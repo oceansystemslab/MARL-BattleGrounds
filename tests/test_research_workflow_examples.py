@@ -6,6 +6,7 @@ seed execution with batched execution. Updates are illustrative counters, not
 an optimizer or a learning claim. Existing restart tests own writer rollback.
 The PPO example passes each method through the shared public workflow and
 rejects attempts to override the method owned by a config or saved checkpoint.
+The QMIX example passes its tiny QMIX settings through the same workflow.
 """
 
 import sys
@@ -22,6 +23,7 @@ import pytest
 from examples import episode_tracking as curriculum
 from examples import evaluation as evaluation_example
 from examples import mappo_training as training_example
+from examples import qmix_training as qmix_example
 from examples import recorded_rollout as recorded
 from examples import research_methods
 
@@ -310,3 +312,41 @@ def test_training_example_rejects_method_override_of_saved_configuration(
         training_example.main()
     assert error.value.code == 2
     assert not list(tmp_path.iterdir())
+
+
+def test_qmix_example_runs_the_shared_public_workflow(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from marl_battlegrounds import training
+
+    calls: list[tuple[training.TrainConfig | None, dict[str, object]]] = []
+    loaded: list[Path] = []
+    actor = tmp_path / "final-actor"
+
+    def train(
+        config: training.TrainConfig | None, **kwargs: object
+    ) -> training.TrainResult:
+        calls.append((config, kwargs))
+        return training.TrainResult(tmp_path, actor, None, 192, 3, "complete", ())
+
+    def load(path: Path) -> object:
+        loaded.append(path)
+        return object()
+
+    def analyze(paths: list[Path], **_kwargs: object) -> dict[str, object]:
+        return {"artifacts": {"summary": str(tmp_path / "summary.md")}}
+
+    monkeypatch.setattr(
+        sys, "argv", ["qmix_training.py", "--output-dir", str(tmp_path)]
+    )
+    monkeypatch.setattr(training, "train", train)
+    monkeypatch.setattr(training, "load_system", load)
+    monkeypatch.setattr(training, "analyze", analyze)
+    qmix_example.main()
+    config, kwargs = calls[0]
+    assert config is not None and config.method == "qmix" and config.qmix is not None
+    assert (config.num_envs, config.total_env_steps) == (4, 192)
+    assert (config.qmix.rollout_length, config.qmix.min_buffer_size) == (8, 32)
+    assert config.checkpoint_interval_updates == 1600
+    assert kwargs == {"output_dir": tmp_path, "resume_from": None}
+    assert loaded == [actor]

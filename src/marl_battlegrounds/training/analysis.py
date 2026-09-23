@@ -322,7 +322,14 @@ def _selection_key(row: Mapping[str, Any]) -> tuple[float, float, int, str]:
 
 
 def _candidates(results: Sequence[Mapping[str, Any]]) -> dict[str, Record]:
-    """Validate complete unique noninitial checkpoint summaries for selection."""
+    """Validate complete unique noninitial checkpoint summaries for selection.
+
+    A row with no experience is dropped. A row marked ``method == "qmix"``
+    must carry a nonnegative integer optimizer_steps (missing, negative or
+    Boolean values raise ValueError) and is dropped at zero, so warmup actors
+    that never learned are never selected. Compatible PPO and QMIX rows (same
+    frozen panel and scoring protocol) may be selected together.
+    """
     selected: dict[str, Record] = {}
     for result in results:
         identifier = result.get("checkpoint_id")
@@ -336,7 +343,10 @@ def _candidates(results: Sequence[Mapping[str, Any]]) -> dict[str, Record]:
             raise ValueError("Selection score is missing")
         if not math.isfinite(value) or not 0 <= value <= 1:
             raise ValueError("Selection score must be finite and between zero and one")
-        if steps:
+        trained = bool(steps)
+        if result.get("method") == "qmix":
+            trained &= bool(_integer(result.get("optimizer_steps"), "optimizer_steps"))
+        if trained:
             selected[identifier] = dict(result)
     if not selected:
         raise ValueError("No eligible trained checkpoint is available")
@@ -358,8 +368,10 @@ def confirmation_candidates(
     routine_results must be complete unique fixed-panel summaries containing
     checkpoint_id, env_steps, score and complete. Initialization is ignored. Ties
     use new-panel kill difference when declared, then earlier experience and
-    identity. Historical panels skip kill difference. The final checkpoint
-    must be present. Incomplete/mismatched evidence raises ValueError. No file changes.
+    identity. Historical panels skip kill difference. QMIX rows need a
+    nonnegative integer optimizer_steps and are skipped at zero (warmup
+    actors). The final checkpoint must be present. Incomplete/mismatched
+    evidence raises ValueError. No file changes.
     """
     candidates = _candidates(routine_results)
     if final_checkpoint_id not in candidates:
@@ -672,6 +684,17 @@ def _phase_costs(events: Sequence[Record], details: Record) -> Record:
     return costs
 
 
+def _settings(config: Mapping[str, Any]) -> Record:
+    """Return the settings block of a saved run config for its method.
+
+    config is the parsed config.json. Returns config["qmix"] when its method
+    is "qmix" and config["ppo"] otherwise; a missing or non-object block
+    gives an empty dict, so callers apply their own defaults.
+    """
+    block = config.get("qmix" if config.get("method") == "qmix" else "ppo", {})
+    return cast(Record, block) if isinstance(block, dict) else {}
+
+
 def _summary(directory: Path) -> Record:
     """Read run facts, withholding active results while checkpoint recovery is open.
 
@@ -710,8 +733,8 @@ def _summary(directory: Path) -> Record:
         "method": config.get("method", "Unavailable"),
         "treatment": _treatment(config),
         "shaping_mode": config.get("shaping_mode", "potential"),
-        "input_scale": config.get("ppo", {}).get("input_scale", 1.0),
-        "spawn_frame": config.get("ppo", {}).get("spawn_frame", "world"),
+        "input_scale": _settings(config).get("input_scale", 1.0),
+        "spawn_frame": _settings(config).get("spawn_frame", "world"),
         "pinned_opponent": config.get("pinned_opponent"),
         "pinned_opponent_share": config.get("pinned_opponent_share", 0.0),
         "seed": config.get("seed"),
@@ -817,7 +840,11 @@ def _memory_lines(memory: object, *, label: str) -> list[str]:
 
 
 def _write_summary(summaries: Sequence[Record], destination: Path) -> Path:
-    """Atomically write factual Markdown from already-read per-run summaries."""
+    """Atomically write factual Markdown from already-read per-run summaries.
+
+    A QMIX run reports optimizer steps, used TD pairs and replay rows per game
+    where a PPO run reports used policy and value samples.
+    """
     lines = [
         "# Training Run Summary",
         "",
@@ -982,12 +1009,27 @@ def _write_summary(summaries: Sequence[Record], destination: Path) -> Path:
                     f"{latest.get('elapsed_seconds', 'Unavailable')} seconds. "
                     "Collection/update time: "
                     f"{latest.get('training_seconds', 'Unavailable')} seconds.",
-                    "Used policy samples: "
-                    f"{latest.get('used_policy_samples', 'Unavailable')}. "
-                    "Used value samples: "
-                    f"{latest.get('used_value_samples', 'Unavailable')}.",
-                    "Losses, entropy, rewards and per-update costs remain in "
-                    "learning_curve.csv.",
+                    *(
+                        (
+                            "Optimizer steps: "
+                            f"{latest.get('completed_updates', 'Unavailable')}. "
+                            "Used TD pairs (repeats count again): "
+                            f"{latest.get('used_td_pairs', 'Unavailable')}. "
+                            "Replay rows per game: "
+                            f"{latest.get('replay_rows_per_lane', 'Unavailable')}.",
+                            "Losses, Q values, exploration, rewards and per-block "
+                            "costs remain in learning_curve.csv.",
+                        )
+                        if summary["method"] == "qmix"
+                        else (
+                            "Used policy samples: "
+                            f"{latest.get('used_policy_samples', 'Unavailable')}. "
+                            "Used value samples: "
+                            f"{latest.get('used_value_samples', 'Unavailable')}.",
+                            "Losses, entropy, rewards and per-update costs remain in "
+                            "learning_curve.csv.",
+                        )
+                    ),
                     "",
                 ]
             )
@@ -1107,6 +1149,9 @@ def analyze(run_dirs: Sequence[str | Path], *, output_dir: str | Path) -> Record
     -------
     dict
         Artifact paths, per-run status and a provisional qualification description.
+        When any run is QMIX, "qmix_png" and "qmix_svg" add a figure of loss,
+        replay rows per game, TD pairs used per transition and exploration
+        rate; PPO-only reports keep their historical artifact set.
         A successful report does not certify useful learning or general competence.
         Summaries retain saved schemas, initial/per-attempt runtime and terminal
         memory snapshots. Missing historical facts stay unknown; no device query
@@ -1136,6 +1181,7 @@ def analyze(run_dirs: Sequence[str | Path], *, output_dir: str | Path) -> Record
     curves: list[Record] = []
     cells: list[Record] = []
     summaries: list[Record] = []
+    qmix_runs: list[tuple[str, list[Record]]] = []
     figure, axes = plt.subplots(
         2, 2, figsize=(12, 8), constrained_layout=True, sharex="col"
     )
@@ -1162,6 +1208,8 @@ def analyze(run_dirs: Sequence[str | Path], *, output_dir: str | Path) -> Record
         ):
             raise ValueError("validation_results.json must contain result objects")
         results = cast(list[Record], raw_results)
+        if config.get("method") == "qmix":
+            qmix_runs.append((run_label, updates))
         for row in updates:
             curves.append(
                 {
@@ -1299,6 +1347,8 @@ def analyze(run_dirs: Sequence[str | Path], *, output_dir: str | Path) -> Record
         os.replace(temporary, target)
         paths[suffix] = str(target)
     plt.close(figure)
+    if qmix_runs:
+        paths.update(_qmix_figure(qmix_runs, destination, plt))
     for key, name, rows in (
         ("curve", "learning_curve.csv", curves),
         ("cells", "validation_cells.csv", cells),
@@ -1315,6 +1365,54 @@ def analyze(run_dirs: Sequence[str | Path], *, output_dir: str | Path) -> Record
             "Provisional; inspect saved evidence before making learning claims"
         ),
     }
+
+
+def _qmix_figure(
+    runs: Sequence[tuple[str, Sequence[Record]]],
+    destination: Path,
+    plt: Any,  # noqa: ANN401
+) -> dict[str, str]:
+    """Write QMIX learning curves as qmix_curves.png and .svg; return their paths.
+
+    runs pairs each QMIX run label with its committed update rows; destination
+    is the report folder; plt is the already-imported matplotlib.pyplot
+    module. The four panels plot loss (warmup blocks are gaps), replay rows
+    stored per game, TD pairs used per real transition (repeats count again)
+    and the exploration rate against environment transitions. Returns
+    {"qmix_png": path, "qmix_svg": path}. Host-only; each file is written to a
+    temporary name and then replaced, so only these two figure files change.
+    """
+    figure, axes = plt.subplots(2, 2, figsize=(12, 8), constrained_layout=True)
+    panels = (
+        ("loss", "Mean Squared Team TD Error"),
+        ("replay_rows_per_lane", "Replay Rows Per Game"),
+        ("td_pairs_per_transition", "Used TD Pairs Per Transition"),
+        ("epsilon", "Exploration Rate"),
+    )
+    for axis, (name, label) in zip(axes.flat, panels, strict=True):
+        for run_label, rows in runs:
+            axis.plot(
+                [row.get("env_steps", np.nan) for row in rows],
+                [
+                    np.nan if row.get(name) is None else row.get(name, np.nan)
+                    for row in rows
+                ],
+                label=run_label,
+            )
+        axis.set_xlabel("Environment Transitions")
+        axis.set_ylabel(label)
+        axis.grid(alpha=0.2)
+        if axis.lines:
+            axis.legend(fontsize="small")
+    paths: dict[str, str] = {}
+    for suffix in ("png", "svg"):
+        target = destination / f"qmix_curves.{suffix}"
+        temporary = destination / f".qmix_curves.{suffix}.tmp"
+        figure.savefig(temporary, format=suffix, dpi=150)
+        os.replace(temporary, target)
+        paths[f"qmix_{suffix}"] = str(target)
+    plt.close(figure)
+    return paths
 
 
 def _screen_object(path: Path) -> Record:

@@ -209,6 +209,19 @@ def _artifact(path: str | Path) -> Record:
     }
 
 
+def _method_fields(identity: Mapping[str, Any]) -> Record:
+    """Return the method fields a validation summary adds for its actor.
+
+    identity comes from _artifact. A QMIX actor adds ``method: "qmix"`` and its
+    integer ``optimizer_steps``, so selection can drop warmup actors and resume
+    can check them against the learner; PPO summaries gain nothing, keeping
+    their historical bytes. The task identity and score are unaffected.
+    """
+    if identity.get("method") != "qmix":
+        return {}
+    return {"method": "qmix", "optimizer_steps": identity["optimizer_steps"]}
+
+
 def create_panel(
     halfway: str | Path | None = None,
     final: str | Path | None = None,
@@ -773,7 +786,9 @@ def _validate_system_panel(
 
     Each opponent keeps independent paired game keys. Interrupted tails remain in
     this process with inactive padding, so opaque clients are never serialized.
-    Only complete durable rows feed the shared summary and selection owner.
+    Only complete durable rows feed the shared summary and selection owner. A
+    QMIX actor's summary also carries method and optimizer_steps from
+    _method_fields; PPO summaries are unchanged.
     """
     import jax
 
@@ -876,6 +891,7 @@ def _validate_system_panel(
             independent_opponents=True,
         ),
         "pass_paths": paths,
+        **_method_fields(identity),
     }
     _publish(directory / "validation_summary.json", result)
     if event_callback is not None:
@@ -1395,7 +1411,11 @@ def _validate(
     event_callback: EventCallback | None,
     root_seed: int | None = None,
 ) -> Record:
-    """Own one exact checkpoint/panel task and reduce its complete saved M8 rows."""
+    """Own one exact checkpoint/panel task and reduce its complete saved M8 rows.
+
+    A QMIX actor's summary also carries method and optimizer_steps from
+    _method_fields; PPO summaries are unchanged.
+    """
     _integer(seed_pairs, "seed_pairs", minimum=1)
     _integer(num_envs, "num_envs", minimum=1)
     _integer(chunk_size, "chunk_size", minimum=1)
@@ -1449,6 +1469,7 @@ def _validate(
             seed_pairs=seed_pairs,
         ),
         "pass_paths": paths,
+        **_method_fields(identity),
     }
     _publish(directory / "validation_summary.json", result)
     if event_callback is not None:
@@ -1493,6 +1514,7 @@ def validate_checkpoint(
 
     Return complete native score, paired uncertainty, per-cell results and saved
     M8 paths. New panels also report mean_kill_difference for declared selection.
+    A QMIX actor's summary also carries method "qmix" and its optimizer_steps.
     Incomplete games never select a checkpoint. Invalid settings or conflicting
     identities raise ValueError; file and method failures keep their cause.
     The call waits for evaluation to finish on the active backend. It never
@@ -1578,7 +1600,8 @@ def validate_random(
     -------
     dict
         Complete scientific summary, including actual root, task and actor IDs,
-        native scores, paired-game uncertainty, and saved M8 pass paths.
+        native scores, paired-game uncertainty, and saved M8 pass paths. A QMIX
+        actor's summary also carries method "qmix" and its optimizer_steps.
 
     Raises
     ------
@@ -1747,7 +1770,10 @@ def _verified_random_result(
     Notes
     -----
     Read-only host work. Verify actor file hashes and reduce saved M8 rows through
-    summarize_validation. No policy call, learner change, writer recovery or new
+    summarize_validation. For a QMIX actor the M8 focal variables digest is
+    compared with the digest of the loaded greedy System's variables (the
+    Q-network plus epsilon 0), and the rebuilt summary carries its method and
+    optimizer_steps. No policy call, learner change, writer recovery or new
     evaluation occurs. This is an integrity check, not a usefulness gate.
     """
     from marl_battlegrounds.evaluation.results import load_results
@@ -1868,6 +1894,15 @@ def _verified_random_result(
     policies, details = entry["policies"], entry["details"]
     focal, opponent = policies["team_a"], policies["team_b"]
     contract = details["evaluation_contract"]
+    # A QMIX System's variables hold its Q-network and the greedy epsilon, so
+    # M8 digests that tree; compare with the verified loaded System's variables.
+    expected_variables = actor["weight_digest"]
+    if actor.get("method") == "qmix":
+        from marl_battlegrounds.evaluation.recording_identity import tree_digest
+        from marl_battlegrounds.training.checkpoints import load_system
+
+        loaded = load_system(path(result["actor_path"], "actor_path"))
+        expected_variables = tree_digest(loaded.variables)
     games = len(VALIDATION_MAPS) * seed_pairs * 2
     options: Record = {
         "seed": root_seed,
@@ -1883,7 +1918,7 @@ def _verified_random_result(
     }
     if (
         focal["checkpoint"] != actor_digest
-        or focal["variables_digest"] != actor["weight_digest"]
+        or focal["variables_digest"] != expected_variables
         or focal["variables_frozen"] is not True
         or opponent["name"] != "random"
         or opponent["callable_name"]
@@ -1910,6 +1945,7 @@ def _verified_random_result(
             rows, maps=VALIDATION_MAPS, opponents=("Random",), seed_pairs=seed_pairs
         ),
         "pass_paths": paths,
+        **_method_fields(actor),
     }
     if reduced != original:
         raise ValueError("Random summary disagrees with its saved M8 games")

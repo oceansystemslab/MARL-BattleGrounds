@@ -85,13 +85,14 @@ for custom episode starts. A mask describes current legal actions; a structural
 action space alone cannot express every coupled action constraint.
 
 The optional [training package](docs/training/README.md) adds recurrent and
-feedforward MAPPO and IPPO, complete save/resume, frozen actor loading and
-learning reports. Choose the method in one `TrainConfig`; the workflow stays
-the same. The
+feedforward MAPPO and IPPO, recurrent QMIX with compact replay, complete
+save/resume, frozen actor loading and learning reports. Choose the method in
+one `TrainConfig`; the workflow stays the same. The
 [baseline System example](examples/baseline_system.py) uses initialized,
 **untrained** weights through the same public workflow. The
 [complete training example](examples/mappo_training.py) exercises the public
-Python route. Working execution and useful learned behavior need separate evidence.
+Python route; the [QMIX example](examples/qmix_training.py) does the same for
+QMIX. Working execution and useful learned behavior need separate evidence.
 
 Use one callable for frozen-System validation and evaluation:
 

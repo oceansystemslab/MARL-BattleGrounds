@@ -4,8 +4,10 @@ Host setup verifies content and freezes callables. Numerical carry keeps changin
 weights, games, memories and counters. Pure scan and bounded recording share one
 step. A named pinned opponent plays the lanes assigned to history slot 0: a JAX
 method inside the compiled step, a host method through a host loop in
-collect_training_rollout. No critic, optimizer, learning run or durable learner
-checkpoint lives here.
+collect_training_rollout. An optional ActorVariablesAtStep hook, such as QMIX
+exploration, sets changing actor values from the round count before every
+decision; without one the step is unchanged. No critic, optimizer, replay,
+learning run or durable learner checkpoint lives here.
 """
 
 from __future__ import annotations
@@ -14,7 +16,7 @@ import json
 from dataclasses import dataclass, replace
 from functools import lru_cache, partial
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, NamedTuple, cast
+from typing import TYPE_CHECKING, Any, NamedTuple, Protocol, cast
 
 import jax
 import jax.numpy as jnp
@@ -111,6 +113,43 @@ if TYPE_CHECKING:
     from marl_battlegrounds.evaluation.run_writer import RunWriter
 
 type Tree = Any
+
+
+class ActorVariablesAtStep(Protocol):
+    """Set changing actor values, such as an exploration rate, before a decision.
+
+    A learner that needs a per-decision value supplies one of these to
+    init_training_collection. Collection calls it once per real round, inside
+    the compiled step, on the shared current actor variables only. Team A and
+    every current Team B lane then act with the returned tree. Historical
+    snapshots and a pinned opponent keep their own values, and the carry keeps
+    the stored variables. Implementations must be pure JAX: same tree
+    structure, shapes and dtypes in and out, no random keys, no host work.
+    Keep one instance for the run; it is part of the static collection.
+    """
+
+    def __call__(self, variables: Tree, completed_rounds: Array) -> Tree:
+        """Return the variables to use for the next decision.
+
+        Parameters
+        ----------
+        variables : PyTree
+            history.current_variables as stored in the carry.
+        completed_rounds : Array
+            Int32 0-d real rounds completed before this decision (not
+            multiplied by the number of games).
+
+        Returns
+        -------
+        PyTree
+            A tree with the same structure, shapes and dtypes.
+        """
+        ...
+
+    @property
+    def identity(self) -> dict[str, object]:
+        """JSON record saved with checkpoints and compared on restore."""
+        ...
 
 
 class TrainingCarry(NamedTuple):
@@ -226,8 +265,11 @@ class TrainingCollection:
     slot-0 lanes instead (reference, name, execution, registration and its ID,
     variables digest, evidence, memory rule). host_opponent is the mutable
     HostOpponent of a pinned host method, else None; a collection that has one
-    serves each training round once and must not be replayed. Reuse this
-    descriptor across blocks to reuse compiled functions. It is not
+    serves each training round once and must not be replayed.
+    actor_variables_at_step is None (the default, used by PPO), or the
+    learner's ActorVariablesAtStep hook, which sets values such as QMIX's
+    exploration rate on the shared current variables before each decision.
+    Reuse this descriptor across blocks to reuse compiled functions. It is not
     a PyTree or a durable checkpoint and must stay outside numerical carry.
     """
 
@@ -249,6 +291,7 @@ class TrainingCollection:
     pinned_opponent_share: float = 0.0
     pinned_opponent: dict[str, Any] | None = None
     host_opponent: HostOpponent | None = None
+    actor_variables_at_step: ActorVariablesAtStep | None = None
 
 
 def _zeros(tree: Tree) -> Tree:
@@ -535,6 +578,7 @@ def init_training_collection(
     recording: bool = False,
     pinned_opponent_share: float = 0.0,
     pinned_opponent: System | Policy | str | None = None,
+    actor_variables_at_step: ActorVariablesAtStep | None = None,
 ) -> tuple[TrainingCollection, TrainingCarry]:
     """Verify and initialize one fixed-batch experiment without choosing actions.
 
@@ -590,6 +634,13 @@ def init_training_collection(
         independent_policies System must match every Team B roster size in the
         schedule. Its training history is recorded by
         ``pinned_opponent_evidence``; nothing is refused for missing history.
+    actor_variables_at_step : ActorVariablesAtStep or None, default None
+        None keeps today's step exactly. Otherwise a learner hook, such as
+        ``baselines.qmix.QMIXExploration``, that collection calls before every
+        real decision with the rounds completed so far, on the shared current
+        variables only (see ActorVariablesAtStep). Setup checks with
+        ``jax.eval_shape`` that it keeps the variable tree, shapes and dtypes,
+        and that its identity is a JSON object; it runs no real decision.
 
     Returns
     -------
@@ -608,8 +659,9 @@ def init_training_collection(
         Unsupported settings, content/bank mismatch, variable structure mismatch,
         a pinned share outside its contract or disagreeing with the schedule, a
         pinned opponent without a positive share, an unresolvable reference, an
-        independent roster that the schedule would break, or failed
-        initialization. Errors from a factory propagate with their own type.
+        independent roster that the schedule would break, a variables hook that
+        changes the tree or has no JSON identity, or failed initialization.
+        Errors from a factory propagate with their own type.
         Failures precede any real transition.
     """
     if not isinstance(cast(object, actor), System):
@@ -663,6 +715,8 @@ def init_training_collection(
             raise ValueError(
                 "actor_variables must match the System leaf shapes and dtypes"
             )
+    if actor_variables_at_step is not None:
+        _check_variables_hook(actor_variables_at_step, actor_variables)
     history = init_opponent_history(actor_variables, num_envs=schedule.num_envs)
     if prepared is None:
         prepared = prepare_training_content(score_thresholds=schedule.score_thresholds)
@@ -832,8 +886,35 @@ def init_training_collection(
         pinned_opponent_share=float(pinned_opponent_share),
         pinned_opponent=pinned_record,
         host_opponent=host,
+        actor_variables_at_step=actor_variables_at_step,
     )
     return collection, carry
+
+
+def _check_variables_hook(hook: ActorVariablesAtStep, variables: Tree) -> None:
+    """Check a variables hook without running it on real values.
+
+    hook must be callable with a JSON-object identity; variables is the actor
+    tree it will receive. ``jax.eval_shape`` traces one call with an int32
+    round count and requires the same tree structure, shapes and dtypes back.
+    Raises TypeError or ValueError; creates no arrays.
+    """
+    if not callable(hook):
+        raise TypeError("actor_variables_at_step must be callable")
+    identity = getattr(hook, "identity", None)
+    if not isinstance(identity, dict):
+        raise TypeError("actor_variables_at_step needs a JSON object identity")
+    json.dumps(identity, allow_nan=False, sort_keys=True)
+    result = jax.eval_shape(hook, variables, jax.ShapeDtypeStruct((), jnp.int32))
+    before = jax.tree.leaves(variables)
+    after = jax.tree.leaves(result)
+    if jax.tree.structure(result) != jax.tree.structure(variables) or any(
+        getattr(a, "shape", None) != b.shape or getattr(a, "dtype", None) != b.dtype
+        for a, b in zip(before, after, strict=True)
+    ):
+        raise ValueError(
+            "actor_variables_at_step must keep the variable tree, shapes and dtypes"
+        )
 
 
 def _apply(carry: TrainingCarry, actor: System, opponent: System) -> Tree:
@@ -986,10 +1067,24 @@ def _reset_pending(
 def _real_step(
     collection: TrainingCollection, carry: TrainingCarry
 ) -> tuple[TrainingCarry, tuple[TrainingTransition, EpisodeInfo, PolicyTrace]]:
-    """Collect one already-checked decision and advance accounting afterward."""
+    """Collect one already-checked decision and advance accounting afterward.
+
+    A variables hook, when present, sets the shared current variables used for
+    this one decision only; the returned carry keeps the stored variables.
+    """
     before = carry.state
+    acting = carry
+    if collection.actor_variables_at_step is not None:
+        history = carry.history
+        acting = carry._replace(
+            history=history._replace(
+                current_variables=collection.actor_variables_at_step(
+                    history.current_variables, carry.progress.rounds
+                )
+            )
+        )
     actions, memory, learning, tracking, result = _apply(
-        carry, collection.actor, collection.opponent
+        acting, collection.actor, collection.opponent
     )
     observations, state, rewards, _, info = result
     progress, tracking, info = _advance_training_schedule(

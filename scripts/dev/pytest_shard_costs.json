@@ -10,6 +10,8 @@
     "tests/test_baseline_ppo_update.py": 11,
     "tests/test_baseline_ppo_variants.py": 19,
     "tests/test_baseline_ppo_variants_reference.py": 72,
+    "tests/test_baseline_qmix.py": 37,
+    "tests/test_baseline_qmix_reference.py": 30,
     "tests/test_baseline_value_norm.py": 3,
     "tests/test_benchmark_canonical.py": 1,
     "tests/test_benchmark_mappo_training.py": 1,
@@ -64,7 +66,7 @@
     "tests/test_gpu_workflows.py": 36,
     "tests/test_import.py": 1,
     "tests/test_indexed_scalar_reports.py": 1,
-    "tests/test_method_loading.py": 12,
+    "tests/test_method_loading.py": 31,
     "tests/test_metric_catalog.py": 3,
     "tests/test_movement_integration.py": 133,
     "tests/test_observation_masks.py": 50,
@@ -103,7 +105,7 @@
     "tests/test_rendering_shared_authorized_pov_scene.py": 2,
     "tests/test_replay_recording_preflight.py": 3,
     "tests/test_replay_v2.py": 22,
-    "tests/test_research_workflow_examples.py": 47,
+    "tests/test_research_workflow_examples.py": 53,
     "tests/test_respawn_lifecycle.py": 61,
     "tests/test_result_access.py": 1,
     "tests/test_run_writer.py": 21,
@@ -145,7 +147,7 @@
     "tests/test_training_content.py": 104,
     "tests/test_training_curriculum.py": 29,
     "tests/test_training_distributions.py": 12,
-    "tests/test_training_launch.py": 21,
+    "tests/test_training_launch.py": 20,
     "tests/test_training_learner.py": 387,
     "tests/test_training_opponents.py": 44,
     "tests/test_training_pinned_export.py": 106,
@@ -156,6 +158,10 @@
     "tests/test_training_ppo_variants.py": 471,
     "tests/test_training_ppo_workflows.py": 1161,
     "tests/test_training_progress.py": 1,
+    "tests/test_training_qmix_checkpoints.py": 244,
+    "tests/test_training_qmix_episodes.py": 39,
+    "tests/test_training_qmix_learner.py": 116,
+    "tests/test_training_qmix_replay.py": 60,
     "tests/test_training_random_diagnostics.py": 473,
     "tests/test_training_screen.py": 3,
     "tests/test_training_screen_analysis.py": 1,
@@ -201,7 +207,7 @@
     "tests/test_visual_debugger_targeting.py": 3
   },
   "measured_on": "2026-09-23",
-  "measured_with": "Mixed prior and Packet 5 focused passing case timings; exact source/report lineage in packet-5 artifacts. CPU affinity and fixture setup differ across runs. Scheduling estimates only; not a full gate.",
+  "measured_with": "Packet 5 lineage for unchanged test files plus Packet 6 focused passing CPU timings for changed and new files; mixed contention. Scheduling estimates only; not a full gate.",
   "reserved_reason": "Hosted CI runs Pyright before the tests of shard 12.",
   "reserved_seconds": {
     "12": [
@@ -221,9 +227,13 @@
   },
   "schema": "marl-bgs-pytest-shard-costs@1",
   "split_families": {
-    "tests/test_training_runner.py::test_public_run_resume_and_final_pending_work": 703
+    "tests/test_training_qmix_workflows.py::test_plain_run_validates_selects_exports_loads_and_evaluates": 466,
+    "tests/test_training_qmix_workflows.py::test_random_diagnostics_run_fresh_reuse_initialization_and_verify_on_resume": 331,
+    "tests/test_training_qmix_workflows.py::test_recorded_run_resumes_after_interruption_like_an_uninterrupted_run": 386,
+    "tests/test_training_runner.py::test_public_run_resume_and_final_pending_work": 749
   },
   "split_residuals": {
-    "tests/test_training_runner.py": 392
+    "tests/test_training_qmix_workflows.py": 207,
+    "tests/test_training_runner.py": 482
   }
 }

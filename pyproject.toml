@@ -31,6 +31,7 @@ training = [
   "optax",
   "flax",
   "orbax-checkpoint",
+  "flashbax==0.1.3",
 ]
 
 interop = [

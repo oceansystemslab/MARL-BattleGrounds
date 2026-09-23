@@ -58,6 +58,8 @@ _PROBE = (
     "print(json.dumps({'identity':runtime_identity(),"
     "'package_file':str(pathlib.Path(marl_battlegrounds.__file__).resolve())}))"
 )
+# QMIX runs also record Flashbax; the PPO probe above keeps its exact bytes.
+_QMIX_PROBE = _PROBE.replace("runtime_identity()", "runtime_identity(method='qmix')")
 
 
 def _read(path: Path) -> Record:
@@ -193,10 +195,18 @@ def _gpu(uuid: str) -> Record:
     return matches[0]
 
 
-def _runtime(python: Path, source: Path) -> Record:
-    """Probe the fixed environment's actual imports and dependency identity."""
+def _runtime(python: Path, source: Path, *, method: str = "mappo") -> Record:
+    """Probe the fixed environment's actual imports and dependency identity.
+
+    python and source are the package's interpreter and exported source.
+    method is the run's training method; "qmix" uses the QMIX probe, which
+    also records Flashbax, and any PPO method uses the historical probe.
+    Runs one isolated child process on the CPU environment; raises
+    ValueError when the child imports a different source package.
+    """
+    probe = _QMIX_PROBE if method == "qmix" else _PROBE
     completed = subprocess.run(
-        [str(python), "-I", "-c", _PROBE],
+        [str(python), "-I", "-c", probe],
         cwd=source,
         env=_environment(None),
         check=True,
@@ -502,7 +512,7 @@ def prepare_run(
     atomic_json(target / "config.json", resolved)
     _install(source, target / ".venv", python)
     interpreter = target / ".venv" / "bin" / "python"
-    imported = _runtime(interpreter, source)
+    imported = _runtime(interpreter, source, method=config.method)
     if panel.schema_version == 2:
         subprocess.run(
             [
@@ -577,8 +587,9 @@ def validate_package(package: str | Path) -> Record:
 
     This performs no learning, writer recovery or checkpoint selection. It reads
     source/artifact bytes, runs nvidia-smi and probes imports in the pinned
-    environment on CPU. Relocation is rejected because commands and config own
-    absolute paths. Ordinary status does not pay this complete verification cost.
+    environment on CPU, using the probe for the method in the hashed config.
+    Relocation is rejected because commands and config own absolute paths.
+    Ordinary status does not pay this complete verification cost.
     """
     root = Path(package).absolute()
     manifest = _read(root / _MANIFEST)
@@ -605,8 +616,9 @@ def validate_package(package: str | Path) -> Record:
         name: environment[name] for name in _EXECUTION_KEYS
     }:
         raise ValueError("Frozen JAX execution settings differ")
+    method = _read(root / "config.json").get("method", "mappo")
     if (
-        _runtime(root / ".venv" / "bin" / "python", root / "source")
+        _runtime(root / ".venv" / "bin" / "python", root / "source", method=method)
         != manifest["runtime"]
     ):
         raise ValueError("Prepared environment or imported source changed")

@@ -143,7 +143,10 @@ class LearnerState(NamedTuple):
 
 
 class UpdateSummary(NamedTuple):
-    """Hold small sums and counts from one successfully learned real prefix.
+    """Hold small sums and counts from one accepted real prefix.
+
+    PPO fills it for each learned update; QMIX fills it for every accepted
+    block, including warmup blocks that store rows without learning.
 
     task_reward_sum is float32 summed over valid active Team A rows;
     active_samples is its int32 denominator. shaping_reward_sum is float32
@@ -874,7 +877,10 @@ def _behavior_valid(rollout: TrainingRollout) -> Array:
 
 
 def _summary(rollout: TrainingRollout) -> UpdateSummary:
-    """Reduce only real transition rows to compact unrepeated learning-log facts."""
+    """Reduce only real transition rows to compact unrepeated learning-log facts.
+
+    Shared by PPO updates and every accepted QMIX block, warmup included.
+    """
     rows = rollout.transitions
     active = rows.valid[..., None] & rows.active
     completed = rows.valid & rows.ended

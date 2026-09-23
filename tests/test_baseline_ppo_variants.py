@@ -1,8 +1,10 @@
 """Check PPO variant actor rights, empty memory and shared masked updates.
 
 Historical MAPPO registrations are compared with records captured before the
-variant work. Real permitted inputs exercise both spawn frames, action legality
-and same-call probabilities. Feedforward actors keep no recurrent parameters,
+variant work, using the exact stored parameters behind those records (their
+initialization rounds differently with other CPU thread counts). Real
+permitted inputs exercise both spawn frames, action legality and same-call
+probabilities. Feedforward actors keep no recurrent parameters,
 state or network loop. Masked updates preserve unused optimizers and ignore
 excluded rows while keeping the existing shared ValueNorm rules. These CPU
 checks prove software contracts, not learned skill or GPU cost.
@@ -92,7 +94,22 @@ def test_historical_mappo_system_registrations_stay_exact() -> None:
         Path(__file__).parent / "fixtures/baseline_donor/mappo_system_registration.json"
     )
     reference = json.loads(path.read_text())
-    params = initialize_ppo(jax.random.key(reference["seed"])).actor_params
+    # The captured digests come from initialize_ppo(key(seed)) with two CPU
+    # threads; its orthogonal initializer rounds differently with other thread
+    # counts, so the exact captured parameters are stored beside the records.
+    template = jax.eval_shape(
+        lambda: initialize_ppo(jax.random.key(reference["seed"])).actor_params
+    )
+    leaves, structure = cast(
+        tuple[list[tuple[Any, Any]], Any],
+        jax.tree_util.tree_flatten_with_path(template),
+    )
+    names = [jax.tree_util.keystr(key) for key, _ in leaves]
+    with np.load(path.with_name("mappo_registration_params.npz")) as stored:
+        assert set(stored.files) == set(names)
+        params = jax.tree_util.tree_unflatten(
+            structure, [jnp.asarray(stored[name]) for name in names]
+        )
     for row in reference["registrations"]:
         for factory in (make_recurrent_mappo_system, make_ppo_system):
             identity, registration = normalize_system_registration(

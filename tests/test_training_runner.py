@@ -22,6 +22,12 @@ All four PPO methods use the same recording recovery checks. Method settings
 round-trip through JSON and keep their recurrent or feedforward batch rules.
 Changing an exported model tag while preserving its actor weights is rejected
 before recording or log recovery changes the saved files.
+QMIX settings replace PPO settings: a QMIX config resolves qmix and a 1600-step
+save interval (PPO keeps 25), saves no ppo block while PPO saves no qmix block,
+round-trips through JSON, and rejects nondefault PPO settings, QMIX settings
+under PPO, a budget below the replay minimum, an exploration clock that would
+overflow int32 and a malformed block. A save
+happens when a block's optimizer steps cross a multiple of the interval.
 """
 
 # Failure injection inspects the private host coordinator, not a public API.
@@ -454,7 +460,7 @@ def test_panel_backed_public_run_resume_selection_and_validation_isolation(
         {"num_envs": 2},
         {"total_env_steps": 33},
         {"seed": False},
-        {"method": "qmix"},
+        {"method": "qdn"},
         {"metrics": "full"},
         {"validation_fractions": (0.5, 0.4, 1.0)},
         {"checkpoint_env_steps": (32,)},
@@ -476,6 +482,46 @@ def test_panel_backed_public_run_resume_selection_and_validation_isolation(
 def test_invalid_config_rejected(change: dict[str, Any]) -> None:
     with pytest.raises((TypeError, ValueError)):
         replace(TrainConfig(), **change)
+
+
+def test_qmix_settings_replace_ppo_and_resolve_their_own_save_interval() -> None:
+    from marl_battlegrounds.baselines.ppo import PPOConfig
+    from marl_battlegrounds.baselines.qmix import DEFAULT_QMIX_CONFIG, QMIXConfig
+    from marl_battlegrounds.training.runner import _crosses_interval
+
+    ppo_config = TrainConfig()
+    assert ppo_config.qmix is None and ppo_config.checkpoint_interval_updates == 25
+    ppo_saved = config_to_dict(ppo_config)
+    assert "qmix" not in ppo_saved and ppo_saved["checkpoint_interval_updates"] == 25
+    qmix_config = TrainConfig(method="qmix")
+    assert qmix_config.qmix == DEFAULT_QMIX_CONFIG
+    assert qmix_config.checkpoint_interval_updates == 1600
+    saved = config_to_dict(qmix_config)
+    assert "ppo" not in saved and saved["qmix"]["buffer_size"] == 1000
+    assert config_from_dict(json.loads(json.dumps(saved))) == qmix_config
+    explicit = TrainConfig(method="qmix", checkpoint_interval_updates=7)
+    assert explicit.checkpoint_interval_updates == 7
+    for bad in (
+        {"method": "qmix", "ppo": PPOConfig(rollout_length=8)},
+        {"qmix": QMIXConfig()},
+        {"method": "qmix", "num_envs": 2, "total_env_steps": 62},
+        {"method": "qmix", "qmix": "default"},
+    ):
+        with pytest.raises((TypeError, ValueError)):
+            TrainConfig(**bad)  # pyright: ignore[reportArgumentType]
+    with pytest.raises(ValueError, match="exploration clock"):
+        TrainConfig(method="qmix", num_envs=32, qmix=QMIXConfig(eps_decay=2**31 - 1))
+    with pytest.raises(ValueError, match="ppo"):
+        config_from_dict({**saved, "ppo": {}})
+    with pytest.raises(ValueError, match="qmix"):
+        config_from_dict({**ppo_saved, "qmix": {}})
+    assert _crosses_interval(24, 28, 25) and not _crosses_interval(20, 24, 25)
+    assert [_crosses_interval(n - 1, n, 25) for n in (24, 25, 26, 50)] == [
+        False,
+        True,
+        False,
+        True,
+    ]
 
 
 def test_pinned_share_flows_through_the_public_run_and_its_saved_records(

@@ -1,8 +1,8 @@
 # Baseline Source Reuse
 
-The four PPO baselines start from Mava's reviewed learning code. BG
-keeps its own environment, permitted actor inputs, action rules, evaluation,
-recording and checkpoint ownership. This page records the source and the
+The four PPO baselines and recurrent QMIX start from Mava's reviewed learning
+code. BG keeps its own environment, permitted actor inputs, action rules,
+evaluation, recording and checkpoint ownership. This page records the source and the
 independent numerical reference. A source match is not evidence of learning.
 
 ## PPO Model Choices
@@ -405,6 +405,170 @@ collector. No donor code is involved.
 The early two-member panel is provisional. Complete-workflow tests and measured
 costs supplement the original numerical comparisons; actual learning quality
 still needs the declared development and demonstration evidence.
+
+## Recurrent QMIX
+
+[`baselines.qmix`](../../src/marl_battlegrounds/baselines/qmix.py) adapts
+Mava's recurrent QMIX (`rec_qmix`) from the same pinned commit. The
+[QMIX source manifest](../../tests/fixtures/baseline_donor/qmix_source_manifest.json)
+is bound to the MAPPO manifest by hash. It adds these original files and
+reuses the shared ones above byte for byte:
+
+| Original File | Reused Calculation Or Checked Contract |
+| --- | --- |
+| `mava/systems/q_learning/anakin/rec_qmix.py` | Epsilon-greedy action selection, sample preparation, the Double-Q loss, `update_q` and the optimizer construction. |
+| `mava/systems/q_learning/types.py` | The transition, action-selection and four-network parameter containers. |
+| `mava/networks/base.py` | `ScannedRNN`, `RecQNetwork` and `QMixingNetwork`. |
+| `mava/networks/distributions.py` | `MaskedEpsGreedyDistribution`; the historical reference uses the real TensorFlow Probability categorical distribution. |
+| `mava/utils/jax_utils.py` | `add_batch_dim` and `switch_leading_axes`. |
+| `mava/configs/default/rec_qmix.yaml`, `mava/configs/network/qmix_rnn.yaml`, `mava/configs/system/q_learning/rec_qmix.yaml` | The network and learning settings below. |
+
+### QMIX Model And Settings
+
+One local Q-network is shared by every Team A actor; each actor keeps its own
+256-wide memory. The layers are the donor's: Dense 256 with ReLU, a 256-wide
+GRU that resets before a new episode, Dense 256 with ReLU and a Dense 198 head
+with orthogonal gain 0.01. Parameter paths match the donor, so the same key
+gives the same starting weights on the current stack. The mixer reads the
+layer-normalized 919-value physical state. Its hypernetworks are
+919→64→160 and 919→64→32 for the two weight layers (absolute value keeps the
+mix monotonic) and 919→32 and 919→32→ReLU→1 for the biases; the hidden layer
+uses ELU. With the current input sizes, the Q-network has 1,833,158 parameters
+and the mixer 190,991: 8,096,596 bytes of float32 weights for one copy of each.
+Target copies and Adam's two moments add three more copies.
+
+| Setting | Default | Meaning |
+| --- | ---: | --- |
+| `rollout_length` | 8 | Rounds collected per block |
+| `buffer_size` | 1000 | Replay rows kept per game |
+| `min_buffer_size` | 32 | Rows per game before any learning |
+| `sample_sequence_length` | 20 | Rows per sampled sequence, giving 19 TD pairs |
+| `sample_batch_size` | 128 | Sequences per optimizer step |
+| `epochs` | 4 | Fresh samples and optimizer steps per ready block |
+| `q_lr` | 0.00003 | Adam learning rate for the Q-network and mixer together |
+| `hard_update`, `update_period` | True, 200 | Copy online to target when the step count before a step is a multiple of 200 |
+| `tau` | 0.01 | Blend weight when `hard_update` is False |
+| `gamma` | 0.99 | Discount per transition |
+| `eps_min`, `eps_decay` | 0.05, 100000 | Exploration falls from 1 to 0.05 over 100,000 real transitions |
+
+The donor YAML also names `max_grad_norm: 10`, but its optimizer is
+`optax.chain(optax.adam(q_lr))` and never clips, so BG copies no clipping. The
+donor's `add_agent_id` is not copied either: the shared permitted encoder
+already gives each actor its own class and self features, and any later change
+to that encoder applies to QMIX as well. No burn-in, extra clipping, Q or
+return normalization, or tuning is added.
+
+### Deliberate QMIX Adaptations
+
+- **Inputs, frame and masks.** Actors read BG's permitted SharedObs encoding in
+  the chosen spawn frame (default "left"), with BG's 198-way legality masks.
+  Chosen actions are mapped back to world directions.
+- **Legal greedy choice.** The donor masks illegal actions with
+  `finfo(float32).min`. If every legal score were exactly that value, its
+  argmax would pick an illegal action. BG masks with negative infinity through
+  the shared action helper, so the greedy choice is always legal; ties go to
+  the lowest legal index in the network's frame (mirrored for left-frame
+  games). For ordinary finite scores both rules choose the same
+  action. Double-Q next-action selection uses the same rule.
+- **Epsilon clock.** Exploration follows the donor's formula on a clock of real
+  transitions. The clock stops counting at the decay end, so it never
+  overflows 32-bit integers, and the rate is then exactly `eps_min`. Before the
+  decay end it matches the donor up to float32 rounding.
+- **Two-stage exploration draw.** Each actor first draws whether to explore and
+  then, if so, draws a uniform legal action. This is the donor's
+  `eps·uniform + (1−eps)·greedy` distribution exactly; the random stream
+  differs, so sampled actions are not compared with the donor.
+- **Team reward.** The donor learns from the mean reward over all agents. BG
+  stores one team task reward per decision: the mean task reward over the
+  Team A slots that are in the game, and adds the shaping value, stored
+  separately, when the sample is built. The two rules agree for full 5v5
+  teams and differ only in smaller curriculum rosters.
+- **Inactive slots and padding.** Smaller rosters pad Team A to five slots.
+  Inactive slots add nothing to the team value or its gradient. Invalid padding
+  rows are replaced by neutral values before any calculation, keep recurrent
+  memory unchanged and never form a TD pair; the loss averages over eligible
+  pairs only. A sample with no eligible pair moves neither the optimizer nor
+  the targets.
+- **Endings.** BG marks the row whose transition ended the episode; the donor
+  marks the next row as an episode start. The TD target stops bootstrapping at
+  a real ending, including a horizon draw, but not at a collection cutoff.
+- **Compact Team A replay.** The donor stores whole observations twice (the
+  observation and the next observation). BG's replay row keeps only Team A's
+  five observer rows, their 5x5 source permissions, Team A masks and chosen
+  actions, the team task reward and the shaping reward separately, lifecycle
+  flags, the 919-value physical state once, and eight identity fields: 29,664
+  bytes per game row, or 949,248,000 bytes for 32 games and 1,000 rows each.
+  The next row of a sequence supplies the successor, so the newest stored row
+  of a game is only ever used as a successor. A sample is rebuilt into network
+  inputs with the same permitted-input builder the live actor uses; the
+  rebuilt features are bitwise equal to the live ones.
+- **Replay storage and readiness.** Storage starts as explicit zeros with a
+  strong 32-bit write index. Flashbax's own initializer uses a weak index that
+  becomes strong after a checkpoint restore, so its type would differ before
+  and after a restore; the explicit index keeps it the same.
+  Only the real prefix of a block is added, one round at a time; padding is
+  never stored. BG checks that `min_buffer_size` is at least
+  `sample_sequence_length` instead of letting Flashbax raise it silently, and
+  checks readiness itself because an unready Flashbax sample returns zeros.
+  The donor has no readiness check.
+- **Exploration hook.** The donor keeps epsilon in its own acting loop. BG's
+  shared collection calls an optional hook before every decision; QMIX's hook
+  sets epsilon on the shared current actor, so current self-play teams share
+  it, while historical opponents keep the epsilon they had when captured.
+  Without a hook the collection program is unchanged.
+- **One learner.** BG runs one gradient step per sample instead of averaging
+  over the donor's replicated device and update-batch axes.
+- **Warmup and keys.** The donor samples from its first block. BG accepts
+  blocks before readiness as warmup blocks with no sample, key use or optimizer
+  step, then learns on every later block. Each optimizer step draws its sample
+  with a key folded from a fixed sampling root and the step count before it,
+  instead of the donor's split key chain, so a resumed run draws the same
+  samples. Each ready block publishes the new actor to self-play history once.
+- **Separate orchestration.** Collection, curriculum, shaping, history,
+  pinned opponents, recording, checkpoints, validation and reports are BG's
+  existing owners, not the donor's loop.
+- **One online pass.** BG unrolls the online Q-network once over all sample
+  rows and uses it both for the chosen-action values and, without gradient, for
+  the next greedy actions. The donor makes two online passes; the recurrent
+  network is causal, so the values and gradients are the same.
+
+### QMIX CPU Reference
+
+`build_same_stack_qmix_reference()` and `load_qmix_reference()` in the
+[reference support module](../../tests/baseline_donor_reference.py) form a
+separate route; the PPO functions and fixtures are unchanged. The historical
+generator runs the original Q-network, mixer, epsilon-greedy distribution,
+action selection, sample preparation, loss and `update_q` bodies in the same
+isolated Python 3.12 environment as the PPO reference. Its synthetic case uses
+four sequences of six rows, five agents, 13 actor features, 17 state features,
+the real 256-wide networks and 198 actions. It includes nonzero starting
+memory, episode starts on an interior, a first and a last row, and a
+neutral-only actor row. A distinct target network makes the Double-Q choice
+visible. Gradients are captured by running `update_q` with a zero-step
+optimizer whose new state is the gradient.
+
+```bash
+JAX_PLATFORMS=cpu /tmp/mava-reference/bin/python tests/baseline_donor_reference.py --qmix --generate /tmp/mava-qmix-reference-output
+```
+
+Two fresh processes produced the same 294 arrays and the same
+13,668,558-byte archive, SHA256
+`c744458bf3553f1f7ad4f2d7a67a68406f4eb2d3ba3409619fe9bf38dc8f006f`.
+`tests/test_baseline_qmix_reference.py` compares BG with both the archive and
+the current-stack donor, using absolute and relative tolerances of 0.000002.
+Initialization matches the current-stack donor exactly for both Q-networks,
+both mixers and the Adam state. Measured largest absolute differences were
+0.00000018 for forward values, memory and the epsilon clock; 0.0000029 for
+mixer values; 0.0000057 for gradients (largest gradient magnitude about 9.8);
+0.0000019 for one and two Adam steps; and 0.00000003 for the soft target rule.
+Probabilities and greedy choices matched exactly. Hard target copies happen at
+step counts 0 and 200 and not at 1 or 199, as in the donor. At exactly
+100,000 transitions the donor's float32 formula gives 0.05000001; BG gives
+exactly 0.05.
+
+These all-valid comparisons prove agreement for the declared synthetic case
+only. They do not establish replay behavior, training throughput, save/resume,
+sample efficiency or learned tactics; those have their own checks.
 
 ## Training Compiler Policy
 

@@ -5,6 +5,8 @@ Reports must keep reward sources and panels separate, preserve incomplete states
 and leave original records untouched. No learner or environment runs here.
 Reports name saved artifacts and sum only phase-owner timing records. An open
 checkpoint recovery must hide stale completion and results until recovery ends.
+Selection keeps compatible PPO and QMIX rows together, drops QMIX warmup actors
+with zero optimizer steps and rejects missing or malformed QMIX counts.
 """
 
 import json
@@ -480,3 +482,23 @@ def test_open_recovery_withholds_stale_complete_results_and_artifacts(
     assert "No Validation Results" in Path(report["artifacts"]["svg"]).read_text()
     assert {path.name: path.read_bytes() for path in run.iterdir()} == before
     assert not report["complete"]
+
+
+def test_selection_keeps_compatible_qmix_rows_and_drops_warmup_actors() -> None:
+    rows = [
+        _result("warm", 96, 0.9, method="qmix", optimizer_steps=0),
+        _result("q", 128, 0.6, method="qmix", optimizer_steps=1),
+        _result("p", 128, 0.7),
+        _result("final", 192, 0.5, method="qmix", optimizer_steps=3),
+    ]
+    assert confirmation_candidates(rows, final_checkpoint_id="final") == (
+        "p",
+        "q",
+        "final",
+    )
+    confirmed = [{**row, "purpose": "confirmation"} for row in rows[1:]]
+    assert select_checkpoint(confirmed)["checkpoint_id"] == "p"
+    for bad in (None, -1, True, 1.0):
+        malformed = _result("q", 128, 0.6, method="qmix", optimizer_steps=bad)
+        with pytest.raises(ValueError, match="optimizer_steps"):
+            confirmation_candidates([malformed, rows[3]], final_checkpoint_id="final")

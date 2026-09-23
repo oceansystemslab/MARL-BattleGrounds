@@ -14,13 +14,16 @@ reported as success when a child exits cleanly during a stop request.
 Nested supervisors receive enough grace to stop their separate worker groups
 after a controller crash, natural exit, stop request or deadline.
 Short UTC lifecycle messages keep full process and cleanup facts in saved JSON.
-They do not install real training dependencies or start a learning experiment.
+PPO packages keep their exact import probe; QMIX packages use a probe that also
+records Flashbax. They do not install real training dependencies or start a
+learning experiment.
 """
 
 from __future__ import annotations
 
 # pyright: reportPrivateUsage=false
 import io
+import json
 import os
 import signal
 import subprocess
@@ -1234,3 +1237,37 @@ def test_preparation_keeps_builtin_panel_references_and_checks_isolated_reload(
     assert reload_commands[0][1] == "-I"
     assert reload_commands[0][-1] == str(target / "panel")
     assert not (target / "run").exists()
+
+
+def test_qmix_packages_probe_flashbax_while_ppo_keeps_its_probe_bytes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    assert launch._PROBE == (
+        "import json,pathlib,marl_battlegrounds; "
+        "from marl_battlegrounds.training.checkpoints import runtime_identity; "
+        "print(json.dumps({'identity':runtime_identity(),"
+        "'package_file':str(pathlib.Path(marl_battlegrounds.__file__).resolve())}))"
+    )
+    expected = launch._PROBE.replace(
+        "runtime_identity()", "runtime_identity(method='qmix')"
+    )
+    assert expected == launch._QMIX_PROBE
+    source = tmp_path / "source"
+    package = source / "src" / "marl_battlegrounds"
+    package.mkdir(parents=True)
+    (package / "__init__.py").write_text("")
+    probes: list[str] = []
+
+    def run(command: list[str], **kwargs: object) -> object:
+        del kwargs
+        probes.append(command[-1])
+        output: str = json.dumps(
+            {"identity": {}, "package_file": str((package / "__init__.py").resolve())}
+        )
+        return SimpleNamespace(stdout=output)
+
+    monkeypatch.setattr(launch.subprocess, "run", run)
+    launch._runtime(tmp_path / "python", source)
+    launch._runtime(tmp_path / "python", source, method="ippo")
+    launch._runtime(tmp_path / "python", source, method="qmix")
+    assert probes == [launch._PROBE, launch._PROBE, launch._QMIX_PROBE]

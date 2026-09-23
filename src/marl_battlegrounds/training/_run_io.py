@@ -297,9 +297,13 @@ def progress_text(status: dict[str, Any]) -> str:
     Steps count real environment transitions. Training speed includes the first
     compilation and excludes validation and saving. Run elapsed time excludes
     gaps between attempts; wall_seconds includes them. Unknown future costs stay
-    unknown. Raw losses and signed reward averages remain in training_updates.jsonl;
-    they cannot diagnose learning by their size. Saved Random results describe
-    combat per game and are never treated as proof of general competence.
+    unknown. A QMIX run in the "warmup" phase is labelled "Warmup: Filling Replay
+    Before Learning", and a status with learning_blocks (QMIX) reports optimizer
+    steps and learning blocks where PPO reports learning updates. Raw losses and
+    signed reward averages remain in training_updates.jsonl; they cannot
+    diagnose learning by their size. Saved
+    Random results describe combat per game and are never treated as proof of
+    general competence.
     """
     steps = int(status.get("env_steps", 0))
     total = int(status.get("total_env_steps", 0))
@@ -324,17 +328,23 @@ def progress_text(status: dict[str, Any]) -> str:
         "random_validation": "Checking Play Against Random",
         "saving": "Saving Progress",
         "reporting": "Writing Results",
+        "warmup": "Warmup: Filling Replay Before Learning",
         "complete": "Run Finished",
         "failed": "Run Stopped With An Error",
         "recovering": "Restoring Saved Progress",
     }
     label = labels.get(phase, phase.replace("_", " ").title())
+    counts = (
+        f"Optimizer Steps: {status.get('completed_updates', 0):,} | "
+        f"Learning Blocks: {status['learning_blocks']:,} | "
+        if "learning_blocks" in status
+        else f"Learning Updates: {status.get('completed_updates', 0):,} | "
+    )
     lines = [
         f"{label} | Steps: {steps:,} / {total:,} ({steps / total:.1%})"
         if total
         else f"{label} | Steps: {steps:,}",
-        f"Learning Updates: {status.get('completed_updates', 0):,} | "
-        f"Time Spent In This Run: {duration(status.get('elapsed_seconds'))} | "
+        counts + f"Time Spent In This Run: {duration(status.get('elapsed_seconds'))} | "
         f"Training Time Left (Estimate): {duration(remaining)} | "
         f"Whole Run Time Left (Estimate): {duration(eta)}",
     ]
@@ -543,34 +553,58 @@ def validate_host_state(
         candidate belongs to an abandoned continuation. A pending current export
         need not exist. Ancestor descriptions remain usable after payload pruning.
         Exported weights, input scale, spawn frame and complete model schema
-        must match their learner boundary and the saved training method.
+        must match their learner boundary and the saved training method. For
+        a QMIX run every saved validation and Random result must name
+        ``method == "qmix"`` and an integer ``optimizer_steps`` equal to its
+        learner boundary's and export's count; PPO results carry neither.
 
     Notes
     -----
-    Read-only and host-only. Existing checkpoint and selection owners verify
-    artifact identities and selection rules. System-panel records may require
-    loading an actor to verify its registration; learner arrays are not restored
-    here. No games run and no writer or log is changed.
-    Call this after complete learner restore and before resume_recording.
+    Read-only and host-only. The saved method selects the host counts. PPO
+    keeps used_policy_samples and used_value_samples. QMIX keeps
+    completed_blocks, learning_blocks, sampled_sequences, used_td_pairs,
+    used_agent_utilities and sampled_exposure (by_stage, by_source and
+    by_opponent lists, each summing to used_td_pairs), all exact Python
+    integers that may exceed int32, checked with the runner's fixed-block
+    arithmetic: blocks of rollout_length rounds, the last one shorter, each
+    learning once the stored rows reach min_buffer_size. Existing checkpoint
+    and selection owners verify artifact identities and selection rules.
+    System-panel records may require loading an actor to verify its
+    registration; learner arrays are not restored here. No games run and no
+    writer or log is changed. Call this after complete learner restore and
+    before resume_recording.
     """
     from marl_battlegrounds.training import analysis, checkpoints, validation
 
     root = run_dir.resolve()
     metadata = checkpoint_details["metadata"]
     config = metadata["config"]
-    schemas = checkpoints.checkpoint_schemas(config.get("method", "mappo"))
+    method = config.get("method", "mappo")
+    qmix_run = method == "qmix"
+    settings = config["qmix"] if qmix_run else config["ppo"]
+    schemas = checkpoints.checkpoint_schemas(method)
     if checkpoint_details["schemas"] != schemas:
         raise ValueError("Saved model schema differs from the training method")
     value: object = metadata.get("host_state")
     if not isinstance(value, dict):
         raise ValueError("Saved host state must be a JSON object")
     host = cast(dict[str, Any], value)
+    samples = (
+        (
+            "completed_blocks",
+            "learning_blocks",
+            "sampled_sequences",
+            "used_td_pairs",
+            "used_agent_utilities",
+        )
+        if qmix_run
+        else ("used_policy_samples", "used_value_samples")
+    )
     counts = (
         "env_steps",
         "completed_updates",
         "actor_decisions",
-        "used_policy_samples",
-        "used_value_samples",
+        *samples,
         "validation_games",
         "saves",
     )
@@ -592,6 +626,8 @@ def validate_host_state(
         "selection",
         "recovery_checkpoints",
     }
+    if qmix_run:
+        required.add("sampled_exposure")
     random_pairs = config.get("random_diagnostic_seed_pairs")
     if random_pairs is not None:
         required.add("random_results")
@@ -662,8 +698,10 @@ def validate_host_state(
         raise ValueError("Saved phase time exceeds the complete elapsed time")
     steps, updates = host["env_steps"], host["completed_updates"]
     batch, total = config["num_envs"], config["total_env_steps"]
-    epochs, length = config["ppo"]["epochs"], config["ppo"]["rollout_length"]
-    if (
+    epochs, length = settings["epochs"], settings["rollout_length"]
+    if qmix_run:
+        _check_qmix_host_counts(host, checkpoint_details["counters"], config)
+    elif (
         {"env_steps": steps, "updates": updates} != checkpoint_details["counters"]
         or steps > total
         or steps % batch
@@ -675,8 +713,9 @@ def validate_host_state(
     ):
         raise ValueError("Saved host experience or sample counts disagree")
     present_stages = set(host) & stage_shapes.keys()
+    collected = host["completed_blocks"] if qmix_run else updates
     if (present_stages and present_stages != stage_shapes.keys()) or (
-        updates and not present_stages
+        collected and not present_stages
     ):
         raise ValueError("Saved stage summaries are incomplete")
     for name in present_stages:
@@ -745,10 +784,14 @@ def validate_host_state(
             or actor["seed"] != config["seed"]
             or actor["env_steps"] != ancestor["counters"]["env_steps"]
             or actor["weight_digest"] != ancestor["actor_digest"]
-            or actor["input_scale"] != config["ppo"].get("input_scale", 1.0)
-            or actor["spawn_frame"] != config["ppo"].get("spawn_frame", "world")
+            or actor["input_scale"] != settings.get("input_scale", 1.0)
+            or actor["spawn_frame"] != settings.get("spawn_frame", "world")
             or actor["schemas"] != ancestor["schemas"]
             or actor["schemas"] != schemas
+            or (
+                qmix_run
+                and actor.get("optimizer_steps") != ancestor["counters"]["updates"]
+            )
         ):
             raise ValueError("Saved actor identity differs from its learner boundary")
         actor_records[key] = actor
@@ -844,6 +887,7 @@ def validate_host_state(
             if key not in actor_records or panel is None:
                 raise ValueError("Saved validation refers to an unknown actor")
             actor = actor_records[key]
+            _check_result_method(result, actor, qmix_run)
             pairs = config[f"{purpose}_seed_pairs"]
             expected_task = validation.panel_task_description(
                 checkpoint_id=key,
@@ -959,6 +1003,7 @@ def validate_host_state(
         )
         if current_actor is None:
             raise ValueError("Saved Random result has no current-run actor capture")
+        _check_result_method(result, current_actor, qmix_run)
         reused = point == 0 and initial_reference is not None
         if result.get("reused_initialization") is not reused or result.get(
             "reference_path"
@@ -1031,3 +1076,116 @@ def validate_host_state(
             or host["selected_actor"] != actors[chosen["checkpoint_id"]]
         ):
             raise ValueError("Saved selection or selected actor identity differs")
+
+
+def qmix_fixed_block_counts(
+    rounds: int, *, rollout_length: int, minimum: int
+) -> tuple[int, int]:
+    """Count a QMIX run's blocks and learning blocks for fixed-length blocks.
+
+    Parameters
+    ----------
+    rounds : int
+        Real rounds collected per game (env steps divided by games).
+    rollout_length : int
+        Rounds in each block; the last block may be shorter.
+    minimum : int
+        min_buffer_size: a block learns once the rows stored per game after its
+        insertion reach it.
+
+    Returns
+    -------
+    tuple[int, int]
+        (completed blocks, learning blocks) as exact Python integers.
+
+    Examples
+    --------
+    >>> qmix_fixed_block_counts(20, rollout_length=4, minimum=6)
+    (5, 4)
+    """
+    blocks = -(-rounds // rollout_length)
+    first = max(1, -(-minimum // rollout_length))
+    if rounds < minimum:
+        return blocks, 0
+    return blocks, blocks - first + 1
+
+
+def _check_qmix_host_counts(
+    host: dict[str, Any], counters: dict[str, Any], config: dict[str, Any]
+) -> None:
+    """Check a QMIX run's saved host counts with fixed-block arithmetic.
+
+    host holds the runner's exact Python-integer totals, counters the learner
+    checkpoint's saved counters and config the saved run config. Blocks are
+    rollout_length rounds, the last one shorter; a block learns once the rows
+    stored per game reach min_buffer_size. Every ready block takes epochs
+    optimizer steps of sample_batch_size sequences with S-1 TD pairs each.
+    Raises ValueError on any disagreement; reads and changes nothing else.
+    """
+    settings = config["qmix"]
+    batch, total = config["num_envs"], config["total_env_steps"]
+    steps, updates = host["env_steps"], host["completed_updates"]
+    length, minimum = settings["rollout_length"], settings["min_buffer_size"]
+    blocks, learning = qmix_fixed_block_counts(
+        steps // batch, rollout_length=length, minimum=minimum
+    )
+    pairs = host["used_td_pairs"]
+    exposure = host["sampled_exposure"]
+    marginals = ("by_stage", "by_source", "by_opponent")
+    exposure_ok = (
+        isinstance(exposure, dict)
+        and set(cast(dict[str, Any], exposure)) == set(marginals)
+        and all(
+            isinstance(exposure[name], list)
+            and len(cast(list[Any], exposure[name])) >= 1
+            and all(
+                type(cell) is int and cell >= 0
+                for cell in cast(list[Any], exposure[name])
+            )
+            and sum(cast(list[int], exposure[name])) == pairs
+            for name in marginals
+        )
+        and len(cast(list[Any], exposure["by_stage"])) == 17
+        and len(cast(list[Any], exposure["by_opponent"])) == 21
+    )
+    if (
+        {
+            "env_steps": steps,
+            "updates": updates,
+            "completed_blocks": host["completed_blocks"],
+            "learning_blocks": host["learning_blocks"],
+        }
+        != counters
+        or steps > total
+        or steps % batch
+        or host["completed_blocks"] != blocks
+        or host["learning_blocks"] != learning
+        or updates != learning * settings["epochs"]
+        or host["actor_decisions"] > steps * 5
+        or host["sampled_sequences"] != updates * settings["sample_batch_size"]
+        or pairs != host["sampled_sequences"] * (settings["sample_sequence_length"] - 1)
+        or not pairs <= host["used_agent_utilities"] <= 5 * pairs
+        or not exposure_ok
+    ):
+        raise ValueError("Saved host experience or sample counts disagree")
+
+
+def _check_result_method(
+    result: dict[str, Any], actor: dict[str, Any], qmix_run: bool
+) -> None:
+    """Match a saved validation result's method fields to its actor.
+
+    A QMIX run's results must say method "qmix" and carry the actor's integer
+    optimizer_steps (from artifact_identity); a PPO run's results must carry
+    neither field. Raises ValueError.
+    """
+    if qmix_run:
+        steps = result.get("optimizer_steps")
+        if (
+            result.get("method") != "qmix"
+            or type(steps) is not int
+            or steps != actor.get("optimizer_steps")
+        ):
+            raise ValueError("Saved QMIX result differs from its optimizer count")
+    elif "method" in result or "optimizer_steps" in result:
+        raise ValueError("Saved PPO result carries QMIX-only fields")

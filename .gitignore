@@ -77,3 +77,5 @@ docs/dev/milestone*.md
 # Offline, source-verified baseline numerical reference.
 !tests/fixtures/baseline_donor/recurrent_mappo.npz
 !tests/fixtures/baseline_donor/ppo_variants.npz
+!tests/fixtures/baseline_donor/qmix.npz
+!tests/fixtures/baseline_donor/mappo_registration_params.npz

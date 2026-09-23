@@ -13,7 +13,7 @@ repos:
       - id: check-added-large-files
         args: ["--maxkb=1024"]
         # The hashed donor fixtures retain full gradients and Adam state.
-        exclude: ^tests/fixtures/baseline_donor/(recurrent_mappo|ppo_variants)\.npz$
+        exclude: ^tests/fixtures/baseline_donor/(recurrent_mappo|ppo_variants|qmix|mappo_registration_params)\.npz$
 
   - repo: local
     hooks:

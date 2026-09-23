@@ -3055,7 +3055,22 @@ collects no privileged critic features. All four share the established action,
 ValueNorm, input-scale, spawn-frame, checkpoint and evaluation owners. New model
 tags distinguish their artifacts; historical MAPPO meanings remain unchanged.
 The initial feedforward experiment matrix is plain. Short software checks do
-not establish learning or sample efficiency. QMIX and PQN remain separate work.
+not establish learning or sample efficiency. PQN remains separate work.
+
+**QMIX method extension, 23 September 2026:** `TrainConfig(method="qmix")`
+selects recurrent QMIX, configured by `TrainConfig.qmix` instead of `ppo`. One
+shared local Q-network acts for every Team A actor from its permitted inputs
+and own memory; only the monotonic mixer reads the physical training state.
+Exploration follows a real-transition clock set before every decision on the
+shared current actor; historical opponents keep the rate they had when
+captured. Compact Team A replay holds each game's decisions; learning starts
+once `min_buffer_size` rows per game are stored, and earlier blocks are
+accepted warmup blocks with no optimizer step. Complete checkpoints include the
+replay, targets and optimizer; exports hold only the Q-network and play
+greedily (epsilon 0, first legal maximum), with their own model tag and
+inference identity. Selection never picks an actor with zero optimizer steps.
+Save cadence counts optimizer steps and defaults to 1,600 for QMIX. Short
+software checks do not establish learning or sample efficiency.
 
 Keep action-time actor outputs. Real endings receive zero bootstrap; ordinary
 collection cutoffs retain it. Critic bootstrap reads the true successor without

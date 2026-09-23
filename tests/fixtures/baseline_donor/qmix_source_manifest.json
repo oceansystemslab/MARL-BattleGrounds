@@ -1,0 +1,204 @@
+{
+  "base_manifest_sha256": "fa44234fef35f0c302055d2765126261d772152da482fd82ab2cb83262beb461",
+  "commit": "9f67e612654ecb7b7d45ff8052ce9ccfc6c68d93",
+  "donor_lock_sha256": "c83137d6d6cc47f71194fd0dc303b1e64ba7239fea49f2a32098a2bb6790445d",
+  "extractions": [
+    {
+      "first_line": 140,
+      "last_line": 150,
+      "path": "mava/types.py",
+      "source_lines_sha256": "a85015b527c2e6ca5d424d2e97af6c67f17ef7ecb1450cf2c66db185b2432599",
+      "symbol": "ObservationGlobalState"
+    },
+    {
+      "first_line": 29,
+      "last_line": 39,
+      "path": "mava/systems/q_learning/types.py",
+      "source_lines_sha256": "fd4ac6d32055876ec745acd94e21b2a233fd05c9f63991d0a51718b9964669ac",
+      "symbol": "Transition"
+    },
+    {
+      "first_line": 52,
+      "last_line": 58,
+      "path": "mava/systems/q_learning/types.py",
+      "source_lines_sha256": "aca6f848e27f7124bfcf0764ddac02b1209078331ea62b680a12aa0d1b60e12a",
+      "symbol": "ActionSelectionState"
+    },
+    {
+      "first_line": 72,
+      "last_line": 76,
+      "path": "mava/systems/q_learning/types.py",
+      "source_lines_sha256": "721dce1caeab306d4cef26ae9638c114c3f8e2b18efd87fcad65c45750e646d6",
+      "symbol": "QMIXParams"
+    },
+    {
+      "first_line": 101,
+      "last_line": 107,
+      "path": "mava/networks/torsos.py",
+      "source_lines_sha256": "37fce25ff294caaf676f2a1c8e00ed20eaee74b3712475dc6e502ca38f14127d",
+      "symbol": "_parse_activation_fn"
+    },
+    {
+      "first_line": 23,
+      "last_line": 46,
+      "path": "mava/networks/torsos.py",
+      "source_lines_sha256": "fa615d93b5ac98de5f424c92b27e45cbcd7f3876ec43416c0675a751df5d1dd1",
+      "symbol": "MLPTorso"
+    },
+    {
+      "first_line": 94,
+      "last_line": 143,
+      "path": "mava/networks/distributions.py",
+      "source_lines_sha256": "431759f8b02d214fa9faa205c6d42bf1e218fc22f74854408b6772a638a32e61",
+      "symbol": "MaskedEpsGreedyDistribution"
+    },
+    {
+      "first_line": 120,
+      "last_line": 148,
+      "path": "mava/networks/base.py",
+      "source_lines_sha256": "896f1eb22db9b4accfabb8a2dc829b8f6be896b0f0a35ca99f47545460bed9e8",
+      "symbol": "ScannedRNN"
+    },
+    {
+      "first_line": 228,
+      "last_line": 272,
+      "path": "mava/networks/base.py",
+      "source_lines_sha256": "6013bba5654ce1cf0cdb1694b831550674347235067cb2401faac9a9fd321c96",
+      "symbol": "RecQNetwork"
+    },
+    {
+      "first_line": 275,
+      "last_line": 342,
+      "path": "mava/networks/base.py",
+      "source_lines_sha256": "c496a997e8ed13963fc13663487ab085a6fdc5b726b5ef583c2bc7f464946f42",
+      "symbol": "QMixingNetwork"
+    },
+    {
+      "first_line": 30,
+      "last_line": 32,
+      "path": "mava/utils/jax_utils.py",
+      "source_lines_sha256": "0a0759fc39d9be7dd9f4e743f02a66cd9880b7e53456b79daa52dbd7d6f22a60",
+      "symbol": "add_batch_dim"
+    },
+    {
+      "first_line": 111,
+      "last_line": 113,
+      "path": "mava/utils/jax_utils.py",
+      "source_lines_sha256": "922d1143c0e6f0ae7444aec3d9f9df80529e9238734065f7d0937f5dd8ea1f4b",
+      "symbol": "switch_leading_axes"
+    },
+    {
+      "first_line": 242,
+      "last_line": 271,
+      "path": "mava/systems/q_learning/anakin/rec_qmix.py",
+      "source_lines_sha256": "bac0ec01f8a0999f5d79c05cb63303fd437132b49795eacebc24af1296c891c8",
+      "symbol": "make_update_fns.select_eps_greedy_action"
+    },
+    {
+      "first_line": 314,
+      "last_line": 329,
+      "path": "mava/systems/q_learning/anakin/rec_qmix.py",
+      "source_lines_sha256": "fcde9b68838875214acb6547fdb37d1bf9642af79b7cc02a8fc45ce3ad8ceb71",
+      "symbol": "make_update_fns.prep_inputs_to_scannedrnn"
+    },
+    {
+      "first_line": 331,
+      "last_line": 370,
+      "path": "mava/systems/q_learning/anakin/rec_qmix.py",
+      "source_lines_sha256": "4f0a9b29fd28e0adc50f2886f5b04df70cad4f0705a24cb27c9dadb4abe57294",
+      "symbol": "make_update_fns.q_loss_fn"
+    },
+    {
+      "first_line": 372,
+      "last_line": 459,
+      "path": "mava/systems/q_learning/anakin/rec_qmix.py",
+      "source_lines_sha256": "35d9699d3fbdaf0aad976ded32d038f94dc9e69e7babcfff961ee72c947ca583",
+      "symbol": "make_update_fns.update_q"
+    },
+    {
+      "first_line": 152,
+      "last_line": 154,
+      "path": "mava/systems/q_learning/anakin/rec_qmix.py",
+      "source_lines_sha256": "c798a230e25555a6da30069b12f48b5c7bb48c86610b286765b34701535ff65f",
+      "symbol": "init.opt"
+    }
+  ],
+  "files": {
+    "LICENSE": {
+      "git_blob": "0810f0b960495773d642da4a3f69cfc4adeab915",
+      "sha256": "17b4239974011679f9e018ee245b50d4bf419dafd969ead7c2af93300be81df7",
+      "stored_path": "source/LICENSE.txt"
+    },
+    "mava/configs/arch/anakin.yaml": {
+      "git_blob": "b026cc90ef584a35ada77f06c80637d771ad8379",
+      "sha256": "ea7873e70059f465dc1a6aa773c36bd9a3e01f969bc59a0077634e99abde8758",
+      "stored_path": "source/mava/configs/arch/anakin.yaml.txt"
+    },
+    "mava/configs/default/rec_qmix.yaml": {
+      "git_blob": "305fa52e69733f92b0050f65ab57c25c06484958",
+      "sha256": "213be5a23c9c61a66a8ce8e71d657ca7cff766439641ee2d156f2ea42abfe353",
+      "stored_path": "source/mava/configs/default/rec_qmix.yaml.txt"
+    },
+    "mava/configs/network/qmix_rnn.yaml": {
+      "git_blob": "83cebb60e9468204c470cc3eb2195b132ba5e0db",
+      "sha256": "dad6ad8ae88441ba938adf29dccd0efab9ac5e2f563b223fc1e235615e7b6be3",
+      "stored_path": "source/mava/configs/network/qmix_rnn.yaml.txt"
+    },
+    "mava/configs/system/q_learning/rec_qmix.yaml": {
+      "git_blob": "41019ec4834e6f28a416b7fb140ef3f5954310f0",
+      "sha256": "a8bd03ec797cbe70a98103dc62e45d6b8022fff535fcc1dcaf7ac9f27391ff27",
+      "stored_path": "source/mava/configs/system/q_learning/rec_qmix.yaml.txt"
+    },
+    "mava/networks/base.py": {
+      "git_blob": "ffcd174933dfec239eec023fefaa3233e36ce371",
+      "sha256": "7174b65c9a67966c6e100b0f7972ed1637f6a0b413e891936a144e29c986dc7f",
+      "stored_path": "source/mava/networks/base.py.txt"
+    },
+    "mava/networks/distributions.py": {
+      "git_blob": "41e5103f2a895083a2aa3f250ae14e81334a882b",
+      "sha256": "bf15a0fa6333b1a492cc3f4a88bd547f74ff480bea916e69e5d34e3bb603886c",
+      "stored_path": "source/mava/networks/distributions.py.txt"
+    },
+    "mava/networks/torsos.py": {
+      "git_blob": "eae88787d6e667d55002e1912edd49927d103f4c",
+      "sha256": "1e99356017e45f288fcd39dd3515a8922ef45c95f6bd5659c4a4a95d07f0197c",
+      "stored_path": "source/mava/networks/torsos.py.txt"
+    },
+    "mava/systems/q_learning/anakin/rec_qmix.py": {
+      "git_blob": "3cd8101f5135cf7a54c4117042c1757e3331c606",
+      "sha256": "1c7afb6cfc3e6f8f4d3805285a15f88d686d02a08dff56de6f7b17d8a686f291",
+      "stored_path": "source/mava/systems/q_learning/anakin/rec_qmix.py.txt"
+    },
+    "mava/systems/q_learning/types.py": {
+      "git_blob": "6c5fc3f5b42ee1c43b12326a62881843c6c25803",
+      "sha256": "630b507e34060e622f8eec4a4a6bc152bbfc10cceaf3a2002670dfb08338641b",
+      "stored_path": "source/mava/systems/q_learning/types.py.txt"
+    },
+    "mava/types.py": {
+      "git_blob": "d0f2cadb351ae7370948eb572056b0f23e7993ff",
+      "sha256": "5a4deed5c51d3857837749ea7617b31ce44e0386ec6468aa34c084c52625661e",
+      "stored_path": "source/mava/types.py.txt"
+    },
+    "mava/utils/config.py": {
+      "git_blob": "31d01d48b3386afe07c26f6d21f3af3f97bccc90",
+      "sha256": "93a62cea24b86f02b3aad19f3d392162b55ed48df785bab4a0d993fda0106adf",
+      "stored_path": "source/mava/utils/config.py.txt"
+    },
+    "mava/utils/jax_utils.py": {
+      "git_blob": "715abf1a5bbde0f891f8a5dc52f49404220e93fb",
+      "sha256": "077b6180e7c382a71a42be700e1c31579547197b3e21a981751790b7879756f8",
+      "stored_path": "source/mava/utils/jax_utils.py.txt"
+    },
+    "pyproject.toml": {
+      "git_blob": "9547a28a5fef145ab7804d3b3a8bc3720f217dfd",
+      "sha256": "e207188a44a6a7380b4af1f89a8d72d952f6f757d8e3dba119cda6b7a695b365",
+      "stored_path": "source/pyproject.toml.txt"
+    }
+  },
+  "notes": [
+    "Recurrent QMIX uses the same pinned donor and unchanged shared source files.",
+    "Only the named AST bodies and the original optimizer assignment execute; BG production code is never imported.",
+    "The retained source/LICENSE.txt applies to all Mava files; original notices are preserved."
+  ],
+  "tree": "f47f19aa124c460ce9dc23e63288ed765d5cdd47"
+}

@@ -1,7 +1,8 @@
 """Check that training commands parse options and call the public Python owners.
 
 Help remains independent of training backends. These dispatch checks do not
-replace the runner's real collect/update/save/resume workflow tests.
+replace the runner's real collect/update/save/resume workflow tests. A QMIX
+JSON config reaches the same public train function with its qmix settings.
 """
 
 import json
@@ -66,3 +67,38 @@ def test_resume_cli_does_not_invent_settings(
     monkeypatch.setattr(runner, "train", fake_train)
     assert _cli.main(["train", "--resume-from", str(tmp_path)]) == 0
     assert calls == [(None, {"output_dir": None, "resume_from": str(tmp_path)})]
+
+
+def test_train_cli_passes_a_qmix_config_to_the_shared_function(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    config = tmp_path / "config.json"
+    config.write_text(
+        json.dumps(
+            {
+                "method": "qmix",
+                "num_envs": 4,
+                "total_env_steps": 192,
+                "qmix": {"rollout_length": 8, "buffer_size": 64},
+            }
+        )
+    )
+    calls: list[runner.TrainConfig] = []
+
+    def fake_train(
+        configuration: runner.TrainConfig, **kwargs: object
+    ) -> runner.TrainResult:
+        del kwargs
+        calls.append(configuration)
+        return runner.TrainResult(
+            tmp_path, tmp_path / "actor", None, 192, 3, "complete", ()
+        )
+
+    monkeypatch.setattr(runner, "train", fake_train)
+    assert (
+        _cli.main(["train", "--config", str(config), "--output-dir", str(tmp_path)])
+        == 0
+    )
+    assert calls[0].method == "qmix" and calls[0].qmix is not None
+    assert (calls[0].qmix.rollout_length, calls[0].qmix.buffer_size) == (8, 64)
+    assert calls[0].checkpoint_interval_updates == 1600

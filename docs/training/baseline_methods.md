@@ -37,6 +37,18 @@ and recurrent models have different parameter counts, so this comparison is
 not a pure memory ablation. Earlier MAPPO learning results below retain their
 original historical scope.
 
+## QMIX Software And Experiment Scope
+
+Recurrent QMIX (`TrainConfig(method="qmix")`) uses the donor's starting
+settings: 1,000 replay rows per game, learning from 32 rows, sequences of 20,
+batches of 128, 4 epochs, Adam learning rate 0.00003, hard target copies every
+200 optimizer steps, and exploration falling to 0.05 over 100,000 real
+transitions. No QMIX setting has been tuned for MARL-BGs. See the
+[training guide](README.md#recurrent-qmix) for the workflow, counts and costs,
+and the [source ledger](source_reuse.md#recurrent-qmix) for the donor match.
+Tiny integration runs check software only; they establish no learning, sample
+efficiency or ranking against PPO.
+
 ## Current MAPPO Standard
 
 **Superseded, 22 September 2026.** The study results quoted in this section come

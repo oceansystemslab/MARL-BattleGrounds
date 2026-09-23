@@ -22,6 +22,18 @@ current-stack reference. ``load_variants_reference(method)`` reads that method's
 historical arrays. ``--methods ippo ff_mappo ff_ippo --generate DIRECTORY``
 generates a separate combined archive from the additional pinned source files.
 The old default generator and historical MAPPO files retain their own meaning.
+
+Recurrent QMIX has its own route and files: ``qmix_source_manifest.json``
+(bound to the MAPPO manifest by hash), ``qmix_reference.json`` and ``qmix.npz``.
+``load_qmix_reference`` checks and reads them. ``build_same_stack_qmix_reference``
+executes the donor's Q-network, mixer, epsilon-greedy distribution, action
+selection, sample preparation, loss and ``update_q`` bodies on the current
+stack; callers set ``cfg``, ``q_net``, ``mixer`` and ``opt`` (see
+``reference_qmix_optimizer``) before calling them. Its categorical wrapper
+supplies only probabilities, the mode and sampling, which the historical
+archive checks. ``--qmix --generate DIRECTORY`` writes that archive in the
+reference environment. ``update_q`` needs the nested ``device`` and ``batch``
+vmap axes it averages over; with one lane each the averages change nothing.
 """
 
 from __future__ import annotations
@@ -54,6 +66,10 @@ _DONOR_METHODS = {
     "ff_mappo": "ff_mappo",
     "ff_ippo": "ff_ippo",
 }
+_QMIX_MANIFEST = "qmix_source_manifest.json"
+_QMIX_METADATA = "qmix_reference.json"
+_QMIX_DATA_FILE = "qmix.npz"
+_QMIX_SYSTEM = "mava/systems/q_learning/anakin/rec_qmix.py"
 
 
 def load_reference() -> tuple[dict[str, Any], dict[str, NDArray[Any]]]:
@@ -733,6 +749,501 @@ def generate_variants_reference(output_dir: Path, methods: list[str]) -> None:
     )
 
 
+def _qmix_manifest() -> dict[str, Any]:
+    manifest = json.loads((_FIXTURE_ROOT / _QMIX_MANIFEST).read_text())
+    if (
+        hashlib.sha256(
+            (_FIXTURE_ROOT / "source_manifest.json").read_bytes()
+        ).hexdigest()
+        != manifest["base_manifest_sha256"]
+    ):
+        raise ValueError("The historical source manifest changed.")
+    return manifest
+
+
+def load_qmix_reference() -> tuple[dict[str, Any], dict[str, NDArray[Any]]]:
+    manifest = _qmix_manifest()
+    for path in manifest["files"]:
+        _source_text(path, manifest)
+    metadata = json.loads((_FIXTURE_ROOT / _QMIX_METADATA).read_text())
+    if (
+        hashlib.sha256((_FIXTURE_ROOT / _QMIX_MANIFEST).read_bytes()).hexdigest()
+        != metadata["source_manifest_sha256"]
+    ):
+        raise ValueError("The QMIX source manifest does not match the reference.")
+    data_path = _FIXTURE_ROOT / _QMIX_DATA_FILE
+    if hashlib.sha256(data_path.read_bytes()).hexdigest() != metadata["archive_sha256"]:
+        raise ValueError("The QMIX archive does not match its recorded hash.")
+    with np.load(data_path, allow_pickle=False) as archive:
+        arrays = {key: archive[key].copy() for key in archive.files}
+    return metadata, arrays
+
+
+def _eps_greedy_shim(jax: Any, jnp: Any) -> SimpleNamespace:
+    class Categorical:
+        def __init__(self, probs: Any) -> None:
+            self.probs = probs
+
+        @classmethod
+        def _parameter_properties(
+            cls, dtype: Any, num_classes: Any = None
+        ) -> dict[str, Any]:
+            del dtype, num_classes
+            return {}
+
+        def probs_parameter(self) -> Any:
+            return self.probs
+
+        def mode(self) -> Any:
+            return jnp.argmax(self.probs, axis=-1).astype(jnp.int32)
+
+        def sample(self, seed: Any) -> Any:
+            return jax.random.categorical(seed, jnp.log(self.probs)).astype(jnp.int32)
+
+    return SimpleNamespace(Categorical=Categorical)
+
+
+def _qmix_namespace(manifest: dict[str, Any], *, same_stack: bool) -> dict[str, Any]:
+    jax = importlib.import_module("jax")
+    jnp = importlib.import_module("jax.numpy")
+    nn = importlib.import_module("flax.linen")
+    tfd = (
+        _eps_greedy_shim(jax, jnp)
+        if same_stack
+        else importlib.import_module(
+            "tensorflow_probability.substrates.jax.distributions"
+        )
+    )
+    module = ModuleType(
+        "mava_pinned_reference_qmix" + ("_same_stack" if same_stack else "")
+    )
+    sys.modules[module.__name__] = module
+    namespace = module.__dict__
+    namespace.update(
+        {
+            "functools": functools,
+            "jax": jax,
+            "jnp": jnp,
+            "lax": importlib.import_module("jax.lax"),
+            "np": np,
+            "nn": nn,
+            "orthogonal": nn.initializers.orthogonal,
+            "tree": jax.tree,
+            "optax": importlib.import_module("optax"),
+            "chex": importlib.import_module("chex"),
+            "NamedTuple": NamedTuple,
+            "tfd": tfd,
+            # The fixture uses ordinary arrays, never donor graph observations.
+            "is_graph_observation": lambda _observation: False,
+        }
+    )
+    sources = (
+        ("mava/types.py", (("ObservationGlobalState",),)),
+        (
+            "mava/systems/q_learning/types.py",
+            (("Transition",), ("ActionSelectionState",), ("QMIXParams",)),
+        ),
+        ("mava/networks/torsos.py", (("_parse_activation_fn",), ("MLPTorso",))),
+        ("mava/networks/distributions.py", (("MaskedEpsGreedyDistribution",),)),
+        (
+            "mava/networks/base.py",
+            (("ScannedRNN",), ("RecQNetwork",), ("QMixingNetwork",)),
+        ),
+        ("mava/utils/jax_utils.py", (("add_batch_dim",), ("switch_leading_axes",))),
+        (
+            _QMIX_SYSTEM,
+            (
+                ("make_update_fns", "select_eps_greedy_action"),
+                ("make_update_fns", "prep_inputs_to_scannedrnn"),
+                ("make_update_fns", "q_loss_fn"),
+                ("make_update_fns", "update_q"),
+            ),
+        ),
+    )
+    for path, symbols in sources:
+        _exec_source(namespace, manifest, path, symbols)
+    return namespace
+
+
+def build_same_stack_qmix_reference() -> dict[str, Any]:
+    return _qmix_namespace(_qmix_manifest(), same_stack=True)
+
+
+def reference_qmix_optimizer(namespace: dict[str, Any]) -> Any:
+    setup = _source_node(_source_text(_QMIX_SYSTEM, _qmix_manifest()), ("init",))
+    statements: list[ast.stmt] = [
+        child
+        for child in getattr(setup, "body", [])
+        if isinstance(child, ast.Assign)
+        and any(
+            isinstance(target, ast.Name) and target.id == "opt"
+            for target in child.targets
+        )
+    ]
+    exec(
+        compile(
+            ast.fix_missing_locations(ast.Module(body=statements, type_ignores=[])),
+            _QMIX_SYSTEM,
+            "exec",
+        ),
+        namespace,
+    )
+    return namespace["opt"]
+
+
+def qmix_reference_networks(
+    namespace: dict[str, Any], network: Any, embed_dim: int, agents: int = 5
+) -> tuple[Any, Any]:
+    # Keyword arguments follow the donor's hydra instantiation of the YAML nodes.
+    def torso(settings: Any) -> Any:
+        return namespace["MLPTorso"](
+            tuple(settings["layer_sizes"]),
+            activation=settings["activation"],
+            use_layer_norm=settings["use_layer_norm"],
+        )
+
+    q_net = namespace["RecQNetwork"](
+        pre_torso=torso(network["q_network"]["pre_torso"]),
+        post_torso=torso(network["q_network"]["post_torso"]),
+        num_actions=198,
+        hidden_state_dim=network["hidden_state_dim"],
+    )
+    mixer = namespace["QMixingNetwork"](
+        num_actions=198,
+        num_agents=agents,
+        hyper_hidden_dim=network["mixer_network"]["hyper_hidden_dim"],
+        embed_dim=embed_dim,
+        norm_env_states=network["mixer_network"]["norm_env_states"],
+    )
+    namespace["q_net"], namespace["mixer"] = q_net, mixer
+    return q_net, mixer
+
+
+def qmix_reference_update(namespace: dict[str, Any]) -> Callable[..., Any]:
+    jax = namespace["jax"]
+
+    def run(params: Any, opt_state: Any, data: Any, t_train: Any) -> Any:
+        def lift(value: Any) -> Any:
+            return jax.tree.map(lambda leaf: leaf[None, None], value)
+
+        update = jax.vmap(
+            jax.vmap(namespace["update_q"], in_axes=(0, 0, 0, None), axis_name="batch"),
+            in_axes=(0, 0, 0, None),
+            axis_name="device",
+        )
+        result = update(lift(params), lift(opt_state), lift(data), t_train)
+        return jax.tree.map(lambda leaf: leaf[0, 0], result)
+
+    return run
+
+
+def qmix_gradient_capture(namespace: dict[str, Any]) -> Any:
+    # A zero-step optimizer whose new state is the donor's averaged gradient.
+    jax, jnp, optax = (namespace[name] for name in ("jax", "jnp", "optax"))
+
+    def init(params: Any) -> Any:
+        return params
+
+    def update(grads: Any, state: Any, params: Any = None) -> tuple[Any, Any]:
+        del state, params
+        return jax.tree.map(jnp.zeros_like, grads), grads
+
+    return optax.GradientTransformation(init, update)
+
+
+def _trees_equal(left: Any, right: Any, jax: Any) -> bool:
+    return all(
+        np.array_equal(np.asarray(a), np.asarray(b))
+        for a, b in zip(jax.tree.leaves(left), jax.tree.leaves(right), strict=True)
+    )
+
+
+def generate_qmix_reference(output_dir: Path) -> None:
+    packages = _check_environment()
+    manifest = _qmix_manifest()
+    for path in manifest["files"]:
+        _source_text(path, manifest)
+    ns = _qmix_namespace(manifest, same_stack=False)
+    jax, jnp = ns["jax"], ns["jnp"]
+    if jax.default_backend() != "cpu":
+        raise ValueError("Reference generation requires JAX_PLATFORMS=cpu.")
+    omega = importlib.import_module("omegaconf").OmegaConf
+    system = omega.create(
+        _source_text("mava/configs/system/q_learning/rec_qmix.yaml", manifest)
+    )
+    network = omega.create(_source_text("mava/configs/network/qmix_rnn.yaml", manifest))
+    architecture = omega.create(_source_text("mava/configs/arch/anakin.yaml", manifest))
+    donor_defaults = omega.to_container(system, resolve=True)
+    # Small CPU tensors keep five agents and the donor's real 256-wide networks.
+    sequences, rows, lanes, agents, actor_width, state_width = 4, 6, 4, 5, 13, 17
+    system.sample_batch_size = sequences
+    system.sample_sequence_length = rows
+    architecture.num_envs = lanes
+    cfg = omega.create({"system": system, "network": network, "arch": architecture})
+    ns["cfg"] = cfg
+    q_net, mixer = qmix_reference_networks(ns, network, system.qmix_embed_dim, agents)
+    opt = reference_qmix_optimizer(ns)
+    width = int(network.hidden_state_dim)
+
+    rng = np.random.default_rng(190923)
+    shape = (sequences, rows, agents)
+    features = rng.normal(size=(*shape, actor_width)).astype(np.float32)
+    masks = rng.random((*shape, 198)) > 0.22
+    masks[..., 0] = True
+    # One dead actor row admits only the neutral action.
+    masks[1, 2, 3] = False
+    masks[1, 2, 3, 0] = True
+    state_rows = rng.normal(size=(sequences, rows, state_width)).astype(np.float32)
+    # The donor environment repeats the physical state for every agent.
+    global_state = np.broadcast_to(state_rows[:, :, None], (*shape, state_width)).copy()
+    actions = np.empty(shape, dtype=np.int32)
+    for index in np.ndindex(shape):
+        actions[index] = rng.choice(np.flatnonzero(masks[index]))
+    rewards = rng.normal(0, 0.3, (sequences, rows, 1)).astype(np.float32)
+    # term_or_trunc marks a row that starts a new episode: interior, first and last.
+    starts = np.zeros((sequences, rows, 1), dtype=bool)
+    starts[0, 3] = starts[2, 0] = starts[3, rows - 1] = True
+    carry = jnp.asarray(
+        rng.normal(0, 0.2, (sequences, agents, width)).astype(np.float32)
+    )
+    agent_qs = jnp.asarray(
+        rng.normal(size=(sequences, rows - 1, agents)).astype(np.float32)
+    )
+    observation = ns["ObservationGlobalState"](
+        jnp.asarray(features), jnp.asarray(masks), jnp.asarray(global_state)
+    )
+    data = ns["Transition"](
+        observation,
+        jnp.asarray(actions),
+        jnp.asarray(rewards),
+        jnp.asarray(starts),
+        jnp.asarray(starts),
+        observation,
+    )
+
+    # Initialization uses the donor's own dummy input layout.
+    init_obs = ns["ObservationGlobalState"](
+        jnp.zeros((1, 1, agents, actor_width)),
+        jnp.ones((1, 1, agents, 198), dtype=bool),
+        jnp.zeros((1, 1, agents, state_width)),
+    )
+    init_x = (init_obs, jnp.zeros((1, 1, 1), dtype=bool))
+    init_hidden = ns["ScannedRNN"].initialize_carry((lanes, agents), width)
+    dummy_qs = jnp.zeros((sequences, rows - 1, agents))
+    dummy_state = jnp.zeros((sequences, rows - 1, state_width))
+    q_key, target_key = jax.random.PRNGKey(31), jax.random.PRNGKey(37)
+    q_params = q_net.init(q_key, init_hidden, init_x)
+    mixer_params = mixer.init(q_key, dummy_qs, dummy_state)
+    # A distinct target makes the Double-Q choice observable.
+    target_q = q_net.init(target_key, init_hidden, init_x)
+    target_mixer = mixer.init(target_key, dummy_qs, dummy_state)
+
+    time_major = ns["switch_leading_axes"](observation)
+    resets = ns["switch_leading_axes"](data.term_or_trunc)
+    forward_carry, forward_q = q_net.apply(
+        q_params, carry, (time_major, resets), method="get_q_values"
+    )
+    rates = (0.0, 0.37, 1.0)
+    probabilities, modes = [], []
+    for rate in rates:
+        _, distribution = q_net.apply(q_params, carry, (time_major, resets), rate)
+        probabilities.append(distribution.probs_parameter())
+        modes.append(distribution.mode())
+
+    q_rows = rng.normal(size=(7, 198)).astype(np.float32)
+    mask_rows = rng.random((7, 198)) > 0.3
+    mask_rows[:, 0] = True
+    # Rows 1, 2 and 5 hold exact ties; the lowest legal index must win.
+    mask_rows[1, [5, 17]] = True
+    q_rows[1, [5, 17]] = q_rows[1].max() + 1
+    mask_rows[2, 197] = True
+    q_rows[2, [0, 197]] = q_rows[2].max() + 1
+    mask_rows[3] = False
+    mask_rows[3, 0] = True
+    mask_rows[4] = True
+    mask_rows[5] = True
+    q_rows[5, [3, 90, 150]] = q_rows[5].max() + 1
+    # Row 6 records the donor's finfo.min edge: only 197 is legal.
+    mask_rows[6] = False
+    mask_rows[6, 197] = True
+    q_rows[6] = np.finfo(np.float32).min
+    row_probabilities, row_modes = [], []
+    for rate in rates:
+        distribution = ns["MaskedEpsGreedyDistribution"](
+            jnp.asarray(q_rows), rate, jnp.asarray(mask_rows)
+        )
+        row_probabilities.append(distribution.probs_parameter())
+        row_modes.append(distribution.mode())
+
+    mixed = mixer.apply(mixer_params, agent_qs, observation.global_state[:, :-1, 0])
+
+    recorded: list[Any] = []
+
+    def recorded_apply(*args: Any, **kwargs: Any) -> Any:
+        recorded.append(args[3])
+        return q_net.apply(*args, **kwargs)
+
+    ns["q_net"] = SimpleNamespace(apply=recorded_apply)
+    epsilon_rounds = (0, 1, 2, 17, 24999, 25000, 25001, 30000)
+    next_steps, select_hidden = [], None
+    lane_obs = jax.tree.map(lambda value: value[:lanes, 0], observation)
+    for count in epsilon_rounds:
+        selection, _action = ns["select_eps_greedy_action"](
+            ns["ActionSelectionState"](
+                q_params,
+                carry[:lanes],
+                jnp.asarray(lanes * count, dtype=jnp.int32),
+                jax.random.PRNGKey(41),
+            ),
+            lane_obs,
+            data.term_or_trunc[:lanes, 0],
+        )
+        next_steps.append(selection.time_steps)
+        if select_hidden is None:
+            select_hidden = selection.hidden_state
+    ns["q_net"] = q_net
+
+    update = qmix_reference_update(ns)
+    base = ns["QMIXParams"](q_params, target_q, mixer_params, target_mixer)
+    ns["opt"] = qmix_gradient_capture(ns)
+    _, gradients, captured_loss = update(
+        base, (q_params, mixer_params), data, jnp.int32(1)
+    )
+    ns["opt"] = opt
+    adam = opt.init((q_params, mixer_params))
+    hard = {
+        count: update(base, adam, data, jnp.int32(count)) for count in (0, 1, 199, 200)
+    }
+    copies = {
+        str(count): _trees_equal(result[0].target, result[0].online, jax)
+        and _trees_equal(result[0].mixer_target, result[0].mixer_online, jax)
+        for count, result in hard.items()
+    }
+    kept = {
+        str(count): _trees_equal(result[0].target, target_q, jax)
+        and _trees_equal(result[0].mixer_target, target_mixer, jax)
+        for count, result in hard.items()
+    }
+    if copies != {"0": True, "1": False, "199": False, "200": True} or kept != {
+        "0": False,
+        "1": True,
+        "199": True,
+        "200": False,
+    }:
+        raise ValueError("The donor's hard target timing differs from the brief.")
+    first_params, first_opt, first_loss = hard[0]
+    second_params, _second_opt, second_loss = update(
+        first_params, first_opt, data, jnp.int32(1)
+    )
+    cfg.system.hard_update = False
+    soft_params, _soft_opt, soft_loss = update(base, adam, data, jnp.int32(0))
+    cfg.system.hard_update = True
+
+    arrays: dict[str, NDArray[Any]] = {}
+    for name, value in {
+        "actor_features": features,
+        "action_mask": masks,
+        "training_state": state_rows,
+        "actions": actions,
+        "rewards": rewards,
+        "episode_start": starts,
+        "carry": carry,
+        "agent_qs": agent_qs,
+        "q_rows": q_rows,
+        "mask_rows": mask_rows,
+        "epsilon_rounds": np.asarray(epsilon_rounds, dtype=np.int32),
+    }.items():
+        arrays[f"input/{name}"] = np.asarray(value)
+    for name, value in {
+        "forward_carry": forward_carry,
+        "forward_q": forward_q,
+        "probabilities": jnp.stack(probabilities),
+        "modes": jnp.stack(modes),
+        "row_probabilities": jnp.stack(row_probabilities),
+        "row_modes": jnp.stack(row_modes),
+        "mixer": mixed,
+        "epsilon": jnp.stack(recorded),
+        "epsilon_next_steps": jnp.stack(next_steps),
+        "select_hidden": select_hidden,
+    }.items():
+        arrays[f"expected/{name}"] = np.asarray(value)
+    trees = {
+        "parameters/online_q": q_params,
+        "parameters/target_q": target_q,
+        "parameters/online_mixer": mixer_params,
+        "parameters/target_mixer": target_mixer,
+        "gradients/q": gradients[0],
+        "gradients/mixer": gradients[1],
+        "gradients/loss": captured_loss,
+        "one_update/online_q": first_params.online,
+        "one_update/online_mixer": first_params.mixer_online,
+        "one_update/optimizer": first_opt,
+        "one_update/loss": first_loss,
+        "two_updates/online_mixer": second_params.mixer_online,
+        "two_updates/loss": second_loss,
+        "soft_update/target_q": soft_params.target,
+        "soft_update/target_mixer": soft_params.mixer_target,
+        "soft_update/loss": soft_loss,
+    }
+    for name, value in trees.items():
+        _store_tree(arrays, name, value, jax)
+    if not all(
+        np.all(np.isfinite(value))
+        for key, value in arrays.items()
+        if np.issubdtype(value.dtype, np.floating) and key != "input/q_rows"
+    ):
+        raise ValueError("The donor produced a nonfinite reference value.")
+    output_dir.mkdir(parents=True, exist_ok=True)
+    data_path = output_dir / _QMIX_DATA_FILE
+    cast(Callable[..., None], np.savez_compressed)(data_path, **arrays)
+    metadata = {
+        "schema_version": 1,
+        "donor_commit": manifest["commit"],
+        "donor_tree": manifest["tree"],
+        "python": platform.python_version(),
+        "packages": packages,
+        "backend": jax.default_backend(),
+        "source_manifest_sha256": hashlib.sha256(
+            (_FIXTURE_ROOT / _QMIX_MANIFEST).read_bytes()
+        ).hexdigest(),
+        "archive_sha256": hashlib.sha256(data_path.read_bytes()).hexdigest(),
+        "generator_sha256": hashlib.sha256(Path(__file__).read_bytes()).hexdigest(),
+        "requirements_sha256": hashlib.sha256(
+            (_FIXTURE_ROOT / "reference-requirements.txt").read_bytes()
+        ).hexdigest(),
+        "settings": omega.to_container(cfg, resolve=True),
+        "donor_defaults": donor_defaults,
+        "rates": list(rates),
+        "keys": {"online": 31, "target": 37, "selection": 41},
+        "hard_update_copies": copies,
+        "hard_update_keeps_target": kept,
+        "shapes": {
+            "sequences": sequences,
+            "rows": rows,
+            "lanes": lanes,
+            "agents": agents,
+            "actor_features": actor_width,
+            "training_state": state_width,
+            "hidden_width": width,
+            "actions": 198,
+        },
+        "array_count": len(arrays),
+        "limits": [
+            "Synthetic all-valid CPU calculation, not a training run.",
+            "Networks are built from the donor YAML with the keyword arguments "
+            "hydra would pass; hydra, flashbax and environments are not imported.",
+            "Sampled actions are not stored; probabilities and greedy modes are.",
+            "No BG masking, frame, reward or replay adaptations are included.",
+            "Production comparisons use stored parameters; cross-version "
+            "initializer identity is not claimed.",
+        ],
+    }
+    (output_dir / _QMIX_METADATA).write_text(
+        json.dumps(metadata, indent=2, sort_keys=True) + "\n"
+    )
+    print(f"Wrote {len(arrays)} arrays to {data_path}")
+
+
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(
         description="Reproduce the pinned CPU MAPPO reference."
@@ -740,9 +1251,13 @@ if __name__ == "__main__":
     parser.add_argument(
         "--generate", required=True, type=Path, metavar="OUTPUT_DIRECTORY"
     )
-    parser.add_argument("--methods", nargs="+", choices=("ippo", "ff_mappo", "ff_ippo"))
+    group = parser.add_mutually_exclusive_group()
+    group.add_argument("--methods", nargs="+", choices=("ippo", "ff_mappo", "ff_ippo"))
+    group.add_argument("--qmix", action="store_true")
     options = parser.parse_args()
-    if options.methods:
+    if options.qmix:
+        generate_qmix_reference(options.generate)
+    elif options.methods:
         generate_variants_reference(options.generate, options.methods)
     else:
         generate_reference(options.generate)

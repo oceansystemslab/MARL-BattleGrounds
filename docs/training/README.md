@@ -7,15 +7,16 @@ decisions and their limits, use the [baseline methods record](baseline_methods.m
 The `marl_battlegrounds.training` package prepares verified maps, samples
 configurations and collects exact experience budgets with optional curriculum,
 score shaping and self-play history. The `marl_battlegrounds.baselines` package
-provides input encoders, exact action helpers and shared PPO calculations.
+provides input encoders, exact action helpers and the PPO and QMIX calculations.
 The optional trainer joins these components into recurrent and feedforward
-MAPPO and IPPO runs,
+MAPPO and IPPO runs and recurrent QMIX runs with compact replay,
 with learner checkpoints, frozen actor loading, validation and analysis.
 Collection alone still performs no optimizer update. Ordinary environment and
-collection helpers need only base dependencies; PPO needs `training` and its
-automatic plots need `viz`. A working trainer is not a claim of learned skill.
+collection helpers need only base dependencies; PPO and QMIX need `training`
+(which includes Flashbax for QMIX replay) and automatic plots need `viz`. A
+working trainer is not a claim of learned skill.
 
-Install the existing `training` extra to use PPO. In a prepared contributor
+Install the existing `training` extra to use PPO or QMIX. In a prepared contributor
 checkout, run the example with:
 
 ```bash
@@ -729,6 +730,154 @@ same-shaped value changes need no new compiled program. Changed shapes or
 settings may compile again. These numerical functions perform no file I/O,
 training loop, checkpoint save or hidden host callback.
 
+## Recurrent QMIX
+
+Choose QMIX with `TrainConfig(method="qmix")`. QMIX runs use their own
+settings object, `TrainConfig.qmix` (a `QMIXConfig`), and leave `ppo` at its
+default; saved configs hold a `"qmix"` block and no `"ppo"` block. Everything
+else is the same workflow: train, resume, validate, select, export, load,
+evaluate and analyze. The [QMIX example](../../examples/qmix_training.py) runs
+a tiny complete case:
+
+```python
+import marl_battlegrounds as marl_bgs
+from marl_battlegrounds import training
+from marl_battlegrounds.baselines.qmix import QMIXConfig
+
+config = training.TrainConfig(
+    method="qmix",
+    num_envs=4,
+    total_env_steps=192,
+    qmix=QMIXConfig(
+        rollout_length=8,
+        buffer_size=64,
+        min_buffer_size=32,
+        sample_sequence_length=20,
+        sample_batch_size=4,
+        epochs=1,
+    ),
+)
+result = training.train(config, output_dir="runs/qmix-example")
+actor = training.load_system(result.final_actor)
+marl_bgs.evaluate(actor, "random", num_episodes=2, maps=[42], num_envs=2,
+                  phase="validation", output_dir="runs/qmix-example/evaluation")
+training.analyze([result.run_dir], output_dir="runs/qmix-example/analysis")
+```
+
+Curriculum and reward shaping are the usual one-line changes:
+`curriculum=True`, `shaping=True`, or both. Shaping uses `qmix.gamma`.
+
+**Team reward.** QMIX learns from one team reward per decision: the mean task
+reward over the Team A slots that are in the game, plus the shaping value when
+shaping is on. The donor averages over all five slots; the two differ only
+when a curriculum stage has fewer than five players per team.
+
+**Model and actors.** One shared local Q-network (256 wide, with a 256-wide
+GRU) turns each actor's permitted inputs and own memory into 198 action
+values. The mixer combines the five chosen values into one team value from the
+919-value physical state; it never reaches an actor. Loaded and exported QMIX
+Systems play greedily: epsilon 0, and among equal best values the first legal
+action in the network's own order (mirrored for left-frame games). Details,
+parameter counts and the donor are in the
+[source ledger](source_reuse.md#recurrent-qmix).
+
+**Exploration.** Before every decision the collection sets the current actor's
+epsilon from a clock of real transitions: it falls from 1 to `eps_min` over
+`eps_decay` transitions (all games counted) and then stays at `eps_min`. Both
+current self-play teams share it. A historical opponent keeps the epsilon it
+had when it was captured, so an early history snapshot or pinned first-update
+actor can stay very exploratory for the whole run. Warmup publishes nothing,
+so a history snapshot due during warmup is taken at the first learning block,
+with that block's weights and epsilon.
+
+**Replay and warmup.** Here "game" means one of the `num_envs` parallel
+games; each plays many episodes. Replay keeps the last `buffer_size` decisions
+of each parallel game; it is never flushed, including across curriculum
+stages. A block adds its real decisions, then learns only once at least
+`min_buffer_size` rows per game are stored. Earlier blocks are warmup blocks:
+their decisions are stored, and no optimizer step runs. Each ready block takes
+`epochs` optimizer steps; each step draws `sample_batch_size` sequences of
+`sample_sequence_length` consecutive decisions from one parallel game, with
+replacement, and starts their memory at zero (no burn-in). A sequence may
+cross an episode ending; the learning target stops at the ending and the next
+episode starts with fresh memory. The newest decision of each game only ever
+appears as the last row of a sequence, because its successor is not stored
+yet. Targets copy the online networks every `update_period` optimizer steps
+(or blend with `tau`).
+
+**Counts.** `completed_updates` counts optimizer steps, not blocks. The
+training log adds blocks, learning blocks, sampled sequences, used TD pairs and
+used actor utilities. A TD pair is two consecutive stored decisions of one
+parallel game, the unit of one learning target; each active actor in a used
+pair adds one actor utility. Used counts include repeated draws of the same
+stored rows; they are not new experience. `exposure.json` adds the used TD pairs by
+curriculum stage, source row and opponent. The runner keeps these totals as
+exact whole numbers; low-level callers of `update_qmix_learner` receive
+per-block counts and must add them up themselves.
+
+**Memory and disk.** One replay row is 29,664 bytes per game: 949,248,000
+bytes for 32 games and 1,000 rows. While a block is checked the learner keeps
+the previous replay (for rollback) and the replay with the new rows, plus
+working space, so plan for up to about three times that; at those sizes XLA
+estimates about 4.0 GB for the whole update on CPU, and the GPU run used about
+3.3 GB. Each complete
+checkpoint stores the replay, the networks, targets, optimizer and history, so
+QMIX saves hold about 1.1 GB of arrays at those sizes. Files are compressed,
+so disk use is lower and depends on the contents; a save with 88 of 1,000 rows
+filled took about 80 MB. Plan disk for the uncompressed size. `checkpoint_interval_updates`
+counts `completed_updates`: PPO updates for PPO, optimizer steps for QMIX. Its
+QMIX default of 1,600 gives the same spacing as PPO's 25 at the defaults:
+102,400 transitions between saves at 32 games (PPO: 25 updates of 128 rounds;
+QMIX: 1,600 steps at 4 per block of 8 rounds). An explicit value is always
+kept. The number is fixed when the config is built, so
+`dataclasses.replace(ppo_config, method="qmix")` keeps PPO's 25 unless that
+call also passes `checkpoint_interval_updates=None`. Exports hold only the
+Q-network, about 7 MB.
+
+A run keeps the complete checkpoint, replay included, at every boundary with an
+exported actor (initialization, each validation fraction, each extra save point
+and the final boundary), plus the two newest recovery saves. A ten-fraction
+panel run at 32 games therefore keeps about 11 complete checkpoints, up to
+roughly 12 GB before compression. Memory and disk grow with
+`num_envs × buffer_size`: at 256 games one replay is about 7.6 GB and a block
+briefly holds three (about 23 GB), and 512 games with 1,000 rows do not fit a
+32 GB card. Lower `buffer_size` or `num_envs` for large batches.
+
+**Recovery.** A resume restores into a shape-only template, so restoring never
+holds a second replay. During training a block holds the previous replay and
+the new one plus working space, as described under Memory and disk. A resume
+rejects impossible counters, the wrong
+method, changed QMIX settings or a changed replay layout before reading arrays.
+CPU tests show that a resumed run continues bit for bit, including a learner
+continued in a fresh process; the matching GPU check is a separate
+qualification.
+
+**Tournaments.** A loaded QMIX actor is an ordinary `System`, so evaluation and
+tournaments use it unchanged:
+
+```python
+selected = training.load_system(result.selected_actor or result.final_actor)
+tournament = marl_bgs.run_tournament(
+    [selected, "tdm-alpha", "tdm-beta"],
+    episodes_per_pair=20,
+    num_envs=32,
+    output_dir="runs/qmix-tournament",
+)
+print(tournament.table("tournament_rankings"))
+```
+
+Read the rankings and uncertainty as described in
+[Run a tournament](../evaluation/workflows.md#run-a-tournament); the
+[canonical tournament guide](../evaluation/canonical_tournaments.md) covers the
+fixed Big 12 comparison, and [examples/evaluation.py](../../examples/evaluation.py)
+runs the same call from the command line.
+
+Low-level users import `from marl_battlegrounds.training import qmix_learner`
+and call `qmix_learner.init_qmix_learner`, `update_qmix_learner` and
+`validate_qmix_learner`, with the numerical pieces in
+[baselines.qmix](../../src/marl_battlegrounds/baselines/qmix.py). A short run
+proves software wiring only; it does not show learning or sample efficiency.
+
 ## What The Checks Establish
 
 Offline source tests check networks, memory, GAE, losses, gradients and Adam
@@ -918,7 +1067,10 @@ happen before any writer rewind. Failures preserve the last published checkpoint
 and report an error; no run silently replaces a seed or increases its budget.
 
 CLI configuration is a JSON object with `schema_version: 1` and the same
-`TrainConfig` field names. PPO options belong in a nested `ppo` object. Omitted
+`TrainConfig` field names. PPO options belong in a nested `ppo` object; a
+QMIX config has `"method": "qmix"` and a nested `qmix` object instead, for
+example `{"method": "qmix", "num_envs": 4, "total_env_steps": 192, "qmix":
+{"rollout_length": 8, "buffer_size": 64, "min_buffer_size": 32}}`. Omitted
 fields use the same defaults; unknown fields fail. These commands call the same
 Python functions. For a small CPU development run, save this as `CONFIG.json`:
 
@@ -1031,8 +1183,9 @@ successful update or validation result. Training-update prefixes remain strict.
 Full checkpoints retain actor/critic parameters, both optimizers, random streams,
 game state, separate memories, tracking, curriculum, opponent history and host
 selection state. They bind exact log prefixes and optional recording tokens.
-They publish at initialization, every 25 updates, declared capture/validation
-points and the final update. An immutable checkpoint ID includes its actual
+They publish at initialization, whenever `completed_updates` crosses a multiple
+of `checkpoint_interval_updates` (25 PPO updates or 1,600 QMIX optimizer steps
+by default), declared capture/validation points and the final update. An immutable checkpoint ID includes its actual
 payload and continuation ancestry; an update number alone is not an identity.
 Ordinary local filesystem rename/fsync semantics are required.
 
@@ -1053,13 +1206,15 @@ exports exactly, with and without recording, using this built-in policy and no
 global autotune flag. See the [measured engineering checks](#measured-mappo-engineering-checks).
 This evidence does not promise equality across hardware or library changes.
 
-Frozen actor exports contain only deployment data and provenance. They load as
-sampled M8 Systems without critic state, optimizer state or training maps. Death
+Frozen actor exports contain only deployment data and provenance. PPO exports
+load as sampled M8 Systems and QMIX exports load as greedy ones, without
+critic or mixer state, optimizer state or training maps. Death
 and respawn preserve actor memory; episode resets clear it. The training-only
 critic view never enters actor decisions or exported actor memory.
 
 Saved model tags distinguish `recurrent_mappo_128`, `recurrent_ippo_128`,
-`feedforward_mappo_128x128` and `feedforward_ippo_128x128`. The loader reads the
+`feedforward_mappo_128x128`, `feedforward_ippo_128x128` and
+`recurrent_qmix_256`. The loader reads the
 validated schema; it never guesses the method from array shapes or filenames.
 Equal actor weights from different methods have different inference identities.
 New variant identities include the model, weights, scale and frame. Historical
@@ -1070,7 +1225,9 @@ Exact learner resume still requires the original source, dependencies and
 execution settings. Actor-only loading supports independent deployment.
 
 Automatic reports include `run_summary.md`, `learning_curve.csv`,
-`learning_curves.png`, `learning_curves.svg` and validation cell results. Analysis
+`learning_curves.png`, `learning_curves.svg` and validation cell results; a
+report with a QMIX run adds `qmix_curves.png` and `qmix_curves.svg` (loss,
+replay rows, used TD pairs per transition and exploration rate). Analysis
 reads saved evidence without changing original scores or checkpoints. Interrupted
 final validation, selection, export and reporting can resume after training has
 used its exact budget, without collecting another transition.
@@ -1138,7 +1295,9 @@ resumes only its unfinished games. It never updates an actor or resumes training
 Validation uses maps 42–46, mirrored canonical 5v5, K20/H300, and both spawn ends.
 Each seed pair means ten games per opponent across those five maps. Defaults are
 10 routine pairs and 50 confirmation pairs. Initialization cannot be selected.
-Requested progress fractions round up to completed updates; final is included.
+Requested progress fractions round up to completed blocks (PPO updates or QMIX
+blocks); final is included. QMIX warmup actors, with no optimizer step, are
+never selected.
 The best two routine checkpoints plus final, when distinct, receive fresh
 confirmation. The highest native score wins: win 1, draw 0.5, loss 0. Exact ties
 use mean kill difference, then earlier training step, then checkpoint ID.
@@ -1168,8 +1327,8 @@ ties. This uses an existing ranking and does not start another tournament.
 The old positional `create_panel(halfway, final, ...)` route remains readable and
 keeps its original hashes, Random qualification, shared opponent seeds, earlier
 step tie rule and CPU tail recovery. Those historical rules do not silently
-change when an old run resumes. The optional slot diagnostic still compares two
-MAPPO actor exports. New panels require `slot_diagnostic_actor` to name that
+change when an old run resumes. The optional slot diagnostic compares two
+actor exports of the run's method. New panels require `slot_diagnostic_actor` to name that
 comparison explicitly; ordinary validation works without it.
 
 
@@ -1244,7 +1403,7 @@ before then used `"world"`.
 ```
 
 The trainer keeps native K20/H300 games. Initialization is a diagnostic check.
-Progress checks round up to completed updates, and final is always included.
+Progress checks round up to completed blocks, and final is always included.
 Routine checks use 200 games; fresh confirmation uses 1,000 games per candidate.
 The best two eligible routine actors plus final, when different, receive
 confirmation. The slot diagnostic adds its declared 3,200 games after training.

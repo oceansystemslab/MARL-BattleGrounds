@@ -1,19 +1,25 @@
-"""Save complete PPO learner boundaries and load independent frozen actors.
+"""Save complete PPO and QMIX learner boundaries and load frozen actors.
 
 The runner owns its run lock, immutable settings and training logs. This module
 owns synchronous Orbax payloads, file integrity, publication and checked numerical
 restore. Restore reads everything before the optional recording recovery helper
 can rewind M8 files. Actor exports need neither training content nor a learner.
+PPO and QMIX share the file layout; the saved model schema names the method.
+A QMIX learner checkpoint's actor payload holds only the Q-network parameters;
+its epsilon, targets, mixer, optimizer and replay are in the state payload.
+QMIX exports and loaded QMIX Systems are greedy (epsilon 0, first legal
+maximum).
 """
 
 from __future__ import annotations
 
 import json
+import math
 import os
 import re
 import shutil
 from collections.abc import Mapping
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 from functools import lru_cache, partial
 from hashlib import sha256
 from importlib.metadata import version
@@ -31,12 +37,25 @@ from marl_battlegrounds.baselines.inputs import (
     ACTOR_INPUT_SCHEMA_VERSION,
     TRAINING_STATE_SCHEMA_VERSION,
 )
+from marl_battlegrounds.baselines.methods import (
+    is_ppo_method,
+    validate_training_method,
+)
 from marl_battlegrounds.baselines.ppo import (
     DEFAULT_PPO_CONFIG,
     PPOConfig,
     initialize_ppo,
     make_ppo_system,
     validate_ppo_method,
+)
+from marl_battlegrounds.baselines.qmix import (
+    DEFAULT_QMIX_CONFIG,
+    QMIX_KEY_SCHEMA_VERSION,
+    QMIX_REPLAY_SCHEMA_VERSION,
+    QMIX_TIE_RULE,
+    QMIXConfig,
+    make_qmix_system,
+    qmix_actor_template,
 )
 from marl_battlegrounds.evaluation.recording_identity import tree_digest
 from marl_battlegrounds.training._compilation import execution_identity
@@ -47,6 +66,7 @@ if TYPE_CHECKING:
     from marl_battlegrounds.evaluation.run_writer import RunWriter
     from marl_battlegrounds.training.collection import TrainingCollection
     from marl_battlegrounds.training.learner import LearnerState
+    from marl_battlegrounds.training.qmix_learner import QMIXLearnerState
 
 type Tree = Any
 _DESCRIPTION = "checkpoint_details.json"
@@ -66,7 +86,19 @@ _MODELS = {
     "ippo": "recurrent_ippo_128",
     "ff_mappo": "feedforward_mappo_128x128",
     "ff_ippo": "feedforward_ippo_128x128",
+    "qmix": "recurrent_qmix_256",
 }
+_QMIX_SCHEMAS = {
+    "checkpoint": 1,
+    "model": _MODELS["qmix"],
+    "actor_input": ACTOR_INPUT_SCHEMA_VERSION,
+    "training_state": TRAINING_STATE_SCHEMA_VERSION,
+    "action": ACTION_SCHEMA_VERSION,
+    "collection_keys": TRAINING_KEY_SCHEMA_VERSION,
+    "qmix_keys": QMIX_KEY_SCHEMA_VERSION,
+    "replay": QMIX_REPLAY_SCHEMA_VERSION,
+}
+_QMIX_COUNTERS = {"updates", "env_steps", "completed_blocks", "learning_blocks"}
 _CONTEXT = {
     "run_id",
     "attempt_id",
@@ -81,12 +113,16 @@ _CONTEXT = {
 class RestoredCheckpoint:
     """Hold a fully checked learner before any recording or log rewind.
 
-    state is the complete restored numerical learner. details is checked JSON
-    metadata; path is the immutable checkpoint directory. This object owns no
-    run lock or writer. Keep the runner's lock while installing its recovery.
+    state is the complete restored numerical learner: a PPO LearnerState for
+    the four PPO methods, or a QMIXLearnerState for ``method="qmix"``, as the
+    saved model schema says. It is typed ``Any`` so existing PPO code keeps
+    reading its fields without casts; check the method (or use isinstance)
+    when a caller handles both. details is checked JSON metadata; path is the
+    immutable checkpoint directory. This object owns no run lock or writer.
+    Keep the runner's lock while installing its recovery.
     """
 
-    state: LearnerState
+    state: Any
     details: dict[str, Any]
     path: Path
 
@@ -148,10 +184,37 @@ def _spawn_frame(value: object) -> str:
     return PPOConfig(spawn_frame=cast(str, value)).spawn_frame
 
 
+def _settings_block(config: object) -> dict[str, Any]:
+    """Return a saved config's method settings: its "qmix" or "ppo" object.
+
+    config must be a JSON learner config. A missing block is an empty object,
+    so historical PPO configs keep their defaults. Raises ValueError.
+    """
+    value = _object(config, "Learner config")
+    name = "qmix" if _config_method(value) == "qmix" else "ppo"
+    return _object(value.get(name, {}), f"{name.upper()} config")
+
+
+def _check_qmix_settings(config: object, settings: QMIXConfig) -> None:
+    """Require a saved QMIX config's settings to equal the given settings.
+
+    config is the saved JSON learner config; settings is the QMIXConfig the
+    caller will save or continue with. Compares every field (for example
+    gamma, q_lr, tau, the target rule, T, C, S, M and the exploration clock)
+    after the same JSON round trip that config_to_dict applies. Raises
+    ValueError on any difference. Reads no arrays and writes nothing.
+    """
+    expected = json.loads(json.dumps(asdict(settings)))
+    if _settings_block(config) != expected:
+        raise ValueError("Checkpoint config QMIX settings differ from the given ones")
+
+
 def _config_spawn_frame(config: object) -> str:
-    """Read a learner's spawn frame; historical configs without it use "world"."""
-    ppo = _object(_object(config, "Learner config").get("ppo", {}), "PPO config")
-    return _spawn_frame(ppo.get("spawn_frame", "world"))
+    """Read a learner's spawn frame; historical configs without it use "world".
+
+    PPO configs keep it in "ppo", QMIX configs in "qmix".
+    """
+    return _spawn_frame(_settings_block(config).get("spawn_frame", "world"))
 
 
 def _config_value_normalization(config: object) -> bool:
@@ -170,11 +233,12 @@ def _config_method(config: object) -> str:
     """Read a saved learner method; only historical absence means MAPPO.
 
     config must be a JSON object. Reject unknown method values through the
-    numerical owner's validation. No saved object is changed and no device work
-    runs. Array shapes never decide which method produced a checkpoint.
+    shared method check (PPO names and "qmix"). No saved object is changed and
+    no device work runs. Array shapes never decide which method produced a
+    checkpoint.
     """
     value = _object(config, "Learner config")
-    return validate_ppo_method(value.get("method", "mappo"))
+    return validate_training_method(value.get("method", "mappo"))
 
 
 def _schema_method(schemas: object) -> str:
@@ -182,17 +246,17 @@ def _schema_method(schemas: object) -> str:
 
     schemas must exactly match checkpoint_schemas for a known model. Reject
     unknown models, altered versions/types, missing fields and extra fields with
-    ValueError. Boolean or float versions do not stand in for integers. This
-    host-only check reads no arrays and changes no input.
+    ValueError. Each method's own dictionary sets the types, so Boolean or
+    float versions (such as a forged ``"replay": true``) do not stand in for
+    integers. This host-only check reads no arrays and changes no input.
     """
     value = _object(schemas, "Checkpoint schemas")
     for method, model in _MODELS.items():
+        expected = checkpoint_schemas(method)
         if (
             value.get("model") == model
-            and value == checkpoint_schemas(method)
-            and all(
-                type(value[key]) is type(expected) for key, expected in _SCHEMAS.items()
-            )
+            and value == expected
+            and all(type(value[key]) is type(item) for key, item in expected.items())
         ):
             return method
     raise ValueError("Checkpoint model or schema differs from this implementation")
@@ -210,7 +274,9 @@ def saved_training_config(details: dict[str, Any]) -> dict[str, Any]:
     Returns
     -------
     dict
-        A new top-level and ppo dictionary. Missing method becomes "mappo";
+        A new top-level dictionary. A QMIX config keeps its "qmix" block
+        exactly as saved and gains no "ppo" block. For PPO it also returns a
+        new ppo dictionary. Missing method becomes "mappo";
         missing ppo.input_scale becomes 1.0. ppo.spawn_frame is filled with
         "world" when the saved config has no ppo block or no such key, because
         a checkpoint saved before the setting existed trained in raw world
@@ -235,12 +301,13 @@ def saved_training_config(details: dict[str, Any]) -> dict[str, Any]:
     runner's exact-settings comparison rather than silently adopted.
     """
     config = _object(details["metadata"]["config"], "Saved training config")
-    ppo = dict(_object(config.get("ppo", {}), "Saved ppo settings"))
-    ppo.setdefault("input_scale", 1.0)
-    ppo.setdefault("spawn_frame", "world")
-    ppo.setdefault("value_normalization", False)
-    config["ppo"] = ppo
-    config.setdefault("method", "mappo")
+    if _config_method(config) != "qmix":
+        ppo = dict(_object(config.get("ppo", {}), "Saved ppo settings"))
+        ppo.setdefault("input_scale", 1.0)
+        ppo.setdefault("spawn_frame", "world")
+        ppo.setdefault("value_normalization", False)
+        config["ppo"] = ppo
+        config.setdefault("method", "mappo")
     config.setdefault("validation_opponents", None)
     config.setdefault("slot_diagnostic_actor", None)
     return config
@@ -254,9 +321,11 @@ def _actor_spawn_frame(details: dict[str, Any]) -> str:
 
 
 def _config_input_scale(config: object) -> float:
-    """Read a learner's scale; historical configs without it use 1.0."""
-    ppo = _object(_object(config, "Learner config").get("ppo", {}), "PPO config")
-    return _input_scale(ppo.get("input_scale", 1.0))
+    """Read a learner's scale; historical configs without it use 1.0.
+
+    PPO configs keep it in "ppo", QMIX configs in "qmix".
+    """
+    return _input_scale(_settings_block(config).get("input_scale", 1.0))
 
 
 def _actor_input_scale(details: dict[str, Any]) -> float:
@@ -273,13 +342,33 @@ def _inference_digest(details: dict[str, Any]) -> str:
     non-default scale alone uses the version-1 envelope exactly as before, so
     every existing scaled identity is unchanged. A "left" frame adds the frame
     to a version-2 envelope, so equal weights played in different frames are
-    different Systems. Other methods always use the version-1 ppo_inference
-    envelope with model, actor_digest, input_scale and spawn_frame. A synthetic
-    historical MAPPO identity may omit schemas; saved artifacts cannot omit it.
+    different Systems. Other PPO methods always use the version-1 ppo_inference
+    envelope with model, actor_digest, input_scale and spawn_frame. QMIX uses a
+    version-1 qmix_inference envelope that also binds the greedy rule (epsilon
+    0.0 and the first-legal-maximum tie rule): learner checkpoints supply these
+    constants and exports their saved, checked values, so both routes give one
+    identity for the same Q-network. A synthetic historical MAPPO identity may
+    omit schemas; saved artifacts cannot omit it.
     """
     scale = _actor_input_scale(details)
     frame = _actor_spawn_frame(details)
     method = _schema_method(details.get("schemas", _SCHEMAS))
+    if method == "qmix":
+        exported = details["kind"] == "actor"
+        return sha256(
+            _json_bytes(
+                {
+                    "kind": "qmix_inference",
+                    "version": 1,
+                    "model": _MODELS[method],
+                    "actor_digest": details["actor_digest"],
+                    "input_scale": scale,
+                    "spawn_frame": frame,
+                    "epsilon": details["epsilon"] if exported else 0.0,
+                    "tie_rule": details["tie_rule"] if exported else QMIX_TIE_RULE,
+                }
+            )
+        ).hexdigest()
     if method != "mappo":
         return sha256(
             _json_bytes(
@@ -422,28 +511,88 @@ def _layout(tree: Tree) -> list[dict[str, object]]:
     return rows
 
 
-def _is_actor(row: dict[str, object]) -> bool:
-    """Identify the learner's sole actor owner by its exact record path."""
-    return cast(list[object], row["path"])[:3] == [
-        {"field": "carry"},
-        {"field": "history"},
-        {"field": "current_variables"},
-    ]
+def _is_actor(row: dict[str, object], method: str = "mappo") -> bool:
+    """Identify the learner's actor payload rows by their exact record path.
+
+    PPO saves the whole current actor tree. QMIX saves only its Q-network
+    parameters (current_variables.params); the epsilon leaf stays in the
+    state payload. method defaults to MAPPO.
+    """
+    prefix = [{"field": "carry"}, {"field": "history"}, {"field": "current_variables"}]
+    path = cast(list[object], row["path"])
+    if method == "qmix":
+        return path[:4] == [*prefix, {"field": "params"}]
+    return path[:3] == prefix
 
 
-def _state_payload(state: LearnerState) -> dict[str, Any]:
-    """Flatten state excluding the actor and zero-element leaves.
+def _actor_payload(state: Tree, method: str = "mappo") -> Tree:
+    """Return the tree saved in actor/: PPO's actor tree or QMIX's Q params."""
+    current = state.carry.history.current_variables
+    return current.params if method == "qmix" else current
 
-    Orbax rejects zero-element arrays. Their exact path, shape and dtype remain
-    in the checked layout; restore rebuilds their empty storage from the template.
+
+def _state_payload(state: Tree, method: str = "mappo") -> dict[str, Any]:
+    """Flatten state excluding the actor payload and zero-element leaves.
+
+    state is a PPO or QMIX learner, or a shape-only template of one; method
+    selects the actor rows (see _is_actor). Orbax rejects zero-element arrays.
+    Their exact path, shape and dtype remain in the checked layout; restore
+    rebuilds their empty storage from the template.
     """
     return {
         f"leaf_{index:05d}": leaf
         for index, (leaf, row) in enumerate(
             zip(jax.tree.leaves(state), _layout(state), strict=True)
         )
-        if not _is_actor(row) and leaf.size
+        if not _is_actor(row, method) and leaf.size
     }
+
+
+def _counters(state: Tree, games: int, method: str) -> dict[str, int]:
+    """Return a learner's saved counters as exact Python integers.
+
+    PPO records updates and env_steps. QMIX adds completed_blocks and
+    learning_blocks; its "updates" means optimizer steps.
+    """
+    counters = {
+        "updates": int(state.completed_updates),
+        "env_steps": int(state.carry.progress.rounds) * games,
+    }
+    if method == "qmix":
+        counters["completed_blocks"] = int(state.completed_blocks)
+        counters["learning_blocks"] = int(state.learning_blocks)
+    return counters
+
+
+def _check_qmix_counters(counters: object, qmix: QMIXConfig, games: int) -> None:
+    """Check saved QMIX counters from metadata alone, before arrays are read.
+
+    counters must hold exactly updates, env_steps, completed_blocks and
+    learning_blocks as nonnegative plain integers, env_steps a whole number of
+    rounds, updates equal to learning_blocks * epochs, and a reachable
+    readiness-aware block sequence. Raises ValueError.
+    """
+    from marl_battlegrounds.training.qmix_learner import (
+        _block_counts_possible,  # pyright: ignore[reportPrivateUsage]
+    )
+
+    value = _object(counters, "Checkpoint counters")
+    if set(value) != _QMIX_COUNTERS or any(
+        type(item) is not int or item < 0 for item in value.values()
+    ):
+        raise ValueError("QMIX checkpoint counters are malformed")
+    if value["env_steps"] % games or value["updates"] != (
+        value["learning_blocks"] * qmix.epochs
+    ):
+        raise ValueError("QMIX checkpoint counters are impossible")
+    if not _block_counts_possible(
+        value["env_steps"] // games,
+        value["completed_blocks"],
+        value["learning_blocks"],
+        rollout_length=qmix.rollout_length,
+        minimum=qmix.min_buffer_size,
+    ):
+        raise ValueError("QMIX checkpoint counters are impossible")
 
 
 def _targets(tree: Tree, device: object | None) -> Tree:
@@ -513,7 +662,9 @@ def _collection_details(collection: TrainingCollection) -> dict[str, Any]:
     """Record reconstructible static settings and verified content identities.
 
     A named pinned opponent's JSON record is added under "pinned_opponent" only
-    when one is pinned, so descriptions of unpinned runs keep their bytes.
+    when one is pinned, and a variables hook's identity (QMIX exploration) under
+    "actor_variables_at_step" only when one is set, so descriptions of other
+    runs keep their bytes.
     """
     details = _object(
         {
@@ -536,6 +687,10 @@ def _collection_details(collection: TrainingCollection) -> dict[str, Any]:
     )
     if collection.pinned_opponent is not None:
         details["pinned_opponent"] = collection.pinned_opponent
+    if collection.actor_variables_at_step is not None:
+        details["actor_variables_at_step"] = _object(
+            collection.actor_variables_at_step.identity, "Variables hook identity"
+        )
     return details
 
 
@@ -584,12 +739,13 @@ def _check_recording_registration(record: dict[str, Any], writer_path: Path) -> 
 def save_checkpoint(
     run_dir: str | Path,
     collection: TrainingCollection,
-    state: LearnerState,
+    state: LearnerState | QMIXLearnerState,
     *,
     metadata: dict[str, object],
     writer: RunWriter | None = None,
     ppo: PPOConfig = DEFAULT_PPO_CONFIG,
     method: str = "mappo",
+    qmix: QMIXConfig | None = None,
 ) -> Path:
     """Publish a complete update boundary, then replace its latest pointer.
 
@@ -598,8 +754,9 @@ def save_checkpoint(
     run_dir : str or Path
         Existing run directory. The caller must hold its exclusive run lock.
     collection, state
-        Matching stable collection descriptor and complete accepted learner.
-        Initialization is allowed; no actor decision occurs during saving.
+        Matching stable collection descriptor and complete accepted learner
+        (LearnerState for PPO, QMIXLearnerState for QMIX). Initialization and
+        QMIX warmup boundaries are allowed; no actor decision occurs.
         Saving reuses the descriptor's installed-content check from setup or
         restore. It still checks the actual carried source bank and learner.
     metadata : dict
@@ -617,16 +774,23 @@ def save_checkpoint(
         input scale, spawn frame and value-normalization setting must equal the
         saved config's, and the state must carry matching statistics, else the
         save is refused before any file changes. The default's frame is "left".
-    method : {"mappo", "ippo", "ff_mappo", "ff_ippo"}, default="mappo"
+    method : {"mappo", "ippo", "ff_mappo", "ff_ippo", "qmix"}, default="mappo"
         Static learner method, matching metadata.config.method and the complete
         numerical state. Missing historical config method means MAPPO. Conflicts
         fail before obtaining a writer token or writing any payload.
+    qmix : QMIXConfig or None, default=None
+        QMIX settings; None means DEFAULT_QMIX_CONFIG. Used only when method
+        is "qmix": every field must equal the saved config's "qmix" block,
+        and validate_qmix_learner checks the state with it. It must be None
+        for PPO methods, whose ppo argument is ignored for QMIX.
 
     Returns
     -------
     Path
         Immutable content-identified checkpoint directory. All payload files and
         its latest_checkpoint.json pointer are durable on the local filesystem.
+        A QMIX checkpoint's actor/ holds only the Q-network parameters; its
+        counters add completed_blocks and learning_blocks.
 
     Raises
     ------
@@ -636,24 +800,42 @@ def save_checkpoint(
         Saving or publication fails. Earlier checkpoints remain intact; an
         unreferenced complete directory never becomes latest implicitly.
     """
-    from marl_battlegrounds.training.learner import validate_learner
-
-    method = validate_ppo_method(method)
+    method = validate_training_method(method)
     root = _directory(Path(run_dir))
     context = _check_context(metadata, require_execution=True)
     if _config_method(context["config"]) != method:
         raise ValueError("Checkpoint config method differs from the selected method")
-    if _config_input_scale(context["config"]) != ppo.input_scale:
-        raise ValueError("Checkpoint config input_scale differs from PPO settings")
-    if _config_spawn_frame(context["config"]) != ppo.spawn_frame:
-        raise ValueError("Checkpoint config spawn_frame differs from PPO settings")
-    if _config_value_normalization(context["config"]) != ppo.value_normalization:
-        raise ValueError(
-            "Checkpoint config value_normalization differs from PPO settings"
+    if method == "qmix":
+        from marl_battlegrounds.training.qmix_learner import validate_qmix_learner
+
+        settings = DEFAULT_QMIX_CONFIG if qmix is None else qmix
+        _check_qmix_settings(context["config"], settings)
+        validate_qmix_learner(
+            collection,
+            cast("QMIXLearnerState", state),
+            qmix=settings,
+            recheck_installed_content=False,
         )
-    validate_learner(
-        collection, state, ppo=ppo, method=method, recheck_installed_content=False
-    )
+    else:
+        from marl_battlegrounds.training.learner import validate_learner
+
+        if qmix is not None:
+            raise ValueError("PPO checkpoints take no QMIX settings")
+        if _config_input_scale(context["config"]) != ppo.input_scale:
+            raise ValueError("Checkpoint config input_scale differs from PPO settings")
+        if _config_spawn_frame(context["config"]) != ppo.spawn_frame:
+            raise ValueError("Checkpoint config spawn_frame differs from PPO settings")
+        if _config_value_normalization(context["config"]) != ppo.value_normalization:
+            raise ValueError(
+                "Checkpoint config value_normalization differs from PPO settings"
+            )
+        validate_learner(
+            collection,
+            cast("LearnerState", state),
+            ppo=ppo,
+            method=method,
+            recheck_installed_content=False,
+        )
     if collection.recording != (writer is not None):
         raise ValueError("Checkpoint writer must match collection recording")
     token = None
@@ -673,9 +855,9 @@ def save_checkpoint(
     _directory(directory)
     temporary = directory / f".pending-{uuid4().hex}"
     temporary.mkdir()
-    actor = state.carry.history.current_variables
+    actor = _actor_payload(state, method)
     _save_arrays(temporary / "actor", actor)
-    _save_arrays(temporary / "state", _state_payload(state))
+    _save_arrays(temporary / "state", _state_payload(state, method))
     details: dict[str, Any] = {
         "schema_version": 1,
         "kind": "learner",
@@ -686,11 +868,7 @@ def save_checkpoint(
         "actor_layout": _layout(actor),
         "actor_digest": tree_digest(actor),
         "recording_token": token,
-        "counters": {
-            "updates": int(state.completed_updates),
-            "env_steps": int(state.carry.progress.rounds)
-            * collection.schedule.num_envs,
-        },
+        "counters": _counters(state, collection.schedule.num_envs, method),
         "files": _inventory(temporary),
     }
     identifier = sha256(_json_bytes(details)).hexdigest()
@@ -726,6 +904,10 @@ def read_checkpoint_description(path: str | Path) -> dict[str, Any]:
     This supports ancestry after retention removes old numerical payloads. It
     does not make that ancestor restorable or prove its payload still exists.
     Use read_checkpoint_details before loading or restoring numerical data.
+    A QMIX actor export must carry input_scale, epsilon exactly 0.0,
+    tie_rule "first_legal_maximum" and a nonnegative integer
+    metadata.optimizer_steps; spawn_frame is present when not "world". A QMIX
+    learner must carry exactly its four counters. Raises ValueError.
     """
     root = _directory(Path(path))
     name = _DESCRIPTION if (root / _DESCRIPTION).exists() else _ACTOR_DESCRIPTION
@@ -751,11 +933,29 @@ def read_checkpoint_description(path: str | Path) -> dict[str, Any]:
     }
     if details["kind"] == "learner":
         required |= {"collection", "layout", "recording_token", "counters"}
+    elif method == "qmix":
+        required |= {"input_scale", "epsilon", "tie_rule"}
+        required |= {"spawn_frame"} if "spawn_frame" in details else set()
     else:
         # Actor exports carry these optional inference settings only when set.
         required |= {key for key in ("input_scale", "spawn_frame") if key in details}
     if set(details) != required:
         raise ValueError("Checkpoint description fields differ from its schema")
+    if method == "qmix" and details["kind"] == "actor":
+        steps = _object(details["metadata"], "Actor provenance").get("optimizer_steps")
+        if (
+            type(details["epsilon"]) is not float
+            or details["epsilon"] != 0.0
+            or math.copysign(1.0, details["epsilon"]) < 0
+            or details["tie_rule"] != QMIX_TIE_RULE
+            or type(steps) is not int
+            or steps < 0
+        ):
+            raise ValueError("QMIX export must be greedy with its optimizer count")
+    if method == "qmix" and details["kind"] == "learner":
+        counters = _object(details["counters"], "Checkpoint counters")
+        if set(counters) != _QMIX_COUNTERS:
+            raise ValueError("QMIX checkpoint counters are malformed")
     _object(details["metadata"], "Checkpoint provenance")
     if not isinstance(details["actor_layout"], list):
         raise ValueError("Checkpoint actor layout must be an array schema")
@@ -791,12 +991,13 @@ def read_checkpoint_details(path: str | Path) -> dict[str, Any]:
 def restore_checkpoint(
     path: str | Path,
     collection: TrainingCollection,
-    template: LearnerState,
+    template: LearnerState | QMIXLearnerState,
     *,
     expected_metadata: Mapping[str, object],
     ppo: PPOConfig = DEFAULT_PPO_CONFIG,
     method: str = "mappo",
     device: object | None = None,
+    qmix: QMIXConfig | None = None,
 ) -> RestoredCheckpoint:
     """Fully validate and restore numerical state without changing any files.
 
@@ -807,7 +1008,9 @@ def restore_checkpoint(
     collection, template
         Fresh code-built descriptor/state from the saved seed and settings. All
         numerical template values are replaced; its static structure is trusted
-        only after comparison with the saved content and settings.
+        only after comparison with the saved content and settings. The template
+        may be shape-only (``jax.ShapeDtypeStruct`` leaves), so a QMIX resume
+        need not hold a second replay while restoring.
         Missing historical shaping_mode means potential; score_delta must be
         saved explicitly and cannot resume a potential checkpoint.
         Missing historical score_threshold_curriculum means False. New threshold
@@ -840,10 +1043,16 @@ def restore_checkpoint(
         checkpoint's, else restore
         is refused before arrays are read. The default's frame is "left", so a
         checkpoint trained in "world" needs the matching config passed here.
-    method : {"mappo", "ippo", "ff_mappo", "ff_ippo"}, default="mappo"
+    method : {"mappo", "ippo", "ff_mappo", "ff_ippo", "qmix"}, default="mappo"
         Static requested method. It must agree with saved/expected config and
         the model schema before any numerical arrays are restored. Missing
         historical config method means MAPPO, never a guess from array shapes.
+    qmix : QMIXConfig or None, default=None
+        QMIX settings (None means DEFAULT_QMIX_CONFIG), used only for "qmix".
+        Scale and frame must equal the checkpoint's, every field must equal
+        the saved config's "qmix" block, and the saved counters must be
+        possible for these settings (``_check_qmix_counters``), all before any
+        array is read. It must be None for PPO methods.
     device : jax.Device or None, default None
         Explicit target device; None uses this process's first selected device.
         Every restored array, including empty IDs, is committed to this device.
@@ -860,11 +1069,11 @@ def restore_checkpoint(
     ------
     ValueError
         Any payload, context, content, schema, array or boundary check fails.
+        Faults that need only metadata (method, config, schema, layout
+        including replay, counters) are raised before any array is read.
         No recording files or trainer logs have been changed.
     """
-    from marl_battlegrounds.training.learner import validate_learner
-
-    method = validate_ppo_method(method)
+    method = validate_training_method(method)
     root = _directory(Path(path))
     details = read_checkpoint_details(root)
     if details["kind"] != "learner":
@@ -892,7 +1101,7 @@ def restore_checkpoint(
             normalized.setdefault("validation_opponents", None)
             normalized.setdefault("slot_diagnostic_actor", None)
             ppo_record = normalized.get("ppo", {})
-            if isinstance(ppo_record, dict):
+            if normalized["method"] != "qmix" and isinstance(ppo_record, dict):
                 # Configs saved before spawn_frame existed compare at "world".
                 nested = dict(cast(dict[str, Any], ppo_record))
                 nested.setdefault("input_scale", 1.0)
@@ -902,15 +1111,28 @@ def restore_checkpoint(
             record["config"] = normalized
     if any(saved_metadata.get(key) != value for key, value in expected.items()):
         raise ValueError("Checkpoint execution metadata differs")
-    if _actor_input_scale(details) != ppo.input_scale:
-        raise ValueError("Checkpoint input_scale differs from PPO settings")
-    if _actor_spawn_frame(details) != ppo.spawn_frame:
-        raise ValueError("Checkpoint spawn_frame differs from PPO settings")
-    if (
-        _config_value_normalization(details["metadata"]["config"])
-        != ppo.value_normalization
-    ):
-        raise ValueError("Checkpoint value_normalization differs from PPO settings")
+    settings = DEFAULT_QMIX_CONFIG if qmix is None else qmix
+    if method == "qmix":
+        if _actor_input_scale(details) != settings.input_scale:
+            raise ValueError("Checkpoint input_scale differs from QMIX settings")
+        if _actor_spawn_frame(details) != settings.spawn_frame:
+            raise ValueError("Checkpoint spawn_frame differs from QMIX settings")
+        _check_qmix_settings(details["metadata"]["config"], settings)
+        _check_qmix_counters(
+            details["counters"], settings, collection.schedule.num_envs
+        )
+    else:
+        if qmix is not None:
+            raise ValueError("PPO checkpoints take no QMIX settings")
+        if _actor_input_scale(details) != ppo.input_scale:
+            raise ValueError("Checkpoint input_scale differs from PPO settings")
+        if _actor_spawn_frame(details) != ppo.spawn_frame:
+            raise ValueError("Checkpoint spawn_frame differs from PPO settings")
+        if (
+            _config_value_normalization(details["metadata"]["config"])
+            != ppo.value_normalization
+        ):
+            raise ValueError("Checkpoint value_normalization differs from PPO settings")
     saved_collection = _object(details["collection"], "Saved collection settings")
     saved_collection.setdefault("shaping_mode", "potential")
     saved_collection.setdefault("score_threshold_curriculum", False)
@@ -930,7 +1152,7 @@ def restore_checkpoint(
             record, _relative(root.parent.parent, record["relative_path"])
         )
     if details["layout"] != _layout(template) or details["actor_layout"] != _layout(
-        template.carry.history.current_variables
+        _actor_payload(template, method)
     ):
         raise ValueError("Checkpoint array paths, shapes or dtypes differ")
     selected_device = cast(Any, jax.devices()[0] if device is None else device)
@@ -941,17 +1163,19 @@ def restore_checkpoint(
     ):
         raise ValueError("Restore device differs from the checked execution identity")
     actor = _restore_arrays(
-        root / "actor", template.carry.history.current_variables, selected_device
+        root / "actor", _actor_payload(template, method), selected_device
     )
     if tree_digest(actor) != details["actor_digest"]:
         raise ValueError("Restored actor digest differs")
-    payload = _restore_arrays(root / "state", _state_payload(template), selected_device)
+    payload = _restore_arrays(
+        root / "state", _state_payload(template, method), selected_device
+    )
     actor_leaves = iter(jax.tree.leaves(actor))
     leaves: list[Any] = []
     for index, (row, initial) in enumerate(
         zip(details["layout"], jax.tree.leaves(template), strict=True)
     ):
-        if _is_actor(row):
+        if _is_actor(row, method):
             leaves.append(next(actor_leaves))
         elif initial.size == 0:
             leaves.append(
@@ -960,7 +1184,7 @@ def restore_checkpoint(
         else:
             leaves.append(payload[f"leaf_{index:05d}"])
     state = cast(
-        "LearnerState",
+        "LearnerState | QMIXLearnerState",
         jax.tree.unflatten(cast(Any, jax.tree.structure(template)), leaves),
     )
     if _layout(state) != details["layout"]:
@@ -968,18 +1192,26 @@ def restore_checkpoint(
     # The pinned checks read a few restored arrays; they run before the full
     # learner validation, which re-checks the installed content and is slow.
     _check_restored_pinned_opponent(collection, state)
-    validate_learner(collection, state, ppo=ppo, method=method)
-    counters = {
-        "updates": int(state.completed_updates),
-        "env_steps": int(state.carry.progress.rounds) * collection.schedule.num_envs,
-    }
+    if method == "qmix":
+        from marl_battlegrounds.training.qmix_learner import validate_qmix_learner
+
+        validate_qmix_learner(
+            collection, cast("QMIXLearnerState", state), qmix=settings
+        )
+    else:
+        from marl_battlegrounds.training.learner import validate_learner
+
+        validate_learner(
+            collection, cast("LearnerState", state), ppo=ppo, method=method
+        )
+    counters = _counters(state, collection.schedule.num_envs, method)
     if counters != details["counters"]:
         raise ValueError("Checkpoint counters disagree with numerical state")
     return RestoredCheckpoint(state, details, root)
 
 
 def _check_restored_pinned_opponent(
-    collection: TrainingCollection, state: LearnerState
+    collection: TrainingCollection, state: LearnerState | QMIXLearnerState
 ) -> None:
     """Apply the pinned opponent's resume rules to already restored arrays.
 
@@ -1081,15 +1313,18 @@ def finish_checkpoint_recovery(
     _sync_dir(root)
 
 
-@lru_cache(maxsize=4)
+@lru_cache(maxsize=8)
 def _actor_template(method: str = "mappo") -> Tree:
     """Cache actor shapes/dtypes for one checked static method, default MAPPO.
 
-    Trace the method-aware initializer with eval_shape. The returned tree holds
-    only abstract actor leaves; no actor/critic weights or optimizer arrays are
-    allocated. Invalid methods raise ValueError before tracing. Callers must not
-    change this shared template; restore creates its own placement targets.
+    Trace the method-aware initializer with eval_shape. For QMIX the tree is
+    the Q-network parameters only (qmix_actor_template). The returned tree
+    holds only abstract actor leaves; no weights, mixer or optimizer arrays are
+    allocated. Invalid methods raise ValueError before tracing. Callers must
+    not change this shared template; restore creates its own placement targets.
     """
+    if validate_training_method(method) == "qmix":
+        return qmix_actor_template()
     method = validate_ppo_method(method)
     return jax.eval_shape(
         partial(initialize_ppo, method=method), jax.random.key(0)
@@ -1105,33 +1340,38 @@ def export_system(
     spawn_frame: str,
     method: str = "mappo",
 ) -> Path:
-    """Publish a standalone immutable sampled-PPO actor artifact.
+    """Publish a standalone immutable actor artifact (sampled PPO or greedy QMIX).
 
     Parameters
     ----------
     actor_variables : PyTree
-        Finite variables matching the selected method's actor schema.
+        Finite variables matching the selected method's actor schema. For QMIX
+        this is the Q-network parameters only, never epsilon or a mixer.
     destination : str or Path
         Exact output directory with an existing parent. Matching exports are
         reused; different weights, scale or provenance at this path are rejected.
     metadata : dict
         Finite JSON provenance with run_id, nonnegative integer seed and
-        env_steps, and the originating checkpoint_id. Extra facts are retained.
+        env_steps, and the originating checkpoint_id. QMIX also needs a
+        nonnegative integer optimizer_steps. Extra facts are retained.
     input_scale : float, default=1.0
         Finite positive factor applied before the actor's first Dense layer.
-        Use the originating PPO config's value. It is part of inference identity;
-        changing it does not rewrite weights or the raw input schema.
+        Use the originating PPO or QMIX config's value. It is part of
+        inference identity; changing it does not rewrite weights or the raw
+        input schema.
     spawn_frame : str
         Required. Spawn frame the weights were trained in: "world" or "left".
-        Use the originating PPO config's value. There is no default, because
+        Use the originating PPO or QMIX config's value. There is no default, because
         an export writes a durable identity: a guessed frame would silently
         label world weights as left, or the reverse. "left" is written into
         the description and the inference identity; "world" writes no key, so
         world exports keep their historical description bytes.
-    method : {"mappo", "ippo", "ff_mappo", "ff_ippo"}, default="mappo"
+    method : {"mappo", "ippo", "ff_mappo", "ff_ippo", "qmix"}, default="mappo"
         Method that trained these weights. Its model schema is the export's
         sole method authority. Equal actor shapes/bytes do not make different
         methods interchangeable; an existing different-method path is rejected.
+        A QMIX export also records epsilon 0.0 and tie_rule
+        "first_legal_maximum": loading it gives the greedy System.
 
     Returns
     -------
@@ -1150,7 +1390,7 @@ def export_system(
     -----
     Host-only. No map preparation, critic, optimizer or game state is required.
     """
-    method = validate_ppo_method(method)
+    method = validate_training_method(method)
     input_scale = _input_scale(input_scale)
     spawn_frame = _spawn_frame(spawn_frame)
     context = _object(metadata, "Actor provenance")
@@ -1160,12 +1400,20 @@ def export_system(
         )
     if not isinstance(context["run_id"], str) or not context["run_id"]:
         raise ValueError("Actor run ID must be nonempty")
-    for name in ("seed", "env_steps"):
-        if type(context[name]) is not int or context[name] < 0:
+    counts = (
+        ("seed", "env_steps", "optimizer_steps")
+        if method == "qmix"
+        else (
+            "seed",
+            "env_steps",
+        )
+    )
+    for name in counts:
+        if type(context.get(name)) is not int or context[name] < 0:
             raise ValueError(f"Actor {name} must be a nonnegative integer")
     _digest(context["checkpoint_id"], "Origin checkpoint")
     if _layout(actor_variables) != _layout(_actor_template(method)):
-        raise ValueError("Actor variables differ from the selected PPO model schema")
+        raise ValueError("Actor variables differ from the selected model schema")
     if not all(
         bool(jnp.all(jnp.isfinite(value))) for value in jax.tree.leaves(actor_variables)
     ):
@@ -1198,6 +1446,9 @@ def export_system(
         "input_scale": input_scale,
         "files": _inventory(temporary),
     }
+    if method == "qmix":
+        details["epsilon"] = 0.0
+        details["tie_rule"] = QMIX_TIE_RULE
     if spawn_frame != "world":
         details["spawn_frame"] = spawn_frame
     details["checkpoint_id"] = sha256(_json_bytes(details)).hexdigest()
@@ -1219,13 +1470,15 @@ def artifact_identity(path: str | Path) -> dict[str, Any]:
     always identifies only the saved variables. Neither identity proves
     competence. All file hashes are checked; this operation may read a full
     learner payload from disk. Missing historical scale means 1.0 and a missing
-    frame means "world". schemas identifies the method; no separate method field
-    is added to this result or to actor exports.
+    frame means "world". schemas identifies the method. PPO results carry no
+    separate method field. QMIX results add "method": "qmix" and the integer
+    "optimizer_steps" (the export's recorded count, or a learner's saved
+    "updates" counter), which validation summaries and selection use.
     """
     details = read_checkpoint_details(path)
     metadata = details["metadata"]
     actor = details["kind"] == "actor"
-    return {
+    identity: dict[str, Any] = {
         "actor_digest": _inference_digest(details),
         "weight_digest": details["actor_digest"],
         "input_scale": _actor_input_scale(details),
@@ -1239,10 +1492,16 @@ def artifact_identity(path: str | Path) -> dict[str, Any]:
         if actor
         else details["counters"]["env_steps"],
     }
+    if _schema_method(details["schemas"]) == "qmix":
+        identity["method"] = "qmix"
+        identity["optimizer_steps"] = (
+            metadata["optimizer_steps"] if actor else details["counters"]["updates"]
+        )
+    return identity
 
 
 def load_system(checkpoint: str | Path) -> System:
-    """Load an exact saved PPO actor through the existing sampled-action System.
+    """Load an exact saved actor: a sampled PPO System or a greedy QMIX System.
 
     Parameters
     ----------
@@ -1255,9 +1514,11 @@ def load_system(checkpoint: str | Path) -> System:
         Frozen numerical actor variables with their saved input scale and verified
         inference digest as the checkpoint label. The validated model schema
         chooses the actor architecture. Each evaluator creates fresh recurrent
-        memory or empty feedforward memory. The
-        actor samples legal masked actions; no critic or training-only input is
-        loaded, and no map preparation or full run directory is needed.
+        memory or empty feedforward memory. A PPO
+        actor samples legal masked actions; a QMIX actor plays greedily
+        (epsilon 0, first legal maximum). No critic, mixer, target, replay or
+        training-only input is loaded, and no map preparation or full run
+        directory is needed.
 
     Raises
     ------
@@ -1272,7 +1533,8 @@ def load_system(checkpoint: str | Path) -> System:
     device. It needs the training extra but does not run an actor or learner.
     A frozen actor identity makes no claim about learned competence.
     Historical artifacts without an input scale keep their original scale 1.0
-    and weight-digest identity. Learner checkpoints use config.ppo.input_scale;
+    and weight-digest identity. Learner checkpoints use their config's ppo or
+    qmix input_scale;
     actor exports use their explicit saved scale. The saved spawn frame is
     restored the same way and is never inferred from a model's results; a
     missing frame means "world". Neither route rewrites weights.
@@ -1288,6 +1550,14 @@ def load_system(checkpoint: str | Path) -> System:
         bool(jnp.all(jnp.isfinite(value))) for value in jax.tree.leaves(actor)
     ):
         raise ValueError("Restored actor is nonfinite or its digest differs")
+    if method == "qmix":
+        return make_qmix_system(
+            actor,
+            epsilon=0.0,
+            checkpoint=_inference_digest(details),
+            input_scale=_actor_input_scale(details),
+            spawn_frame=_actor_spawn_frame(details),
+        )
     return make_ppo_system(
         actor,
         method=method,
@@ -1302,54 +1572,78 @@ def checkpoint_schemas(method: str = "mappo") -> dict[str, int | str]:
 
     Parameters
     ----------
-    method : {"mappo", "ippo", "ff_mappo", "ff_ippo"}, default="mappo"
-        Static method. Unknown values raise ValueError through the PPO owner.
-        MAPPO retains its exact historical schema dictionary.
+    method : {"mappo", "ippo", "ff_mappo", "ff_ippo", "qmix"}, default="mappo"
+        Static method. Unknown values raise ValueError through the shared
+        method check. MAPPO retains its exact historical schema dictionary.
 
     Returns
     -------
     dict[str, int or str]
         A fresh JSON-ready copy of the checkpoint version, model name, actor
         input, training-state and action versions, and collection/learner key
-        versions. These are the same identifiers checked during restore.
+        versions. QMIX replaces learner_keys with qmix_keys and adds its replay
+        row version. These are the same identifiers checked during restore.
         Changing the returned dictionary does not change the shared authority.
 
     Notes
     -----
     Reads only fixed metadata; no file access or device initialization occurs.
     """
+    if validate_training_method(method) == "qmix":
+        return dict(_QMIX_SCHEMAS)
     return {**_SCHEMAS, "model": _MODELS[validate_ppo_method(method)]}
 
 
-def checkpoint_dependencies() -> dict[str, str]:
+def checkpoint_dependencies(method: str = "mappo") -> dict[str, str]:
     """Read installed numerical dependency versions for the runner's identity.
 
-    Returns Python, JAX, JAXlib, NumPy, Flax, Optax and Orbax versions. Missing
-    optional training packages raise PackageNotFoundError. This reads metadata
-    only and does not install packages or initialize a device.
+    Parameters
+    ----------
+    method : {"mappo", "ippo", "ff_mappo", "ff_ippo", "qmix"}, default="mappo"
+        Training method. QMIX also records Flashbax; PPO records exactly the
+        historical set, so PPO identities keep their bytes.
+
+    Returns
+    -------
+    dict[str, str]
+        Python, JAX, JAXlib, NumPy, Flax, Optax and Orbax versions, plus
+        Flashbax for QMIX.
+
+    Raises
+    ------
+    PackageNotFoundError
+        An optional training package is missing.
+    ValueError
+        method is unknown.
+
+    Notes
+    -----
+    Reads package metadata only; installs nothing and initializes no device.
     """
     import platform
 
+    names = ["jax", "jaxlib", "numpy", "flax", "optax", "orbax-checkpoint"]
+    if not is_ppo_method(method):
+        names.append("flashbax")
     return {
         "python": platform.python_version(),
-        **{
-            name: version(name)
-            for name in ("jax", "jaxlib", "numpy", "flax", "optax", "orbax-checkpoint")
-        },
+        **{name: version(name) for name in names},
     }
 
 
-def runtime_identity() -> dict[str, object]:
+def runtime_identity(method: str = "mappo") -> dict[str, object]:
     """Read the current imported-source identity and installed dependencies.
 
-    The runner calls this at setup under a stable source snapshot, then reuses
-    the result as its source/dependencies equality assertion for resume. Git or
-    installed-package discovery reads files and may run read-only Git commands;
-    no package is installed, device initialized or artifact written.
+    method selects the dependency set (see checkpoint_dependencies); the
+    default keeps the PPO record. The runner calls this at setup under a
+    stable source snapshot, then reuses the result as its source/dependencies
+    equality assertion for resume. Git or installed-package discovery reads
+    files and may run read-only Git commands; no package is installed, device
+    initialized or artifact written.
     """
     from marl_battlegrounds.evaluation.revision import discover_code_revision_v2
 
     return {
         "source": discover_code_revision_v2().model_dump(mode="json"),
-        "dependencies": checkpoint_dependencies(),
+        "dependencies": checkpoint_dependencies(method),
     }
