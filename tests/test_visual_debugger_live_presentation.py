@@ -1,13 +1,19 @@
-"""Check live display packaging and access through the locked service."""
+"""Check live display packaging and access through the locked service.
+
+The lock check fails at once if its held presentation worker finishes before it
+enters the blocked builder. It releases that worker inside the executor block,
+so a failed assertion cannot leave the test waiting forever.
+"""
 
 from __future__ import annotations
 
 import json
-from concurrent.futures import ThreadPoolExecutor
+import time
+from concurrent.futures import Future, ThreadPoolExecutor
 from inspect import signature
 from pathlib import Path
 from threading import Event
-from typing import cast
+from typing import Any, cast
 
 import pytest
 import scripts.dev.visual_debugger.live_presentation as live_presentation_module
@@ -1017,6 +1023,21 @@ def test_live_getter_rejects_a_swapped_committed_raw_snapshot(field: str) -> Non
     assert service.current_frame() is poisoned
 
 
+def _wait_for_entry(entered: Event, future: Future[Any]) -> None:
+    # Poll with no time limit, but fail at once if the worker finished without
+    # entering the blocked call; a plain wait would then never end.
+    while not entered.is_set():
+        if future.done():
+            if entered.is_set():
+                return
+            error = future.exception()
+            outcome = repr(error) if error is not None else repr(future.result())
+            pytest.fail(
+                f"The worker finished before it entered the blocked call: {outcome}"
+            )
+        time.sleep(0.01)
+
+
 def test_live_presentation_getter_holds_lock_against_submit(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -1051,13 +1072,18 @@ def test_live_presentation_getter_holds_lock_against_submit(
         command=KeyboardCommandV1(key=" "),
     )
     with ThreadPoolExecutor(max_workers=2) as pool:
-        presentation_future = pool.submit(service.current_presentation)
-        assert entered.wait()
-        submit_future = pool.submit(service.apply_command, submit)
-        assert not submit_future.done()
-        release.set()
-        presentation = presentation_future.result()
-        submitted = submit_future.result()
+        # The release sits inside the executor block, so a failed assertion
+        # frees the held worker before the executor waits for it.
+        try:
+            presentation_future = pool.submit(service.current_presentation)
+            _wait_for_entry(entered, presentation_future)
+            submit_future = pool.submit(service.apply_command, submit)
+            assert not submit_future.done()
+            release.set()
+            presentation = presentation_future.result()
+            submitted = submit_future.result()
+        finally:
+            release.set()
 
     assert presentation.outcome == "response"
     assert isinstance(

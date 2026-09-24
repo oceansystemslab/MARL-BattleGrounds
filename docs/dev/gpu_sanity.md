@@ -38,6 +38,10 @@ games as the workflow requires.
    settings. Compare the old and new paths on the same inputs. For a new
    convenience, also compare a simple, correct manual path doing the same work.
    Check results before interpreting speed. State any justified float tolerance.
+   Keep enough material to rebuild the exact measured source for as long as its
+   evidence is kept. A later commit is enough only if it reproduces those bytes,
+   either directly or with a kept exact patch. A list of file hashes alone
+   cannot rebuild source; it can only show whether a rebuilt copy matches.
 2. **Use meaningful play.** Use the existing reactive controllers and ordinary
    episode limits for the main environment measurement. Include action selection,
    permitted observations and masks, stepping and required resets. Consume the

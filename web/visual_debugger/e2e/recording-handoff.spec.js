@@ -1,6 +1,15 @@
 /**
  * @file Check live recording finish/discard/exit, saved interrupted prefixes and
- * multi-tab handoff to replay.
+ * multi-tab handoff to replay. Exit must end the server with exit code 0 and no
+ * signal, checked strictly by expectServerShutdown. A server that dies before its
+ * shutdown response must reject that response promptly through the browser's real
+ * requestfailed event, be reported as a failure naming its SIGKILL outcome (never as
+ * a shutdown), and leave no process holding its owner token. That test pauses the
+ * uv launcher with SIGSTOP while it kills the Python server, so the browser's
+ * requestfailed always arrives before Node can see the launcher exit. It waits for
+ * the browser's own requestfailed event, so a helper that ignored that event would
+ * fail the test instead of leaving it waiting. Each signal rechecks the server
+ * owner token and process start time through the shared lifecycle helper.
  */
 import { readFile } from "node:fs/promises";
 import { join } from "node:path";
@@ -8,12 +17,20 @@ import { join } from "node:path";
 import { expect, test } from "@playwright/test";
 import { finishControllerClock } from "./support/choreography.js";
 import {
+  captureServerFailure,
+  expectServerShutdown,
+  findOwnedProcessIds,
+  killOwnedProcesses,
+  ServerFailureError,
+  serverOwnerToken,
+  signalOwnedProcess,
+} from "./support/live-debugger.js";
+import {
   createReplayTargetRace,
   metricReportPathForReplay,
   readJsonArtifact,
   startRecordingDebugger,
   stopRecordingDebugger,
-  waitForRecordingDebuggerExit,
 } from "./support/recording-handoff.js";
 import { expectVisibleInteractiveHelpInventory } from "./support/visual-regression.js";
 
@@ -98,6 +115,37 @@ async function openRecording(page, url) {
 /** @param {import("@playwright/test").Page} page */
 function expectNoBrowserErrors(page) {
   expect(browserErrors.get(page) ?? []).toEqual([]);
+}
+
+/** @param {import("@playwright/test").Request} request */
+function isLiveCommandPost(request) {
+  return (
+    request.method() === "POST" && new URL(request.url()).pathname === "/api/command"
+  );
+}
+
+/** @param {string} token @param {number} launcherPid
+ * @returns {Promise<number[]>} */
+async function killServerWithLauncherPaused(token, launcherPid) {
+  // Pause the uv launcher so Node cannot see it exit yet, then kill every other
+  // process that holds the token, which includes the Python server.
+  if (!signalOwnedProcess(launcherPid, [token], "SIGSTOP")) {
+    throw new Error("The recording launcher is no longer owned by this test.");
+  }
+  /** @type {number[]} */
+  const killed = [];
+  for (;;) {
+    const cleanup = killOwnedProcesses([token], undefined, [launcherPid]);
+    killed.push(...cleanup.killedProcessIds);
+    if (cleanup.errors.length > 0) {
+      throw new AggregateError(cleanup.errors, "The recording server cleanup failed.");
+    }
+    if (cleanup.stillPresentProcessIds.length === 0) {
+      return killed;
+    }
+    // The launcher stays paused while its signalled server children finish dying.
+    await new Promise((resolve) => setTimeout(resolve, 20));
+  }
 }
 
 /** @param {import("@playwright/test").Page} page */
@@ -506,17 +554,11 @@ test("Exit persists an interrupted prefix before clean process shutdown", async 
   await openRecording(page, started.url);
   await captureOneTransition(page);
   expectNoBrowserErrors(page);
-  const exitPromise = waitForRecordingDebuggerExit(started.process);
-  const responsePromise = page
-    .waitForResponse(
-      (response) =>
-        response.request().method() === "POST" &&
-        new URL(response.url()).pathname === "/api/command",
-    )
-    .then(async (response) => ({
-      payload: await response.json(),
-      status: response.status(),
-    }));
+  const shutdown = expectServerShutdown(page, started.process, isLiveCommandPost);
+  const responsePromise = shutdown.response.then(async (response) => ({
+    payload: await response.json(),
+    status: response.status(),
+  }));
   await page.locator("#exit-button").click();
   const response = await responsePromise;
   expect(response.status).toBe(200);
@@ -541,7 +583,131 @@ test("Exit persists an interrupted prefix before clean process shutdown", async 
     completion_state: "interrupted",
     end_or_failure_reason: "user_exit",
   });
-  expect(await exitPromise).toEqual({ exitCode: 0, signalCode: null });
+  expect(await shutdown.exit).toEqual({ exitCode: 0, signalCode: null });
+});
+
+test("Exit reports a server that dies before its shutdown response", async ({
+  page,
+}) => {
+  const started = requiredRecording();
+  const launcher = started.process;
+  const launcherPid = Number(launcher.pid);
+  await openRecording(page, started.url);
+  const token = serverOwnerToken(launcher);
+  const failure = captureServerFailure(launcher);
+  const shutdown = expectServerShutdown(page, launcher, isLiveCommandPost);
+  // The registry settles these inside the launcher's exit event, before the
+  // listener below runs, so the test awaits only the real exit and then reads them.
+  const observed = {
+    /** @type {any} */ failure: null,
+    /** @type {any} */ exit: null,
+  };
+  failure.then((error) => {
+    observed.failure = error;
+  });
+  shutdown.exit.then((outcome) => {
+    observed.exit = outcome;
+  });
+  const launcherExit = new Promise((resolveExit) => {
+    launcher.once("exit", resolveExit);
+  });
+  /** @type {number[]} */
+  let killedServerProcesses = [];
+  let launcherPaused = false;
+  await page.route("**/api/command", async (route) => {
+    if (route.request().postDataJSON()?.command?.command_type !== "exit") {
+      await route.continue();
+      return;
+    }
+    launcherPaused = true;
+    killedServerProcesses = await killServerWithLauncherPaused(token, launcherPid);
+    await route.continue();
+  });
+
+  const response = {
+    /** @type {"pending" | "fulfilled" | "rejected"} */ status: "pending",
+    /** @type {any} */ value: undefined,
+    settledAt: 0,
+  };
+  shutdown.response.then(
+    (value) => {
+      Object.assign(response, {
+        status: "fulfilled",
+        value,
+        settledAt: performance.now(),
+      });
+    },
+    (error) => {
+      Object.assign(response, {
+        status: "rejected",
+        value: error,
+        settledAt: performance.now(),
+      });
+    },
+  );
+  // Wait for the browser's own requestfailed, not for the helper's promise: the
+  // launcher is paused, so a helper that ignored requestfailed would otherwise leave
+  // this test waiting forever. waitForEvent also rejects on a page crash or close.
+  const exitCommandFailed = page.waitForEvent("requestfailed", isLiveCommandPost);
+  exitCommandFailed.catch(() => {});
+
+  try {
+    const clickedAt = performance.now();
+    await page.locator("#exit-button").click();
+    const failedRequest = await exitCommandFailed;
+    await new Promise((resolveTurn) => setImmediate(resolveTurn));
+    test.info().annotations.push(
+      {
+        type: "shutdown-response-rejection-ms",
+        description: String(Math.round(response.settledAt - clickedAt)),
+      },
+      {
+        type: "shutdown-response-rejection",
+        description: String(response.value?.message),
+      },
+      {
+        type: "killed-server-processes",
+        description: killedServerProcesses.join(", "),
+      },
+    );
+    expect(killedServerProcesses.length).toBeGreaterThan(0);
+    expect(killedServerProcesses).not.toContain(launcherPid);
+    // The launcher is still paused, so Node has not reported its exit, and the
+    // helper's requestfailed handler is what rejected the response.
+    expect(launcher.exitCode).toBeNull();
+    expect(launcher.signalCode).toBeNull();
+    expect(observed.failure).toBeNull();
+    expect(response.status).toBe("rejected");
+    expect(response.value).not.toBeInstanceOf(ServerFailureError);
+    expect(response.value.message).toMatch(
+      /^The shutdown request POST http:\/\/127\.0\.0\.1:\d+\/api\/command failed before its response arrived \(net::ERR_[A-Z_]+\)\. Recording debugger \(.+\) exit: not reported yet\.$/u,
+    );
+    expect(response.value.message).toContain(
+      `(${failedRequest.failure()?.errorText}).`,
+    );
+  } finally {
+    if (launcherPaused && launcher.exitCode === null && launcher.signalCode === null) {
+      // SIGKILL also ends a paused process. The registry then runs the failure path.
+      signalOwnedProcess(launcherPid, [token], "SIGKILL");
+    }
+  }
+  await launcherExit;
+  await new Promise((resolveTurn) => setImmediate(resolveTurn));
+
+  expect(observed.failure).toBeInstanceOf(ServerFailureError);
+  expect(observed.failure.outcome).toEqual({ exitCode: null, signalCode: "SIGKILL" });
+  expect(observed.failure.errors[0].message).toContain(
+    "exited during the test with exit code none and signal SIGKILL",
+  );
+  expect(observed.failure.errors[0].message).toContain(
+    "Allowed exit: exit code 0 and no signal, after a product shutdown request.",
+  );
+  expect(observed.failure.message.startsWith(observed.failure.errors[0].message)).toBe(
+    true,
+  );
+  expect(observed.exit).toEqual({ exitCode: null, signalCode: "SIGKILL" });
+  expect(findOwnedProcessIds([token])).toEqual([]);
+  await page.unroute("**/api/command");
 });
 
 test("a second live tab cannot advance after Finish and Reconnect adopts replay", async ({

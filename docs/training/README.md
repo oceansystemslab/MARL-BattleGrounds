@@ -699,11 +699,11 @@ there is no universal threshold that proves or disproves useful learning.
 When investigating weak learning, inspect actual task outcomes and fixed-opponent
 validation before increasing the budget. Under native K20/H300, a game without
 a winner at the horizon is a draw even when its kill scores differ. Potential
-shaping preserves that objective; it does not turn such draws into wins. Low
-value loss and a negative actor loss do not prove progress: the actor loss also
-includes its entropy bonus. Compare input scales, spawn frames and update
-settings on declared development seeds, and keep test-map outcomes out of
-those choices.
+shaping preserves the declared discounted objective for fixed starts; it does
+not turn such draws into wins. Low value loss and a negative actor loss do not
+prove progress: the actor loss also includes its entropy bonus. Compare input
+scales, spawn frames and update settings on declared development seeds, and
+keep test-map outcomes out of those choices.
 
 `PPOBatch` uses time first: `(T, B, ...)`. Actions, values, rewards and sample
 masks use five Team A slots. `ended[t]` describes the transition produced by
@@ -1449,6 +1449,47 @@ saved panel may only restore its existing members. `load_panel(path, bindings=..
 also restores live-only methods. Changing frozen membership, roots or identities
 requires a new panel. Repeating `validate_checkpoint` with the same task directory
 resumes only its unfinished games. It never updates an actor or resumes training.
+
+Panel members need distinct names. Every export of one method loads under that
+method's name, such as `Recurrent MAPPO` or `QMIX`. So two exports of one method
+in one panel are refused with "Panel opponents need distinct names". To keep both,
+write one small `module:function` factory per export. Each factory loads its
+export with `load_system` and returns a renamed copy:
+
+```python
+# my_panel_members.py, saved where Python can import it (on its import path)
+import dataclasses
+
+from marl_battlegrounds import training
+
+
+def mappo_early():
+    system = training.load_system("/absolute/path/RUN/actors/EARLY_CHECKPOINT")
+    return dataclasses.replace(system, name="MAPPO early")
+
+
+def mappo_late():
+    system = training.load_system("/absolute/path/RUN/actors/LATE_CHECKPOINT")
+    return dataclasses.replace(system, name="MAPPO late")
+```
+
+```python
+from marl_battlegrounds.training.validation import create_panel, load_panel
+
+create_panel(
+    opponents=("my_panel_members:mappo_early", "my_panel_members:mappo_late"),
+    output_dir="artifacts/two-mappo-panel",
+)
+panel = load_panel("artifacts/two-mappo-panel")
+print([member.name for member in panel.members])  # ['MAPPO early', 'MAPPO late']
+```
+
+The panel saves the two references, not the Systems. `load_panel` runs each
+factory again and checks that it returns the same saved identity, name included.
+Keep the module importable and each export where it is, unchanged. Rename only
+ordinary Systems like these. Do not rename a System built from Policies, such as
+one from `shared_policy` or `independent_policies`, with `dataclasses.replace`:
+the copy loses the Policies inside it.
 
 Validation uses maps 42–46, mirrored canonical 5v5, K20/H300, and both spawn ends.
 Each seed pair means ten games per opponent across those five maps. Defaults are

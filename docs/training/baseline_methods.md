@@ -30,7 +30,7 @@ model inputs, memory and complete examples, and the
 deliberate donor changes.
 
 The new methods retain today's ValueNorm, input-scale and spawn-frame defaults.
-The running MAPPO search does not choose their settings. Fixed-input donor
+The MAPPO search does not choose their settings. Fixed-input donor
 comparisons and tiny integration runs check software; they do not establish
 sample efficiency, useful tactics or a ranking between methods. Feedforward
 and recurrent models have different parameter counts, so this comparison is
@@ -873,8 +873,10 @@ These are engineering checks, not evidence of better sample efficiency or
 learned tactics. Raw qualification records, source identities, the timing-only
 tier choice, all attempted runs and generated results belong under
 `artifacts/m9-m10/packet-4/mappo-optimization-20260923/`. No study outcome is
-claimed here before the detached study completes. The driver must refuse to
-start if its smallest approved replicated comparison cannot fit the budget.
+claimed here: the study was stopped on 23 September 2026 after its discovery
+stage. All 24 discovery runs finished, and no finalist run trained. The driver
+must refuse to start if its smallest approved replicated comparison cannot fit
+the budget.
 
 
 A separate controller audit kept identical permitted B512 inputs and swapped

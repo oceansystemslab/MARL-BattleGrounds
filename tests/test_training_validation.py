@@ -11,13 +11,23 @@ never 8,192 or 12,288; fractions that round to one boundary merge, the final
 partial boundary is kept, and explicit save steps are valid only on a
 boundary. With no initial rounds it equals the earlier rule
 ``min(total, ceil(q / (B * T)) * B * T)`` and its update count over a grid.
+
+Panel member names: two exports of one method both load under the method's
+name, so a System panel given their two paths refuses them with the
+"distinct names" error and writes no panel.json. Two ``module:function``
+factories in this file, each loading one export with load_system and
+returning a renamed copy, are accepted: panel.json keeps the two references
+and names, and load_panel runs both factories again and restores the same
+names, identities and digest.
 """
 
 import itertools
 import json
 import math
+import os
 import shutil
 from copy import deepcopy
+from dataclasses import replace
 from hashlib import sha256
 from importlib import import_module
 from pathlib import Path
@@ -27,9 +37,14 @@ import jax
 import pytest
 
 from marl_battlegrounds.baselines.ppo import initialize_ppo
+from marl_battlegrounds.evaluation.policy_execution import System
 from marl_battlegrounds.evaluation.recording_context import capture_recording_provenance
 from marl_battlegrounds.evaluation.recording_identity import tree_digest
-from marl_battlegrounds.training.checkpoints import artifact_identity, export_system
+from marl_battlegrounds.training.checkpoints import (
+    artifact_identity,
+    export_system,
+    load_system,
+)
 from marl_battlegrounds.training.validation import (
     _collection_boundary,
     _pending,
@@ -338,6 +353,57 @@ def test_relocated_member_paths_keep_panel_scientific_identity(
         member.path is not None and member.path.parent == relocated
         for member in copied.members
     )
+
+
+# The panel imports these factories by name, possibly as a second copy of this
+# module, so each export path travels in an environment variable.
+_EARLY_EXPORT = "MARL_BG_TEST_PANEL_EARLY_EXPORT"
+_LATE_EXPORT = "MARL_BG_TEST_PANEL_LATE_EXPORT"
+
+
+def renamed_early_export() -> System:
+    return replace(load_system(os.environ[_EARLY_EXPORT]), name="MAPPO early")
+
+
+def renamed_late_export() -> System:
+    return replace(load_system(os.environ[_LATE_EXPORT]), name="MAPPO late")
+
+
+def test_panel_accepts_same_method_exports_renamed_by_factories(
+    actors: tuple[Path, Path],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv(_EARLY_EXPORT, str(actors[0]))
+    monkeypatch.setenv(_LATE_EXPORT, str(actors[1]))
+    references = [
+        f"tests.test_training_validation:{factory.__name__}"
+        for factory in (renamed_early_export, renamed_late_export)
+    ]
+    names = ["MAPPO early", "MAPPO late"]
+    panel = create_panel(opponents=references, output_dir=tmp_path)
+    assert [member.name for member in panel.members] == names
+    assert [member.reference for member in panel.members] == references
+    saved = json.loads(panel.path.read_text())["members"]
+    assert [row["name"] for row in saved] == names
+    assert [row["reference"] for row in saved] == references
+    reloaded = load_panel(tmp_path)
+    assert reloaded == panel
+    assert [method.name for method in reloaded.methods] == names
+    assert all(
+        isinstance(method, System) and method is not original
+        for method, original in zip(reloaded.methods, panel.methods, strict=True)
+    )
+
+
+def test_panel_refuses_two_unrenamed_exports_of_one_method(
+    actors: tuple[Path, Path],
+    tmp_path: Path,
+) -> None:
+    assert [load_system(path).name for path in actors] == ["Recurrent MAPPO"] * 2
+    with pytest.raises(ValueError, match="distinct names"):
+        create_panel(opponents=[str(path) for path in actors], output_dir=tmp_path)
+    assert not (tmp_path / "panel.json").exists()
 
 
 @pytest.mark.parametrize("kind", ("panel", "slot"))

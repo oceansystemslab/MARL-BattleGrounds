@@ -1,6 +1,8 @@
 /**
  * @file Exercise artifact loading, replay endpoints, playback controls, reconnect
- * boundaries and exported views in a real browser.
+ * boundaries and exported views in a real browser. Exit must flush its replay
+ * response and end the server with exit code 0 and no signal, checked strictly by
+ * expectServerShutdown.
  */
 import { createHash } from "node:crypto";
 import { readFileSync } from "node:fs";
@@ -11,6 +13,7 @@ import { expect, test } from "@playwright/test";
 import { buildMetricSearchIndex, findMeasurements } from "../src/metric-search.js";
 import { VISUAL_FILTER_IDS } from "../src/visual-filters.js";
 import { installWaapiAutopause } from "./support/choreography.js";
+import { expectServerShutdown } from "./support/live-debugger.js";
 import {
   currentReplayFrame,
   currentReplayTimeline,
@@ -4669,22 +4672,19 @@ test("Exit flushes its replay response before clean server shutdown", async ({
 }) => {
   const complete = requiredViewer(completeViewer, "complete");
   await openReplay(page, complete.url);
-  const exitPromise = new Promise((resolve) => {
-    const process = complete.process;
-    if (process.exitCode !== null || process.signalCode !== null) {
-      resolve(undefined);
-      return;
-    }
-    process.once("exit", () => {
-      resolve(undefined);
-    });
-  });
-  const response = await clickReplayCommand(page, "#exit-button");
-  expect(response).toMatchObject({
+  const shutdown = expectServerShutdown(
+    page,
+    complete.process,
+    (request) =>
+      request.method() === "POST" &&
+      new URL(request.url()).pathname === "/api/replay/command",
+  );
+  await page.locator("#exit-button").click();
+  const response = await shutdown.response;
+  expect(response.status()).toBe(200);
+  expect(await response.json()).toMatchObject({
     result: "shutdown_scheduled",
     animate_incoming: false,
   });
-  await exitPromise;
-  expect(complete.process.exitCode).toBe(0);
-  expect(complete.process.signalCode).toBeNull();
+  expect(await shutdown.exit).toEqual({ exitCode: 0, signalCode: null });
 });

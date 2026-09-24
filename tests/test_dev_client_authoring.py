@@ -1,14 +1,20 @@
 """Check DevClient map and scenario authoring with isolated local files, including
 that a saved map equal to an approved TDM map previews in the live debugger under
 that map's registered identity and its approved source label.
+
+The threaded-command check fails at once if its held worker finishes before it
+enters the blocked call. It releases that worker inside the executor block, so
+a failed assertion cannot leave the test waiting forever.
 """
 
 from __future__ import annotations
 
 import json
-from concurrent.futures import ThreadPoolExecutor
+import time
+from concurrent.futures import Future, ThreadPoolExecutor
 from pathlib import Path
 from threading import Event
+from typing import Any
 
 import numpy as np
 import pytest
@@ -1604,6 +1610,21 @@ def test_single_authoring_binding_parses_whole_commands_and_shares_loader(
     ]
 
 
+def _wait_for_entry(entered: Event, future: Future[Any]) -> None:
+    # Poll with no time limit, but fail at once if the worker finished without
+    # entering the blocked call; a plain wait would then never end.
+    while not entered.is_set():
+        if future.done():
+            if entered.is_set():
+                return
+            error = future.exception()
+            outcome = repr(error) if error is not None else repr(future.result())
+            pytest.fail(
+                f"The worker finished before it entered the blocked call: {outcome}"
+            )
+        time.sleep(0.01)
+
+
 def test_authoring_binding_serializes_threaded_host_commands(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -1627,13 +1648,18 @@ def test_authoring_binding_serializes_threaded_host_commands(
     monkeypatch.setattr(binding, "_list_assets", blocking_list)
     request = _request({"command_type": "list", "asset_kind": "all"})
     with ThreadPoolExecutor(max_workers=2) as executor:
-        first = executor.submit(binding.apply_command, request)
-        assert first_entered.wait()
-        second = executor.submit(binding.apply_command, request)
-        assert not second_entered.wait(timeout=0.1)
-        release_first.set()
-        assert first.result().ok
-        assert second.result().ok
+        # The release sits inside the executor block, so a failed assertion
+        # frees the held worker before the executor waits for it.
+        try:
+            first = executor.submit(binding.apply_command, request)
+            _wait_for_entry(first_entered, first)
+            second = executor.submit(binding.apply_command, request)
+            assert not second_entered.wait(timeout=0.1)
+            release_first.set()
+            assert first.result().ok
+            assert second.result().ok
+        finally:
+            release_first.set()
     assert second_entered.is_set()
 
 

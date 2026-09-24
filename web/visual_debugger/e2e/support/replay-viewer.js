@@ -3,6 +3,23 @@
  * lifecycle for browser checks. Replay export and viewer startup wait with no
  * time limit, and frame waits set no limit of their own. A process that fails
  * to start or exits early still rejects at once.
+ *
+ * `startReplayViewer` checks its options with `replayViewerArguments`, which throws
+ * a `TypeError` for invalid options before any process starts, for example when not
+ * exactly one of `replayPath`, `sampleReplay` or `scenario` is given.
+ *
+ * Each viewer follows the server lifecycle that live-debugger.js owns. It gets a
+ * fresh owner token in `MARL_BG_E2E_SERVER_OWNER` and is registered at spawn. A
+ * process is owned only when it runs as this user and its `/proc/<pid>/environ`
+ * holds that exact token, so this works on Linux only. After startup,
+ * `stopDebugger` marks a requested stop. `expectServerShutdown` allows only exit
+ * code 0 with no signal, and rejects its `response` at once on a matching
+ * `requestfailed`, a page crash or a page close. Any other exit sends SIGKILL to
+ * every owned process through repeated `/proc` scans, without waiting on an
+ * ordinary stop, and then fails the running test with the original failure first.
+ * A death during startup rejects the startup promise instead. The test-only
+ * `captureServerFailure` and the fallback worker exit hook live in
+ * live-debugger.js.
  */
 import { execFile, spawn } from "node:child_process";
 import { mkdtemp, rm } from "node:fs/promises";
@@ -10,7 +27,15 @@ import { tmpdir } from "node:os";
 import { basename, dirname, join, resolve } from "node:path";
 import { promisify } from "node:util";
 
-import { REPOSITORY_ROOT, stopDebugger } from "./live-debugger.js";
+import {
+  createServerOwnerToken,
+  markServerStarted,
+  REPOSITORY_ROOT,
+  registerServer,
+  serverEnvironment,
+  startupCleanupNote,
+  stopDebugger,
+} from "./live-debugger.js";
 
 const execFileAsync = promisify(execFile);
 export const REPLAY_VIEWER_ENTRYPOINT = "scripts/dev/replay_viewer.py";
@@ -216,9 +241,14 @@ export function replayViewerArguments({
 export function startReplayViewer(options) {
   const replayArguments = replayViewerArguments(options);
   return new Promise((resolveUrl, reject) => {
+    const token = createServerOwnerToken();
     const child = spawn("uv", replayArguments, {
       cwd: REPOSITORY_ROOT,
-      env: process.env,
+      env: serverEnvironment(token),
+    });
+    registerServer(child, {
+      label: `Replay viewer (${replayArguments[4]} ${replayArguments[5]})`,
+      token,
     });
     let settled = false;
     let stdout = "";
@@ -245,6 +275,7 @@ export function startReplayViewer(options) {
         return;
       }
       settled = true;
+      markServerStarted(child);
       resolveUrl({ process: child, url: match[1] });
     });
     child.once("exit", (code) => {
@@ -252,7 +283,7 @@ export function startReplayViewer(options) {
         settled = true;
         reject(
           new Error(
-            `Replay viewer exited before startup with code ${code}.\n${stderr}`,
+            `Replay viewer exited before startup with code ${code}.\n${stderr}${startupCleanupNote(child)}`,
           ),
         );
       }

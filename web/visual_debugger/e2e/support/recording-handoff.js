@@ -1,13 +1,37 @@
 /**
  * @file Provide browser-test setup and inspection for live-recording handoff to an
  * immutable replay. Waits for debugger startup and exit have no time limit.
+ *
+ * `startRecordingDebugger` records one episode into a fresh temporary folder and
+ * follows the server lifecycle that live-debugger.js owns. Each recording debugger
+ * gets a fresh owner token in `MARL_BG_E2E_SERVER_OWNER` and is registered at
+ * spawn. A process is owned only when it runs as this user and its
+ * `/proc/<pid>/environ` holds that exact token, so this works on Linux only. After
+ * startup, `stopDebugger` (also called by `stopRecordingDebugger`, which then
+ * removes the folder) marks a requested stop. `expectServerShutdown` allows only
+ * exit code 0 with no signal, and rejects its `response` at once on a matching
+ * `requestfailed`, a page crash or a page close. Any other exit sends SIGKILL to
+ * every owned process through repeated `/proc` scans, without waiting on an
+ * ordinary stop, and then fails the running test with the original failure first.
+ * A death during startup rejects the startup promise instead. The server is then
+ * stopped and the folder removed; if that cleanup fails too, an `AggregateError`
+ * lists the startup error first. The test-only `captureServerFailure` and the
+ * fallback worker exit hook live in live-debugger.js.
  */
 import { spawn } from "node:child_process";
 import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { basename, dirname, join, resolve } from "node:path";
 
-import { REPOSITORY_ROOT, stopDebugger } from "./live-debugger.js";
+import {
+  createServerOwnerToken,
+  markServerStarted,
+  REPOSITORY_ROOT,
+  registerServer,
+  serverEnvironment,
+  startupCleanupNote,
+  stopDebugger,
+} from "./live-debugger.js";
 
 const RECORDING_TEMP_PREFIX = "marl-battlegrounds-recording-e2e-";
 const REPLAY_FILE_SUFFIX = ".marlbg-replay.json";
@@ -51,6 +75,7 @@ export async function startRecordingDebugger({ stem = "episode" } = {}) {
   const outputDirectory = await mkdtemp(join(tmpdir(), RECORDING_TEMP_PREFIX));
   const replayPath = join(outputDirectory, `${stem}${REPLAY_FILE_SUFFIX}`);
   const metricReportPath = metricReportPathForReplay(replayPath);
+  const token = createServerOwnerToken();
   const child = spawn(
     "uv",
     [
@@ -66,10 +91,11 @@ export async function startRecordingDebugger({ stem = "episode" } = {}) {
     ],
     {
       cwd: REPOSITORY_ROOT,
-      env: process.env,
+      env: serverEnvironment(token),
       stdio: ["ignore", "pipe", "pipe"],
     },
   );
+  registerServer(child, { label: `Recording debugger (${replayPath})`, token });
 
   try {
     const url = await new Promise((resolveUrl, reject) => {
@@ -97,14 +123,17 @@ export async function startRecordingDebugger({ stem = "episode" } = {}) {
           /MARL-BattleGrounds DevClient: (http:\/\/127\.0\.0\.1:\d+\/#token=[A-Za-z0-9_-]+)/,
         );
         if (match) {
-          finish(() => resolveUrl(match[1]));
+          finish(() => {
+            markServerStarted(child);
+            resolveUrl(match[1]);
+          });
         }
       });
       child.once("exit", (code, signal) => {
         finish(() =>
           reject(
             new Error(
-              `Recording debugger exited before startup with code ${code} and signal ${signal}.\n${stderr}`,
+              `Recording debugger exited before startup with code ${code} and signal ${signal}.\n${stderr}${startupCleanupNote(child)}`,
             ),
           ),
         );
@@ -163,20 +192,6 @@ export async function stopRecordingDebugger(started) {
   if (cleanupErrors.length > 0) {
     throw new AggregateError(cleanupErrors, "Recording E2E cleanup failed.");
   }
-}
-
-/** @param {import("node:child_process").ChildProcess} child */
-export async function waitForRecordingDebuggerExit(child) {
-  if (child.exitCode !== null || child.signalCode !== null) {
-    return { exitCode: child.exitCode, signalCode: child.signalCode };
-  }
-  return new Promise((resolveExit) => {
-    /** @param {number | null} exitCode @param {NodeJS.Signals | null} signalCode */
-    const onExit = (exitCode, signalCode) => {
-      resolveExit({ exitCode, signalCode });
-    };
-    child.once("exit", onExit);
-  });
 }
 
 /** @param {Awaited<ReturnType<typeof startRecordingDebugger>>} started

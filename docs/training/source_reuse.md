@@ -259,8 +259,11 @@ array layout does not bypass those checks.
 ### Optional Dense Training Reward
 
 The default `shaping_mode="potential"` keeps the original score-potential
-adjustment and terminal cancellation. The explicit `"score_delta"` alternative
-adds coefficient times new team kills minus new team deaths to native reward.
+adjustment and terminal cancellation: a real ending sets the next potential to
+zero, so over a complete game the discounted adjustments sum to minus the
+starting potential (zero from a tied start). The plain, undiscounted sum need
+not cancel. The explicit `"score_delta"` alternative adds coefficient times new
+team kills minus new team deaths to native reward.
 It retains terminal kills and has no terminal cancellation. Both use actual
 scores from the producing game and keep padding at zero.
 

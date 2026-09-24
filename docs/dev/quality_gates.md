@@ -286,6 +286,19 @@ product timing settings under test, and checks of the product's own speed.
 Canonical gates stop a red shard at its first failure; successful runs still
 execute the complete inventory.
 
+No time limit does not mean waiting for something that can never come. A wait
+for a result that a child process, thread or server must produce also watches
+that producer. While the producer lives, the test keeps waiting. If the
+producer dies, the test checks for the result once more, since it may have
+arrived just before the death. If it is still missing, the test fails at once
+and reports how the producer ended, such as its exit code and output. Cleanup
+after such a failure signals only processes that the test has proven it owns:
+for example, by an identity recorded while the process was surely running, or
+by a private token given to the process when it started. It never signals a
+bare process ID or group number, because the system may have reused that number
+for an unrelated process. The report names the original failure first, even
+when cleanup meets errors of its own.
+
 ## Development selection
 
 Choose the proof from the changed contract and its callers. Preserve generic

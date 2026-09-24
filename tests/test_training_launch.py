@@ -18,11 +18,31 @@ PPO packages keep their exact import probe; QMIX packages use a probe that also
 records Flashbax, and PQN-VDN packages use PPO's probe, whose dependency record
 has no Flashbax. They do not install real training dependencies or start a
 learning experiment.
+
+The tests' own readiness waits fail instead of hanging when the process they
+wait on dies. A readiness wait checks readiness first, keeps waiting with no
+time limit while the child lives, looks once more after the child exits, and
+then fails with the child's exit code and the last lines of its log. Generated
+family leaders and nested controllers exit with code 3 when their own child
+ends first. The detached-supervisor wait follows the exact supervisor identity
+printed at launch and fails if that process ends before its record says exited.
+Its final cleanup signals only that identity; if the wait fails, it also stops
+the members of a verified trainer group. Apart from the test's own child
+processes that it has not yet reaped, test cleanup kills only captured
+identities that still match exactly and members of a saved trainer group whose
+leader still matches. It never kills by a bare group number: a process behind a
+reused identity or a changed leader is left alive, and any process still in a
+saved group number is listed in the failure message. The generated trainer that
+kills its own supervisor first proves from process.json that its parent is that
+supervisor, with the same PID, start time and boot. Otherwise, for example when
+the supervisor already ended and the trainer has a new parent, it signals
+nothing and exits with code 4 and a one-line reason.
 """
 
 from __future__ import annotations
 
 # pyright: reportPrivateUsage=false
+import inspect
 import io
 import json
 import os
@@ -32,6 +52,7 @@ import sys
 import tarfile
 import time
 import venv
+from collections.abc import Callable
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, BinaryIO, cast
@@ -551,12 +572,19 @@ def test_detached_child_survives_parent_exit_and_records_stdout_and_failure(
         f"print('worker output',flush=True); sys.exit({code})"
     )
     supervisor = _supervisor_command(tmp_path, worker)
+    # The parent has not reaped the supervisor when it reads the identity, so
+    # the supervisor's PID cannot belong to another process yet.
     parent = (
-        "import subprocess; "
+        "import importlib.util,json,subprocess; "
+        "spec=importlib.util.spec_from_file_location('run_io_under_test',"
+        f"{inspect.getfile(process_identity)!r}); "
+        "run_io=importlib.util.module_from_spec(spec); "
+        "spec.loader.exec_module(run_io); "
         f"log=open({str(tmp_path / 'process.log')!r},'ab',buffering=0); "
         f"child=subprocess.Popen({supervisor!r},"
         "stdin=subprocess.DEVNULL,stdout=log,stderr=subprocess.STDOUT,"
-        "start_new_session=True); print(child.pid)"
+        "start_new_session=True); "
+        "print(json.dumps(run_io.process_identity(child.pid)))"
     )
     result = subprocess.run(
         [sys.executable, "-I", "-c", parent],
@@ -564,12 +592,25 @@ def test_detached_child_survives_parent_exit_and_records_stdout_and_failure(
         capture_output=True,
         text=True,
     )
-    pid = int(result.stdout.strip())
+    identity = json.loads(result.stdout)
+    pid = identity["pid"]
+    path = tmp_path / "process.json"
+
+    def exited() -> bool:
+        return path.exists() and launch._read(path).get("state") == "exited"
+
     try:
-        while True:
-            path = tmp_path / "process.json"
-            if path.exists() and launch._read(path).get("state") == "exited":
-                break
+        while not exited():
+            if not launch._alive({"process": identity}):
+                # The supervisor may have written its last record just before
+                # it ended, so look once more before failing.
+                if exited():
+                    break
+                left = _stop_owned(_saved_groups(tmp_path), [])
+                pytest.fail(
+                    f"The detached supervisor {identity} ended before its record "
+                    f"reached exited.\n{_left_text(left)}\n{_log_tail(tmp_path)}"
+                )
             time.sleep(0.05)
         record = launch._read(tmp_path / "process.json")
         assert record["state"] == "exited"
@@ -581,8 +622,9 @@ def test_detached_child_survives_parent_exit_and_records_stdout_and_failure(
         assert record["process"]["pid"] == pid
         assert "finished_at" in record
     finally:
-        if launch._alive({"process": process_identity(pid)}):
-            os.killpg(pid, signal.SIGTERM)
+        # Signal only the exact supervisor printed at launch, never a later
+        # process that reuses its PID.
+        _kill_identity(identity, signal.SIGTERM)
 
 
 def test_supervisor_records_preflight_failure(
@@ -697,11 +739,12 @@ def test_stop_signal_reaches_owned_trainer_and_records_exit(tmp_path: Path) -> N
             stderr=subprocess.STDOUT,
             start_new_session=True,
         )
+    owned: list[dict[str, Any]] = []
     try:
         # Wait until the trainer runs. A stop that arrives after the trainer is
         # recorded but before it is released keeps it from starting at all.
-        while not (tmp_path / "ready").exists():
-            time.sleep(0.02)
+        _wait_for_readiness(child, tmp_path, (tmp_path / "ready").exists)
+        owned = _capture_owned(tmp_path)
         assert (tmp_path / "ready").exists()
         before = launch._read(tmp_path / "process.json")
         assert "trainer" in before
@@ -713,9 +756,7 @@ def test_stop_signal_reaches_owned_trainer_and_records_exit(tmp_path: Path) -> N
         assert after["exit_code"] == -signal.SIGTERM
         assert not launch._alive(after)
     finally:
-        if child.poll() is None:
-            os.killpg(child.pid, signal.SIGKILL)
-            child.wait()
+        _cleanup_family(child, owned, tmp_path)
 
 
 def _family_worker(package: Path, mode: str) -> str:
@@ -726,36 +767,116 @@ def _family_worker(package: Path, mode: str) -> str:
         if mode == "ignore"
         else ""
     )
+    # The worker writes this file once it runs. In "kill_supervisor" mode it
+    # uses another name, so the test's family readiness never arrives.
+    marker = package / (
+        "worker_started.json" if mode == "kill_supervisor" else "worker.json"
+    )
     worker = (
-        "import json,os,pathlib,signal,time; "
+        "import sys; sys.exit(9)"
+        if mode == "worker_exits"
+        else "import json,os,pathlib,signal,time; "
         + ignore
-        + f"pathlib.Path({str(package / 'worker.json')!r}).write_text("
+        + f"pathlib.Path({str(marker)!r}).write_text("
         "json.dumps({'pid':os.getpid(),'group':os.getpgrp(),'session':os.getsid(0)})); "
         "time.sleep(30)"
     )
+    endings = {
+        "fail": "sys.exit(7)\n",
+        "orphan": (
+            f"while not pathlib.Path({str(package / 'exit_trainer')!r}).exists():\n"
+            "    time.sleep(0.01)\n"
+            "sys.exit(7)\n"
+        ),
+        # This ends the supervisor after it recorded the trainer group, while
+        # the worker still runs. The trainer's parent should be its supervisor,
+        # but if the supervisor already ended, the trainer now has a new parent,
+        # such as the user's session manager. So the trainer first proves its
+        # parent is the supervisor saved in process.json: same PID, start time
+        # and boot. Otherwise it signals nothing, prints why and exits with 4.
+        # It checks its parent again just before the kill: while the trainer
+        # still has that parent, the parent has not finished exiting, so its PID
+        # cannot yet belong to another process. Only the microseconds between
+        # that check and the kill stay unguarded.
+        "kill_supervisor": (
+            "import json\n"
+            f"saved=json.loads(pathlib.Path({str(package / 'process.json')!r})"
+            ".read_text())['process']\n"
+            "parent=os.getppid()\n"
+            "try:\n"
+            "    stat=pathlib.Path(f'/proc/{parent}/stat').read_text()\n"
+            "    boot=pathlib.Path('/proc/sys/kernel/random/boot_id').read_text()\n"
+            "    live={'pid':parent,'start_ticks':stat.rsplit(')',1)[1].split()[19],\n"
+            "          'boot_id':boot.strip()}\n"
+            "except (OSError,IndexError) as error:\n"
+            "    live={'pid':parent,'error':repr(error)}\n"
+            "if live!=saved or os.getppid()!=parent:\n"
+            "    print(f'Refusing to kill parent {live}: it is not the recorded '\n"
+            "          f'supervisor {saved}',file=sys.stderr,flush=True)\n"
+            "    sys.exit(4)\n"
+            "os.kill(parent,signal.SIGKILL)\n"
+            "time.sleep(30)\n"
+        ),
+    }
     return (
-        "import pathlib,signal,subprocess,sys,time\n"
+        "import os,pathlib,signal,subprocess,sys,time\n"
         + ignore
         + f"worker=subprocess.Popen({[sys.executable, '-I', '-c', worker]!r})\n"
-        f"while not pathlib.Path({str(package / 'worker.json')!r}).exists():\n"
-        "    time.sleep(0.01)\n"
-        + (
-            "sys.exit(7)\n"
-            if mode == "fail"
-            else (
-                f"while not pathlib.Path({str(package / 'exit_trainer')!r}).exists():\n"
-                "    time.sleep(0.01)\n"
-                "sys.exit(7)\n"
-                if mode == "orphan"
-                else "time.sleep(30)\n"
+        f"marker=pathlib.Path({str(marker)!r})\n"
+        "while not marker.exists():\n"
+        "    if worker.poll() is not None:\n"
+        "        if marker.exists():\n"
+        "            break\n"
+        "        print(f'Family worker exited with code {worker.returncode} '\n"
+        "              f'before writing {marker.name}',file=sys.stderr,flush=True)\n"
+        "        sys.exit(3)\n"
+        "    time.sleep(0.01)\n" + endings.get(mode, "time.sleep(30)\n")
+    )
+
+
+def _log_tail(package: Path) -> str:
+    log = package / "process.log"
+    lines = log.read_text(errors="replace").splitlines()[-40:] if log.exists() else []
+    return f"Last lines of {log}:\n" + ("\n".join(lines) or "(empty or missing)")
+
+
+def _left_text(left: list[int]) -> str:
+    return (
+        "Processes left running and not signalled, because this test could not "
+        f"prove it owns them: {left or 'none'}"
+    )
+
+
+def _wait_for_readiness(
+    child: subprocess.Popen[bytes], package: Path, is_ready: Callable[[], bool]
+) -> None:
+    # Readiness comes first, so a child that got ready and then exited passes.
+    # A live child may take as long as it needs; there is no time limit.
+    while not is_ready():
+        if child.poll() is not None:
+            # The child may have become ready just before it exited.
+            if is_ready():
+                return
+            left = _stop_owned(_saved_groups(package), [])
+            pytest.fail(
+                f"The process exited with code {child.returncode} before it was "
+                f"ready.\n{_left_text(left)}\n{_log_tail(package)}"
             )
-        )
+        time.sleep(0.02)
+
+
+def _family_ready(package: Path) -> bool:
+    record = package / "process.json"
+    return (
+        (package / "worker.json").exists()
+        and record.exists()
+        and "trainer_group" in launch._read(record)
     )
 
 
 def _start_family(
     package: Path, mode: str, *, deadline_seconds: float | None = None
-) -> subprocess.Popen[bytes]:
+) -> tuple[subprocess.Popen[bytes], list[dict[str, Any]]]:
     with (package / "process.log").open("wb") as log:
         child = subprocess.Popen(
             _supervisor_command(
@@ -768,37 +889,262 @@ def _start_family(
             stderr=subprocess.STDOUT,
             start_new_session=True,
         )
-    while True:
-        record = package / "process.json"
-        if (
-            (package / "worker.json").exists()
-            and record.exists()
-            and "trainer_group" in launch._read(record)
-        ):
-            return child
-        time.sleep(0.02)
+    _wait_for_readiness(child, package, lambda: _family_ready(package))
+    return child, _capture_owned(package)
 
 
-def _kill_identity(identity: dict[str, Any]) -> None:
+def _identity_matches(identity: object) -> bool:
+    # A saved identity proves ownership only while the live process has the
+    # same PID, start time and boot. Missing fields prove nothing.
+    if not isinstance(identity, dict):
+        return False
+    identity = cast(dict[str, Any], identity)
+    return (
+        type(identity.get("pid")) is int
+        and identity["pid"] > 0
+        and identity.get("start_ticks") is not None
+        and identity.get("boot_id") is not None
+        and process_identity(identity["pid"]) == identity
+    )
+
+
+def _kill_identity(identity: dict[str, Any], number: int = signal.SIGKILL) -> bool:
     try:
-        if process_identity(identity["pid"]) == identity:
-            os.kill(identity["pid"], signal.SIGKILL)
+        if _identity_matches(identity):
+            os.kill(identity["pid"], number)
+            return True
     except ProcessLookupError:
         pass
+    return False
 
 
-def _cleanup_family(package: Path, child: subprocess.Popen[bytes]) -> None:
-    record_path = package / "process.json"
-    if record_path.exists():
-        record = launch._read(record_path)
-        group = record.get("trainer_group")
+def _saved_groups(*packages: Path) -> list[dict[str, Any]]:
+    groups: list[dict[str, Any]] = []
+    for package in packages:
+        path = package / "process.json"
+        group = launch._read(path).get("trainer_group") if path.exists() else None
         if isinstance(group, dict):
-            group = cast(dict[str, Any], group)
-            for pid in launch._group_members(group["pid"]):
-                _kill_identity(process_identity(pid))
+            groups.append(cast(dict[str, Any], group))
+    return groups
+
+
+def _owned_members(group: dict[str, Any]) -> list[dict[str, Any]]:
+    # Members count only while the group's leader is still the saved process;
+    # a leader that is gone cannot vouch for a possibly reused group number.
+    # The second scan drops a PID that left the group between the first scan
+    # and the identity read, because another process may have reused it.
+    if not _identity_matches(group):
+        return []
+    identities = [process_identity(pid) for pid in launch._group_members(group["pid"])]
+    still_members = set(launch._group_members(group["pid"]))
+    if not _identity_matches(group):
+        return []
+    return [
+        identity
+        for identity in identities
+        if identity["pid"] in still_members and identity["start_ticks"] is not None
+    ]
+
+
+def _capture_owned(package: Path) -> list[dict[str, Any]]:
+    return [
+        identity
+        for group in _saved_groups(package)
+        for identity in _owned_members(group)
+    ]
+
+
+def _stop_owned(groups: list[dict[str, Any]], owned: list[dict[str, Any]]) -> list[int]:
+    # Kill the current members of each saved group whose leader still matches,
+    # then the captured identities that still match exactly. Groups go first,
+    # because killing a captured leader would leave its group unverifiable.
+    # Nothing is ever killed by a bare group number.
+    killed: list[dict[str, Any]] = []
+    for group in groups:
+        killed += [
+            identity for identity in _owned_members(group) if _kill_identity(identity)
+        ]
+    killed += [identity for identity in owned if _kill_identity(identity)]
+    # SIGKILL cannot be caught or ignored, so each wait ends once the kernel
+    # has finished the kill. A zombie no longer counts as alive.
+    for identity in killed:
+        while launch._alive({"process": identity}):
+            time.sleep(0.01)
+    # Anything still in a saved group was not proved to be ours. It is only
+    # reported.
+    return sorted(
+        {pid for group in groups for pid in launch._group_members(group["pid"])}
+    )
+
+
+def _cleanup_family(
+    child: subprocess.Popen[bytes], owned: list[dict[str, Any]], *packages: Path
+) -> None:
+    left = _stop_owned(_saved_groups(*packages), owned)
     if child.poll() is None:
         child.kill()
     child.wait()
+    if left:
+        pytest.fail(_left_text(left))
+
+
+def _capture_nested(outer: Path, inner: Path) -> list[dict[str, Any]]:
+    owned = [
+        identity
+        for group in _saved_groups(inner, outer)
+        for identity in _owned_members(group)
+    ]
+    inner_supervisor = launch._read(inner / "process.json").get("process")
+    if _identity_matches(inner_supervisor) and inner_supervisor not in owned:
+        owned.append(cast(dict[str, Any], inner_supervisor))
+    return owned
+
+
+def _sleeper() -> subprocess.Popen[bytes]:
+    return subprocess.Popen(
+        [sys.executable, "-I", "-c", "import time; time.sleep(30)"],
+        start_new_session=True,
+    )
+
+
+@pytest.mark.parametrize("code", [0, 7])
+def test_readiness_wait_fails_with_exit_code_and_log_when_child_exits_first(
+    tmp_path: Path, code: int
+) -> None:
+    with (tmp_path / "process.log").open("wb") as log:
+        child = subprocess.Popen(
+            [
+                sys.executable,
+                "-I",
+                "-c",
+                f"print('Child is leaving',flush=True); raise SystemExit({code})",
+            ],
+            stdout=log,
+            stderr=subprocess.STDOUT,
+        )
+    with pytest.raises(
+        pytest.fail.Exception, match=f"exited with code {code} before it was ready"
+    ) as failure:
+        _wait_for_readiness(child, tmp_path, (tmp_path / "ready").exists)
+    assert "Child is leaving" in str(failure.value)
+
+
+def test_readiness_wait_checks_readiness_before_and_after_child_exit(
+    tmp_path: Path,
+) -> None:
+    ready = tmp_path / "ready"
+    child = subprocess.Popen(
+        [
+            sys.executable,
+            "-I",
+            "-c",
+            f"import pathlib; pathlib.Path({str(ready)!r}).touch()",
+        ]
+    )
+    child.wait()
+    _wait_for_readiness(child, tmp_path, ready.exists)
+    looks: list[bool] = []
+
+    def ready_on_second_look() -> bool:
+        looks.append(True)
+        return len(looks) == 2
+
+    _wait_for_readiness(child, tmp_path, ready_on_second_look)
+    assert len(looks) == 2
+
+
+def test_family_worker_exit_before_its_file_fails_with_leader_code(
+    tmp_path: Path,
+) -> None:
+    with pytest.raises(
+        pytest.fail.Exception, match="exited with code 3 before it was ready"
+    ) as failure:
+        _start_family(tmp_path, "worker_exits")
+    assert "Family worker exited with code 9 before writing worker.json" in str(
+        failure.value
+    )
+    record = launch._read(tmp_path / "process.json")
+    assert record["exit_code"] == 3
+    assert record["cleanup"]["remaining_pids"] == []
+    assert not launch._alive(record)
+
+
+def test_supervisor_death_after_group_record_leaves_no_owned_member(
+    tmp_path: Path,
+) -> None:
+    unrelated = _sleeper()
+    unrelated_identity = process_identity(unrelated.pid)
+    try:
+        with pytest.raises(
+            pytest.fail.Exception,
+            match=f"exited with code {-signal.SIGKILL} before it was ready",
+        ) as failure:
+            _start_family(tmp_path, "kill_supervisor")
+        assert "could not prove it owns them: none" in str(failure.value)
+        record = launch._read(tmp_path / "process.json")
+        worker = launch._read(tmp_path / "worker_started.json")
+        assert record["state"] == "running"
+        assert worker["group"] == record["trainer_group"]["pid"]
+        assert not launch._alive(record)
+        assert not launch._group_members(worker["group"])
+        assert process_identity(unrelated.pid) == unrelated_identity
+        assert unrelated.poll() is None
+    finally:
+        unrelated.kill()
+        unrelated.wait()
+
+
+def test_cleanup_refuses_reused_identity_and_kills_true_identity() -> None:
+    unrelated = _sleeper()
+    control = _sleeper()
+    try:
+        unrelated_identity = process_identity(unrelated.pid)
+        # Same PID, different start time: the saved process is gone and an
+        # unrelated process now holds its PID and group number.
+        reused = {**unrelated_identity, "start_ticks": "reused"}
+        left = _stop_owned([reused], [reused, process_identity(control.pid)])
+        assert control.wait() == -signal.SIGKILL
+        assert left == [unrelated.pid]
+        assert unrelated.poll() is None
+        assert process_identity(unrelated.pid) == unrelated_identity
+    finally:
+        for process in (unrelated, control):
+            process.kill()
+            process.wait()
+
+
+def test_nested_cleanup_never_kills_by_group_number_of_changed_leader(
+    tmp_path: Path,
+) -> None:
+    inner = tmp_path / "inner"
+    inner.mkdir()
+    unrelated = _sleeper()
+    controller = _sleeper()
+    try:
+        unrelated_identity = process_identity(unrelated.pid)
+        stale = {**unrelated_identity, "start_ticks": "older"}
+        atomic_json(
+            inner / "process.json",
+            {"process": stale, "trainer": stale, "trainer_group": stale},
+        )
+        outer = process_identity(controller.pid)
+        atomic_json(
+            tmp_path / "process.json", {"trainer": outer, "trainer_group": outer}
+        )
+        owned = _capture_nested(tmp_path, inner)
+        assert owned == [outer]
+        with pytest.raises(
+            pytest.fail.Exception,
+            match=rf"could not prove it owns them: \[{unrelated.pid}\]",
+        ):
+            _cleanup_family(controller, owned, inner, tmp_path)
+        assert controller.returncode == -signal.SIGKILL
+        assert unrelated.poll() is None
+        assert process_identity(unrelated.pid) == unrelated_identity
+    finally:
+        for process in (unrelated, controller):
+            process.kill()
+            process.wait()
 
 
 @pytest.mark.parametrize(
@@ -817,38 +1163,40 @@ def test_stop_reaches_trainer_and_worker_with_bounded_force_and_isolation(
         [sys.executable, "-I", "-c", "import time; time.sleep(30)"],
         start_new_session=True,
     )
-    unrelated_identity = process_identity(unrelated.pid)
-    child = _start_family(tmp_path, mode)
     try:
-        before = launch._read(tmp_path / "process.json")
-        worker = launch._read(tmp_path / "worker.json")
-        assert worker["group"] == worker["session"] == before["trainer"]["pid"]
-        assert before["trainer_group"] == before["trainer"]
-        assert worker["group"] != child.pid
-        started = time.monotonic()
-        child.send_signal(number)
-        child.wait()
-        assert time.monotonic() - started < 5
-        after = launch._read(tmp_path / "process.json")
-        assert after["state"] == "exited" and after["stop_signal"] == number
-        assert after["cleanup"]["signals"][0] == number
-        assert after["cleanup"]["remaining_pids"] == []
-        assert not launch._alive(after)
-        assert not launch._group_members(worker["group"])
-        if mode == "ignore":
-            assert after["cleanup"]["signals"] == [number, signal.SIGKILL]
-            assert after["exit_code"] == -signal.SIGKILL
-        else:
-            assert after["cleanup"]["signals"] == [number]
-            assert after["exit_code"] != 0
-        assert process_identity(unrelated.pid) == unrelated_identity
-        assert unrelated.poll() is None
-        assert (
-            f"Launch module: {launch.__file__}"
-            in (tmp_path / "process.log").read_text()
-        )
+        unrelated_identity = process_identity(unrelated.pid)
+        child, owned = _start_family(tmp_path, mode)
+        try:
+            before = launch._read(tmp_path / "process.json")
+            worker = launch._read(tmp_path / "worker.json")
+            assert worker["group"] == worker["session"] == before["trainer"]["pid"]
+            assert before["trainer_group"] == before["trainer"]
+            assert worker["group"] != child.pid
+            started = time.monotonic()
+            child.send_signal(number)
+            child.wait()
+            assert time.monotonic() - started < 5
+            after = launch._read(tmp_path / "process.json")
+            assert after["state"] == "exited" and after["stop_signal"] == number
+            assert after["cleanup"]["signals"][0] == number
+            assert after["cleanup"]["remaining_pids"] == []
+            assert not launch._alive(after)
+            assert not launch._group_members(worker["group"])
+            if mode == "ignore":
+                assert after["cleanup"]["signals"] == [number, signal.SIGKILL]
+                assert after["exit_code"] == -signal.SIGKILL
+            else:
+                assert after["cleanup"]["signals"] == [number]
+                assert after["exit_code"] != 0
+            assert process_identity(unrelated.pid) == unrelated_identity
+            assert unrelated.poll() is None
+            assert (
+                f"Launch module: {launch.__file__}"
+                in (tmp_path / "process.log").read_text()
+            )
+        finally:
+            _cleanup_family(child, owned, tmp_path)
     finally:
-        _cleanup_family(tmp_path, child)
         unrelated.kill()
         unrelated.wait()
 
@@ -856,7 +1204,7 @@ def test_stop_reaches_trainer_and_worker_with_bounded_force_and_isolation(
 def test_natural_trainer_failure_cleans_worker_after_leader_exit(
     tmp_path: Path,
 ) -> None:
-    child = _start_family(tmp_path, "fail")
+    child, owned = _start_family(tmp_path, "fail")
     try:
         child.wait()
         after = launch._read(tmp_path / "process.json")
@@ -866,14 +1214,14 @@ def test_natural_trainer_failure_cleans_worker_after_leader_exit(
         assert not launch._alive(after)
         assert not launch._group_members(after["trainer"]["pid"])
     finally:
-        _cleanup_family(tmp_path, child)
+        _cleanup_family(child, owned, tmp_path)
 
 
 @pytest.mark.parametrize("mode", ["wait", "ignore"])
 def test_deadline_stops_owned_descendants_and_records_distinct_failure(
     tmp_path: Path, mode: str
 ) -> None:
-    child = _start_family(tmp_path, mode, deadline_seconds=2.0)
+    child, owned = _start_family(tmp_path, mode, deadline_seconds=2.0)
     try:
         child.wait()
         record = launch._read(tmp_path / "process.json")
@@ -887,7 +1235,7 @@ def test_deadline_stops_owned_descendants_and_records_distinct_failure(
         if mode == "ignore":
             assert record["cleanup"]["signals"] == [signal.SIGTERM, signal.SIGKILL]
     finally:
-        _cleanup_family(tmp_path, child)
+        _cleanup_family(child, owned, tmp_path)
 
 
 @pytest.mark.parametrize("outcome", ["stop", "crash", "exit", "deadline"])
@@ -901,7 +1249,14 @@ def test_nested_supervisor_cleans_separate_worker_group(
         "import os,pathlib,signal,subprocess,sys,time\n"
         f"child=subprocess.Popen({inner_command!r})\n"
         f"ready=pathlib.Path({str(tmp_path / 'controller_ready')!r})\n"
-        f"while not pathlib.Path({str(inner / 'worker.json')!r}).exists():\n"
+        f"inner_ready=pathlib.Path({str(inner / 'worker.json')!r})\n"
+        "while not inner_ready.exists():\n"
+        "    if child.poll() is not None:\n"
+        "        if inner_ready.exists():\n"
+        "            break\n"
+        "        print(f'Inner supervisor exited with code {child.returncode} '\n"
+        "              'before its worker was ready',file=sys.stderr,flush=True)\n"
+        "        sys.exit(3)\n"
         "    time.sleep(.01)\n"
         "ready.touch()\n"
         f"while not pathlib.Path({str(tmp_path / 'release_controller')!r}).exists():\n"
@@ -929,10 +1284,10 @@ def test_nested_supervisor_cleans_separate_worker_group(
         child = subprocess.Popen(
             command, stdout=log, stderr=subprocess.STDOUT, start_new_session=True
         )
+    owned: list[dict[str, Any]] = []
     try:
-        while not (tmp_path / "controller_ready").exists():
-            assert child.poll() is None
-            time.sleep(0.02)
+        _wait_for_readiness(child, tmp_path, (tmp_path / "controller_ready").exists)
+        owned = _capture_nested(tmp_path, inner)
         outer_before = launch._read(tmp_path / "process.json")
         inner_before = launch._read(inner / "process.json")
         assert (
@@ -965,17 +1320,9 @@ def test_nested_supervisor_cleans_separate_worker_group(
         else:
             assert child.returncode != 0
     finally:
-        if (inner / "process.json").exists():
-            record = launch._read(inner / "process.json")
-            for identity in (record.get("trainer"), record.get("process")):
-                if isinstance(identity, dict):
-                    identity = cast(dict[str, Any], identity)
-                    for pid in launch._group_members(identity["pid"]):
-                        _kill_identity(process_identity(pid))
-                    _kill_identity(identity)
-        _cleanup_family(tmp_path, child)
         unrelated.kill()
         unrelated.wait()
+        _cleanup_family(child, owned, inner, tmp_path)
 
 
 def test_cleanup_reserve_covers_nested_grace_and_preserves_flat_defaults() -> None:
@@ -1067,9 +1414,10 @@ def test_graceful_child_zero_exit_does_not_hide_stop_request(
             stdout=log,
             stderr=subprocess.STDOUT,
         )
+    owned: list[dict[str, Any]] = []
     try:
-        while not (tmp_path / "ready").exists():
-            time.sleep(0.02)
+        _wait_for_readiness(child, tmp_path, (tmp_path / "ready").exists)
+        owned = _capture_owned(tmp_path)
         assert (tmp_path / "ready").exists()
         if deadline_seconds is None:
             child.send_signal(signal.SIGTERM)
@@ -1082,13 +1430,13 @@ def test_graceful_child_zero_exit_does_not_hide_stop_request(
             "signal" if deadline_seconds is None else "deadline"
         )
     finally:
-        _cleanup_family(tmp_path, child)
+        _cleanup_family(child, owned, tmp_path)
 
 
 def test_orphan_worker_blocks_restart_after_supervisor_and_leader_exit(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    child = _start_family(tmp_path, "orphan")
+    child, owned = _start_family(tmp_path, "orphan")
     try:
         record = launch._read(tmp_path / "process.json")
         child.kill()
@@ -1107,7 +1455,7 @@ def test_orphan_worker_blocks_restart_after_supervisor_and_leader_exit(
         atomic_json(tmp_path / "process.json", record)
         assert launch.status(tmp_path)["effective_state"] == "stopping"
     finally:
-        _cleanup_family(tmp_path, child)
+        _cleanup_family(child, owned, tmp_path)
 
 
 def test_cleanup_never_signals_reaped_child_or_shared_process_group(

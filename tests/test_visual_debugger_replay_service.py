@@ -1,4 +1,9 @@
-"""Check read-only replay navigation, authority and privacy limits."""
+"""Check read-only replay navigation, authority and privacy limits.
+
+The shared-lock check fails at once if its held metric-report worker finishes
+before it enters the blocked read. It releases that worker inside the executor
+block, so a failed assertion cannot leave the test waiting forever.
+"""
 
 from __future__ import annotations
 
@@ -8,8 +13,9 @@ import io
 import json
 import subprocess
 import sys
+import time
 from collections.abc import Callable
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import Future, ThreadPoolExecutor
 from concurrent.futures import TimeoutError as FutureTimeoutError
 from dataclasses import asdict, dataclass
 from pathlib import Path
@@ -912,6 +918,21 @@ def test_agent_metric_download_reads_the_canonical_sidecar_once(
     assert bundle.calls == 1
 
 
+def _wait_for_entry(entered: Event, future: Future[Any]) -> None:
+    # Poll with no time limit, but fail at once if the worker finished without
+    # entering the blocked call; a plain wait would then never end.
+    while not entered.is_set():
+        if future.done():
+            if entered.is_set():
+                return
+            error = future.exception()
+            outcome = repr(error) if error is not None else repr(future.result())
+            pytest.fail(
+                f"The worker finished before it entered the blocked call: {outcome}"
+            )
+        time.sleep(0.01)
+
+
 def test_metric_report_view_switch_and_sidecar_read_share_one_lock_epoch(
     service_cases: _ServiceCases,
 ) -> None:
@@ -943,15 +964,20 @@ def test_metric_report_view_switch_and_sidecar_read_share_one_lock_epoch(
         )
 
     with ThreadPoolExecutor(max_workers=2) as executor:
-        metric_future = executor.submit(service.current_metric_report)
-        assert entered.wait()
-        command_future = executor.submit(switch_to_pov)
-        assert command_started.wait()
-        with pytest.raises(FutureTimeoutError):
-            command_future.result(timeout=0.1)
-        release.set()
-        metric_result = metric_future.result()
-        command_result = command_future.result()
+        # The release sits inside the executor block, so a failed assertion
+        # frees the held worker before the executor waits for it.
+        try:
+            metric_future = executor.submit(service.current_metric_report)
+            _wait_for_entry(entered, metric_future)
+            command_future = executor.submit(switch_to_pov)
+            assert command_started.wait()
+            with pytest.raises(FutureTimeoutError):
+                command_future.result(timeout=0.1)
+            release.set()
+            metric_result = metric_future.result()
+            command_result = command_future.result()
+        finally:
+            release.set()
 
     assert metric_result.outcome == "available"
     assert _response(command_result).frame.view_mode == "pov"

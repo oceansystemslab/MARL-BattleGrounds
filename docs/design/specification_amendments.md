@@ -2586,7 +2586,13 @@ closed toward the centre. The scripted controllers (seen with ALPHA version 2,
 BETA version 4 and a candidate revision of them) do not steer around other
 bodies, so the leading agent was pinned in that corner by the teammates behind
 it, and six agents stood still for whole games. With the wall removed, the
-agents go round the centre circle.
+agents go round the centre circle. (Correction, 24 September 2026: "do not
+steer around other bodies" is too broad. It holds for ALPHA's ordinary
+movement. BETA's other classes always use that movement, and so does its Rogue
+unless it is pursuing a Priest, Mage or Hunter. In that pursuit, BETA version 4
+already had the limited body check
+that [A42](#a42-reactive-tdm-fixes-at-blocked-walls) describes for version 5.
+That check gives no general navigation guarantee.)
 
 The clearance table above no longer lists Map 39. Its two exceptions were the
 gaps between the removed wall and the two slanted walls. Removing an obstacle
@@ -3192,13 +3198,29 @@ seconds. Peak GPU memory rises by 18 MiB at 128 games (371 to 389 MiB) and by
 every obstacle at each exit. No slowdown larger than this machine's own
 run-to-run noise was seen: two timings of identical games differed by up to 13%,
 and one timing with the fixes matched or beat both timings without them. A
-slowdown smaller than about 10% is not ruled out.
+slowdown smaller than about 10% is not ruled out. (Correction, 24 September
+2026: a later, tighter controller-only audit with identical inputs measured a
+real extra cost per controller call; the [baseline methods
+record](../training/baseline_methods.md#current-recurrent-mappo-search-declared-23-september-2026)
+owns that number and its limits.)
 
 **Limits.** The controllers still do not steer around other bodies, so traffic
 jams remain; they are accepted for these scripted baselines. One jam of five
 agents lasting 31 to 35 ticks on Map 36 was seen. Moving defenders can still block a
 path. These are diagnostic controllers, not trained policies or baselines for
-the Big 12.
+the Big 12. (Correction, 24 September 2026: the first sentence is too broad.
+ALPHA's ordinary movement does not steer around other bodies and can jam. BETA
+uses that movement for its other classes and for a Rogue that observes no
+living enemy Priest, Mage or Hunter. While BETA's Rogue pursues one of those,
+it has a limited body check. It skips a move when that move's first contact
+with another observed living agent, other than its prey, would be head-on or
+within 45 degrees of head-on. If it already overlaps such an agent deeply, it
+only takes moves that do not push further in and that end farther away. It
+treats those agents as standing still, looks only one move ahead in eight
+directions, and chooses Stay when no move qualifies.
+[A32](#a32-scenario-5-shoulder-bypass-and-fallback-prey) states the exact
+contact rule. Neither controller guarantees a route, and traffic jams
+remain.)
 
 **Effects on saved work.** Resuming a saved evaluation, tournament or training
 run recorded with ALPHA version 2 or BETA version 4 fails its identity check,

@@ -204,7 +204,10 @@ A wall end capped by a pillar or a short wall is extended once past the cap, so
 the agent steers around the whole shape. Near a wall corner, a move may drift
 back by up to one useful stride and still count as progress. A Hunter holds its
 distance only while it can shoot the nearest enemy; otherwise it approaches.
-Agents still do not steer around other bodies, so traffic jams remain.
+ALPHA's ordinary movement does not steer around other bodies, so it can jam.
+BETA's Rogue has only the limited body check described above, and only while
+it pursues a Priest, Mage or Hunter. Neither controller guarantees a route,
+and traffic jams remain.
 
 In a body-blocking study, the defending Warrior can screen a vulnerable Hunter
 and provide a moving body around which the Hunter kites, while both maintain

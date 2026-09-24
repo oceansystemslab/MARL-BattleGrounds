@@ -1,4 +1,10 @@
-"""Check read-only replay HTTP handling with an injected test service."""
+"""Check read-only replay HTTP handling with an injected test service.
+
+Waits for a blocked service call fail at once if the request or worker thread
+ends before the call begins, and the failure shows any response received.
+Cleanup joins only the request and replacement threads that started, so an
+early failure keeps its own message.
+"""
 
 from __future__ import annotations
 
@@ -6,6 +12,7 @@ import json
 import socket
 import subprocess
 import sys
+import time
 from collections.abc import Callable, Iterator
 from dataclasses import dataclass
 from http import HTTPStatus
@@ -520,6 +527,23 @@ def _raw_exchange(server: DebuggerHTTPServer, request: bytes) -> bytes:
 
 def _authorized_headers(**extra: str) -> dict[str, str]:
     return {_TOKEN_HEADER: _TOKEN, **extra}
+
+
+def _wait_for_service_entry(
+    entered: Event, request: Thread, responses: list[tuple[HTTPResponse, bytes]]
+) -> None:
+    # Poll with no time limit, but fail at once if the request thread ended
+    # before the service call began; a plain wait would then never end.
+    while not entered.is_set():
+        if not request.is_alive():
+            if entered.is_set():
+                return
+            received = [(response.status, body) for response, body in responses]
+            pytest.fail(
+                "The request thread ended before the service call began. "
+                f"Responses received: {received or 'none'}"
+            )
+        time.sleep(0.01)
 
 
 def _stable_headers(response: HTTPResponse) -> tuple[tuple[str, str], ...]:
@@ -1092,7 +1116,7 @@ def test_live_request_and_replay_replacement_are_serialized_and_coherent() -> No
     swap_thread = Thread(target=install_replay, daemon=True)
     try:
         old_request.start()
-        assert live_service.entered.wait()
+        _wait_for_service_entry(live_service.entered, old_request, old_responses)
         swap_thread.start()
         assert swap_started.wait()
         assert not swap_finished.wait(timeout=0.1)
@@ -1191,8 +1215,10 @@ def test_live_request_and_replay_replacement_are_serialized_and_coherent() -> No
             server.shutdown()
         server.server_close()
         server_thread.join()
-        old_request.join()
-        swap_thread.join()
+        # Join only threads that started, so an early failure keeps its message.
+        for thread in (old_request, swap_thread):
+            if thread.ident is not None:
+                thread.join()
 
 
 def test_in_flight_live_presentation_pins_old_binding_until_replay_cas() -> None:
@@ -1240,7 +1266,7 @@ def test_in_flight_live_presentation_pins_old_binding_until_replay_cas() -> None
     swap_thread = Thread(target=install_replay, daemon=True)
     try:
         old_request.start()
-        assert live_service.entered.wait()
+        _wait_for_service_entry(live_service.entered, old_request, old_responses)
         swap_thread.start()
         assert not swap_finished.wait(timeout=0.1)
 
@@ -1275,8 +1301,10 @@ def test_in_flight_live_presentation_pins_old_binding_until_replay_cas() -> None
             server.shutdown()
         server.server_close()
         server_thread.join()
-        old_request.join()
-        swap_thread.join()
+        # Join only threads that started, so an early failure keeps its message.
+        for thread in (old_request, swap_thread):
+            if thread.ident is not None:
+                thread.join()
 
 
 def test_live_request_can_reentrantly_install_replay_before_live_response() -> None:
@@ -1512,7 +1540,7 @@ def test_in_flight_error_uses_the_pinned_protocol_family() -> None:
     swap_thread = Thread(target=install_replay, daemon=True)
     try:
         old_request.start()
-        assert live_service.entered.wait()
+        _wait_for_service_entry(live_service.entered, old_request, old_responses)
         swap_thread.start()
         assert not swap_finished.wait(timeout=0.1)
 
@@ -1545,8 +1573,10 @@ def test_in_flight_error_uses_the_pinned_protocol_family() -> None:
             server.shutdown()
         server.server_close()
         server_thread.join()
-        old_request.join()
-        swap_thread.join()
+        # Join only threads that started, so an early failure keeps its message.
+        for thread in (old_request, swap_thread):
+            if thread.ident is not None:
+                thread.join()
 
 
 def test_coordinator_cas_failure_never_partially_swaps_active_pair() -> None:
@@ -2316,7 +2346,7 @@ def test_metric_catalog_http_is_authenticated_and_keeps_playback_available(
     )
     worker.start()
     try:
-        assert service.metric_catalog_started.wait()
+        _wait_for_service_entry(service.metric_catalog_started, worker, results)
         # The catalog may still be preparing while ordinary replay reads run.
         frame_response, _ = _exchange(
             server, "GET", REPLAY_HTTP_ROUTES.frame, headers={_TOKEN_HEADER: _TOKEN}
