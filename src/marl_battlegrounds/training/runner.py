@@ -1,9 +1,9 @@
-"""Run and resume one declared PPO or recurrent QMIX experiment.
+"""Run and resume one declared PPO, recurrent QMIX or recurrent PQN-VDN experiment.
 
 TrainConfig owns validated host settings. train joins existing collection,
 learner, checkpoint and evaluation authorities; numerical work stays outside
 host logging and file handling. CLI commands use these same public functions.
-PPO and QMIX share the run layout, validation, selection and reports; the
+All methods share the run layout, validation, selection and reports; the
 saved method chooses the learner, its settings block and its host counts.
 """
 
@@ -27,11 +27,18 @@ from marl_battlegrounds._method_loading import validate_saved_method_reference
 from marl_battlegrounds.baselines.methods import (
     TrainingMethod,
     is_ppo_method,
+    method_settings_field,
     validate_training_method,
 )
 from marl_battlegrounds.baselines.ppo import (
     PPOConfig,
     validate_ppo_batch_size,
+)
+from marl_battlegrounds.baselines.pqn import (
+    DEFAULT_PQN_CONFIG,
+    PQNConfig,
+    pqn_planned_learning_blocks,
+    validate_pqn_batch_size,
 )
 from marl_battlegrounds.baselines.qmix import (
     DEFAULT_QMIX_CONFIG,
@@ -82,22 +89,29 @@ class TrainConfig:
     ----------
     seed : int, default=42
         Root seed for model and independent collection/shuffle/sampling streams.
-    method : {"mappo", "ippo", "ff_mappo", "ff_ippo", "qmix"}, default="mappo"
+    method : {"mappo", "ippo", "ff_mappo", "ff_ippo", "qmix", "pqn_vdn"}, \
+default="mappo"
         Learner saved with the run. MAPPO uses physical critic inputs; IPPO
         uses each actor's permitted inputs. The ff_ methods use two 128-wide
         layers without recurrent memory. "qmix" is recurrent QMIX with compact
-        replay, configured by qmix instead of ppo.
+        replay, configured by qmix instead of ppo. "pqn_vdn" is recurrent
+        PQN-VDN (no replay or target network), configured by pqn.
     num_envs : int, default=32
         Fixed even environment batch. Recurrent PPO methods require
         divisibility by PPO groups times minibatches. Feedforward methods
         require divisibility by groups, and rollout_length*num_envs by groups
         times minibatches. QMIX has no divisibility rule, but
         num_envs*qmix.rollout_length*5 must fit a signed 32-bit integer.
+        PQN-VDN needs num_envs divisible by pqn.num_minibatches and the
+        int32 guards of ``validate_pqn_batch_size``.
     total_env_steps : int, default=10000000
         Exact real environment transitions, divisible by num_envs. Resets and
         padding do not count. Per-lane rounds must fit a signed 32-bit integer.
         Whole-run totals may exceed it. QMIX needs at least min_buffer_size
         rounds per game, and rounds times qmix.epochs must fit int32.
+        PQN-VDN needs at least memory_window + rollout_length + 1 rounds per
+        game (W initial random rounds, counted in the budget, then at least
+        one learning round) and planned optimizer steps within int32.
     curriculum, shaping : bool, default=False
         Enable the existing 17-stage schedule and chosen team reward adjustment.
     score_threshold_curriculum : bool, default=False
@@ -136,12 +150,16 @@ class TrainConfig:
     ppo : PPOConfig, default=PPOConfig()
         Immutable donor network update settings, including rollout length,
         input scale and spawn frame. A shared random initialization result can
-        be reused only by a run with the same scale and frame. A QMIX run must
-        leave it at the default; it is not saved for QMIX.
+        be reused only by a run with the same scale and frame. QMIX and
+        PQN-VDN runs must leave it at the default; it is not saved for them.
     qmix : QMIXConfig or None, default=None
         QMIX settings (replay sizes, sampling, target rule, exploration, input
         scale and spawn frame). None means DEFAULT_QMIX_CONFIG for a QMIX run
-        and is required for PPO runs. It is saved only for QMIX.
+        and is required for other runs. It is saved only for QMIX.
+    pqn : PQNConfig or None, default=None
+        PQN-VDN settings (T, H, epochs, minibatches, rates, schedules, input
+        scale and spawn frame). None means DEFAULT_PQN_CONFIG for a PQN-VDN
+        run and is required for other runs. It is saved only for PQN-VDN.
     metrics : {"priority", "none"}, default="priority"
         Existing episode metric level. No replay recording is implied.
     recording : bool, default=False
@@ -155,30 +173,40 @@ class TrainConfig:
         Freeze these once before training. Live methods instead belong in
         train's validation_opponents keyword. Conflicting declarations fail.
     slot_diagnostic_actor : str or None, default=None
-        Explicit absolute actor export (PPO or QMIX, matching the run's method)
+        Explicit absolute actor export (matching the run's method)
         for the optional slot comparison with a
         new System panel. Historical panels keep their final actor by default.
         Enabled diagnostics verify this artifact before learner setup.
     validation_fractions : tuple[float, ...], default=(0.1, ..., 1.0)
-        Increasing experience fractions, rounded up to completed blocks (PPO
-        updates or QMIX blocks).
+        Increasing experience fractions, rounded up to the next completed
+        collection block. For PPO and QMIX blocks end at multiples of
+        rollout_length rounds; for PQN-VDN they end at multiples of T rounds
+        up to its W = memory_window + rollout_length initial rounds, then at
+        W + j * T, and at the final round (for example 4,096, 4,224, 8,320
+        transitions at 32 games with the defaults).
         Initialization is diagnostic only. The final fraction must be one.
     routine_seed_pairs, confirmation_seed_pairs : int, default=10, 50
         Independent seed pairs per validation map and opponent.
     checkpoint_interval_updates : int or None, default=None
         Recovery-save interval in completed updates: PPO updates for PPO,
-        optimizer steps for QMIX. A save happens whenever completed_updates
-        crosses a multiple of it (a QMIX block adds epochs steps, so 24 to 28
-        crosses 25). None means 25 for PPO and 1600 for QMIX, the same spacing
-        at the defaults (102,400 transitions at 32 games); QMIX checkpoints
-        carry the replay (about 1 GB at 32 games);
+        optimizer steps for QMIX and PQN-VDN. A save happens whenever
+        completed_updates crosses a multiple of it (a QMIX block adds epochs
+        steps, so 24 to 28 crosses 25; a PQN-VDN block adds epochs *
+        num_minibatches steps, and initial chunks add none). None means 25
+        for PPO and 1600 for QMIX and PQN-VDN (at the defaults: 102,400
+        transitions at 32 games for QMIX, 25 learning blocks for PQN-VDN);
+        QMIX checkpoints carry the replay (about 1 GB at 32 games);
         the resolved number is what is saved. Initialization, capture points
         and the final boundary always save. The number is resolved when the
         config is built, so ``dataclasses.replace(ppo_config, method="qmix")``
-        keeps PPO's 25; pass ``checkpoint_interval_updates=None`` in that
-        replace call to get the QMIX default.
+        or ``method="pqn_vdn"`` keeps PPO's 25; pass
+        ``checkpoint_interval_updates=None`` in that replace call to get the
+        1600 default.
     checkpoint_env_steps : tuple[int, ...], default=()
-        Additional exact actor capture points at completed block boundaries.
+        Additional exact actor capture points, each exactly at a collection
+        boundary in transitions (the same boundaries as validation_fractions:
+        for PQN-VDN these are offset by its W initial rounds, so 8,320 is a
+        boundary at 32 games with the defaults and 8,192 is refused).
     random_diagnostic_seed_pairs : int or None, default=None
         Enable fixed Random diagnostics at initialization, checkpoint_env_steps
         and the final budget. The positive count is paired seeds per each of
@@ -219,6 +247,7 @@ class TrainConfig:
     pinned_opponent: str | None = None
     ppo: PPOConfig = field(default_factory=PPOConfig)
     qmix: QMIXConfig | None = None
+    pqn: PQNConfig | None = None
     metrics: Literal["priority", "none"] = "priority"
     recording: bool = False
     validation_panel: str | None = None
@@ -238,8 +267,9 @@ class TrainConfig:
     def __post_init__(self) -> None:
         """Reject invalid host settings without allocating numerical arrays.
 
-        Resolves qmix=None to DEFAULT_QMIX_CONFIG for QMIX runs and
-        checkpoint_interval_updates=None to 25 (PPO) or 1600 (QMIX).
+        Resolves qmix=None to DEFAULT_QMIX_CONFIG for QMIX runs, pqn=None to
+        DEFAULT_PQN_CONFIG for PQN-VDN runs and checkpoint_interval_updates=None
+        to 25 (PPO) or 1600 (QMIX and PQN-VDN).
         """
         method = validate_training_method(self.method)
         if not isinstance(cast(object, self.ppo), PPOConfig):
@@ -252,10 +282,29 @@ class TrainConfig:
             if not isinstance(cast(object, self.qmix), QMIXConfig):
                 raise TypeError("qmix must be QMIXConfig or None")
         elif self.qmix is not None:
-            raise ValueError("A PPO run takes no QMIX settings")
+            raise ValueError(
+                "A PQN-VDN run takes no QMIX settings"
+                if method == "pqn_vdn"
+                else "A PPO run takes no QMIX settings"
+            )
+        if method == "pqn_vdn":
+            if self.ppo != PPOConfig():
+                raise ValueError("A PQN-VDN run takes no PPO settings")
+            if self.pqn is None:
+                object.__setattr__(self, "pqn", DEFAULT_PQN_CONFIG)
+            if not isinstance(cast(object, self.pqn), PQNConfig):
+                raise TypeError("pqn must be PQNConfig or None")
+        elif self.pqn is not None:
+            raise ValueError(
+                "A QMIX run takes no PQN settings"
+                if method == "qmix"
+                else "A PPO run takes no PQN settings"
+            )
         if self.checkpoint_interval_updates is None:
             object.__setattr__(
-                self, "checkpoint_interval_updates", 1600 if method == "qmix" else 25
+                self,
+                "checkpoint_interval_updates",
+                25 if is_ppo_method(method) else 1600,
             )
         if type(self.seed) is not int:
             raise TypeError("seed must be a Python integer, not bool")
@@ -299,6 +348,10 @@ class TrainConfig:
             if rounds * self.qmix.epochs > 2**31 - 1:
                 raise ValueError("QMIX optimizer counts for this budget exceed int32")
             discount, rollout_length = self.qmix.gamma, self.qmix.rollout_length
+        elif self.pqn is not None:
+            validate_pqn_batch_size(self.num_envs, self.pqn)
+            pqn_planned_learning_blocks(rounds, self.pqn)
+            discount, rollout_length = self.pqn.gamma, self.pqn.rollout_length
         else:
             validate_ppo_batch_size(self.num_envs, self.ppo, method=method)
             discount, rollout_length = self.ppo.gamma, self.ppo.rollout_length
@@ -395,13 +448,24 @@ class TrainConfig:
             previous = fraction
         if not isinstance(cast(object, self.checkpoint_env_steps), tuple):
             raise TypeError("checkpoint_env_steps must be a tuple")
-        block = self.num_envs * rollout_length
+        from marl_battlegrounds.training.validation import (
+            _collection_boundary,  # pyright: ignore[reportPrivateUsage]
+        )
+
+        initial = self.pqn.initial_rounds if self.pqn is not None else 0
         previous_step = 0
         for step in self.checkpoint_env_steps:
             if (
                 type(step) is not int
                 or not previous_step < step <= self.total_env_steps
-                or (step != self.total_env_steps and step % block)
+                or _collection_boundary(
+                    step,
+                    total_env_steps=self.total_env_steps,
+                    num_envs=self.num_envs,
+                    rollout_length=rollout_length,
+                    initial_rounds=initial,
+                )[0]
+                != step
             ):
                 raise ValueError(
                     "checkpoint_env_steps must increase at complete update boundaries"
@@ -416,7 +480,8 @@ class TrainResult:
     run_dir identifies the experiment; final_actor and selected_actor identify
     frozen exports (selection is None without a panel). completed_env_steps and
     completed_updates exclude padding; for QMIX completed_updates counts
-    optimizer steps (epochs per learning block), not blocks. status is
+    optimizer steps (epochs per learning block) and for PQN-VDN optimizer
+    steps (epochs times minibatches per learning block), not blocks. status is
     complete only after validation, export and reporting finish.
     evidence_paths names the shared report outputs.
     This record carries no rollout, live model state or learning qualification.
@@ -434,11 +499,16 @@ class TrainResult:
 def config_to_dict(config: TrainConfig) -> dict[str, Any]:
     """Return version-1 JSON-ready settings; preserve every resolved option.
 
-    A PPO config omits the qmix field, so historical PPO bytes are unchanged;
-    a QMIX config omits ppo and saves its resolved qmix settings.
+    Only the run's own settings block is kept (``methods.method_settings_field``):
+    a PPO config omits qmix and pqn, so historical PPO bytes are unchanged; a
+    QMIX config keeps only its resolved qmix settings and a PQN-VDN config
+    only its resolved pqn settings.
     """
     data = json.loads(json.dumps(asdict(config)))
-    data.pop("ppo" if config.method == "qmix" else "qmix")
+    kept = method_settings_field(config.method)
+    for name in ("ppo", "qmix", "pqn"):
+        if name != kept:
+            data.pop(name)
     return {"schema_version": 1, **data}
 
 
@@ -446,8 +516,9 @@ def config_from_dict(value: dict[str, Any]) -> TrainConfig:
     """Read version-1 settings and reject unknown fields before opening a run.
 
     value is a JSON object with optional schema_version=1. Omitted settings
-    use TrainConfig defaults; ppo and qmix are settings objects. A QMIX config
-    must not contain ppo and a PPO config must not contain qmix. Lists for
+    use TrainConfig defaults; ppo, qmix and pqn are settings objects. A config
+    may contain only its own method's block: a QMIX config no ppo or pqn, a
+    PQN-VDN config no ppo or qmix, a PPO config no qmix or pqn. Lists for
     fractions and extra save points become tuples. Invalid versions, fields
     and values raise ValueError or TypeError. The input dictionary is not
     changed.
@@ -459,11 +530,12 @@ def config_from_dict(value: dict[str, Any]) -> TrainConfig:
     unknown = set(data) - {item.name for item in fields(TrainConfig)}
     if unknown:
         raise ValueError(f"Unknown training config fields: {sorted(unknown)}")
-    qmix_run = data.get("method", "mappo") == "qmix"
-    if qmix_run and "ppo" in data:
-        raise ValueError("A QMIX training config takes no ppo settings")
-    if not qmix_run and "qmix" in data:
-        raise ValueError("A PPO training config takes no qmix settings")
+    method = data.get("method", "mappo")
+    label = {"qmix": "QMIX", "pqn_vdn": "PQN-VDN"}.get(str(method), "PPO")
+    kept = method_settings_field(method)
+    for name in ("ppo", "qmix", "pqn"):
+        if name != kept and name in data:
+            raise ValueError(f"A {label} training config takes no {name} settings")
     if "ppo" in data:
         if not isinstance(data["ppo"], dict):
             raise TypeError("ppo must be a JSON object")
@@ -472,6 +544,10 @@ def config_from_dict(value: dict[str, Any]) -> TrainConfig:
         if not isinstance(data["qmix"], dict):
             raise TypeError("qmix must be a JSON object")
         data["qmix"] = QMIXConfig(**cast(dict[str, Any], data["qmix"]))
+    if "pqn" in data and data["pqn"] is not None:
+        if not isinstance(data["pqn"], dict):
+            raise TypeError("pqn must be a JSON object")
+        data["pqn"] = PQNConfig(**cast(dict[str, Any], data["pqn"]))
     for name in (
         "validation_fractions",
         "checkpoint_env_steps",
@@ -548,7 +624,7 @@ def train(
     resume_from: str | Path | None = None,
     validation_opponents: Sequence[Any] | None = None,
 ) -> TrainResult:
-    """Run or resume one complete declared PPO or QMIX experiment on this device.
+    """Run or resume one complete declared training experiment on this device.
 
     Parameters
     ----------
@@ -566,11 +642,12 @@ def train(
         Older checkpoints without that identity remain readable but cannot
         resume. A saved config without ppo.spawn_frame means "world" whatever
         the current default is; a supplied config that disagrees is rejected.
-        A QMIX resume restores into a shape-only template, so restoring never
-        holds a second replay. Once training starts, train keeps no reference
-        to the first learner state; a QMIX block then holds the previous
-        replay and the new one plus working space (plan for up to about three
-        replays). Failed recovery retains its explicit retry marker.
+        A QMIX or PQN-VDN resume restores into a shape-only template, so
+        restoring never holds a second learner. Once training starts, train
+        keeps no reference to the first learner state; a QMIX block then holds
+        the previous replay and the new one plus working space (plan for up to
+        about three replays). Failed recovery retains its explicit retry
+        marker.
 
     validation_opponents : sequence of System, Policy or str, optional
         Live methods or reload references for a new frozen panel. A new run cannot
@@ -699,6 +776,21 @@ def train(
             pinned_opponent=config.pinned_opponent,
             qmix=config.qmix,
         )
+    elif config.pqn is not None:
+        from marl_battlegrounds.training import pqn_learner
+
+        collection, state = pqn_learner.init_pqn_learner(
+            schedule=schedule,
+            seed=config.seed,
+            shaping=config.shaping,
+            shaping_coefficient=config.shaping_coefficient,
+            shaping_mode=config.shaping_mode,
+            metrics=config.metrics,
+            recording=config.recording,
+            pinned_opponent_share=config.pinned_opponent_share,
+            pinned_opponent=config.pinned_opponent,
+            pqn=config.pqn,
+        )
     else:
         collection, state = learner.init_learner(
             schedule=schedule,
@@ -718,17 +810,22 @@ def train(
         from marl_battlegrounds.evaluation.recording_identity import tree_digest
 
         current = state.carry.history.current_variables
-        settings = config.qmix if config.qmix is not None else config.ppo
+        settings = config.qmix or config.pqn or config.ppo
+        payload = (
+            current.params
+            if config.qmix is not None
+            else checkpoints._pqn_actor_item(current.network)  # pyright: ignore[reportPrivateUsage]
+            if config.pqn is not None
+            else current
+        )
         initial = {
             "kind": "actor",
-            "actor_digest": tree_digest(
-                current.params if config.qmix is not None else current
-            ),
+            "actor_digest": tree_digest(payload),
             "input_scale": settings.input_scale,
             "spawn_frame": settings.spawn_frame,
             "schemas": checkpoints.checkpoint_schemas(config.method),
         }
-        if config.qmix is not None:
+        if not is_ppo_method(config.method):
             initial.update(epsilon=0.0, tie_rule=QMIX_TIE_RULE)
         initial_digest = checkpoints._inference_digest(initial)  # pyright: ignore[reportPrivateUsage]
         validation.read_random_initialization(
@@ -736,7 +833,8 @@ def train(
             actor_digest=initial_digest,
             seed_pairs=cast(int, config.random_diagnostic_seed_pairs),
         )
-    # PPO keeps the argument-free call; QMIX also records Flashbax.
+    # PPO keeps the argument-free call; QMIX also records Flashbax, PQN-VDN
+    # records the same set as PPO.
     identity = (
         checkpoints.runtime_identity()
         if is_ppo_method(config.method)
@@ -753,10 +851,10 @@ def train(
         restored: checkpoints.RestoredCheckpoint | None = None
         if saved is not None:
             assert checkpoint is not None
-            if config.qmix is not None:
+            if not is_ppo_method(config.method):
                 import jax
 
-                # Release the fresh replay before restore reads the saved one.
+                # Release the fresh learner before restore reads the saved one.
                 state = jax.eval_shape(_identity, state)
             restored = checkpoints.restore_checkpoint(
                 checkpoint,
@@ -771,6 +869,7 @@ def train(
                 ppo=config.ppo,
                 method=config.method,
                 qmix=config.qmix,
+                pqn=config.pqn,
             )
             metadata = dict(restored.details["metadata"])
             cursors = metadata.get("log_cursors", {})
@@ -807,6 +906,18 @@ def train(
                 ) != _bank_size(state.carry):
                     raise ValueError(
                         "Saved sampled exposure does not match the source bank"
+                    )
+            if config.pqn is not None:
+                from marl_battlegrounds.training.pqn_learner import (
+                    _bank_size as _pqn_bank_size,  # pyright: ignore[reportPrivateUsage]
+                )
+
+                exposure = host.get("used_exposure")
+                if not isinstance(exposure, dict) or len(
+                    cast(list[int], cast(dict[str, Any], exposure).get("by_source", []))
+                ) != _pqn_bank_size(state.carry):
+                    raise ValueError(
+                        "Saved used exposure does not match the source bank"
                     )
             validate_host_state(root, restored.details, panel=panel)
             if (root / "status.json").is_file():
@@ -963,11 +1074,12 @@ def train(
 def _crosses_interval(before: int, after: int, interval: int) -> bool:
     """Say whether an update count crossed a multiple of the save interval.
 
-    before and after are completed_updates around one block (PPO updates or
-    QMIX optimizer steps); interval is the positive save interval. PPO adds
-    one update per block, so
-    this is its historical ``after % interval == 0`` rule; a QMIX block adds
-    epochs steps, so 24 to 28 crosses 25 while 20 to 24 does not.
+    before and after are completed_updates around one block (PPO updates, or
+    QMIX and PQN-VDN optimizer steps); interval is the positive save interval.
+    PPO adds one update per block, so this is its historical
+    ``after % interval == 0`` rule. A QMIX block adds epochs steps and a
+    PQN-VDN learning block adds epochs times num_minibatches steps (an initial
+    PQN-VDN chunk adds none), so 24 to 28 crosses 25 while 20 to 24 does not.
 
     Examples
     --------
@@ -1115,6 +1227,99 @@ def _random_progress(results: list[dict[str, Any]]) -> dict[str, Any] | None:
     }
 
 
+def _finite_or_marked(value: object, name: str, markers: dict[str, str]) -> object:
+    """Copy a float or nested list of floats, replacing nonfinite values by None.
+
+    Parameters
+    ----------
+    value : object
+        A Python float, bool or int, or a nested list of them (for example a
+        rejected block's (epochs, minibatches) losses after ``tolist()``).
+    name : str
+        Field name used in the markers, such as ``"loss"``.
+    markers : dict[str, str]
+        Mapping this function adds to: one entry per replaced value, keyed
+        by the name plus its indices, such as ``"loss[1,0]"``, with the value
+        "NaN", "+Inf" or "-Inf". Existing entries are kept.
+
+    Returns
+    -------
+    object
+        The same structure with every nonfinite float replaced by None.
+        Finite floats, booleans and integers are returned unchanged; an empty
+        list stays empty.
+
+    Notes
+    -----
+    Host-only and pure apart from adding to markers. The shared JSON writer
+    refuses NaN, so the event keeps every value without disguising it.
+    """
+
+    def clean(item: object, index: tuple[int, ...]) -> object:
+        """Replace one nonfinite float in place of its position."""
+        if isinstance(item, list):
+            return [
+                clean(entry, (*index, position))
+                for position, entry in enumerate(cast(list[object], item))
+            ]
+        if isinstance(item, float) and not math.isfinite(item):
+            label = name if not index else f"{name}[{','.join(map(str, index))}]"
+            markers[label] = (
+                "NaN" if math.isnan(item) else ("+Inf" if item > 0 else "-Inf")
+            )
+            return None
+        return item
+
+    return clean(value, ())
+
+
+def _rejected_block_facts(result: Any) -> dict[str, object]:  # noqa: ANN401
+    """Describe a rejected PQN-VDN block for the learner_update_rejected event.
+
+    Parameters
+    ----------
+    result : PQNUpdateResult
+        Host copy of the rejected block's result.
+
+    Returns
+    -------
+    dict
+        reason (int32 failure code), generated_transitions and
+        active_samples from the kept summary, task_reward_sum and
+        shaping_reward_sum, and the attempted (epochs, minibatches) step
+        flags (steps_performed, steps_finite) and losses. Finite values are
+        written as they are; each nonfinite value is None and the
+        "nonfinite" object names it with its marker.
+
+    Notes
+    -----
+    Host-only; the runner writes the event, then attempt_failed, then raises.
+    No retry happens and no host count changes.
+    """
+    import numpy as np
+
+    summary, metrics = result.summary, result.metrics
+    markers: dict[str, str] = {}
+    facts: dict[str, object] = {
+        "reason": int(result.failure_reason),
+        "generated_transitions": int(summary.real_transitions),
+        "active_samples": int(summary.active_samples),
+        "task_reward_sum": _finite_or_marked(
+            float(summary.task_reward_sum), "task_reward_sum", markers
+        ),
+        "shaping_reward_sum": _finite_or_marked(
+            float(summary.shaping_reward_sum), "shaping_reward_sum", markers
+        ),
+        "steps_performed": np.asarray(metrics.performed).tolist(),
+        "steps_finite": np.asarray(metrics.finite).tolist(),
+        "losses": _finite_or_marked(
+            np.asarray(metrics.loss, dtype=np.float64).tolist(), "losses", markers
+        ),
+    }
+    facts["nonfinite"] = markers
+    return facts
+
+
 class _Run:
     """Own one locked process attempt and its small host bookkeeping.
 
@@ -1122,7 +1327,8 @@ class _Run:
     one learner state and stable compiled updater; it never stores a rollout
     after its update. Files and validation are performed between numerical calls.
     A QMIX run keeps exact Python-integer block, update and sampled-use totals
-    in its host state instead of PPO's policy and value sample counts.
+    in its host state instead of PPO's policy and value sample counts; a
+    PQN-VDN run keeps block, update and used-row totals the same way.
     """
 
     def __init__(
@@ -1149,8 +1355,20 @@ class _Run:
         from marl_battlegrounds.training.validation import resolve_validation_schedule
 
         self.qmix = config.qmix
+        self.pqn = config.pqn
         self.rollout_length = (
-            config.ppo.rollout_length if self.qmix is None else self.qmix.rollout_length
+            self.qmix.rollout_length
+            if self.qmix is not None
+            else self.pqn.rollout_length
+            if self.pqn is not None
+            else config.ppo.rollout_length
+        )
+        self.planned_learning_blocks = (
+            0
+            if self.pqn is None
+            else pqn_planned_learning_blocks(
+                config.total_env_steps // config.num_envs, self.pqn
+            )
         )
         self.root, self.config = root, config
         self.collection, self.state = collection, state
@@ -1199,6 +1417,25 @@ class _Run:
                     "by_opponent": [0] * 21,
                 },
             )
+        if self.pqn is not None:
+            from marl_battlegrounds.training.pqn_learner import (
+                _bank_size as _pqn_bank_size,  # pyright: ignore[reportPrivateUsage]
+            )
+
+            del defaults["used_policy_samples"], defaults["used_value_samples"]
+            defaults.update(
+                completed_blocks=0,
+                learning_blocks=0,
+                used_sequences=0,
+                used_td_pairs=0,
+                used_agent_utilities=0,
+                used_prefix_td_pairs=0,
+                used_exposure={
+                    "by_stage": [0] * 17,
+                    "by_source": [0] * _pqn_bank_size(state.carry),
+                    "by_opponent": [0] * 21,
+                },
+            )
         for name, default in defaults.items():
             self.host.setdefault(name, default)
         self.checkpoint = checkpoint
@@ -1213,21 +1450,36 @@ class _Run:
         self.created_at = datetime.fromisoformat(details["created_at"]).timestamp()
         self.reporter = ProgressReporter(enabled=config.verbose)
         self.speed_estimate = TrainingSpeedEstimate() if config.verbose else None
-        if self.qmix is None:
-            self.updater = cast(
-                "_Updater",
-                jax.jit(
-                    partial(update_learner, ppo=config.ppo, method=config.method),
-                    compiler_options=training_compiler_options(),
-                ),
-            )
-        else:
+        if self.qmix is not None:
             from marl_battlegrounds.training.qmix_learner import update_qmix_learner
 
             self.updater = cast(
                 "_Updater",
                 jax.jit(
                     partial(update_qmix_learner, qmix=self.qmix),
+                    compiler_options=training_compiler_options(),
+                ),
+            )
+        elif self.pqn is not None:
+            from marl_battlegrounds.training.pqn_learner import update_pqn_learner
+
+            # The planned count is a static Python int bound once per run.
+            self.updater = cast(
+                "_Updater",
+                jax.jit(
+                    partial(
+                        update_pqn_learner,
+                        pqn=self.pqn,
+                        planned_learning_blocks=self.planned_learning_blocks,
+                    ),
+                    compiler_options=training_compiler_options(),
+                ),
+            )
+        else:
+            self.updater = cast(
+                "_Updater",
+                jax.jit(
+                    partial(update_learner, ppo=config.ppo, method=config.method),
                     compiler_options=training_compiler_options(),
                 ),
             )
@@ -1239,6 +1491,7 @@ class _Run:
                     config.num_envs,
                     rollout_length=self.rollout_length,
                     fractions=config.validation_fractions,
+                    initial_rounds=0 if self.pqn is None else self.pqn.initial_rounds,
                 )
             }
             if panel is not None
@@ -1333,7 +1586,11 @@ class _Run:
         """
         if not self.host["saves"] or self.host["report_seconds"] is None:
             return None
-        if self.qmix is None:
+        if self.pqn is not None:
+            remaining_updates = (
+                self.planned_learning_blocks - self.host["learning_blocks"]
+            ) * (self.pqn.epochs * self.pqn.num_minibatches)
+        elif self.qmix is None:
             remaining_updates = math.ceil(
                 (self.config.total_env_steps - self.host["env_steps"])
                 / (self.config.num_envs * self.config.ppo.rollout_length)
@@ -1409,6 +1666,7 @@ class _Run:
             ppo=self.config.ppo,
             method=self.config.method,
             qmix=self.qmix,
+            pqn=self.pqn,
         )
         self.metadata["parent_checkpoint"] = self.checkpoint.name
         seconds = time.monotonic() - started
@@ -1457,8 +1715,9 @@ class _Run:
     def actor(self) -> Path:
         """Export this boundary's exact actor; reuse an identical existing artifact.
 
-        A QMIX export holds only the Q-network parameters, plays greedily and
-        records the optimizer steps behind it.
+        A QMIX export holds only the Q-network parameters and a PQN-VDN export
+        only the network's parameters and statistics; both play greedily and
+        record the optimizer steps behind them.
         """
         from marl_battlegrounds.training.checkpoints import export_system
 
@@ -1466,9 +1725,13 @@ class _Run:
         destination = self.root / "actors" / self.checkpoint.name
         destination.parent.mkdir(exist_ok=True)
         variables = self.state.carry.history.current_variables
-        settings = self.config.ppo if self.qmix is None else self.qmix
+        settings = self.qmix or self.pqn or self.config.ppo
         export_system(
-            variables if self.qmix is None else variables.params,
+            variables.params
+            if self.qmix is not None
+            else variables.network
+            if self.pqn is not None
+            else variables,
             destination,
             input_scale=settings.input_scale,
             spawn_frame=settings.spawn_frame,
@@ -1480,7 +1743,7 @@ class _Run:
                 "checkpoint_id": self.checkpoint.name,
                 **(
                     {}
-                    if self.qmix is None
+                    if is_ppo_method(self.config.method)
                     else {"optimizer_steps": self.host["completed_updates"]}
                 ),
                 # A later run that pins this export inherits its exposure.
@@ -1699,7 +1962,7 @@ class _Run:
                 collected, rollout = collect_training_rollout(
                     self.collection,
                     self.state.carry,
-                    length=self.rollout_length,
+                    length=self.block_length(),
                     writer=self.writer,
                 )
                 # The required update-result transfer is the only learner sync.
@@ -1707,9 +1970,16 @@ class _Run:
                 host_result = jax.device_get(result)
                 seconds = time.monotonic() - started
                 accepted = (
-                    host_result.performed if self.qmix is None else host_result.accepted
+                    host_result.performed
+                    if is_ppo_method(self.config.method)
+                    else host_result.accepted
                 )
                 if bool(host_result.failed) or not bool(accepted):
+                    if self.pqn is not None:
+                        self.event(
+                            "learner_update_rejected",
+                            **_rejected_block_facts(host_result),
+                        )
                     raise RuntimeError(
                         "Learner update failed: "
                         f"reason {int(host_result.failure_reason)}"
@@ -1719,7 +1989,11 @@ class _Run:
                 updates_before = self.host["completed_updates"]
                 self.host["env_steps"] += int(summary.real_transitions)
                 self.host["actor_decisions"] += int(summary.live_actor_decisions)
-                if self.qmix is None:
+                if self.qmix is not None:
+                    self._count_qmix_block(host_result)
+                elif self.pqn is not None:
+                    self._count_pqn_block(host_result)
+                else:
                     self.host["completed_updates"] += 1
                     self.host["used_policy_samples"] += sum(
                         int(x) for x in np.asarray(metrics.actor_samples).flat
@@ -1727,8 +2001,6 @@ class _Run:
                     self.host["used_value_samples"] += sum(
                         int(x) for x in np.asarray(metrics.critic_samples).flat
                     )
-                else:
-                    self._count_qmix_block(host_result)
                 for name in (
                     "stage_completed",
                     "stage_score_sums",
@@ -1747,12 +2019,25 @@ class _Run:
                 self.host["elapsed_seconds"] = (
                     self.prior_elapsed + time.monotonic() - self.start
                 )
-                if self.qmix is not None:
-                    row = self._qmix_row(host_result, seconds)
+                if self.qmix is not None or self.pqn is not None:
+                    row = (
+                        self._qmix_row(host_result, seconds)
+                        if self.qmix is not None
+                        else self._pqn_row(host_result, seconds)
+                    )
                     append_jsonl(self.root / "training_updates.jsonl", row)
                     # Free the block's device arrays before saving or validating.
                     del rollout, collected, result, next_state
-                    self._after_block(row, summary, seconds, updates_before, interval)
+                    self._after_block(
+                        row,
+                        summary,
+                        seconds,
+                        updates_before,
+                        interval,
+                        phase="warmup"
+                        if self.qmix is not None
+                        else "initial_collection",
+                    )
                     continue
                 row = {
                     "schema_version": 1,
@@ -1889,6 +2174,16 @@ class _Run:
                     "unit": "TD pairs used by optimizer steps; repeats count again",
                     "used_td_pairs": self.host["used_td_pairs"],
                     **self.host["sampled_exposure"],
+                }
+            if self.pqn is not None:
+                exposure["used_exposure"] = {
+                    "unit": (
+                        "TD pairs used by optimizer steps, by left row; each "
+                        "epoch counts again and kept rows are used again"
+                    ),
+                    "used_td_pairs": self.host["used_td_pairs"],
+                    "used_prefix_td_pairs": self.host["used_prefix_td_pairs"],
+                    **self.host["used_exposure"],
                 }
             exposure.update(
                 {
@@ -2062,6 +2357,152 @@ class _Run:
             "learning_rate": self.qmix.q_lr,
         }
 
+    def _count_pqn_block(self, result: Any) -> None:  # noqa: ANN401
+        """Add one accepted PQN-VDN block to the exact host totals.
+
+        result is the host copy of a PQNUpdateResult. Every accepted block
+        adds one completed block; a learning block (performed) also adds a
+        learning block, epochs * num_minibatches optimizer steps and its used
+        counts and exposure. Totals are Python integers and may exceed int32.
+        """
+        import numpy as np
+
+        assert self.pqn is not None
+        self.host["completed_blocks"] += 1
+        if bool(result.performed):
+            self.host["learning_blocks"] += 1
+            self.host["completed_updates"] += self.pqn.epochs * self.pqn.num_minibatches
+        used = result.used
+        for name in (
+            "used_sequences",
+            "used_td_pairs",
+            "used_agent_utilities",
+            "used_prefix_td_pairs",
+        ):
+            self.host[name] += int(getattr(used, name))
+        exposure = self.host["used_exposure"]
+        for key, field_name in (
+            ("by_stage", "exposure_by_stage"),
+            ("by_source", "exposure_by_source"),
+            ("by_opponent", "exposure_by_opponent"),
+        ):
+            counts = cast(list[int], np.asarray(getattr(used, field_name)).tolist())
+            totals = cast(list[int], exposure[key])
+            exposure[key] = [
+                total + int(count) for total, count in zip(totals, counts, strict=True)
+            ]
+
+    def _pqn_row(self, result: Any, seconds: float) -> dict[str, Any]:  # noqa: ANN401
+        """Build one PQN-VDN training-log row from host totals and a block result.
+
+        Parameters
+        ----------
+        result : PQNUpdateResult
+            Host copy of the block's result, already added to the host totals
+            by _count_pqn_block.
+        seconds : float
+            The block's collection-plus-update wall time in seconds.
+
+        Returns
+        -------
+        dict
+            JSON-ready row for training_updates.jsonl: the shared counters,
+            completed_blocks, learning_blocks, completed_updates (optimizer
+            steps), initial_rounds_completed (at most W), the exact used
+            totals and used_exposure (cumulative, like the other counts),
+            task and shaping reward means, and loss, mean_q and mean_target
+            (averages over the block's minibatch steps; None for an initial
+            chunk). epsilon is the rate current actors hold at this boundary
+            (1.0 before W, then the block clock's value, a float64 host
+            value); learning_rate is the scheduled rate of the block's last
+            applied step (None for an initial chunk). No PPO or QMIX-only keys.
+
+        Notes
+        -----
+        Reads host values only; adds no device work or synchronization.
+        """
+        import numpy as np
+
+        from marl_battlegrounds.baselines.pqn import (
+            pqn_epsilon_reference,
+            pqn_learning_rate,
+        )
+
+        assert self.pqn is not None
+        summary, metrics = result.summary, result.metrics
+        learned = bool(result.performed)
+        rounds = self.host["env_steps"] // self.config.num_envs
+        planned = self.planned_learning_blocks
+
+        def mean(values: object) -> float | None:
+            """Average one (epochs, minibatches) metric over this block's steps."""
+            return float(np.mean(np.asarray(values))) if learned else None
+
+        return {
+            "schema_version": 1,
+            "attempt_id": self.metadata["attempt_id"],
+            "wall_seconds": max(0.0, time.time() - self.created_at),
+            **{
+                key: self.host[key]
+                for key in (
+                    "env_steps",
+                    "actor_decisions",
+                    "completed_blocks",
+                    "learning_blocks",
+                    "completed_updates",
+                )
+            },
+            "initial_rounds_completed": min(rounds, self.pqn.initial_rounds),
+            **{
+                key: self.host[key]
+                for key in (
+                    "used_sequences",
+                    "used_td_pairs",
+                    "used_agent_utilities",
+                    "used_prefix_td_pairs",
+                    "used_exposure",
+                    "training_seconds",
+                    "elapsed_seconds",
+                )
+            },
+            "collection_update_seconds": seconds,
+            "task_reward_mean": float(summary.task_reward_sum)
+            / int(summary.active_samples)
+            if int(summary.active_samples)
+            else None,
+            "shaping_mean": float(summary.shaping_reward_sum)
+            / int(summary.real_transitions),
+            "loss": mean(metrics.loss),
+            "mean_q": mean(metrics.mean_q),
+            "mean_target": mean(metrics.mean_target),
+            "epsilon": 1.0
+            if rounds < self.pqn.initial_rounds
+            else pqn_epsilon_reference(self.host["learning_blocks"], planned, self.pqn),
+            "learning_rate": pqn_learning_rate(
+                self.host["completed_updates"] - 1, planned, self.pqn
+            )
+            if learned
+            else None,
+        }
+
+    def block_length(self) -> int:
+        """Return the rounds to request for the next collection block.
+
+        PPO and QMIX always request rollout_length. PQN-VDN requests
+        ``min(T, W - r)`` during its W initial rounds (a chunk of T, then one
+        of H) and T afterwards; collection stops at the exact budget, so a
+        final block may hold fewer real rounds. Reads host counts only.
+        """
+        if self.pqn is None:
+            return self.rollout_length
+        rounds = self.host["env_steps"] // self.config.num_envs
+        initial = self.pqn.initial_rounds
+        return (
+            min(self.rollout_length, initial - rounds)
+            if rounds < initial
+            else self.rollout_length
+        )
+
     def _after_block(
         self,
         row: dict[str, Any],
@@ -2069,19 +2510,24 @@ class _Run:
         seconds: float,
         updates_before: int,
         interval: int,
+        *,
+        phase: str,
     ) -> None:
-        """Apply the shared capture and save rules after one QMIX block.
+        """Apply the shared capture and save rules after one QMIX or PQN-VDN block.
 
-        row is the block's log row from _qmix_row; summary is its host
-        UpdateSummary; seconds is the block's collection-plus-update time;
-        updates_before is the optimizer-step total before the block; interval
-        is the resolved checkpoint_interval_updates. A capture point (a
-        validation fraction, an extra save point or the final step) or a
-        crossed multiple of the interval saves the learner and finishes
-        pending captures, exactly as for PPO. Status reports "warmup" until
-        the first learning block, then "training", with the row's loss,
-        Q values, reward means, epsilon and the learning-block count. Writes
-        checkpoint and status files.
+        row is the block's log row from _qmix_row or _pqn_row; summary is its
+        host UpdateSummary; seconds is the block's collection-plus-update
+        time; updates_before is the optimizer-step total before the block;
+        interval is the resolved checkpoint_interval_updates; phase is the
+        status name before the first learning block ("warmup" for QMIX,
+        "initial_collection" for PQN-VDN). A capture point (a validation
+        fraction, an extra save point or the final step) or a crossed
+        multiple of the interval saves the learner and finishes pending
+        captures, exactly as for PPO; blocks without optimizer steps never
+        cross an interval. Status reports phase until the first learning
+        block, then "training", with the row's loss, Q values, reward means,
+        epsilon and the learning-block count. Writes checkpoint and status
+        files.
         """
         steps = self.host["env_steps"]
         capture = (
@@ -2100,7 +2546,7 @@ class _Run:
             self.save()
             self.finish_pending()
         self.set_status(
-            "training" if self.host["learning_blocks"] else "warmup",
+            "training" if self.host["learning_blocks"] else phase,
             recent_transitions_per_second=int(summary.real_transitions) / seconds,
             learning_blocks=self.host["learning_blocks"],
             **{

@@ -6,7 +6,13 @@ and leave original records untouched. No learner or environment runs here.
 Reports name saved artifacts and sum only phase-owner timing records. An open
 checkpoint recovery must hide stale completion and results until recovery ends.
 Selection keeps compatible PPO and QMIX rows together, drops QMIX warmup actors
-with zero optimizer steps and rejects missing or malformed QMIX counts.
+with zero optimizer steps and rejects missing or malformed QMIX counts; the
+same holds for PQN-VDN rows, whose initial-collection actors have zero
+optimizer steps. A PQN-VDN run's report reads its "pqn" settings block, adds
+its summary line (optimizer steps, learning blocks, used and kept-row pairs,
+initial transitions never learned, capped by the transitions generated so far)
+and draws pqn_curves from scalar columns only, keeping the used_exposure
+dictionary out of the CSV.
 """
 
 import json
@@ -502,3 +508,88 @@ def test_selection_keeps_compatible_qmix_rows_and_drops_warmup_actors() -> None:
         malformed = _result("q", 128, 0.6, method="qmix", optimizer_steps=bad)
         with pytest.raises(ValueError, match="optimizer_steps"):
             confirmation_candidates([malformed, rows[3]], final_checkpoint_id="final")
+
+
+def test_selection_keeps_compatible_pqn_rows_and_drops_initial_actors() -> None:
+    rows = [
+        _result("initial", 32, 0.9, method="pqn_vdn", optimizer_steps=0),
+        _result("pqn", 48, 0.6, method="pqn_vdn", optimizer_steps=2),
+        _result("q", 64, 0.7, method="qmix", optimizer_steps=1),
+        _result("final", 80, 0.5, method="pqn_vdn", optimizer_steps=6),
+    ]
+    assert confirmation_candidates(rows, final_checkpoint_id="final") == (
+        "q",
+        "pqn",
+        "final",
+    )
+    for bad in (None, -1, True, 1.0):
+        malformed = _result("pqn", 48, 0.6, method="pqn_vdn", optimizer_steps=bad)
+        with pytest.raises(ValueError, match="optimizer_steps"):
+            confirmation_candidates([malformed, rows[3]], final_checkpoint_id="final")
+
+
+def test_a_pqn_report_uses_its_settings_summary_line_and_figure(
+    tmp_path: Path,
+) -> None:
+    from marl_battlegrounds.training.analysis import (
+        _settings,  # pyright: ignore[reportPrivateUsage]
+    )
+
+    config = {
+        "method": "pqn_vdn",
+        "seed": 7,
+        "num_envs": 4,
+        "pqn": {"rollout_length": 4, "input_scale": 1.0, "spawn_frame": "left"},
+        "ppo": {"input_scale": 9.0},
+    }
+    assert _settings(config)["rollout_length"] == 4
+    root = tmp_path / "run"
+    root.mkdir()
+    (root / "run_details.json").write_text(
+        json.dumps({"run_id": "Example", "config": config})
+    )
+    exposure = {"by_stage": [4] + [0] * 16, "by_source": [4], "by_opponent": [4]}
+    updates = [
+        {
+            "env_steps": 16,
+            "completed_updates": 0,
+            "learning_blocks": 0,
+            "used_td_pairs": 0,
+            "used_prefix_td_pairs": 0,
+            "used_exposure": {**exposure, "by_stage": [0] * 17},
+            "loss": None,
+            "epsilon": 1.0,
+        },
+        {
+            "env_steps": 40,
+            "completed_updates": 2,
+            "learning_blocks": 1,
+            "used_td_pairs": 20,
+            "used_prefix_td_pairs": 8,
+            "used_exposure": exposure,
+            "loss": 1.5,
+            "epsilon": 0.01,
+        },
+    ]
+    (root / "training_updates.jsonl").write_text(
+        "".join(json.dumps(row) + "\n" for row in updates)
+    )
+    (root / "status.json").write_text(json.dumps({"status": "complete"}))
+    report = analyze([root], output_dir=tmp_path / "report")
+    assert report["runs"][0]["input_scale"] == 1.0
+    assert report["runs"][0]["spawn_frame"] == "left"
+    assert Path(report["artifacts"]["pqn_png"]).read_bytes().startswith(b"\x89PNG")
+    assert "Share Of Used Pairs" in Path(report["artifacts"]["pqn_svg"]).read_text()
+    header = Path(report["artifacts"]["curve"]).read_text().splitlines()[0]
+    assert "used_prefix_td_pairs" in header and "used_exposure" not in header
+    summary = Path(report["artifacts"]["summary"]).read_text()
+    assert "Optimizer steps: 2. Learning blocks: 1." in summary
+    assert "of which pairs starting on kept rows: 8." in summary
+    assert "Initial random transitions generated but never learned: 16." in summary
+    # A run saved before round T has generated fewer initial transitions.
+    early = {**updates[0], "env_steps": 8}
+    (root / "training_updates.jsonl").write_text(json.dumps(early) + "\n")
+    (root / "status.json").write_text(json.dumps({"status": "incomplete"}))
+    report = analyze([root], output_dir=tmp_path / "early-report")
+    summary = Path(report["artifacts"]["summary"]).read_text()
+    assert "Initial random transitions generated but never learned: 8." in summary

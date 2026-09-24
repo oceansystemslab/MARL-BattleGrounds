@@ -1,10 +1,10 @@
 """Load optional baseline components without adding cost to environment imports.
 
-The inputs and actions modules use base JAX dependencies. The ppo and qmix
-modules need the training extra. Importing this package alone loads neither JAX
-nor Flax. Use ppo.make_ppo_system or qmix.make_qmix_system for an initialized,
-untrained M8 System; these components do not start training or load a
-deployment checkpoint.
+The inputs and actions modules use base JAX dependencies. The ppo, qmix and
+pqn modules need the training extra. Importing this package alone loads neither
+JAX nor Flax. Use ppo.make_ppo_system, qmix.make_qmix_system or
+pqn.make_pqn_system for an initialized, untrained M8 System; these components
+do not start training or load a deployment checkpoint.
 """
 
 # Exports are loaded by __getattr__ so a base import stays light.
@@ -13,7 +13,7 @@ from importlib import import_module
 from importlib.util import find_spec
 from types import ModuleType
 
-__all__ = ["actions", "inputs", "ppo", "qmix"]
+__all__ = ["actions", "inputs", "ppo", "pqn", "qmix"]
 
 
 def __getattr__(name: str) -> ModuleType:
@@ -22,7 +22,8 @@ def __getattr__(name: str) -> ModuleType:
     Parameters
     ----------
     name : str
-        One of actions, inputs, ppo or qmix. Other names raise AttributeError.
+        One of actions, inputs, ppo, qmix or pqn. Other names raise
+        AttributeError.
 
     Returns
     -------
@@ -32,14 +33,14 @@ def __getattr__(name: str) -> ModuleType:
     Raises
     ------
     ImportError
-        PPO or QMIX is requested without the optional Flax and Optax
+        PPO, QMIX or PQN is requested without the optional Flax and Optax
         dependencies.
     AttributeError
         The name is not part of the package interface.
     """
     if name not in __all__:
         raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
-    if name in ("ppo", "qmix") and any(
+    if name in ("ppo", "qmix", "pqn") and any(
         find_spec(package) is None for package in ("flax", "optax")
     ):
         raise ImportError(

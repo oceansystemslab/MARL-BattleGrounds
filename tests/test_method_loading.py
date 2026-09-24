@@ -1,9 +1,9 @@
 """Check the one reference loader and the pinned-opponent evidence classes.
 
 load_method turns the three built-in names into their Policies, an exported
-actor directory into its method's PPO System (or a greedy QMIX System for a
-QMIX export, which then plays a complete two-entrant tournament), and a
-module:function factory
+actor directory into its method's PPO System (or a greedy QMIX or PQN-VDN
+System for such an export, which then plays a complete two-entrant
+tournament), and a module:function factory
 into the Policy or System it returns; it refuses a learner checkpoint
 directory, an empty or unknown reference and a factory that returns anything
 else, and a factory's own error keeps its type. The command line's factory
@@ -162,6 +162,39 @@ def test_evidence_classes_for_built_ins_factories_and_unlinked_exports(
     assert declared["source"] == "declared export"
     assert declared["exposure"] == "unknown"
     assert declared["familiar_scenarios"] == list(range(1, 9))
+
+
+def test_a_pqn_export_loads_as_its_greedy_system(tmp_path: Path) -> None:
+    from marl_battlegrounds.baselines import pqn
+
+    network = pqn.initialize_pqn(jax.random.key(5), planned_learning_blocks=1).network
+    exported = export_system(
+        network,
+        tmp_path / "actor",
+        metadata={
+            "run_id": "loading",
+            "seed": 5,
+            "env_steps": 0,
+            "checkpoint_id": "c" * 64,
+            "optimizer_steps": 0,
+        },
+        spawn_frame="left",
+        method="pqn_vdn",
+    )
+    loaded = load_method(str(exported))
+    assert isinstance(loaded, System) and loaded.execution == "jax"
+    assert float(loaded.variables.epsilon) == 0.0
+    tournament = marl_bgs.run_tournament(
+        (loaded, "random"),
+        maps=[47],
+        episodes_per_pair=2,
+        max_steps=4,
+        num_envs=2,
+        chunk_size=2,
+        metrics="none",
+    )
+    assert tournament.status == "complete"
+    assert len(tournament.table("tournament_rankings")["rank"]) == 2
 
 
 def test_a_qmix_export_loads_as_its_greedy_system(tmp_path: Path) -> None:

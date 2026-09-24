@@ -266,9 +266,10 @@ class TrainingCollection:
     variables digest, evidence, memory rule). host_opponent is the mutable
     HostOpponent of a pinned host method, else None; a collection that has one
     serves each training round once and must not be replayed.
-    actor_variables_at_step is None (the default, used by PPO), or the
-    learner's ActorVariablesAtStep hook, which sets values such as QMIX's
-    exploration rate on the shared current variables before each decision.
+    actor_variables_at_step is None (the default, used by PPO and PQN-VDN,
+    whose rate changes only between blocks), or the learner's
+    ActorVariablesAtStep hook, which sets values such as QMIX's exploration
+    rate on the shared current variables before each decision.
     Reuse this descriptor across blocks to reuse compiled functions. It is not
     a PyTree or a durable checkpoint and must stay outside numerical carry.
     """

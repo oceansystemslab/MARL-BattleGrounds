@@ -2,7 +2,8 @@
 
 Help remains independent of training backends. These dispatch checks do not
 replace the runner's real collect/update/save/resume workflow tests. A QMIX
-JSON config reaches the same public train function with its qmix settings.
+JSON config reaches the same public train function with its qmix settings,
+and a PQN-VDN JSON config with its pqn settings and a 1600-step interval.
 """
 
 import json
@@ -101,4 +102,44 @@ def test_train_cli_passes_a_qmix_config_to_the_shared_function(
     )
     assert calls[0].method == "qmix" and calls[0].qmix is not None
     assert (calls[0].qmix.rollout_length, calls[0].qmix.buffer_size) == (8, 64)
+    assert calls[0].checkpoint_interval_updates == 1600
+
+
+def test_train_cli_passes_a_pqn_config_to_the_shared_function(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    config = tmp_path / "config.json"
+    config.write_text(
+        json.dumps(
+            {
+                "method": "pqn_vdn",
+                "num_envs": 4,
+                "total_env_steps": 176,
+                "pqn": {
+                    "rollout_length": 4,
+                    "memory_window": 2,
+                    "epochs": 1,
+                    "num_minibatches": 2,
+                },
+            }
+        )
+    )
+    calls: list[runner.TrainConfig] = []
+
+    def fake_train(
+        configuration: runner.TrainConfig, **kwargs: object
+    ) -> runner.TrainResult:
+        del kwargs
+        calls.append(configuration)
+        return runner.TrainResult(
+            tmp_path, tmp_path / "actor", None, 176, 20, "complete", ()
+        )
+
+    monkeypatch.setattr(runner, "train", fake_train)
+    assert (
+        _cli.main(["train", "--config", str(config), "--output-dir", str(tmp_path)])
+        == 0
+    )
+    assert calls[0].method == "pqn_vdn" and calls[0].pqn is not None
+    assert (calls[0].pqn.rollout_length, calls[0].pqn.memory_window) == (4, 2)
     assert calls[0].checkpoint_interval_updates == 1600

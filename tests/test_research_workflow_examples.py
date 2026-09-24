@@ -6,7 +6,11 @@ seed execution with batched execution. Updates are illustrative counters, not
 an optimizer or a learning claim. Existing restart tests own writer rollback.
 The PPO example passes each method through the shared public workflow and
 rejects attempts to override the method owned by a config or saved checkpoint.
-The QMIX example passes its tiny QMIX settings through the same workflow.
+The QMIX example passes its tiny QMIX settings through the same workflow, and
+the PQN-VDN example its tiny pqn settings, with the curriculum and shaping
+switches reaching the config and --evaluate playing "tdm-alpha" in one
+evaluation and one two-entrant tournament; the PQN-VDN example refuses those
+switches with --config or --resume-from before any training call.
 """
 
 import sys
@@ -23,6 +27,7 @@ import pytest
 from examples import episode_tracking as curriculum
 from examples import evaluation as evaluation_example
 from examples import mappo_training as training_example
+from examples import pqn_training as pqn_example
 from examples import qmix_training as qmix_example
 from examples import recorded_rollout as recorded
 from examples import research_methods
@@ -350,3 +355,81 @@ def test_qmix_example_runs_the_shared_public_workflow(
     assert config.checkpoint_interval_updates == 1600
     assert kwargs == {"output_dir": tmp_path, "resume_from": None}
     assert loaded == [actor]
+
+
+def test_pqn_example_runs_the_shared_public_workflow(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from marl_battlegrounds import training
+
+    calls: list[tuple[training.TrainConfig | None, dict[str, object]]] = []
+    played: list[tuple[str, object]] = []
+    loaded: list[Path] = []
+    actor = tmp_path / "final-actor"
+
+    def train(
+        config: training.TrainConfig | None, **kwargs: object
+    ) -> training.TrainResult:
+        calls.append((config, kwargs))
+        return training.TrainResult(tmp_path, actor, None, 176, 20, "complete", ())
+
+    def load(path: Path) -> object:
+        loaded.append(path)
+        return "loaded"
+
+    def evaluate(system: object, opponent: object, **_kwargs: object) -> None:
+        played.append(("evaluate", opponent))
+
+    def tournament(entrants: tuple[object, ...], **_kwargs: object) -> None:
+        played.append(("tournament", entrants))
+
+    def analyze(paths: list[Path], **_kwargs: object) -> dict[str, object]:
+        return {"artifacts": {"summary": str(tmp_path / "summary.md")}}
+
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "pqn_training.py",
+            "--output-dir",
+            str(tmp_path),
+            "--curriculum",
+            "--shaping",
+            "--evaluate",
+        ],
+    )
+    monkeypatch.setattr(training, "train", train)
+    monkeypatch.setattr(training, "load_system", load)
+    monkeypatch.setattr(training, "analyze", analyze)
+    monkeypatch.setattr(marl_bgs, "evaluate", evaluate)
+    monkeypatch.setattr(marl_bgs, "run_tournament", tournament)
+    pqn_example.main()
+    config, kwargs = calls[0]
+    assert config is not None and config.method == "pqn_vdn" and config.pqn is not None
+    assert (config.num_envs, config.total_env_steps) == (4, 176)
+    assert (config.pqn.rollout_length, config.pqn.memory_window) == (4, 2)
+    assert config.curriculum and config.shaping
+    assert config.checkpoint_interval_updates == 1600
+    assert config.validation_opponents is None and config.validation_panel is None
+    assert kwargs == {"output_dir": tmp_path, "resume_from": None}
+    assert loaded == [actor]
+    assert played == [
+        ("evaluate", "tdm-alpha"),
+        ("tournament", ("loaded", "tdm-alpha")),
+    ]
+    # Curriculum and shaping flags cannot silently vanish into a saved config.
+    for extra in (
+        (
+            "--output-dir",
+            str(tmp_path / "other"),
+            "--config",
+            "saved.json",
+            "--shaping",
+        ),
+        ("--resume-from", str(tmp_path), "--curriculum"),
+    ):
+        monkeypatch.setattr(sys, "argv", ["pqn_training.py", *extra])
+        with pytest.raises(SystemExit) as error:
+            pqn_example.main()
+        assert error.value.code == 2
+    assert len(calls) == 1

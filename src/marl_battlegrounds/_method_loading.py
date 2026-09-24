@@ -88,7 +88,7 @@ def load_method(reference: str) -> Policy | System:
     reference : str
         Checked in this order. A built-in Policy name ("random", "tdm-alpha" or
         "tdm-beta", as ``policy`` defines them) gives that Policy. Otherwise an
-        existing directory is loaded as an exported PPO or QMIX actor with
+        existing directory is loaded as an exported PPO, QMIX or PQN-VDN actor with
         ``marl_battlegrounds.training.load_system``; it must be an actor
         export, not a learner checkpoint, and needs the training extra.
         Otherwise the text must be a ``module:function`` factory (see

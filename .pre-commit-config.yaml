@@ -7,13 +7,15 @@ repos:
     hooks:
       - id: trailing-whitespace
       - id: end-of-file-fixer
+        # Hashed JaxMARL copies keep upstream bytes; two have no final newline.
+        exclude: ^tests/fixtures/baseline_donor/source/jaxmarl/
       - id: check-yaml
       - id: check-toml
       - id: check-merge-conflict
       - id: check-added-large-files
         args: ["--maxkb=1024"]
         # The hashed donor fixtures retain full gradients and Adam state.
-        exclude: ^tests/fixtures/baseline_donor/(recurrent_mappo|ppo_variants|qmix|mappo_registration_params)\.npz$
+        exclude: ^tests/fixtures/baseline_donor/(recurrent_mappo|ppo_variants|qmix|mappo_registration_params|pqn)\.npz$
 
   - repo: local
     hooks:

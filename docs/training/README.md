@@ -7,16 +7,17 @@ decisions and their limits, use the [baseline methods record](baseline_methods.m
 The `marl_battlegrounds.training` package prepares verified maps, samples
 configurations and collects exact experience budgets with optional curriculum,
 score shaping and self-play history. The `marl_battlegrounds.baselines` package
-provides input encoders, exact action helpers and the PPO and QMIX calculations.
-The optional trainer joins these components into recurrent and feedforward
-MAPPO and IPPO runs and recurrent QMIX runs with compact replay,
-with learner checkpoints, frozen actor loading, validation and analysis.
+provides input encoders, exact action helpers and the PPO, QMIX and PQN-VDN
+calculations. The optional trainer joins these components into recurrent and
+feedforward MAPPO and IPPO runs, recurrent QMIX runs with compact replay and
+recurrent PQN-VDN runs without replay, with learner checkpoints, frozen actor
+loading, validation and analysis.
 Collection alone still performs no optimizer update. Ordinary environment and
-collection helpers need only base dependencies; PPO and QMIX need `training`
-(which includes Flashbax for QMIX replay) and automatic plots need `viz`. A
-working trainer is not a claim of learned skill.
+collection helpers need only base dependencies; PPO, QMIX and PQN-VDN need
+`training` (which includes Flashbax for QMIX replay) and automatic plots need
+`viz`. A working trainer is not a claim of learned skill.
 
-Install the existing `training` extra to use PPO or QMIX. In a prepared contributor
+Install the existing `training` extra to use PPO, QMIX or PQN-VDN. In a prepared contributor
 checkout, run the example with:
 
 ```bash
@@ -830,8 +831,8 @@ QMIX default of 1,600 gives the same spacing as PPO's 25 at the defaults:
 102,400 transitions between saves at 32 games (PPO: 25 updates of 128 rounds;
 QMIX: 1,600 steps at 4 per block of 8 rounds). An explicit value is always
 kept. The number is fixed when the config is built, so
-`dataclasses.replace(ppo_config, method="qmix")` keeps PPO's 25 unless that
-call also passes `checkpoint_interval_updates=None`. Exports hold only the
+`dataclasses.replace(ppo_config, method="qmix")` (or `method="pqn_vdn"`)
+keeps PPO's 25 unless that call also passes `checkpoint_interval_updates=None`. Exports hold only the
 Q-network, about 7 MB.
 
 A run keeps the complete checkpoint, replay included, at every boundary with an
@@ -876,6 +877,157 @@ Low-level users import `from marl_battlegrounds.training import qmix_learner`
 and call `qmix_learner.init_qmix_learner`, `update_qmix_learner` and
 `validate_qmix_learner`, with the numerical pieces in
 [baselines.qmix](../../src/marl_battlegrounds/baselines/qmix.py). A short run
+proves software wiring only; it does not show learning or sample efficiency.
+
+## Recurrent PQN-VDN
+
+Choose PQN-VDN with `TrainConfig(method="pqn_vdn")`. PQN-VDN runs use their
+own settings object, `TrainConfig.pqn` (a `PQNConfig`), and leave `ppo` and
+`qmix` alone; saved configs hold a `"pqn"` block and no other. Everything else
+is the same workflow: train, resume, validate, select, export, load, evaluate,
+run tournaments and analyze. The [PQN-VDN example](../../examples/pqn_training.py)
+runs a tiny complete case:
+
+```python
+import marl_battlegrounds as marl_bgs
+from marl_battlegrounds import training
+from marl_battlegrounds.baselines.pqn import PQNConfig
+
+config = training.TrainConfig(
+    method="pqn_vdn",
+    num_envs=4,
+    total_env_steps=176,
+    pqn=PQNConfig(rollout_length=4, memory_window=2, epochs=1, num_minibatches=2),
+)
+result = training.train(config, output_dir="runs/pqn-example")
+actor = training.load_system(result.selected_actor or result.final_actor)
+marl_bgs.evaluate(actor, "tdm-alpha", num_episodes=2, maps=[42], num_envs=2,
+                  phase="validation", output_dir="runs/pqn-example/evaluation")
+training.analyze([result.run_dir], output_dir="runs/pqn-example/analysis")
+```
+
+That example has no validation panel, so it loads the final actor. For real
+checkpoint selection add a panel, for example
+`validation_opponents=("tdm-alpha", "tdm-beta")`, as in
+[A Panel-Backed MAPPO Demonstration](#a-panel-backed-mappo-demonstration);
+Random alone is never the selection panel. Curriculum and reward shaping are the
+usual one-line changes: `curriculum=True`, `shaping=True`, or both (C, RS and
+C-RS). Shaping uses `pqn.gamma`.
+
+**Model and actors.** One shared local Q-network turns each actor's permitted
+inputs and own 512-wide memory into 198 action values: BatchNorm on the input,
+two blocks of Dense 512, BatchNorm and ReLU, a GRU and a Dense head, 4,595,998
+parameters. The team value is the sum of the active actors' values (VDN); there
+is no mixer, critic, physical state, target network or replay. Loaded and
+exported PQN-VDN Systems play greedily: epsilon 0 and, among equal best values,
+the first legal action in the network's own order (mirrored for left-frame
+games). Details and the donor are in the
+[source ledger](source_reuse.md#recurrent-pqn-vdn).
+
+**Normalization.** BatchNorm normalizes with the statistics of each training
+minibatch, counting only real rows and configured slots (padding and empty
+roster slots are left out), and keeps running statistics. Choosing an action
+always uses the saved running statistics and never changes them, so every game
+is played by the same fixed function. The statistics are part of the actor:
+they are saved, exported and part of its identity, so an actor whose weights
+match but whose statistics differ is a different actor. Because the input
+BatchNorm divides each feature by its own spread, `pqn.input_scale` almost
+cancels; it is kept for identity and compatibility, not as a setting to tune.
+At the default 32 games and 16 minibatches each minibatch holds two whole
+games, so statistics come from small batches; see the
+[source ledger](source_reuse.md#deliberate-pqn-vdn-adaptations).
+
+**Initial random experience.** A run first collects W = `memory_window` +
+`rollout_length` rounds (132 by default) with exploration rate 1, which is a
+uniform choice among legal actions; nothing is learned yet. They count in the
+budget. The runner collects them as a chunk of `rollout_length` rounds and a
+chunk of `memory_window` rounds; progress shows **Initial Random Collection**.
+Only the last `memory_window` of those rounds are ever learned, so
+`rollout_length` × `num_envs` initial transitions (4,096 at the defaults) are
+generated but never learned. The run needs at least W + 1 rounds per game.
+
+**Learning blocks.** After W, each block collects `rollout_length` rounds and
+learns once from a window of the last `memory_window` rounds kept from before
+plus the new rounds, per game: `epochs` passes, each shuffling the games and
+taking `num_minibatches` optimizer steps on equal groups of games (4 × 16 = 64
+steps per block at the defaults). Time order is never shuffled and teammates
+stay together. Each game's unroll starts from the memory its actors held when
+they made the oldest kept decision; older weights produced that memory and it
+is not recomputed. Targets are lambda returns (`gamma`, `td_lambda`) from the
+same forward pass, with the best legal value; a real ending (win, loss or
+horizon draw) stops the return, and the end of a block does not. The last row
+of a window only provides the bootstrap target for the row before it, so the
+final budget's last decisions are never a learning target. When the budget
+ends inside a block, that block is shorter.
+
+**Schedules.** The learning rate falls linearly from `q_lr` to 1e-10 over
+N × `epochs` × `num_minibatches` optimizer steps, where N =
+ceil((R − W) / `rollout_length`) learning blocks for R rounds per game
+(`lr_linear_decay=False` keeps it constant). Exploration falls from `eps_start`
+to `eps_finish` over the first `eps_decay_fraction` × N learning blocks, then
+stays; it is 1 during initial collection and changes only between blocks.
+Historical opponents keep the rate they had when captured. Until the first
+learning block is published, every opponent is current self-play.
+
+**Counts.** `completed_updates` counts optimizer steps, not blocks. The log
+adds completed blocks, learning blocks, used sequences, used TD pairs (two
+consecutive real decisions of one game), used actor utilities, used pairs
+starting on kept rows, and `used_exposure` by curriculum stage, source row and
+opponent. Each epoch counts again, and kept rows are used again in the next
+block, so used counts are not new experience. The runner keeps exact whole
+numbers; low-level callers of `update_pqn_learner` receive per-block counts and
+add them up themselves.
+
+**Memory and disk.** One kept row is 25,988 bytes per game plus its actors'
+memory; the kept rows are about 4.6 MB at 32 games. A whole default window is
+about 110 MB of rows, but only one minibatch's games are expanded to network
+inputs at a time (about 27 MB). The 20-slot opponent history holds about 369 MB
+of frozen networks. A complete checkpoint holds the network, optimizer,
+history and kept rows (about 0.43 GB of arrays at 32 games before
+compression); an export holds only the network and its statistics, about 18 MB.
+`checkpoint_interval_updates` counts optimizer steps; its default of 1,600 saves
+every 25 learning blocks at the defaults. Initial chunks take no optimizer steps
+and never cause a periodic save. As for the other methods, a run keeps the
+complete checkpoint at every boundary with an exported actor (initialization,
+each validation fraction, each extra save point and the final boundary) plus
+the two newest recovery saves. A ten-fraction panel run at 32 games therefore
+keeps about 11 complete checkpoints, about 4.8 GB of arrays before compression;
+measured checkpoints took 172-189 MB on disk each. The number is fixed when the
+config is built, so `dataclasses.replace(ppo_config, method="pqn_vdn")` keeps
+PPO's 25 (a save after every 64-step block) unless that call also passes
+`checkpoint_interval_updates=None`.
+
+**Checkpoint and validation points.** Saves and validation happen only at
+reachable block boundaries: before W, at multiples of `rollout_length` capped at
+W; after W, at W + j × `rollout_length` capped at the total. At 32 games and the
+defaults these are 4,096, 4,224, 8,320, 12,416 transitions and so on, never
+8,192. Requested validation fractions round up to these boundaries, and
+`checkpoint_env_steps` must name them exactly. Actors saved before any
+optimizer step (initialization and the end of initial collection) are
+diagnostics only and are never selected.
+
+**Recovery.** A resume restores into a shape-only template. It rejects the
+wrong method, changed PQN settings, impossible counters or a changed layout
+before reading arrays, then checks the kept rows, statistics and exploration
+rates against the saved counters before any recording or log is rewound. If a
+block is rejected (for example a nonfinite loss), the run writes a
+`learner_update_rejected` event with the reason, the block's rewards and each
+step's flags and losses (a NaN or infinite value is written as null and named
+under `nonfinite`), then stops; it never retries on its own. Resume from the last
+checkpoint.
+
+**Reports and tournaments.** A report with a PQN-VDN run adds `pqn_curves.png`
+and `pqn_curves.svg` (loss, used TD pairs per transition, the share of used
+pairs that start on kept rows, and exploration), and the summary names the
+optimizer steps, learning blocks, used pairs and the initial transitions never
+learned. A loaded PQN-VDN actor is an ordinary `System`, so evaluation and
+tournaments use it unchanged, as shown for QMIX above. Repeated greedy games
+with the same seeds are not new independent evidence.
+
+Low-level users import `from marl_battlegrounds.training import pqn_learner`
+and call `pqn_learner.init_pqn_learner`, `update_pqn_learner` and
+`validate_pqn_learner`, with the numerical pieces in
+[baselines.pqn](../../src/marl_battlegrounds/baselines/pqn.py). A short run
 proves software wiring only; it does not show learning or sample efficiency.
 
 ## What The Checks Establish
@@ -1070,7 +1222,10 @@ CLI configuration is a JSON object with `schema_version: 1` and the same
 `TrainConfig` field names. PPO options belong in a nested `ppo` object; a
 QMIX config has `"method": "qmix"` and a nested `qmix` object instead, for
 example `{"method": "qmix", "num_envs": 4, "total_env_steps": 192, "qmix":
-{"rollout_length": 8, "buffer_size": 64, "min_buffer_size": 32}}`. Omitted
+{"rollout_length": 8, "buffer_size": 64, "min_buffer_size": 32}}`, and a
+PQN-VDN config has `"method": "pqn_vdn"` and a nested `pqn` object, for example
+`{"method": "pqn_vdn", "num_envs": 4, "total_env_steps": 176, "pqn":
+{"rollout_length": 4, "memory_window": 2, "epochs": 1, "num_minibatches": 2}}`. Omitted
 fields use the same defaults; unknown fields fail. These commands call the same
 Python functions. For a small CPU development run, save this as `CONFIG.json`:
 
@@ -1184,8 +1339,9 @@ Full checkpoints retain actor/critic parameters, both optimizers, random streams
 game state, separate memories, tracking, curriculum, opponent history and host
 selection state. They bind exact log prefixes and optional recording tokens.
 They publish at initialization, whenever `completed_updates` crosses a multiple
-of `checkpoint_interval_updates` (25 PPO updates or 1,600 QMIX optimizer steps
-by default), declared capture/validation points and the final update. An immutable checkpoint ID includes its actual
+of `checkpoint_interval_updates` (25 PPO updates, or 1,600 QMIX or PQN-VDN
+optimizer steps by default), declared capture/validation points and the final
+update. An immutable checkpoint ID includes its actual
 payload and continuation ancestry; an update number alone is not an identity.
 Ordinary local filesystem rename/fsync semantics are required.
 
@@ -1195,8 +1351,9 @@ Every save still checks the actual source bank carried by the learner, its
 numerical state and its counters. Restore places every array on the selected
 device, including empty recording and metric IDs.
 
-Built-in PPO fixes GPU kernel selection with `xla_gpu_autotune_level=0` on its
-outer collection and update compilations, including recorded collection. This
+Built-in PPO, QMIX and PQN-VDN runs fix GPU kernel selection with
+`xla_gpu_autotune_level=0` on their outer collection and update compilations,
+including recorded collection. This
 avoids choosing different kernels from fresh timing trials after a restart.
 It changes no process-wide JAX setting. Raw numerical helpers remain usable in
 researchers' own compiled loops; the M8 evaluator keeps its existing settings.
@@ -1207,14 +1364,14 @@ global autotune flag. See the [measured engineering checks](#measured-mappo-engi
 This evidence does not promise equality across hardware or library changes.
 
 Frozen actor exports contain only deployment data and provenance. PPO exports
-load as sampled M8 Systems and QMIX exports load as greedy ones, without
-critic or mixer state, optimizer state or training maps. Death
+load as sampled M8 Systems and QMIX and PQN-VDN exports load as greedy ones,
+without critic or mixer state, optimizer state, kept rows or training maps. Death
 and respawn preserve actor memory; episode resets clear it. The training-only
 critic view never enters actor decisions or exported actor memory.
 
 Saved model tags distinguish `recurrent_mappo_128`, `recurrent_ippo_128`,
-`feedforward_mappo_128x128`, `feedforward_ippo_128x128` and
-`recurrent_qmix_256`. The loader reads the
+`feedforward_mappo_128x128`, `feedforward_ippo_128x128`,
+`recurrent_qmix_256` and `recurrent_pqn_vdn_512`. The loader reads the
 validated schema; it never guesses the method from array shapes or filenames.
 Equal actor weights from different methods have different inference identities.
 New variant identities include the model, weights, scale and frame. Historical
@@ -1227,7 +1384,8 @@ execution settings. Actor-only loading supports independent deployment.
 Automatic reports include `run_summary.md`, `learning_curve.csv`,
 `learning_curves.png`, `learning_curves.svg` and validation cell results; a
 report with a QMIX run adds `qmix_curves.png` and `qmix_curves.svg` (loss,
-replay rows, used TD pairs per transition and exploration rate). Analysis
+replay rows, used TD pairs per transition and exploration rate), and one with a
+PQN-VDN run adds `pqn_curves.png` and `pqn_curves.svg`. Analysis
 reads saved evidence without changing original scores or checkpoints. Interrupted
 final validation, selection, export and reporting can resume after training has
 used its exact budget, without collecting another transition.
@@ -1295,9 +1453,10 @@ resumes only its unfinished games. It never updates an actor or resumes training
 Validation uses maps 42–46, mirrored canonical 5v5, K20/H300, and both spawn ends.
 Each seed pair means ten games per opponent across those five maps. Defaults are
 10 routine pairs and 50 confirmation pairs. Initialization cannot be selected.
-Requested progress fractions round up to completed blocks (PPO updates or QMIX
-blocks); final is included. QMIX warmup actors, with no optimizer step, are
-never selected.
+Requested progress fractions round up to completed blocks (PPO updates, QMIX
+blocks, or PQN-VDN's initial chunks and blocks); final is included. QMIX warmup
+actors and PQN-VDN initial-collection actors, with no optimizer step, are never
+selected.
 The best two routine checkpoints plus final, when distinct, receive fresh
 confirmation. The highest native score wins: win 1, draw 0.5, loss 0. Exact ties
 use mean kill difference, then earlier training step, then checkpoint ID.

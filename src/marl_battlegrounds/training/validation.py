@@ -88,11 +88,14 @@ def _publish(path: Path, payload: Mapping[str, Any]) -> None:
 
 @dataclass(frozen=True)
 class ValidationPoint:
-    """One actual update boundary and all requested thresholds that reached it.
+    """One reachable collection boundary and all requested thresholds that reached it.
 
-    requested_steps is a tuple of exact rational-upward-rounded experience targets.
-    env_steps is the actual cumulative experience; update_index counts completed
-    updates. The initial diagnostic has zero for each and is never selectable.
+    requested_steps is a tuple of exact rational-upward-rounded experience
+    targets. env_steps is the actual cumulative experience at the boundary.
+    update_index is the collection-block ordinal of that boundary: the number
+    of accepted collection blocks when it is reached (for PQN this includes
+    initial random blocks, so it is not an optimizer or learning-block count).
+    The initial diagnostic has zero for each and is never selectable.
     """
 
     requested_steps: tuple[int, ...]
@@ -100,20 +103,96 @@ class ValidationPoint:
     update_index: int
 
 
+def _collection_boundary(
+    requested_steps: int,
+    *,
+    total_env_steps: int,
+    num_envs: int,
+    rollout_length: int,
+    initial_rounds: int = 0,
+) -> tuple[int, int]:
+    """Return the first reachable collection boundary at or above a request.
+
+    Parameters
+    ----------
+    requested_steps : int
+        Nonnegative requested experience in environment transitions.
+    total_env_steps : int
+        Positive declared budget, divisible by num_envs; its round count is
+        R = total_env_steps / num_envs.
+    num_envs : int
+        Positive number of game lanes (B).
+    rollout_length : int
+        Positive rounds in a normal collection block (T).
+    initial_rounds : int, default=0
+        Nonnegative rounds collected before normal blocks start (W). Zero is the
+        PPO and QMIX rule. PQN passes W = memory_window + rollout_length; W must
+        then be less than R.
+
+    Returns
+    -------
+    tuple[int, int]
+        ``(steps, ordinal)``. In rounds, reachable boundaries are: zero; before
+        W, multiples of T capped at W; after W, ``W + j * T`` capped at R.
+        steps is the first reachable boundary at or above the request, capped at
+        the total, times B. ordinal is the number of collection blocks that
+        reach it (``ceil(W / T) + ceil((r - W) / T)`` after W, ``ceil(r / T)``
+        before). A request of zero gives ``(0, 0)``.
+
+    Raises
+    ------
+    ValueError
+        A count is not a plain integer in range, the total is not divisible by
+        num_envs, or a positive initial_rounds is not below R.
+
+    Notes
+    -----
+    Integer ceil division only, so results are exact for any Python integer.
+    With ``initial_rounds=0`` this equals the earlier rule
+    ``min(total, ceil(requested / (B * T)) * B * T)``. One helper serves
+    explicit save checks, fraction resolution, learner validation and host
+    recovery; no list of every block is built. Host-only; no I/O.
+    """
+    requested = _integer(requested_steps, "requested_steps", minimum=0)
+    total = _integer(total_env_steps, "total_env_steps", minimum=1)
+    batch = _integer(num_envs, "num_envs", minimum=1)
+    length = _integer(rollout_length, "rollout_length", minimum=1)
+    initial = _integer(initial_rounds, "initial_rounds", minimum=0)
+    if total % batch:
+        raise ValueError("total_env_steps must be divisible by num_envs")
+    budget = total // batch
+    if initial and initial >= budget:
+        raise ValueError("initial_rounds must be below the total rounds")
+    wanted = -(-requested // batch)
+    if wanted <= 0:
+        return 0, 0
+    if initial and wanted <= initial:
+        rounds = min(initial, -(-wanted // length) * length)
+        return rounds * batch, -(-rounds // length)
+    rounds = min(budget, initial + -(-(wanted - initial) // length) * length)
+    ordinal = -(-initial // length) + -(-(rounds - initial) // length)
+    return rounds * batch, ordinal
+
+
 def resolve_validation_schedule(
     total_env_steps: int,
     num_envs: int,
     rollout_length: int = 128,
     fractions: Sequence[float] = tuple(i / 10 for i in range(1, 11)),
+    *,
+    initial_rounds: int = 0,
 ) -> tuple[ValidationPoint, ...]:
-    """Resolve requested fractions to completed update boundaries, including final.
+    """Resolve requested fractions to reachable collection boundaries, including final.
 
     total_env_steps is positive and divisible by positive num_envs. rollout_length
     is a positive Python integer. fractions must be finite, increasing and inside
-    (0,1]. Decimal strings define their exact fractions. Initial zero and final
-    budget are always included; coincident rounded points are merged. Return an
-    ordered tuple without changing settings, splitting a rollout or doing I/O.
-    Invalid values raise ValueError.
+    (0,1]. Decimal strings define their exact fractions. initial_rounds is the
+    keyword-only count of rounds collected before normal blocks start: 0 (the
+    default, PPO and QMIX) or PQN's memory_window + rollout_length. Each request
+    rounds up to the first reachable boundary from :func:`_collection_boundary`.
+    Initial zero and final budget are always included; coincident rounded points
+    are merged. Return an ordered tuple without changing settings, splitting a
+    rollout or doing I/O. Invalid values raise ValueError.
     """
     total = _integer(total_env_steps, "total_env_steps", minimum=1)
     batch = _integer(num_envs, "num_envs", minimum=1)
@@ -135,16 +214,21 @@ def resolve_validation_schedule(
         amounts.append(fraction)
     if not amounts or amounts[-1] != 1:
         amounts.append(Fraction(1))
-    block = batch * length
     points: dict[int, list[int]] = {0: [0]}
+    ordinals: dict[int, int] = {0: 0}
     for fraction in amounts:
         requested = math.ceil(total * fraction)
-        actual = min(total, math.ceil(requested / block) * block)
-        points.setdefault(actual, []).append(requested)
-    return tuple(
-        ValidationPoint(
-            tuple(dict.fromkeys(requests)), actual, math.ceil(actual / block)
+        actual, ordinal = _collection_boundary(
+            requested,
+            total_env_steps=total,
+            num_envs=batch,
+            rollout_length=length,
+            initial_rounds=initial_rounds,
         )
+        points.setdefault(actual, []).append(requested)
+        ordinals[actual] = ordinal
+    return tuple(
+        ValidationPoint(tuple(dict.fromkeys(requests)), actual, ordinals[actual])
         for actual, requests in sorted(points.items())
     )
 
@@ -212,14 +296,17 @@ def _artifact(path: str | Path) -> Record:
 def _method_fields(identity: Mapping[str, Any]) -> Record:
     """Return the method fields a validation summary adds for its actor.
 
-    identity comes from _artifact. A QMIX actor adds ``method: "qmix"`` and its
-    integer ``optimizer_steps``, so selection can drop warmup actors and resume
-    can check them against the learner; PPO summaries gain nothing, keeping
-    their historical bytes. The task identity and score are unaffected.
+    identity comes from _artifact. A QMIX or PQN-VDN actor adds its method
+    (``"qmix"`` or ``"pqn_vdn"``) and its integer ``optimizer_steps``, so
+    selection can drop actors saved before learning (QMIX warmup, PQN-VDN
+    initial collection) and resume can check them against the learner; PPO
+    summaries gain nothing, keeping their historical bytes. The task identity
+    and score are unaffected.
     """
-    if identity.get("method") != "qmix":
+    method = identity.get("method")
+    if method not in ("qmix", "pqn_vdn"):
         return {}
-    return {"method": "qmix", "optimizer_steps": identity["optimizer_steps"]}
+    return {"method": method, "optimizer_steps": identity["optimizer_steps"]}
 
 
 def create_panel(
@@ -787,8 +874,8 @@ def _validate_system_panel(
     Each opponent keeps independent paired game keys. Interrupted tails remain in
     this process with inactive padding, so opaque clients are never serialized.
     Only complete durable rows feed the shared summary and selection owner. A
-    QMIX actor's summary also carries method and optimizer_steps from
-    _method_fields; PPO summaries are unchanged.
+    QMIX or PQN-VDN actor's summary also carries method and optimizer_steps
+    from _method_fields; PPO summaries are unchanged.
     """
     import jax
 
@@ -1413,8 +1500,8 @@ def _validate(
 ) -> Record:
     """Own one exact checkpoint/panel task and reduce its complete saved M8 rows.
 
-    A QMIX actor's summary also carries method and optimizer_steps from
-    _method_fields; PPO summaries are unchanged.
+    A QMIX or PQN-VDN actor's summary also carries method and optimizer_steps
+    from _method_fields; PPO summaries are unchanged.
     """
     _integer(seed_pairs, "seed_pairs", minimum=1)
     _integer(num_envs, "num_envs", minimum=1)
@@ -1514,9 +1601,10 @@ def validate_checkpoint(
 
     Return complete native score, paired uncertainty, per-cell results and saved
     M8 paths. New panels also report mean_kill_difference for declared selection.
-    A QMIX actor's summary also carries method "qmix" and its optimizer_steps.
-    Incomplete games never select a checkpoint. Invalid settings or conflicting
-    identities raise ValueError; file and method failures keep their cause.
+    A QMIX or PQN-VDN actor's summary also carries its method and its
+    optimizer_steps. Incomplete games never select a checkpoint. Invalid
+    settings or conflicting identities raise ValueError; file and method
+    failures keep their cause.
     The call waits for evaluation to finish on the active backend. It never
     updates a learner or actor.
     """
@@ -1601,7 +1689,8 @@ def validate_random(
     dict
         Complete scientific summary, including actual root, task and actor IDs,
         native scores, paired-game uncertainty, and saved M8 pass paths. A QMIX
-        actor's summary also carries method "qmix" and its optimizer_steps.
+        or PQN-VDN actor's summary also carries its method and its
+        optimizer_steps.
 
     Raises
     ------
@@ -1770,9 +1859,11 @@ def _verified_random_result(
     Notes
     -----
     Read-only host work. Verify actor file hashes and reduce saved M8 rows through
-    summarize_validation. For a QMIX actor the M8 focal variables digest is
-    compared with the digest of the loaded greedy System's variables (the
-    Q-network plus epsilon 0), and the rebuilt summary carries its method and
+    summarize_validation. For a QMIX or PQN-VDN actor the M8 focal variables
+    digest is compared with the digest of the loaded greedy System's variables
+    (the Q-network plus epsilon 0; for PQN-VDN the network is its parameters
+    plus its frozen normalization statistics, so a statistics-only change
+    breaks reuse), and the rebuilt summary carries its method and
     optimizer_steps. No policy call, learner change, writer recovery or new
     evaluation occurs. This is an integrity check, not a usefulness gate.
     """
@@ -1894,10 +1985,11 @@ def _verified_random_result(
     policies, details = entry["policies"], entry["details"]
     focal, opponent = policies["team_a"], policies["team_b"]
     contract = details["evaluation_contract"]
-    # A QMIX System's variables hold its Q-network and the greedy epsilon, so
-    # M8 digests that tree; compare with the verified loaded System's variables.
+    # A QMIX or PQN-VDN System's variables hold its network and the greedy
+    # epsilon (PQN-VDN also its statistics), so M8 digests that tree; compare
+    # with the verified loaded System's variables.
     expected_variables = actor["weight_digest"]
-    if actor.get("method") == "qmix":
+    if actor.get("method") in ("qmix", "pqn_vdn"):
         from marl_battlegrounds.evaluation.recording_identity import tree_digest
         from marl_battlegrounds.training.checkpoints import load_system
 

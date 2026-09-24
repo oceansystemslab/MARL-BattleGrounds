@@ -58,7 +58,8 @@ _PROBE = (
     "print(json.dumps({'identity':runtime_identity(),"
     "'package_file':str(pathlib.Path(marl_battlegrounds.__file__).resolve())}))"
 )
-# QMIX runs also record Flashbax; the PPO probe above keeps its exact bytes.
+# QMIX runs also record Flashbax; the probe above keeps its exact bytes and
+# serves PPO and PQN-VDN, which never load Flashbax.
 _QMIX_PROBE = _PROBE.replace("runtime_identity()", "runtime_identity(method='qmix')")
 
 
@@ -200,7 +201,8 @@ def _runtime(python: Path, source: Path, *, method: str = "mappo") -> Record:
 
     python and source are the package's interpreter and exported source.
     method is the run's training method; "qmix" uses the QMIX probe, which
-    also records Flashbax, and any PPO method uses the historical probe.
+    also records Flashbax, and every other method (PPO and "pqn_vdn") uses the
+    historical probe, whose dependency set has no Flashbax.
     Runs one isolated child process on the CPU environment; raises
     ValueError when the child imports a different source package.
     """

@@ -849,18 +849,18 @@ def test_saved_host_counts_follow_fixed_blocks_beyond_int32(tmp_path: Path) -> N
 def test_saved_results_carry_method_fields_only_for_qmix() -> None:
     actor = {"optimizer_steps": 7}
     io_helpers._check_result_method(
-        {"method": "qmix", "optimizer_steps": 7}, actor, True
+        {"method": "qmix", "optimizer_steps": 7}, actor, "qmix"
     )
-    io_helpers._check_result_method({"score": 0.5}, actor, False)
-    for result, qmix_run in (
-        ({"method": "qmix", "optimizer_steps": 6}, True),
-        ({"method": "qmix", "optimizer_steps": True}, True),
-        ({"optimizer_steps": 7}, True),
-        ({"method": "qmix"}, False),
-        ({"optimizer_steps": 7}, False),
+    io_helpers._check_result_method({"score": 0.5}, actor, "mappo")
+    for result, method in (
+        ({"method": "qmix", "optimizer_steps": 6}, "qmix"),
+        ({"method": "qmix", "optimizer_steps": True}, "qmix"),
+        ({"optimizer_steps": 7}, "qmix"),
+        ({"method": "qmix"}, "mappo"),
+        ({"optimizer_steps": 7}, "mappo"),
     ):
         with pytest.raises(ValueError):
-            io_helpers._check_result_method(result, actor, qmix_run)
+            io_helpers._check_result_method(result, actor, method)
 
 
 def test_actor_payload_rows_leave_epsilon_in_the_state() -> None:

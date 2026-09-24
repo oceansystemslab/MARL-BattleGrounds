@@ -15,7 +15,8 @@ Nested supervisors receive enough grace to stop their separate worker groups
 after a controller crash, natural exit, stop request or deadline.
 Short UTC lifecycle messages keep full process and cleanup facts in saved JSON.
 PPO packages keep their exact import probe; QMIX packages use a probe that also
-records Flashbax. They do not install real training dependencies or start a
+records Flashbax, and PQN-VDN packages use PPO's probe, whose dependency record
+has no Flashbax. They do not install real training dependencies or start a
 learning experiment.
 """
 
@@ -1270,4 +1271,14 @@ def test_qmix_packages_probe_flashbax_while_ppo_keeps_its_probe_bytes(
     launch._runtime(tmp_path / "python", source)
     launch._runtime(tmp_path / "python", source, method="ippo")
     launch._runtime(tmp_path / "python", source, method="qmix")
-    assert probes == [launch._PROBE, launch._PROBE, launch._QMIX_PROBE]
+    launch._runtime(tmp_path / "python", source, method="pqn_vdn")
+    assert probes == [
+        launch._PROBE,
+        launch._PROBE,
+        launch._QMIX_PROBE,
+        launch._PROBE,
+    ]
+    from marl_battlegrounds.training.checkpoints import checkpoint_dependencies
+
+    assert "flashbax" not in checkpoint_dependencies("pqn_vdn")
+    assert checkpoint_dependencies("pqn_vdn") == checkpoint_dependencies("mappo")

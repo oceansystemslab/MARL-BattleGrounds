@@ -5,7 +5,9 @@ methods and import factories share M8 registrations. A local text-JSON client
 stands in for a language-model service. The real short-horizon CPU evaluator
 proves 32-lane padded execution, complete saved rows and no extra provider calls
 after a task completes. No network client is used. Existing tests keep the old
-panel/task hashes and selection covered.
+panel/task hashes and selection covered. A PQN-VDN export is validated against
+a panel holding a host-execution System; its summary names the method and its
+optimizer count.
 """
 
 # pyright: reportPrivateUsage=false
@@ -384,6 +386,53 @@ def test_live_host_validation_keeps_32_lanes_and_reuses_completed_rows(
             )
     assert all(path.read_bytes() == data for path, data in saved.items())
     assert len(client.calls) == before
+
+
+def test_a_pqn_export_is_validated_against_a_host_system_panel(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from marl_battlegrounds.baselines import pqn
+
+    network = pqn.initialize_pqn(jax.random.key(7), planned_learning_blocks=1).network
+    export = checkpoints.export_system(
+        network,
+        tmp_path / "actor",
+        metadata={
+            "run_id": "pqn-validation",
+            "seed": 7,
+            "env_steps": 40,
+            "checkpoint_id": "d" * 64,
+            "optimizer_steps": 2,
+        },
+        spawn_frame="left",
+        method="pqn_vdn",
+    )
+    client = Client()
+    panel = validation.create_panel(
+        opponents=(System("Host", client.apply, execution="host"),),
+        output_dir=tmp_path / "panel",
+    )
+    evaluator = import_module("marl_battlegrounds.evaluation.evaluate")
+    original = evaluator.evaluate
+    original_verify = evaluator._verify_evaluation
+
+    def short(*args: Any, **kwargs: Any) -> Any:  # noqa: ANN401
+        return original(*args, max_steps=1, **kwargs)
+
+    def short_verify(*args: Any, **kwargs: Any) -> Any:  # noqa: ANN401
+        return original_verify(*args, max_steps=1, **kwargs)
+
+    monkeypatch.setattr(evaluator, "evaluate", short)
+    monkeypatch.setattr(evaluator, "_verify_evaluation", short_verify)
+    result = validation.validate_checkpoint(
+        export, panel, output_dir=tmp_path / "task", seed_pairs=1, num_envs=32
+    )
+    assert result["complete"] and result["games"] == 10
+    assert result["method"] == "pqn_vdn" and result["optimizer_steps"] == 2
+    assert (
+        result["actor_digest"] == checkpoints.artifact_identity(export)["actor_digest"]
+    )
+    assert client.calls
 
 
 @pytest.mark.parametrize("method", ("mappo", "ff_ippo"))

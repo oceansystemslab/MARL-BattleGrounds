@@ -9,6 +9,12 @@ Runtime metadata keeps device selectors distinct from verified hardware, and
 optional terminal memory reads preserve missing measurements and read failures.
 Forecasts exclude the first compiled update, wait for warmed measurements, count
 partial batches exactly and restart their timing window on a new attempt.
+PQN-VDN host records follow its offset boundaries at B32, T128 and H4 (W = 132
+initial rounds): the counts, optimizer steps, used sequences, TD pairs,
+kept-row pairs and exposure marginals must match the closed-form totals,
+also beyond int32; routine validation at 4,224 and 8,320 transitions is
+accepted while a result at 8,192 (the old rule's point) is rejected; and the
+initial-collection phase is labelled "Initial Random Collection".
 """
 
 from __future__ import annotations
@@ -19,7 +25,7 @@ import io
 import json
 from pathlib import Path
 from types import SimpleNamespace
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, cast
 from unittest.mock import Mock
 
 import pytest
@@ -697,3 +703,279 @@ def test_panel_score_remains_visible_without_random_hook() -> None:
     text = io_helpers.progress_text({"validation_score": 0.75})
     assert "Average Game Score 0.750" in text
     assert "Win = 1; Draw = 0.5; Loss = 0" in text
+
+
+_PQN = {
+    "rollout_length": 128,
+    "memory_window": 4,
+    "epochs": 4,
+    "num_minibatches": 16,
+    "q_lr": 0.00025,
+    "lr_linear_decay": True,
+    "max_grad_norm": 1.0,
+    "gamma": 0.99,
+    "td_lambda": 0.85,
+    "eps_start": 1.0,
+    "eps_finish": 0.01,
+    "eps_decay_fraction": 0.1,
+    "input_scale": 1.0,
+    "spawn_frame": "left",
+}
+
+
+def _pqn_counts(steps: int, batch: int) -> tuple[int, int]:
+    rounds, initial = steps // batch, 132
+    if rounds <= initial:
+        return -(-rounds // 128), 0
+    learning = -(-(rounds - initial) // 128)
+    return 2 + learning, learning
+
+
+def _pqn_host(
+    steps: int, *, batch: int = 32, pending: bool | None = False
+) -> dict[str, Any]:
+    blocks, learning = _pqn_counts(steps, batch)
+    rounds = steps // batch
+    pairs = 4 * batch * ((rounds - 132) + learning * 3) if learning else 0
+    host = _saved_host(steps=steps, pending=pending)
+    for name in ("used_policy_samples", "used_value_samples"):
+        del host[name]
+    host.update(
+        {
+            "completed_updates": learning * 4 * 16,
+            "completed_blocks": blocks,
+            "learning_blocks": learning,
+            "used_sequences": learning * 4 * batch,
+            "used_td_pairs": pairs,
+            "used_agent_utilities": 2 * pairs,
+            "used_prefix_td_pairs": learning * 4 * batch * 4,
+            "used_exposure": {
+                "by_stage": [pairs] + [0] * 16,
+                "by_source": [pairs, 0],
+                "by_opponent": [pairs] + [0] * 20,
+            },
+        }
+    )
+    return host
+
+
+def _pqn_description(
+    root: Path,
+    host: dict[str, Any],
+    *,
+    batch: int = 32,
+    total: int = 16_640,
+    parent: dict[str, Any] | None = None,
+    panel: bool = False,
+) -> dict[str, Any]:
+    from marl_battlegrounds.training import checkpoints
+
+    config = {
+        "seed": 42,
+        "method": "pqn_vdn",
+        "num_envs": batch,
+        "total_env_steps": total,
+        "pqn": _PQN,
+        "validation_panel": "frozen-panel" if panel else None,
+        "validation_fractions": [0.25, 0.5, 1.0],
+        "checkpoint_env_steps": [],
+        "routine_seed_pairs": 1,
+        "confirmation_seed_pairs": 2,
+        "slot_diagnostic": False,
+    }
+    details: dict[str, Any] = {
+        "schema_version": 1,
+        "kind": "learner",
+        "schemas": checkpoints.checkpoint_schemas("pqn_vdn"),
+        "metadata": {
+            "run_id": "one-run",
+            "attempt_id": "original",
+            "parent_checkpoint": None if parent is None else parent["checkpoint_id"],
+            "config": config,
+            "source": {"fixed": True},
+            "dependencies": {"fixed": True},
+            "execution": execution_identity(),
+            "host_state": host,
+        },
+        "actor_layout": [],
+        "actor_digest": hashlib.sha256(str(host["env_steps"]).encode()).hexdigest(),
+        "files": {},
+        "collection": {},
+        "layout": [],
+        "recording_token": None,
+        "counters": {
+            "updates": host["completed_updates"],
+            "env_steps": host["env_steps"],
+            "completed_blocks": host["completed_blocks"],
+            "learning_blocks": host["learning_blocks"],
+        },
+    }
+    details["checkpoint_id"] = hashlib.sha256(
+        checkpoints._json_bytes(details)
+    ).hexdigest()
+    directory = root / "checkpoints" / details["checkpoint_id"]
+    directory.mkdir(parents=True)
+    io_helpers.atomic_json(directory / "checkpoint_details.json", details)
+    return details
+
+
+def _pqn_actor(root: Path, ancestor: dict[str, Any]) -> Path:
+    from marl_battlegrounds.training import checkpoints
+
+    details: dict[str, Any] = {
+        "schema_version": 1,
+        "kind": "actor",
+        "schemas": ancestor["schemas"],
+        "metadata": {
+            "run_id": "one-run",
+            "seed": 42,
+            "env_steps": ancestor["counters"]["env_steps"],
+            "checkpoint_id": ancestor["checkpoint_id"],
+            "optimizer_steps": ancestor["counters"]["updates"],
+        },
+        "actor_layout": [],
+        "actor_digest": ancestor["actor_digest"],
+        "input_scale": 1.0,
+        "spawn_frame": "left",
+        "epsilon": 0.0,
+        "tie_rule": "first_legal_maximum",
+        "files": {},
+    }
+    details["checkpoint_id"] = hashlib.sha256(
+        checkpoints._json_bytes(details)
+    ).hexdigest()
+    path = root / "actors" / ancestor["checkpoint_id"]
+    path.mkdir(parents=True)
+    io_helpers.atomic_json(path / "actor_details.json", details)
+    return path
+
+
+def _pqn_validation(
+    root: Path,
+    ancestor: dict[str, Any],
+    actor: Path,
+    panel: FrozenPanel,
+    monkeypatch: pytest.MonkeyPatch,
+) -> dict[str, Any]:
+    from marl_battlegrounds.training import checkpoints, validation
+
+    identity = checkpoints.artifact_identity(actor)
+    key = ancestor["checkpoint_id"]
+    task = validation.validation_task_description(
+        checkpoint_id=key,
+        actor_digest=identity["actor_digest"],
+        env_steps=ancestor["counters"]["env_steps"],
+        panel_digest=panel.digest,
+        purpose="routine",
+        seed_pairs=1,
+        members=tuple((member.name, member.actor_digest) for member in panel.members),
+    )
+    directory = root / "validation" / f"routine-{key}"
+    directory.mkdir(parents=True)
+    io_helpers.atomic_json(directory / "task.json", task)
+    paths = [str(directory / f"opponent-{index}" / "run") for index in range(2)]
+    for path in paths:
+        Path(path).mkdir(parents=True)
+    summary = {
+        **task,
+        "complete": True,
+        "score": 0.5,
+        "ci_low": 0.25,
+        "ci_high": 0.75,
+        "games": 20,
+        "pass_paths": paths,
+        "method": "pqn_vdn",
+        "optimizer_steps": identity["optimizer_steps"],
+    }
+    io_helpers.atomic_json(directory / "validation_summary.json", summary)
+
+    def saved(parent: Path, pass_id: str) -> Path:
+        return parent / "run"
+
+    monkeypatch.setattr(validation, "_saved_run", saved)
+    monkeypatch.setattr(validation, "_pending", Mock(return_value=0))
+    return {**summary, "elapsed_seconds": 1.0}
+
+
+def test_saved_pqn_host_counts_follow_offset_boundaries_beyond_int32(
+    tmp_path: Path,
+) -> None:
+    for steps in (0, 4096, 4224, 8320, 12416, 16_640):
+        root = tmp_path / f"steps-{steps}"
+        # A save at the budget still owes its final capture.
+        final = False if steps == 16_640 else None
+        details = _pqn_description(root, _pqn_host(steps, pending=final))
+        io_helpers.validate_host_state(root, details, panel=None)
+    batch, rounds = 1024, 2**30
+    steps = batch * rounds
+    big = _pqn_host(steps, batch=batch, pending=False)
+    assert big["used_td_pairs"] > 2**31
+    details = _pqn_description(tmp_path / "big", big, batch=batch, total=steps)
+    io_helpers.validate_host_state(tmp_path / "big", details, panel=None)
+    for field, value in (
+        ("learning_blocks", 2),
+        ("completed_blocks", 4),
+        ("used_sequences", 1),
+        ("used_td_pairs", 1),
+        ("used_prefix_td_pairs", 0),
+        ("used_agent_utilities", 1),
+        (
+            "used_exposure",
+            {"by_stage": [0] * 17, "by_source": [0], "by_opponent": [0] * 21},
+        ),
+    ):
+        host = _pqn_host(8320, pending=None)
+        host[field] = value
+        root = tmp_path / field
+        bad = _pqn_description(root, host)
+        with pytest.raises(ValueError, match="host experience or sample counts"):
+            io_helpers.validate_host_state(root, bad, panel=None)
+    unreachable = _pqn_host(8320, pending=None)
+    unreachable.update(env_steps=8192)
+    root = tmp_path / "unreachable"
+    with pytest.raises(ValueError, match="host experience or sample counts"):
+        io_helpers.validate_host_state(
+            root, _pqn_description(root, unreachable), panel=None
+        )
+
+
+def _pqn_chain(
+    root: Path, steps: tuple[int, ...], monkeypatch: pytest.MonkeyPatch
+) -> tuple[dict[str, Any], FrozenPanel]:
+    panel = _panel()
+    parent: dict[str, Any] | None = None
+    actors: dict[str, str] = {}
+    results: list[dict[str, Any]] = []
+    for point in steps:
+        ancestor = _pqn_description(
+            root, _pqn_host(point, pending=True), parent=parent, panel=True
+        )
+        actor = _pqn_actor(root, ancestor)
+        actors[ancestor["checkpoint_id"]] = str(actor)
+        results.append(_pqn_validation(root, ancestor, actor, panel, monkeypatch))
+        parent = ancestor
+    host = _pqn_host(16_640, pending=None)
+    host["actors"] = actors
+    host["routine_results"] = results
+    host["validation_games"] = 20 * len(results)
+    final = cast(dict[str, Any], parent)
+    host["final_actor"] = actors[final["checkpoint_id"]]
+    return _pqn_description(root, host, parent=final, panel=True), panel
+
+
+def test_saved_pqn_routine_results_follow_the_offset_schedule(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    good, panel = _pqn_chain(tmp_path / "good", (0, 4224, 8320, 16_640), monkeypatch)
+    io_helpers.validate_host_state(tmp_path / "good", good, panel=panel)
+    bad, panel = _pqn_chain(tmp_path / "bad", (0, 4224, 8192, 16_640), monkeypatch)
+    with pytest.raises(ValueError, match="routine validation schedule"):
+        io_helpers.validate_host_state(tmp_path / "bad", bad, panel=panel)
+
+
+def test_pqn_initial_collection_has_its_own_label() -> None:
+    text = io_helpers.progress_text(
+        {"phase": "initial_collection", "learning_blocks": 0, "completed_updates": 0}
+    )
+    assert "Initial Random Collection" in text
+    assert "Optimizer Steps: 0 | Learning Blocks: 0" in text

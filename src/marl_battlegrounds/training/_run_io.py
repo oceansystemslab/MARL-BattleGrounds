@@ -298,8 +298,10 @@ def progress_text(status: dict[str, Any]) -> str:
     compilation and excludes validation and saving. Run elapsed time excludes
     gaps between attempts; wall_seconds includes them. Unknown future costs stay
     unknown. A QMIX run in the "warmup" phase is labelled "Warmup: Filling Replay
-    Before Learning", and a status with learning_blocks (QMIX) reports optimizer
-    steps and learning blocks where PPO reports learning updates. Raw losses and
+    Before Learning", a PQN-VDN run in the "initial_collection" phase is
+    labelled "Initial Random Collection", and a status with learning_blocks
+    (QMIX or PQN-VDN) reports optimizer steps and learning blocks where PPO
+    reports learning updates. Raw losses and
     signed reward averages remain in training_updates.jsonl; they cannot
     diagnose learning by their size. Saved
     Random results describe combat per game and are never treated as proof of
@@ -329,6 +331,7 @@ def progress_text(status: dict[str, Any]) -> str:
         "saving": "Saving Progress",
         "reporting": "Writing Results",
         "warmup": "Warmup: Filling Replay Before Learning",
+        "initial_collection": "Initial Random Collection",
         "complete": "Run Finished",
         "failed": "Run Stopped With An Error",
         "recovering": "Restoring Saved Progress",
@@ -554,9 +557,10 @@ def validate_host_state(
         need not exist. Ancestor descriptions remain usable after payload pruning.
         Exported weights, input scale, spawn frame and complete model schema
         must match their learner boundary and the saved training method. For
-        a QMIX run every saved validation and Random result must name
-        ``method == "qmix"`` and an integer ``optimizer_steps`` equal to its
-        learner boundary's and export's count; PPO results carry neither.
+        a QMIX or PQN-VDN run every saved validation and Random result must
+        name its method (``"qmix"`` or ``"pqn_vdn"``) and an integer
+        ``optimizer_steps`` equal to its learner boundary's and export's
+        count; PPO results carry neither.
 
     Notes
     -----
@@ -567,13 +571,19 @@ def validate_host_state(
     by_opponent lists, each summing to used_td_pairs), all exact Python
     integers that may exceed int32, checked with the runner's fixed-block
     arithmetic: blocks of rollout_length rounds, the last one shorter, each
-    learning once the stored rows reach min_buffer_size. Existing checkpoint
+    learning once the stored rows reach min_buffer_size. PQN-VDN keeps
+    completed_blocks, learning_blocks, used_sequences, used_td_pairs,
+    used_agent_utilities, used_prefix_td_pairs and used_exposure (the same
+    three marginals), checked against its offset boundaries: W = H + T
+    initial rounds, then blocks of T (``_check_pqn_host_counts``); its
+    validation points come from the same offset schedule. Existing checkpoint
     and selection owners verify artifact identities and selection rules.
     System-panel records may require loading an actor to verify its
     registration; learner arrays are not restored here. No games run and no
     writer or log is changed. Call this after complete learner restore and
     before resume_recording.
     """
+    from marl_battlegrounds.baselines.methods import method_settings_field
     from marl_battlegrounds.training import analysis, checkpoints, validation
 
     root = run_dir.resolve()
@@ -581,7 +591,8 @@ def validate_host_state(
     config = metadata["config"]
     method = config.get("method", "mappo")
     qmix_run = method == "qmix"
-    settings = config["qmix"] if qmix_run else config["ppo"]
+    pqn_run = method == "pqn_vdn"
+    settings = config[method_settings_field(method)]
     schemas = checkpoints.checkpoint_schemas(method)
     if checkpoint_details["schemas"] != schemas:
         raise ValueError("Saved model schema differs from the training method")
@@ -598,6 +609,15 @@ def validate_host_state(
             "used_agent_utilities",
         )
         if qmix_run
+        else (
+            "completed_blocks",
+            "learning_blocks",
+            "used_sequences",
+            "used_td_pairs",
+            "used_agent_utilities",
+            "used_prefix_td_pairs",
+        )
+        if pqn_run
         else ("used_policy_samples", "used_value_samples")
     )
     counts = (
@@ -628,6 +648,8 @@ def validate_host_state(
     }
     if qmix_run:
         required.add("sampled_exposure")
+    if pqn_run:
+        required.add("used_exposure")
     random_pairs = config.get("random_diagnostic_seed_pairs")
     if random_pairs is not None:
         required.add("random_results")
@@ -701,6 +723,8 @@ def validate_host_state(
     epochs, length = settings["epochs"], settings["rollout_length"]
     if qmix_run:
         _check_qmix_host_counts(host, checkpoint_details["counters"], config)
+    elif pqn_run:
+        _check_pqn_host_counts(host, checkpoint_details["counters"], config)
     elif (
         {"env_steps": steps, "updates": updates} != checkpoint_details["counters"]
         or steps > total
@@ -713,7 +737,7 @@ def validate_host_state(
     ):
         raise ValueError("Saved host experience or sample counts disagree")
     present_stages = set(host) & stage_shapes.keys()
-    collected = host["completed_blocks"] if qmix_run else updates
+    collected = host["completed_blocks"] if qmix_run or pqn_run else updates
     if (present_stages and present_stages != stage_shapes.keys()) or (
         collected and not present_stages
     ):
@@ -789,7 +813,7 @@ def validate_host_state(
             or actor["schemas"] != ancestor["schemas"]
             or actor["schemas"] != schemas
             or (
-                qmix_run
+                (qmix_run or pqn_run)
                 and actor.get("optimizer_steps") != ancestor["counters"]["updates"]
             )
         ):
@@ -804,6 +828,7 @@ def validate_host_state(
                 batch,
                 rollout_length=length,
                 fractions=config["validation_fractions"],
+                initial_rounds=(settings["memory_window"] + length if pqn_run else 0),
             )
         }
         if panel is not None
@@ -887,7 +912,7 @@ def validate_host_state(
             if key not in actor_records or panel is None:
                 raise ValueError("Saved validation refers to an unknown actor")
             actor = actor_records[key]
-            _check_result_method(result, actor, qmix_run)
+            _check_result_method(result, actor, method)
             pairs = config[f"{purpose}_seed_pairs"]
             expected_task = validation.panel_task_description(
                 checkpoint_id=key,
@@ -1003,7 +1028,7 @@ def validate_host_state(
         )
         if current_actor is None:
             raise ValueError("Saved Random result has no current-run actor capture")
-        _check_result_method(result, current_actor, qmix_run)
+        _check_result_method(result, current_actor, method)
         reused = point == 0 and initial_reference is not None
         if result.get("reused_initialization") is not reused or result.get(
             "reference_path"
@@ -1170,22 +1195,136 @@ def _check_qmix_host_counts(
         raise ValueError("Saved host experience or sample counts disagree")
 
 
+def _check_pqn_host_counts(
+    host: dict[str, Any], counters: dict[str, Any], config: dict[str, Any]
+) -> None:
+    """Check a PQN-VDN run's saved host counts with offset-block arithmetic.
+
+    Parameters
+    ----------
+    host : dict
+        The runner's exact Python-integer totals.
+    counters : dict
+        The learner checkpoint's saved counters.
+    config : dict
+        The saved run config, whose "pqn" block gives T, H, epochs and
+        minibatches.
+
+    Raises
+    ------
+    ValueError
+        Any count disagrees. With r rounds and k learned blocks: r is a
+        reachable boundary (``validation._collection_boundary`` with W = H + T
+        initial rounds), completed_blocks is its ordinal, k is that ordinal
+        less ceil(W / T) (never below 0), updates is k * E * M, used_sequences
+        is k * E * B, used_td_pairs is E * B * ((r - W) + k * (H - 1)) (0 before
+        learning), used_prefix_td_pairs is k * E * B * H, utilities lie
+        between 1 and 5 per pair, and each used_exposure marginal (17 stages,
+        the source bank, 21 opponent rows) sums to used_td_pairs.
+
+    Notes
+    -----
+    Host-only arithmetic on exact integers that may exceed int32; reads and
+    changes nothing else.
+    """
+    from marl_battlegrounds.training.validation import (
+        _collection_boundary,  # pyright: ignore[reportPrivateUsage]
+    )
+
+    settings = config["pqn"]
+    batch, total = config["num_envs"], config["total_env_steps"]
+    steps, updates = host["env_steps"], host["completed_updates"]
+    length, window = settings["rollout_length"], settings["memory_window"]
+    epochs, groups = settings["epochs"], settings["num_minibatches"]
+    initial = window + length
+    if steps > total or steps % batch or total % batch:
+        raise ValueError("Saved host experience or sample counts disagree")
+    rounds = steps // batch
+    reachable, blocks = _collection_boundary(
+        rounds,
+        total_env_steps=total // batch,
+        num_envs=1,
+        rollout_length=length,
+        initial_rounds=initial,
+    )
+    learning = max(0, blocks - -(-initial // length))
+    pairs = host["used_td_pairs"]
+    expected_pairs = (
+        epochs * batch * ((rounds - initial) + learning * (window - 1))
+        if learning
+        else 0
+    )
+    exposure = host["used_exposure"]
+    marginals = ("by_stage", "by_source", "by_opponent")
+    exposure_ok = (
+        isinstance(exposure, dict)
+        and set(cast(dict[str, Any], exposure)) == set(marginals)
+        and all(
+            isinstance(exposure[name], list)
+            and len(cast(list[Any], exposure[name])) >= 1
+            and all(
+                type(cell) is int and cell >= 0
+                for cell in cast(list[Any], exposure[name])
+            )
+            and sum(cast(list[int], exposure[name])) == pairs
+            for name in marginals
+        )
+        and len(cast(list[Any], exposure["by_stage"])) == 17
+        and len(cast(list[Any], exposure["by_opponent"])) == 21
+    )
+    if (
+        {
+            "env_steps": steps,
+            "updates": updates,
+            "completed_blocks": host["completed_blocks"],
+            "learning_blocks": host["learning_blocks"],
+        }
+        != counters
+        or reachable != rounds
+        or host["completed_blocks"] != blocks
+        or host["learning_blocks"] != learning
+        or updates != learning * epochs * groups
+        or host["actor_decisions"] > steps * 5
+        or host["used_sequences"] != learning * epochs * batch
+        or pairs != expected_pairs
+        or host["used_prefix_td_pairs"] != learning * epochs * batch * window
+        or not pairs <= host["used_agent_utilities"] <= 5 * pairs
+        or not exposure_ok
+    ):
+        raise ValueError("Saved host experience or sample counts disagree")
+
+
 def _check_result_method(
-    result: dict[str, Any], actor: dict[str, Any], qmix_run: bool
+    result: dict[str, Any], actor: dict[str, Any], method: str
 ) -> None:
     """Match a saved validation result's method fields to its actor.
 
-    A QMIX run's results must say method "qmix" and carry the actor's integer
-    optimizer_steps (from artifact_identity); a PPO run's results must carry
-    neither field. Raises ValueError.
+    A QMIX or PQN-VDN run's results must name that method ("qmix" or
+    "pqn_vdn") and carry the actor's integer optimizer_steps (from
+    artifact_identity); a PPO run's results must carry neither field.
+
+    Parameters
+    ----------
+    result : dict
+        One saved routine, confirmation or Random result.
+    actor : dict
+        The artifact identity of the actor the result evaluated.
+    method : str
+        The run's training method name, such as "mappo", "qmix" or "pqn_vdn".
+
+    Raises
+    ------
+    ValueError
+        A QMIX or PQN-VDN result names another method, or its optimizer_steps
+        is not the actor's integer count; or a PPO result carries method or
+        optimizer_steps.
     """
-    if qmix_run:
+    if method in ("qmix", "pqn_vdn"):
+        label = "QMIX" if method == "qmix" else "PQN-VDN"
+        if result.get("method") != method:
+            raise ValueError(f"Saved {label} result names another method")
         steps = result.get("optimizer_steps")
-        if (
-            result.get("method") != "qmix"
-            or type(steps) is not int
-            or steps != actor.get("optimizer_steps")
-        ):
-            raise ValueError("Saved QMIX result differs from its optimizer count")
+        if type(steps) is not int or steps != actor.get("optimizer_steps"):
+            raise ValueError(f"Saved {label} result differs from its optimizer count")
     elif "method" in result or "optimizer_steps" in result:
-        raise ValueError("Saved PPO result carries QMIX-only fields")
+        raise ValueError("Saved PPO result carries QMIX or PQN-VDN fields")

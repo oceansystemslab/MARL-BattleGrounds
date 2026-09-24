@@ -1,0 +1,109 @@
+{
+  "commit": "976aeb152cb184a5095021968bba94da96eb6394",
+  "extractions": [
+    {
+      "first_line": 28,
+      "last_line": 55,
+      "path": "baselines/QLearning/pqn_vdn_rnn.py",
+      "source_lines_sha256": "e4e41755b5a5f7a2502231f9c61a27c7e21fafb28ee498c85925aa88637cf57c",
+      "symbol": "ScannedRNN"
+    },
+    {
+      "first_line": 58,
+      "last_line": 102,
+      "path": "baselines/QLearning/pqn_vdn_rnn.py",
+      "source_lines_sha256": "acbcafdc66c4b34e30c5bc8efd791c5d79a5c078693c7e3a9a0734b0e87510e8",
+      "symbol": "QNetwork"
+    },
+    {
+      "first_line": 106,
+      "last_line": 114,
+      "path": "baselines/QLearning/pqn_vdn_rnn.py",
+      "source_lines_sha256": "cba82029a3b62e799d723caa449f7ae51280c3264ee5767e4de4d5d5a170fda8",
+      "symbol": "Transition"
+    },
+    {
+      "first_line": 117,
+      "last_line": 121,
+      "path": "baselines/QLearning/pqn_vdn_rnn.py",
+      "source_lines_sha256": "699fc3f440ef5d634ac58aa3bdc772c8060865d49929927227273fba20d90a29",
+      "symbol": "CustomTrainState"
+    },
+    {
+      "first_line": 130,
+      "last_line": 132,
+      "path": "baselines/QLearning/pqn_vdn_rnn.py",
+      "source_lines_sha256": "1985da41de68268096cff585bbc5488fc438e2021e164ac7df06766bcb826038",
+      "symbol": "make_train.config[NUM_UPDATES]"
+    },
+    {
+      "first_line": 134,
+      "last_line": 138,
+      "path": "baselines/QLearning/pqn_vdn_rnn.py",
+      "source_lines_sha256": "8f1294424ed060070e99ddb649f02188b3c7c03975c6a48c763e0e7f7dba3c72",
+      "symbol": "make_train.eps_scheduler"
+    },
+    {
+      "first_line": 140,
+      "last_line": 143,
+      "path": "baselines/QLearning/pqn_vdn_rnn.py",
+      "source_lines_sha256": "c04509d3de2974d2639327ce2e76a55de7bd5644f9bcb9f455b11445c42eb6f7",
+      "symbol": "make_train.get_greedy_actions"
+    },
+    {
+      "first_line": 146,
+      "last_line": 171,
+      "path": "baselines/QLearning/pqn_vdn_rnn.py",
+      "source_lines_sha256": "7cd93337454b6dbf199c9528d51ce099f02c572c31de92aaef482ec6493ea162",
+      "symbol": "make_train.eps_greedy_exploration"
+    },
+    {
+      "first_line": 204,
+      "last_line": 237,
+      "path": "baselines/QLearning/pqn_vdn_rnn.py",
+      "source_lines_sha256": "a93c289ebfaf5dbd8d05f8cc41842ae667a6fd71f46a99b5efe0f0a0dc49b3d3",
+      "symbol": "make_train.train.create_agent"
+    },
+    {
+      "first_line": 327,
+      "last_line": 456,
+      "path": "baselines/QLearning/pqn_vdn_rnn.py",
+      "source_lines_sha256": "09f7ff94a223f339fd5f94349e34c63e5a9dfcbb4018d4d345b11d475d1ca026",
+      "symbol": "make_train.train._update_step._learn_epoch"
+    }
+  ],
+  "files": {
+    "LICENSE": {
+      "git_blob": "86f0f8d248ce42621ac0995f0e68c13e7217dab9",
+      "sha256": "194e94abef030f092fde5f16e9966ba07f1c83455467a7f2cf9f9282335288c4",
+      "stored_path": "source/jaxmarl/LICENSE.txt"
+    },
+    "baselines/QLearning/config/alg/pqn_vdn_rnn_smax.yaml": {
+      "git_blob": "be7b68fec6dae7ed62fcb079d8ac7a831425dccd",
+      "sha256": "cd967bed24ad19a482ff4edf938603d03ea341438f163564a3099d3383b2f515",
+      "stored_path": "source/jaxmarl/baselines/QLearning/config/alg/pqn_vdn_rnn_smax.yaml.txt"
+    },
+    "baselines/QLearning/pqn_vdn_rnn.py": {
+      "git_blob": "7d34baad76208decb34399f6aa05654bb4f735d1",
+      "sha256": "da84642e2a0d8f226d658c59ea356806d65c251b11e935050f05bde2a9d73109",
+      "stored_path": "source/jaxmarl/baselines/QLearning/pqn_vdn_rnn.py.txt"
+    },
+    "jaxmarl/wrappers/baselines.py": {
+      "git_blob": "f5a0de0064d34668760475b70736c77e4231fd03",
+      "sha256": "5d4d4641c445ec34a5e8f4bdd88eb1366ba92e787804298025458967e4151b0a",
+      "stored_path": "source/jaxmarl/jaxmarl/wrappers/baselines.py.txt"
+    },
+    "pyproject.toml": {
+      "git_blob": "602f4a5080986ac2f4187d02a12279bb4214509e",
+      "sha256": "770f04df56bc1dfd2459218d8103b3629b7fe0697c6c020774bfbbc5e7a142f7",
+      "stored_path": "source/jaxmarl/pyproject.toml.txt"
+    }
+  },
+  "notes": [
+    "Recurrent PQN-VDN uses the pinned JaxMARL donor; the files were read from the pinned revision's raw URLs, not from a clone, so no donor tree hash is recorded.",
+    "Only the named AST bodies and the two original assignments execute; BG production code is never imported by the reference calculations.",
+    "The retained source/jaxmarl/LICENSE.txt (Apache 2.0) applies to all JaxMARL files; original notices are preserved."
+  ],
+  "repository": "https://github.com/bold-lab-ai/JaxMARL",
+  "schema_version": 1
+}

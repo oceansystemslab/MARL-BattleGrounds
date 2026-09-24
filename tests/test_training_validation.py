@@ -3,9 +3,19 @@
 CPU artifact fixtures use untrained MAPPO only. A short-horizon fixture exercises
 the real writer/evaluator recovery path; it is not an admitted learning trial.
 No validation result may alter learner state or change a frozen artifact identity.
+The one boundary helper, ``_collection_boundary``, gives PQN-VDN's offset
+boundaries: before its initial rounds W = H + T, multiples of T capped at W;
+after W, W + j * T capped at the total, with the collection-block ordinal. At
+B32, T128, H4 the boundaries are 4,096, 4,224, 8,320 and 12,416 transitions,
+never 8,192 or 12,288; fractions that round to one boundary merge, the final
+partial boundary is kept, and explicit save steps are valid only on a
+boundary. With no initial rounds it equals the earlier rule
+``min(total, ceil(q / (B * T)) * B * T)`` and its update count over a grid.
 """
 
+import itertools
 import json
+import math
 import shutil
 from copy import deepcopy
 from hashlib import sha256
@@ -21,6 +31,7 @@ from marl_battlegrounds.evaluation.recording_context import capture_recording_pr
 from marl_battlegrounds.evaluation.recording_identity import tree_digest
 from marl_battlegrounds.training.checkpoints import artifact_identity, export_system
 from marl_battlegrounds.training.validation import (
+    _collection_boundary,
     _pending,
     _rows,
     _run_pass,
@@ -127,6 +138,75 @@ def test_validation_thresholds_round_to_updates_and_keep_exact_partial_end() -> 
     assert tiny[-1].env_steps == 128 and tiny[-1].update_index == 1
     assert len(tiny[-1].requested_steps) == 10
     assert resolve_validation_schedule(128, 4, 128, fractions=())[-1].env_steps == 128
+
+
+def test_pqn_offset_boundaries_follow_initial_rounds_then_normal_blocks() -> None:
+    def boundary(requested: int, total: int = 10_000_000) -> tuple[int, int]:
+        return _collection_boundary(
+            requested,
+            total_env_steps=total,
+            num_envs=32,
+            rollout_length=128,
+            initial_rounds=132,
+        )
+
+    assert boundary(0) == (0, 0)
+    assert [boundary(q) for q in (1, 4096, 4097, 4224)] == [
+        (4096, 1),
+        (4096, 1),
+        (4224, 2),
+        (4224, 2),
+    ]
+    assert [boundary(q) for q in (4225, 8192, 8320, 8321, 12288)] == [
+        (8320, 3),
+        (8320, 3),
+        (8320, 3),
+        (12416, 4),
+        (12416, 4),
+    ]
+    # 312,500 rounds: 132 initial rounds, then 2,441 blocks, the last partial.
+    assert boundary(9_999_999) == (10_000_000, 2443)
+    assert boundary(10_000_000) == (10_000_000, 2443)
+    for step in (0, 4096, 4224, 8320, 12416, 10_000_000):
+        assert boundary(step)[0] == step
+    for step in (8192, 12288, 4200, 9_999_968):
+        assert boundary(step)[0] != step
+    points = resolve_validation_schedule(
+        16_640, 32, 128, fractions=(0.25, 0.253, 0.5), initial_rounds=132
+    )
+    assert [(p.env_steps, p.update_index) for p in points] == [
+        (0, 0),
+        (4224, 2),
+        (8320, 3),
+        (16_640, 6),
+    ]
+    assert points[1].requested_steps == (4160, 4210)
+    with pytest.raises(ValueError, match="below the total rounds"):
+        boundary(1, total=132 * 32)
+    with pytest.raises(ValueError):
+        boundary(True)  # pyright: ignore[reportArgumentType]
+
+
+def test_boundary_without_initial_rounds_matches_the_earlier_rule() -> None:
+    fractions = (0.1, 0.25, 1 / 3, 0.5, 0.7, 0.999, 1.0)
+    for total_rounds, batch, length in itertools.product(
+        (1, 2, 7, 64, 129, 1000, 4097), (1, 2, 4, 32), (1, 3, 4, 128)
+    ):
+        total = total_rounds * batch
+        block = batch * length
+        for requested in {
+            0,
+            1,
+            total - 1,
+            total,
+            *(math.ceil(total * f) for f in fractions),
+        }:
+            if requested < 0:
+                continue
+            expected = min(total, math.ceil(requested / block) * block)
+            assert _collection_boundary(
+                requested, total_env_steps=total, num_envs=batch, rollout_length=length
+            ) == (expected, math.ceil(expected / block))
 
 
 @pytest.mark.parametrize("values", ((127, 4), (True, 4), (128, 0)))

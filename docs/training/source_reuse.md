@@ -1,9 +1,10 @@
 # Baseline Source Reuse
 
 The four PPO baselines and recurrent QMIX start from Mava's reviewed learning
-code. BG keeps its own environment, permitted actor inputs, action rules,
-evaluation, recording and checkpoint ownership. This page records the source and the
-independent numerical reference. A source match is not evidence of learning.
+code; recurrent PQN-VDN starts from JaxMARL's. BG keeps its own environment,
+permitted actor inputs, action rules, evaluation, recording and checkpoint
+ownership. This page records each source and its independent numerical
+reference. A source match is not evidence of learning.
 
 ## PPO Model Choices
 
@@ -105,9 +106,8 @@ generation writes separate outputs and does not replace the old MAPPO record.
 | `mava/configs/arch/anakin.yaml` | Sixteen environments in each of two data groups; sampled PPO evaluation. |
 | `mava/configs/network/rnn.yaml`, `mava/configs/system/ppo/rec_mappo.yaml` | The network and learning settings below. |
 
-The later PQN-VDN port is reserved for JaxMARL commit
-`976aeb152cb184a5095021968bba94da96eb6394`. This reference does not verify that
-later port. Mava's environment wrappers, experiment logger, evaluation loop,
+Recurrent PQN-VDN comes from a different donor, JaxMARL; see
+[Recurrent PQN-VDN](#recurrent-pqn-vdn). Mava's environment wrappers, experiment logger, evaluation loop,
 checkpoint loader and distributed experiment harness are not copied into BG.
 
 ## Resolved Recurrent MAPPO Settings
@@ -570,10 +570,245 @@ These all-valid comparisons prove agreement for the declared synthetic case
 only. They do not establish replay behavior, training throughput, save/resume,
 sample efficiency or learned tactics; those have their own checks.
 
+## Recurrent PQN-VDN
+
+[`baselines.pqn`](../../src/marl_battlegrounds/baselines/pqn.py) adapts
+JaxMARL's recurrent PQN-VDN (`baselines/QLearning/pqn_vdn_rnn.py`) at commit
+`976aeb152cb184a5095021968bba94da96eb6394` of
+<https://github.com/bold-lab-ai/JaxMARL>. JaxMARL is licensed under Apache
+2.0; the retained copy is `source/jaxmarl/LICENSE.txt`. The five files were
+read from that commit's raw URLs, not a clone, and are stored byte for byte
+under `tests/fixtures/baseline_donor/source/jaxmarl/`. The
+[PQN source manifest](../../tests/fixtures/baseline_donor/pqn_source_manifest.json)
+records each file's git blob and SHA256 and the line ranges of every executed
+body.
+
+| Original File | Reused Calculation Or Checked Contract |
+| --- | --- |
+| `baselines/QLearning/pqn_vdn_rnn.py` | `QNetwork` and `ScannedRNN`; the optimizer and schedule in `create_agent`; the exploration schedule; `get_greedy_actions` and `eps_greedy_exploration`; the epoch, minibatch, loss and lambda-return code in `_learn_epoch`. |
+| `baselines/QLearning/config/alg/pqn_vdn_rnn_smax.yaml` | The settings below. |
+| `jaxmarl/wrappers/baselines.py` | Donor facts only: how its rollout wrapper samples random actions, masks observations and forms the team reward. Nothing from it runs in BG. |
+| `pyproject.toml` | The donor's dependency ranges, recorded as found. The donor has no lock file for this run, so none is invented; BG's stack is unchanged. |
+| `LICENSE` | Apache 2.0 terms. |
+
+### PQN-VDN Model And Settings
+
+One local Q-network is shared by every Team A actor; each actor keeps its own
+512-wide memory. The layers are the donor's SMAX configuration: BatchNorm on
+the input, then two blocks of Dense 512, BatchNorm and ReLU, a 512-wide GRU
+that resets before a new episode, and a Dense 198 head. Flax's default
+initializers are kept (LeCun-normal Dense and GRU input kernels, orthogonal
+recurrent kernels, zero biases). Parameter paths match the donor, so the same
+key gives exactly the same starting weights. With BG's 5,164 actor features
+the network has 4,595,998 parameters (18,383,992 float32 bytes) and 12,376
+running statistics (49,504 bytes); RAdam's two moment trees add 36,767,984
+bytes. The team value is the sum of the actors' values (VDN); there is no
+mixer, critic, physical state or target network.
+
+| Setting | Default | Meaning |
+| --- | ---: | --- |
+| `rollout_length` | 128 | New rounds per normal collection block (T) |
+| `memory_window` | 4 | Recent rows kept per game and learned again with the next block (H) |
+| `epochs` | 4 | Passes over each learning window |
+| `num_minibatches` | 16 | Equal game groups per pass; must divide the number of games |
+| `q_lr` | 0.00025 | Starting RAdam learning rate |
+| `lr_linear_decay` | True | Decay linearly to 1e-10 over all planned optimizer steps |
+| `max_grad_norm` | 1.0 | Global gradient-norm clip before RAdam |
+| `gamma`, `td_lambda` | 0.99, 0.85 | Discount and lambda-return weight |
+| `eps_start`, `eps_finish`, `eps_decay_fraction` | 1.0, 0.01, 0.1 | Exploration falls from 1 to 0.01 over the first tenth of the planned learning blocks |
+
+BatchNorm keeps the donor's settings (momentum 0.99, epsilon 1e-5). In
+training minibatches it normalizes each feature over all time rows and
+flattened game/actor rows together; action selection uses the saved running
+statistics and never changes them. The donor's `REW_SCALE: 10` is a SMAX
+reward conversion and is not copied. Its 128 games are not copied either;
+BG keeps its own default of 32.
+
+### Deliberate PQN-VDN Adaptations
+
+- **Inputs, frame and masks.** Actors read BG's permitted SharedObs encoding in
+  the chosen spawn frame (default "left"), with BG's 198-way legality masks.
+  Chosen actions are mapped back to world directions. The donor's rollout
+  wrapper appends a one-hot agent index to each observation; BG does not,
+  because the permitted encoder already gives each actor its own class and
+  self features.
+- **Legal greedy choice.** The donor subtracts 1e10 from illegal values. If
+  every legal value were already at float32's lowest value, that subtraction
+  would not separate them and its argmax could pick an illegal action. BG
+  masks with negative infinity through the shared action helper, so the choice
+  is always legal; ties go to the lowest legal index in the network's frame.
+  For ordinary values both rules choose the same action. Bootstrap targets use
+  the same legal maximum.
+- **Exploration draw.** BG reuses QMIX's two-stage draw: explore with
+  probability epsilon, then take a uniform legal action. This is the donor's
+  `eps·uniform + (1−eps)·greedy` distribution; the random stream differs, so
+  sampled actions are compared as counts, not index by index.
+- **Memory resets and death.** The donor resets an agent's memory after the
+  agent's own `done`, because a SMAX death is permanent, and its wrapper zeroes
+  the observations of dead agents. BG deaths are temporary: memory resets only
+  at a new episode, and a dead actor keeps receiving its permitted input.
+- **Inactive slots and padding.** Smaller rosters pad Team A to five slots.
+  Inactive slots get zero values and zero memory and are left out of the
+  BatchNorm moments; padding rows are replaced by zeros before any arithmetic,
+  keep memory unchanged and are left out of the moments too. The donor has
+  neither, because SMAX rosters are fixed and its windows have no padding.
+- **Independent runs.** The donor's `single_run` maps `make_train` over
+  `NUM_SEEDS` keys, which runs separate learners from separate keys. BG runs
+  one learner per training run; independent seeds are separate runs. Environment
+  lanes and minibatches inside one learner are a different thing. The donor's
+  in-training greedy test loop is also not copied; BG's validation owns that.
+- **Initial random experience.** The donor's first rollout fills its memory
+  window with random actions drawn over the whole action space, ignoring
+  legality, and stores those rewards unscaled while later rows are scaled by
+  ten. BG collects the first W = H + T rounds (132 by default) with the actor's
+  own exploration at rate 1, which is uniform over legal actions. It counts
+  them in the experience budget, collects them as a chunk of T rounds then a
+  chunk of H rounds, and learns nothing until they are done. Only the last H
+  of them enter the first learning window, so T·B generated transitions
+  (4,096 at B32) are never learned. The exploration schedule starts after
+  them, on the learning-block clock.
+- **Stored rows and memory.** The donor keeps whole transitions for its
+  window. BG stores a compact Team A row per game and decision (25,988 bytes:
+  the five observer rows and their 5x5 permissions, masks, world-frame
+  actions, task and shaping rewards, lifecycle flags and identities) plus the
+  memory each actor held just before acting. Between blocks it keeps only the
+  last H real rows per game (4,637,184 bytes at B32, H4); no Q values, Team B
+  rows, physical state or expanded features are kept. A minibatch rebuilds
+  its actor features with the same builder as live action selection, only
+  for its selected games (27,265,920 bytes per default minibatch instead of
+  436,254,720 for the whole window). Like the donor, a window's unroll starts
+  from the oldest kept row's stored memory, which older weights produced; it
+  is never recomputed.
+- **Partial final window.** When the budget ends inside a block, the last
+  window holds H kept rows plus the remaining m rounds, then padding. Padding
+  never becomes a successor, and the last real row serves only as the
+  bootstrap for the pair before it.
+- **Team reward and endings.** The donor's SMAX team reward is the first
+  agent's reward. BG uses the mean native reward over the configured Team A
+  slots (the shared `team_task_reward`), plus the team shaping reward when
+  shaping is on. The value sum and the legal maximum cover configured slots
+  only. A real ending (win, loss or horizon draw) cuts the return to the
+  immediate reward; the end of a block is not an ending and bootstraps from
+  the next row, as in the donor.
+- **Loss and logged values.** The loss is the mean squared team TD error over
+  the eligible pairs only: it divides by the number of pairs whose left and
+  right rows are both real, so padding changes neither the sum nor the count.
+  The logged `mean_q` is the mean VDN team value at the recorded actions over
+  those pairs; the donor's `qvals` is the mean per-agent chosen value over all
+  rows. The two logs are not the same number.
+- **Normalization batch size.** Train-mode BatchNorm normalizes over one
+  minibatch's rows. At BG's default B = 32 games and 16 minibatches, each
+  minibatch holds D = 2 whole games; the donor's SMAX workload had 8. Some
+  features hardly change within a game (the map layout, for example), so
+  their minibatch variance is smaller than their variance across games: an
+  independent review measured about 0.54 of it at D = 2 against 0.94 at D = 8
+  on real collected inputs. The running statistics used for action choice
+  therefore come from small, game-grouped batches. This is not a code defect,
+  and its effect on learning is not measured; changing the minibatch count or
+  the number of games is a learning-setting choice left to the qualification
+  of PQN-VDN settings.
+- **Schedules.** The donor derives its planned updates from a step budget
+  that leaves out its first random rollout. BG counts the W initial rounds in
+  the budget, so the planned learning blocks are N = ceil((R − W) / T) for R
+  rounds, and the learning rate decays over N · epochs · minibatches
+  optimizer steps. Exploration uses the donor's block clock over the same N.
+  Compiled code sets the final exploration rate exactly once the decay span
+  is reached, because dividing through the span's reciprocal can land a few
+  float32 steps below it.
+- **Random streams and opponents.** The model key and the minibatch shuffle
+  root come from BG's run root through fixed tags ("PQNI" and "PQNS"); epoch
+  e of learning block k shuffles games with a key folded from both. Each
+  epoch permutes whole games once and minibatch j takes the next D games, as
+  the donor's reshape does. Empty and rejected blocks use no key. Team B
+  plays BG's self-play history, frozen snapshots or a pinned System through
+  the shared owners; the donor plays SMAX's built-in enemies.
+- **Rejection.** The donor has no rollback. BG rejects a whole block when a
+  row, a recorded action, the window's order, any step's loss, gradient or
+  candidate state (including every optimizer leaf) is not valid, or when the
+  shared history would refuse the publication, and keeps the previous
+  boundary.
+- **Shared host workflow.** The donor's own training loop, logging, Hydra and
+  WandB setup and test episodes are not copied. BG's shared collection,
+  curriculum, shaping, checkpoints, validation, selection, exports,
+  tournaments and reports run PQN-VDN the same way as PPO and QMIX.
+
+Kept unchanged from the donor: learning again from the kept rows of the
+previous block, starting each unroll from the memory stored when those rows
+were acted on, train-mode BatchNorm in every minibatch with frozen statistics
+for action choice, one forward pass for predictions and stopped-gradient
+lambda-return targets, the VDN sum, clipped RAdam with its linear schedule, and
+no target network or replay.
+
+### PQN-VDN CPU Reference
+
+`build_same_stack_pqn_reference()` and `load_pqn_reference()` in the
+[PQN reference support module](../../tests/pqn_donor_reference.py) run the
+donor's own `ScannedRNN`, `QNetwork`, `Transition`, `CustomTrainState`,
+`create_agent`, exploration schedule, greedy and epsilon-greedy functions and
+`_learn_epoch` bodies. The helper computes the names each body reads from its
+syntax tree and supplies exactly those; it never imports BG's PQN code. The
+donor settings come from the stored YAML plus recorded per-case overrides
+(PyYAML reads `1e7` as a string, and the case's `TOTAL_TIMESTEPS` is chosen so
+the donor's floor rule gives the case's learning blocks). The isolated
+generator runs in a Python 3.14 environment holding exactly the project's
+numerical versions and no BG package (`pqn-reference-requirements.txt`). To
+rebuild it in a fresh temporary environment, run these commands from the
+repository root (`--no-config` keeps BG's dependency settings out of it), then
+compare every generated array with the checked archive:
+
+```bash
+UV_CACHE_DIR=/tmp/pqn-reference-cache uv --no-config venv --python 3.14 /tmp/pqn-reference
+UV_CACHE_DIR=/tmp/pqn-reference-cache uv --no-config pip install --python /tmp/pqn-reference/bin/python -r tests/fixtures/baseline_donor/pqn-reference-requirements.txt
+env JAX_PLATFORMS=cpu OMP_NUM_THREADS=2 OPENBLAS_NUM_THREADS=2 taskset -c 0,1 \
+  /tmp/pqn-reference/bin/python -B tests/pqn_donor_reference.py \
+  --generate /tmp/pqn-reference-output
+```
+
+Inputs come from recorded seeds, because `jax.random` does not depend on the
+CPU thread count. The three orthogonal recurrent kernels are stored, because
+their rounding does. Parameter-sized results are stored as fingerprints (sum,
+norm and 64 fixed entries per leaf); the same donor bodies also run inside the
+test process for leaf-by-leaf comparison. Two fresh generations produced the
+same 3,245,544-byte archive of 544 arrays. Each donor learning call traces a
+fresh wrapper, because the donor body reads its window as a global and JAX
+would otherwise reuse an earlier trace holding an older window.
+
+`tests/test_baseline_pqn_reference.py` compares BG with both references, using
+absolute and relative tolerances of 0.000002. Initialization matches the
+same-stack donor exactly for parameters, statistics and the clipped RAdam
+state, and every leaf's SHA256 matches the isolated generator's except the
+three orthogonal kernels. Measured largest absolute differences were
+0.00000021 for inference-mode values and memory and 0.0000014 for training-mode
+values, memory and running statistics. For one captured minibatch step, the
+loss matched within 0.000002 relative, and gradients before clipping matched
+within the relative tolerance; the largest absolute difference was 0.000023,
+on gradients whose magnitudes reach the tens. The donor flattens actors
+agent-major and BG game-major, which changes only the order of float
+reductions. Greedy choices matched exactly; the donor's sampled action counts
+at epsilon 0, 0.37 and 1 lie within a 5-sigma binomial bound of BG's
+probabilities, with no illegal draw. Two whole learning blocks (4 games, H2
+and T2 windows, 2 epochs of 2 minibatches, 8 clipped RAdam steps that cross
+RAdam's rectification point) run through the learner's own epoch loop with the
+donor's permutations. Every step's loss matched within 0.000002 relative, and
+parameters, statistics and optimizer state after each block matched both
+references; the largest difference was 0.00000092.
+
+The 0.000002 tolerances are measured on full windows. In a short final window
+many input features have almost no variance within the batch, and BatchNorm's
+variance with epsilon 0.00001 then magnifies float rounding: an independent
+review found that only reordering the games changed a 3-row window's loss in
+the sixth significant digit, and BG differed from the donor there by 0.000014
+relative on the loss and up to 0.0000046 on parameters after one step. The
+donor has the same property; it is float sensitivity, not a rule difference.
+
+These all-valid comparisons prove agreement for the declared synthetic cases
+only. They do not establish training throughput, save/resume, sample
+efficiency or learned tactics; those have their own checks.
+
 ## Training Compiler Policy
 
-Built-in PPO passes `xla_gpu_autotune_level=0` to its outer collection and update
-compilations, including collection with recording. The shared owner is
+Built-in PPO, QMIX and PQN-VDN runs pass `xla_gpu_autotune_level=0` to their
+outer collection and update compilations, including collection with recording. The shared owner is
 [`training._compilation`](../../src/marl_battlegrounds/training/_compilation.py).
 It changes no process-wide environment or JAX setting. The raw scan and learner
 functions remain usable inside callers' own compiled loops. Generic collection

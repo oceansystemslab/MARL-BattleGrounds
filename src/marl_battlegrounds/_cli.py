@@ -104,7 +104,7 @@ def build_parser() -> argparse.ArgumentParser:
     training = commands.add_parser(
         "train",
         allow_abbrev=False,
-        help="Run or resume a declared PPO or QMIX experiment",
+        help="Run or resume a declared PPO, QMIX or PQN-VDN experiment",
     )
     training.add_argument("--config", help="Versioned JSON training settings")
     training_output = training.add_mutually_exclusive_group(required=True)

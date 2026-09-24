@@ -3,6 +3,9 @@
 Small CPU learners use real K20/H300 Random games on the five fixed validation
 maps. The checks keep native M8 records, prove diagnostics do not change learner
 state or keys, and reject altered shared evidence before recovery writes.
+A PQN-VDN run binds initialization reuse to its greedy identity over both
+parameters and BatchNorm statistics (a statistics-only change is a different
+actor), and its results name the method and optimizer count.
 These are engineering fixtures, not learning or configuration-screen trials.
 """
 
@@ -93,6 +96,81 @@ def test_initialization_reuse_binds_the_selected_method_before_output(
         assert not (tmp_path / method).exists()
     assert digests[0] == tree_digest(variables)
     assert len(set(digests)) == 4
+
+
+def test_pqn_initialization_reuse_binds_parameters_and_statistics(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from marl_battlegrounds.baselines import pqn
+    from marl_battlegrounds.training import pqn_learner
+
+    network = pqn.initialize_pqn(jax.random.key(3), planned_learning_blocks=1).network
+
+    def shift(leaf: jax.Array) -> jax.Array:
+        return leaf + 1
+
+    shifted = network._replace(batch_stats=jax.tree.map(shift, network.batch_stats))
+    digests: list[str] = []
+
+    def read_initialization(
+        path: object, *, actor_digest: str, seed_pairs: int
+    ) -> None:
+        del path, seed_pairs
+        digests.append(actor_digest)
+        raise ValueError("Stop at the initialization identity check")
+
+    monkeypatch.setattr(validation, "read_random_initialization", read_initialization)
+    config = config_from_dict(
+        {
+            "method": "pqn_vdn",
+            "num_envs": 4,
+            "total_env_steps": 64,
+            "pqn": {
+                "rollout_length": 4,
+                "memory_window": 2,
+                "epochs": 1,
+                "num_minibatches": 2,
+            },
+            "random_diagnostic_seed_pairs": 1,
+            "random_initialization_result": str(tmp_path / "initialization.json"),
+        }
+    )
+    for index, variables in enumerate((network, shifted)):
+        state = SimpleNamespace(
+            carry=SimpleNamespace(
+                history=SimpleNamespace(
+                    current_variables=pqn.PQNActorVariables(variables, jnp.float32(1.0))
+                )
+            )
+        )
+
+        def initialize(
+            *, chosen: SimpleNamespace = state, **kwargs: object
+        ) -> tuple[None, SimpleNamespace]:
+            del kwargs
+            return None, chosen
+
+        monkeypatch.setattr(pqn_learner, "init_pqn_learner", initialize)
+        with pytest.raises(ValueError, match="initialization identity check"):
+            runner.train(config, output_dir=tmp_path / f"run-{index}")
+        assert not (tmp_path / f"run-{index}").exists()
+    expected = checkpoints._inference_digest(
+        {
+            "kind": "actor",
+            "actor_digest": tree_digest(checkpoints._pqn_actor_item(network)),
+            "input_scale": 1.0,
+            "spawn_frame": "left",
+            "epsilon": 0.0,
+            "tie_rule": "first_legal_maximum",
+            "schemas": checkpoints.checkpoint_schemas("pqn_vdn"),
+        }
+    )
+    assert digests[0] == expected and digests[1] != digests[0]
+    assert validation._method_fields({"method": "pqn_vdn", "optimizer_steps": 3}) == {
+        "method": "pqn_vdn",
+        "optimizer_steps": 3,
+    }
+    assert validation._method_fields({"optimizer_steps": 3}) == {}
 
 
 @pytest.fixture(scope="module")

@@ -49,6 +49,21 @@ and the [source ledger](source_reuse.md#recurrent-qmix) for the donor match.
 Tiny integration runs check software only; they establish no learning, sample
 efficiency or ranking against PPO.
 
+## PQN-VDN Software And Experiment Scope
+
+Recurrent PQN-VDN (`TrainConfig(method="pqn_vdn")`) uses the donor's SMAX
+starting settings: blocks of 128 rounds, a memory window of 4 kept rows, 4
+epochs of 16 minibatches, RAdam learning rate 0.00025 falling linearly to
+1e-10, gradient clipping at 1.0, gamma 0.99 and lambda 0.85, and exploration
+falling from 1 to 0.01 over the first tenth of the learning blocks. The donor's
+128 games and its SMAX reward multiplier of 10 are not copied. No PQN-VDN
+setting has been tuned for MARL-BGs. The first 132 rounds of every run are
+random initial collection, counted in the budget. See the
+[training guide](README.md#recurrent-pqn-vdn) for the workflow, counts and
+costs, and the [source ledger](source_reuse.md#recurrent-pqn-vdn) for the donor
+match. Tiny integration runs check software only; they establish no learning,
+sample efficiency or ranking against PPO or QMIX.
+
 ## Current MAPPO Standard
 
 **Superseded, 22 September 2026.** The study results quoted in this section come

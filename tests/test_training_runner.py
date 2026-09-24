@@ -28,6 +28,15 @@ round-trips through JSON, and rejects nondefault PPO settings, QMIX settings
 under PPO, a budget below the replay minimum, an exploration clock that would
 overflow int32 and a malformed block. A save
 happens when a block's optimizer steps cross a multiple of the interval.
+PQN-VDN settings replace PPO settings the same way (a pqn block, a 1600-step
+interval, JSON round trip, and refusal of other methods' blocks, a budget
+without a learning block and a batch its minibatches do not divide); its
+extra save points must lie on its offset boundaries (8,320 transitions is
+accepted, 8,192 is not, while PPO and QMIX keep their fixed-block points).
+A rejected PQN-VDN block writes one learner_update_rejected event whose
+finite values are kept and whose NaN and infinite values are null with a
+named marker, then attempt_failed with the same reason, and stops without a
+second update or any change to the host counts.
 """
 
 # Failure injection inspects the private host coordinator, not a public API.
@@ -522,6 +531,129 @@ def test_qmix_settings_replace_ppo_and_resolve_their_own_save_interval() -> None
         False,
         True,
     ]
+
+
+def test_pqn_settings_replace_ppo_and_follow_offset_capture_points() -> None:
+    from marl_battlegrounds.baselines.ppo import PPOConfig
+    from marl_battlegrounds.baselines.pqn import DEFAULT_PQN_CONFIG, PQNConfig
+    from marl_battlegrounds.baselines.qmix import QMIXConfig
+
+    config = TrainConfig(method="pqn_vdn")
+    assert config.pqn == DEFAULT_PQN_CONFIG
+    assert config.checkpoint_interval_updates == 1600
+    saved = config_to_dict(config)
+    assert "ppo" not in saved and "qmix" not in saved
+    assert saved["pqn"]["memory_window"] == 4
+    assert config_from_dict(json.loads(json.dumps(saved))) == config
+    assert "pqn" not in config_to_dict(TrainConfig())
+    assert "pqn" not in config_to_dict(TrainConfig(method="qmix"))
+    explicit = TrainConfig(method="pqn_vdn", checkpoint_interval_updates=7)
+    assert explicit.checkpoint_interval_updates == 7
+    offsets = TrainConfig(method="pqn_vdn", checkpoint_env_steps=(4224, 8320))
+    assert offsets.checkpoint_env_steps == (4224, 8320)
+    for steps in ((8192,), (12288,)):
+        with pytest.raises(ValueError, match="update boundaries"):
+            TrainConfig(method="pqn_vdn", checkpoint_env_steps=steps)
+        assert TrainConfig(checkpoint_env_steps=steps).checkpoint_env_steps == steps
+        qmix = TrainConfig(method="qmix", checkpoint_env_steps=steps)
+        assert qmix.checkpoint_env_steps == steps
+    for bad, match in (
+        ({"method": "pqn_vdn", "ppo": PPOConfig(rollout_length=8)}, "no PPO"),
+        ({"method": "pqn_vdn", "qmix": QMIXConfig()}, "no QMIX"),
+        ({"pqn": PQNConfig()}, "PPO run takes no PQN"),
+        ({"method": "qmix", "pqn": PQNConfig()}, "QMIX run takes no PQN"),
+        (
+            {"method": "pqn_vdn", "num_envs": 32, "total_env_steps": 32 * 132},
+            "at least",
+        ),
+        ({"method": "pqn_vdn", "num_envs": 18, "total_env_steps": 18_000}, "divide"),
+        ({"method": "pqn_vdn", "pqn": "default"}, "PQNConfig"),
+    ):
+        with pytest.raises((TypeError, ValueError), match=match):
+            TrainConfig(**bad)  # pyright: ignore[reportArgumentType]
+    for block in ("ppo", "qmix"):
+        with pytest.raises(ValueError, match=block):
+            config_from_dict({**saved, block: {}})
+    with pytest.raises(ValueError, match="pqn"):
+        config_from_dict({**config_to_dict(TrainConfig()), "pqn": {}})
+
+
+def test_a_rejected_pqn_block_records_its_diagnostics_and_stops(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import jax.numpy as jnp
+
+    from marl_battlegrounds import training
+    from marl_battlegrounds.baselines.pqn import PQNConfig
+    from marl_battlegrounds.training import pqn_learner, runner
+
+    original = pqn_learner.update_pqn_learner
+
+    def rejected(state: Any, collected: Any, rollout: Any, **settings: Any) -> Any:  # noqa: ANN401
+        _, result = original(state, collected, rollout, **settings)
+        summary = result.summary._replace(
+            task_reward_sum=jnp.float32(jnp.nan),
+            shaping_reward_sum=jnp.float32(jnp.inf),
+        )
+        metrics = result.metrics._replace(
+            loss=jnp.asarray([[-jnp.inf, 1.5]], jnp.float32)
+        )
+        failed = state._replace(failed=jnp.bool_(True), failure_reason=jnp.int32(5))
+        return failed, result._replace(
+            accepted=jnp.bool_(False),
+            failed=jnp.bool_(True),
+            failure_reason=jnp.int32(5),
+            summary=summary,
+            metrics=metrics,
+        )
+
+    calls: list[int] = []
+    original_init = runner._Run.__init__
+
+    def counting_init(execution: runner._Run, *args: Any, **kwargs: Any) -> None:  # noqa: ANN401
+        original_init(execution, *args, **kwargs)
+        updater = execution.updater
+
+        def counted(*values: Any) -> Any:  # noqa: ANN401
+            calls.append(1)
+            return updater(*values)
+
+        execution.updater = counted
+
+    monkeypatch.setattr(pqn_learner, "update_pqn_learner", rejected)
+    monkeypatch.setattr(runner._Run, "__init__", counting_init)
+    config = TrainConfig(
+        method="pqn_vdn",
+        seed=19049151,
+        num_envs=4,
+        total_env_steps=64,
+        pqn=PQNConfig(rollout_length=4, memory_window=2, epochs=1, num_minibatches=2),
+        metrics="none",
+        verbose=False,
+    )
+    root = tmp_path / "run"
+    with pytest.raises(RuntimeError, match="reason 5"):
+        training.train(config, output_dir=root)
+    assert calls == [1]
+    events = [json.loads(line) for line in (root / "run_events.jsonl").open()]
+    names = [event["event"] for event in events]
+    position = names.index("learner_update_rejected")
+    assert names[position + 1] == "attempt_failed"
+    record = events[position]
+    assert record["reason"] == 5 and record["generated_transitions"] == 16
+    assert record["task_reward_sum"] is None and record["shaping_reward_sum"] is None
+    assert record["losses"] == [[None, 1.5]]
+    assert record["nonfinite"] == {
+        "task_reward_sum": "NaN",
+        "shaping_reward_sum": "+Inf",
+        "losses[0,0]": "-Inf",
+    }
+    assert record["steps_performed"] == [[False, False]]
+    assert "reason 5" in events[position + 1]["error"]
+    status = json.loads((root / "status.json").read_text())
+    assert status["env_steps"] == 0 and status["completed_updates"] == 0
+    log = root / "training_updates.jsonl"
+    assert not log.exists() or not log.read_text()
 
 
 def test_pinned_share_flows_through_the_public_run_and_its_saved_records(

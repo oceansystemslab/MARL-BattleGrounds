@@ -3072,6 +3072,27 @@ inference identity. Selection never picks an actor with zero optimizer steps.
 Save cadence counts optimizer steps and defaults to 1,600 for QMIX. Short
 software checks do not establish learning or sample efficiency.
 
+**PQN-VDN method extension, 24 September 2026:** `TrainConfig(method="pqn_vdn")`
+selects recurrent PQN-VDN, configured by `TrainConfig.pqn`. One shared local
+Q-network with BatchNorm acts for every Team A actor from its permitted inputs
+and own memory; the team value is the sum of the active actors' values, with
+no mixer, critic, physical state, target network or replay. Training
+normalizes over real rows and configured slots only; action selection always
+uses the saved statistics, which belong to the actor's identity. A run first
+collects W = memory_window + rollout_length rounds at exploration rate 1,
+counted in the budget; after that, each block learns once from the last
+memory_window kept rows plus the new rows, starting each game's unroll from its
+stored action-time memory, and publishes once. Reachable save and validation
+points follow these offset blocks. Exploration follows the learning-block clock
+and changes only between blocks; historical opponents keep their captured rate.
+Complete checkpoints include the network, statistics, optimizer, history and
+kept rows; exports hold only the network and statistics and play greedily
+(epsilon 0, first legal maximum), with their own model tag and inference
+identity. Selection never picks an actor with zero optimizer steps. Save cadence
+counts optimizer steps and defaults to 1,600. A rejected block is recorded and
+stops the run without a retry. Short software checks do not establish learning
+or sample efficiency.
+
 Keep action-time actor outputs. Real endings receive zero bootstrap; ordinary
 collection cutoffs retain it. Critic bootstrap reads the true successor without
 advancing retained recurrent memory twice. Death/respawn does not clear memory.

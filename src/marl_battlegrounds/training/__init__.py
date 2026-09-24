@@ -2,9 +2,9 @@
 
 Content preparation, schedules, shaping, self-play and compact collection use
 base dependencies. The package alone imports no JAX or PPO. Baseline actors need
-the existing training extra. train owns complete PPO and QMIX runs; load_system
-reads frozen actors and analyze uses the optional viz extra for saved-result
-plots.
+the existing training extra. train owns complete PPO, QMIX and PQN-VDN runs;
+load_system reads frozen actors and analyze uses the optional viz extra for
+saved-result plots.
 """
 
 # pyright: reportUnsupportedDunderAll=false
