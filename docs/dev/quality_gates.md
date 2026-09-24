@@ -321,9 +321,15 @@ The supported controllers are Reactive TDM ALPHA and BETA under the recorded
 versions of [A30](../design/specification_amendments.md#a30-reactive-tdm-and-specialist-scenario-controllers),
 [A34](../design/specification_amendments.md#a34-reactive-tdm-alpha-and-beta),
 [A35](../design/specification_amendments.md#a35-reactive-tdm-wall-steering) and
-[A42](../design/specification_amendments.md#a42-reactive-tdm-fixes-at-blocked-walls).
-Older version-specific witness results remain historical evidence. Use the
-current implementation and descriptors when qualifying a new candidate.
+[A42](../design/specification_amendments.md#a42-reactive-tdm-fixes-at-blocked-walls),
+plus Reactive TDM GAMMA version 2 under
+[A43](../design/specification_amendments.md#a43-reactive-tdm-gamma), which
+shares their movement helpers; a change to those shared helpers must leave
+ALPHA's and BETA's moves unchanged. GAMMA is BETA plus three rules (enemy-spawn search, no
+damage on enemies with 2 or more Trap ticks, and a Hunter Trap order), so
+outside those rules its choices must equal BETA's. Older version-specific
+witness results remain historical evidence. Use the current implementation and
+descriptors when qualifying a new candidate.
 
 Check each class's choices, tie handling, exact action masks, permitted inputs
 and RNG use. BETA preserves non-Rogue ALPHA behavior and uses its declared

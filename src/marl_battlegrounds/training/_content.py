@@ -690,6 +690,11 @@ def pinned_opponent_evidence(
         results become familiar-opponent results or cannot count as protected
         evidence: all eight whenever any pressure controller is known, because
         Beta's rules include Alpha's, and all eight when exposure is unknown.
+        The registered GAMMA callable is recognized through the BETA descriptor
+        its own descriptor records as ancestry: when that exact BETA identity
+        is among the binding's protected controllers, GAMMA counts as known
+        exposure to it (``controllers`` names BETA), although GAMMA's execution
+        identity stays its own. Otherwise GAMMA falls back to unknown.
         Unknown history is never reported as "none". A researcher System that
         declares components also gets ``declared_components``, a copy of them.
 
@@ -704,6 +709,9 @@ def pinned_opponent_evidence(
         System,
         controller_identity,
         policy,
+    )
+    from marl_battlegrounds.policies.reactive_tdm_gamma import (
+        reactive_tdm_gamma_controller_descriptor,
     )
 
     pressures = {
@@ -726,6 +734,7 @@ def pinned_opponent_evidence(
     elif isinstance(method, System):
         policies = method._policies  # pyright: ignore[reportPrivateUsage]
     controllers: list[str] = []
+    gamma_apply = policy("tdm-gamma").apply
     for entry in policies:
         identity = controller_identity(entry)
         if (
@@ -738,6 +747,19 @@ def pinned_opponent_evidence(
             in pressures
         ):
             controllers.append(f"{identity['identifier']}@{identity['version']}")
+        elif entry.apply is gamma_apply:
+            # GAMMA executes as itself but its descriptor records BETA's rules as
+            # ancestry; count that exposure only when the binding protects them.
+            inherited = cast(
+                dict[str, object],
+                reactive_tdm_gamma_controller_descriptor()["inherited_controller"],
+            )
+            if (
+                inherited["policy_id"],
+                inherited["version"],
+                canonical_digest_sha256(inherited),
+            ) in pressures:
+                controllers.append(f"{inherited['policy_id']}@{inherited['version']}")
     random_apply = policy("random").apply
     if isinstance(method, Policy) and (controllers or method.apply is random_apply):
         base: dict[str, object] = {"source": "installed"}

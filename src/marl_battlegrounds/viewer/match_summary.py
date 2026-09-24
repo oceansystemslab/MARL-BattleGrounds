@@ -165,6 +165,7 @@ _CONTROLLER_NAMES = {
     "random_valid": "Random (legal actions)",
     "reactive_tdm": "Reactive TDM ALPHA",
     "scenario_5": "Reactive TDM BETA",
+    "tdm_gamma": "Reactive TDM GAMMA",
 }
 
 

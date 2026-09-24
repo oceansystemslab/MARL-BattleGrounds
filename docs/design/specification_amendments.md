@@ -2440,8 +2440,9 @@ This amendment records decisions and planned work, not implementation completion
 | M14 | Capture the Flag | M9 |
 
 The submission sequence is M7 through M12. M13 and M14 begin after manuscript
-submission and the optimization audit below. Milestones 1–6 retain their identities.
-The current M12 owns full manuscript training runs, behavioral ablations, the frozen Paper 1 tournament,
+submission. Milestones 1–6 retain their identities. The current M12 starts with
+the repository clean-up and optimization audit below. It then owns full
+manuscript training runs, behavioral ablations, the frozen Paper 1 tournament,
 analysis and release artifacts. Earlier milestones qualify their machinery
 with focused tests and bounded pilots; protocols and selection rules are
 frozen before the dependent full runs.
@@ -2452,10 +2453,29 @@ are aliases under this table. New plans use the current name/number and give
 the historical alias when needed to disambiguate a source. Existing private
 handoffs remain at their original paths with an explicit current-name notice.
 
-### Post-manuscript optimization audit
+### M12 clean-up and optimization audit
 
-The user's 2026-09-08 decision requires a dedicated optimization phase after
-manuscript completion and before KOTH/CTF implementation. Profile representative
+The user's 2026-09-08 decision placed a dedicated optimization audit after
+manuscript completion. The user's 2026-09-24 decision moves it into M12 and
+widens it. M12 now runs in this order:
+
+1. Refactor the repository. Remove legacy code, folders nobody needs and tests
+   that no longer check anything useful. Restructure the file layout, and move
+   private helpers into separate utility modules so the public code stays short
+   and easy to read.
+2. Audit all in-file documentation and public Markdown for correctness and
+   against the [Documentation Standard](../dev/documentation_standard.md).
+3. Run the optimization audit described below.
+4. Run the manuscript experiments on the cleaned code, so the published results
+   come from the released code.
+5. Release MARL-BGs as a professional open-source project in the style of
+   JaxMARL, Mava and PettingZoo, with a documentation website and tutorials.
+
+Each refactor step keeps behavior unchanged for the code that stays and proves
+it with tests and matching outputs. Changes to public interfaces and concrete
+Core changes need explicit approval.
+
+For the optimization audit, profile representative
 training, validation, evaluation, metrics, replay and persistence workloads across
 realistic batch sizes and rollout lengths. Examine runtime, peak VRAM/RAM, data
 transfer, allocation and disk costs; remove repeated computation and serialization.
@@ -3229,3 +3249,96 @@ identity are rejected by the scenario checker. The eight packaged scenario
 notes keep their dated "ALPHA v2" and "BETA v4" wording, because changing them
 would change scenario assets. Results recorded with the old versions remain
 evidence for those versions only.
+
+## A43. Reactive TDM GAMMA
+
+**Classification:** new diagnostic controller. **Revises:** nothing. ALPHA
+version 3, BETA version 5, every scenario and its pressure controller, Core and
+the recording formats stay as they were.
+
+GAMMA is a third built-in reactive controller. Researchers use it by name,
+`policy("tdm-gamma")`, anywhere a built-in name is accepted: evaluation,
+tournaments, a pinned training opponent or a panel member. Its recorded
+identity is `reactive-team-deathmatch-gamma-controller`, version 2. Like ALPHA
+and BETA it reads only the actor's current observation (its SharedObs unit
+rows, its own status and the map size) and its exact action masks. It also
+reads the opposing spawn pads and its own spawn-shield time, which are public.
+It keeps no memory and ignores its random key.
+
+**What GAMMA is.** GAMMA plays exactly like BETA except for three rules:
+
+| Rule | What Changes From BETA |
+| --- | --- |
+| Search | With no enemy in view, Warriors, Mages, Hunters and Rogues walk to the middle of the enemy's five spawn pads instead of the map centre, and stay once there. Priests keep BETA's behaviour. |
+| Trap hold | GAMMA never damages an enemy that has 2 or more Hunter Trap ticks left: no Basic, no Warrior Charge, no Rogue Ultimate, and such an enemy does not count as a reason for a Mage Burst. At 1 tick it hits again, because the Trap is ending anyway. Movement and spacing do not change. |
+| Trap order | A Hunter Traps only untrapped enemies (Trap ticks 0), in the order Priest, Mage, Rogue, Warrior, Hunter, lowest health first within a class, at its full Trap range, and stays still that tick. If nothing is in Trap range but its Trap is ready (cooldown 0, not stunned, no spawn shield), it walks toward the first enemy in that order while still shooting. Otherwise it plays BETA's Hunter and does not Trap. |
+
+A Trap cast at one decision reads 4, 3, 2, 1, 0 Trap ticks at the next five.
+Any damage while it reads 2 or more breaks the Trap early. So GAMMA's team
+leaves a trapped enemy alone and kills the others, and its Hunter Traps the
+enemy healer first.
+
+**Relationship to ALPHA and BETA.** Everything the three rules do not change is
+BETA's, including its thresholds, tie-breaks and steering. Checked on one RTX
+5090: GAMMA's actions equal a copy of BETA with only these three rules switched
+on in all 368,640 decisions of 208 games on all 52 maps, and that copy with no
+rules switched on equals BETA in all 194,560 decisions of 104 games. GAMMA's
+descriptor records BETA's descriptor (which records ALPHA's). GAMMA is not a
+scenario pressure controller: no scenario uses it. Because GAMMA runs BETA's
+rules and records BETA as its base, a run that pins `tdm-gamma` is recorded as
+known exposure to BETA (`scenario-5-pressure-controller@5`), and all eight
+protected-scenario results are familiar-opponent results, as with `tdm-beta`.
+
+**How the rules were chosen.** An earlier, unreleased GAMMA (version 1) had
+twelve rule changes, including the search and the Trap hold: class-priority
+targets, saved Warrior Charges and Mage Bursts, a 36-health Rogue Ultimate and
+Warrior-then-Hunter Traps, among others. It lost all 300 games of a test-map round robin to ALPHA and BETA
+(30 distinct games). Each rule was then added on its own to BETA plus the
+search, and all 14 controllers played each other on all 52 maps (104 games per
+pairing). Moving Warriors, Mages and Hunters toward the enemy Priest first
+was the main cause of the losses: that variant won 4 of 130 test-map games. The combination of Trap
+order and Trap hold had the best record of any variant against BETA and ALPHA
+together on all 52 maps (99 wins in 208 games) and became version 2. These
+games included the test maps, so the tournament below is not a held-out
+measurement of GAMMA.
+
+**Masks decide.** Dead units do nothing. A stunned unit can only stay; a unit
+under its own spawn shield still moves but cannot fight. Core's rules,
+collisions and timings are unchanged.
+
+**DevClient.** Either team may choose "Reactive TDM GAMMA" and, since 24
+September 2026, "Reactive TDM BETA" too; both need SharedObs. Recordings name
+`tdm_gamma` for every row of a team that uses GAMMA, Priests included. A
+private action-source record names the controllers' identities: version 6 for
+GAMMA on Team B, and version 7 whenever BETA or GAMMA plays Team A.
+Policy-controlled Submits and the simulator step run compiled, so a Submit
+takes milliseconds after a one-time compile of a few seconds.
+
+**Tournament, 24 September 2026.** One fixed round robin compared ALPHA, BETA
+and GAMMA version 2 on the five test maps (47 to 51) under the standard rules:
+canonical 5v5 rosters, 20 points to win, at most 300 steps, priority metrics,
+seed 0 and 100 games per pairing (20 per map, spawn ends exchanged), 32 games
+at a time on one RTX 5090. The first name in sorted order plays Team A, so
+GAMMA was Team B in every game. The run took 95 seconds.
+
+| Team A vs Team B | Team A Wins–Draws–Losses | Mean Game Length (Steps) | Mean Score Difference (A − B) | Team A Kills / Deaths Per Game |
+| --- | --- | --- | --- | --- |
+| ALPHA vs BETA | 30–10–60 | 202 | −0.7 | 18.4 / 19.1 |
+| ALPHA vs GAMMA | 60–0–40 | 210 | +1.9 | 19.5 / 17.6 |
+| BETA vs GAMMA | 100–0–0 | 218 | +2.2 | 20.0 / 17.8 |
+
+GAMMA won 40 of 100 games against ALPHA and none against BETA. By map, it won
+10 of 40 games on maps 47, 48, 50 and 51 and none on map 49. Elo ratings were
+BETA 1,396, ALPHA 1,184 and GAMMA 1,020. The tournament reports no confidence
+intervals ("Insufficient Variation"), because all three controllers ignore
+random keys: each of the 30 starting conditions (3 pairings × 5 maps × 2 spawn
+ends) produced the same game 10 times. So the 300 games are 30 distinct games,
+each counted 10 times. In every side check run (ALPHA against BETA, and
+GAMMA version 1 against both, each on all 52 maps), swapping which controller
+plays Team A gave exactly mirrored results. On all 52 maps GAMMA version 2 won
+47 of 104 games against BETA (no draws) and 52 of 104 against ALPHA (2 draws).
+
+**Limits.** GAMMA is a diagnostic controller, not a trained policy and not a
+Big 12 entrant. It has no route memory, lookahead or prediction of other units.
+Its rules were picked from games that included the test maps. It lost every
+test-map tournament game to BETA.

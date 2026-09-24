@@ -1,6 +1,9 @@
 /**
  * @file Check that browser installation and page mode use validated joined authority
- * rather than retained raw transport.
+ * rather than retained raw transport. The page labels the GAMMA controller
+ * (tdm_gamma) "Reactive TDM GAMMA", accepts BETA (scenario_5) and GAMMA for
+ * either team only under SharedObs, and styles both teams' BETA and GAMMA
+ * roster rows like the other policy controllers.
  */
 import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
@@ -1432,7 +1435,11 @@ test("main labels every policy controller explicitly and fences its action editi
 
   assert.match(
     source,
-    /value === "manual" \|\| value === "reactive_tdm" \|\| value === "random_valid"/u,
+    /value === "manual" \|\| value === "random_valid" \|\| isReactiveController\(value\)/u,
+  );
+  assert.match(
+    source,
+    /value === "reactive_tdm" \|\| value === "scenario_5" \|\| value === "tdm_gamma"/u,
   );
   assert.match(source, /controller === "random_valid"[\s\S]*return "Random"/u);
   assert.match(
@@ -1443,6 +1450,33 @@ test("main labels every policy controller explicitly and fences its action editi
   assert.doesNotMatch(styles, /data-team-b-controller="scenario_3"/u);
   assert.match(source, /controller === "scenario_5"[\s\S]*return "Reactive TDM BETA"/u);
   assert.match(styles, /data-team-b-controller="scenario_5"/u);
+  assert.match(
+    source,
+    /if \(controller === "tdm_gamma"\) \{\s*return "Reactive TDM GAMMA";\s*\}/u,
+  );
+  assert.match(
+    source,
+    /!isTeamController\(candidate\.team_a_controller\) \|\|\s*!isTeamController\(candidate\.team_b_controller\) \|\|/u,
+  );
+  assert.match(
+    source,
+    /\(isReactiveController\(candidate\.team_a_controller\) \|\|\s*isReactiveController\(candidate\.team_b_controller\)\) &&\s*candidate\.execution_information_mode !== "shared_obs"/u,
+  );
+  assert.doesNotMatch(
+    source,
+    /team_[ab]_controller (?:===|!==) "(?:scenario_5|tdm_gamma)"/u,
+  );
+  for (const controller of ["scenario_5", "tdm_gamma"]) {
+    for (const team of ["team-a", "team-b"]) {
+      assert.match(
+        styles,
+        new RegExp(
+          `html\\[data-${team}-controller="${controller}"\\] \\.roster-row\\[data-team="${team}"\\]`,
+          "u",
+        ),
+      );
+    }
+  }
   assert.match(
     source,
     /controller === "manual"[\s\S]*Object\.freeze\(\{ team, controller \}\)/u,

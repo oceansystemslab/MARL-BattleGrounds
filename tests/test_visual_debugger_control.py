@@ -1,4 +1,13 @@
-"""Check debugger session control in isolated and integrated cases."""
+"""Check debugger session control in isolated and integrated cases.
+
+Policy-controlled Submits run the policy executor and Core step compiled. The
+compiled-Submit test counts calls through the two compiled programs, so each
+of its two Submits is proved to run through both. The compiled Submit gives
+exactly the uncompiled state, observation, action mask and whole transition
+record (facts, events, rewards, terminated and truncated) for ALPHA, BETA,
+GAMMA and Random, and the second Submit reuses both compiled programs (their
+cache sizes do not grow).
+"""
 
 from dataclasses import fields, replace
 from typing import cast
@@ -1210,6 +1219,13 @@ def test_every_controller_and_information_mode_executes_one_real_coherent_step(
     monkeypatch.setattr(policy_execution, "build_team_actor_input", counting_bank)
     monkeypatch.setattr(control, "step", counting_step)
 
+    def uncompiled(*args: object, **kwargs: object) -> object:
+        return policy_execution.apply_policies(*args, **kwargs)  # type: ignore[arg-type]
+
+    # Counting needs the uncompiled executor; a compiled program would build the
+    # banks only once, while tracing. Compiled results are compared separately.
+    monkeypatch.setattr(control, "apply_policies", uncompiled)
+
     def execute() -> DebuggerSession:
         return submit_interactive(
             _session(
@@ -1717,3 +1733,74 @@ def test_debugger_scenario_validates_default_fixed_slot() -> None:
             0,
             "public",  # type: ignore[arg-type]
         )
+
+
+@pytest.mark.parametrize(
+    ("team_a_controller", "team_b_controller"),
+    (
+        ("manual", "tdm_gamma"),
+        ("tdm_gamma", "scenario_5"),
+        ("reactive_tdm", "random_valid"),
+    ),
+)
+def test_compiled_submit_matches_the_uncompiled_submit(
+    monkeypatch: pytest.MonkeyPatch,
+    team_a_controller: TeamController,
+    team_b_controller: TeamController,
+) -> None:
+    session = _session(
+        team_a_controller=team_a_controller,
+        team_b_controller=team_b_controller,
+        execution_information_mode="shared_obs",
+    )
+    real_step = control._COMPILED_STEP  # pyright: ignore[reportPrivateUsage]
+    real_policies = control._COMPILED_APPLY_POLICIES  # pyright: ignore[reportPrivateUsage]
+    calls = {"step": 0, "policies": 0}
+
+    def counted_step(*args: object) -> object:
+        calls["step"] += 1
+        return real_step(*args)
+
+    def counted_policies(*args: object, **kwargs: object) -> object:
+        calls["policies"] += 1
+        return real_policies(*args, **kwargs)
+
+    # Count calls through the real compiled programs; process-wide cache sizes
+    # alone could have been filled by an earlier test.
+    monkeypatch.setattr(control, "_COMPILED_STEP", counted_step)
+    monkeypatch.setattr(control, "_COMPILED_APPLY_POLICIES", counted_policies)
+    first = submit_interactive(session)
+    assert calls == {"step": 1, "policies": 1}
+    programs = (
+        real_step._cache_size(),  # pyright: ignore[reportFunctionMemberAccess]
+        real_policies._cache_size(),  # pyright: ignore[reportFunctionMemberAccess]
+    )
+    compiled = submit_interactive(first)
+    assert calls == {"step": 2, "policies": 2}
+    # The second Submit reuses both compiled programs.
+    assert (
+        real_step._cache_size(),  # pyright: ignore[reportFunctionMemberAccess]
+        real_policies._cache_size(),  # pyright: ignore[reportFunctionMemberAccess]
+    ) == programs
+
+    def uncompiled(*args: object, **kwargs: object) -> object:
+        return policy_execution.apply_policies(*args, **kwargs)  # type: ignore[arg-type]
+
+    def uncompiled_step(*args: object) -> object:
+        return control.core_env.step(*args)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(control, "apply_policies", uncompiled)
+    monkeypatch.setattr(control, "step", uncompiled_step)
+    reference = submit_interactive(submit_interactive(session))
+    # The reference ran uncompiled: no further calls through the compiled programs.
+    assert calls == {"step": 2, "policies": 2}
+    assert _tree_equal(compiled.state, reference.state)
+    assert _tree_equal(compiled.observation, reference.observation)
+    assert _tree_equal(compiled.action_mask, reference.action_mask)
+    assert compiled.incoming_evaluation_view is not None
+    assert reference.incoming_evaluation_view is not None
+    # The whole transition record: facts, events, rewards, terminated, truncated.
+    assert (
+        compiled.incoming_evaluation_view.transition
+        == reference.incoming_evaluation_view.transition
+    )

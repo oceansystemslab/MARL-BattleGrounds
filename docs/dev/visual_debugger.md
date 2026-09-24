@@ -54,9 +54,9 @@ case; new obstacle IDs use `obstacle_N`. Visible names remain free-form.
 **Delete Saved** needs confirmation and removes all revisions of that identity;
 an open draft remains available as an unsaved copy.
 
-Both teams can use **Manual**, **Reactive TDM ALPHA**, or **Random**. Team B can
-also use **Reactive TDM BETA**. Reactive controllers require SharedObs; Random
-and Manual also support NoSharedObs. Policy-controlled agents stay inspectable,
+Both teams can use **Manual**, **Reactive TDM ALPHA**, **Reactive TDM BETA**,
+**Reactive TDM GAMMA** or **Random**. Reactive controllers require SharedObs;
+Random and Manual also support NoSharedObs. Policy-controlled agents stay inspectable,
 but their actions cannot be edited manually. Submit can run both automatic
 teams. A controller or information-mode change resets the loaded snapshot.
 
@@ -71,6 +71,13 @@ known. (Superseded, 22 September 2026: this assessment of ALPHA version 2 and BE
 version 4 is historical only; later study found longer stalls.) The shared `scenario_5` BETA behavior serves Scenarios 3 and 5; the old
 standalone Scenario 3, Scripted TDM, and separate Reactive MRP interfaces were
 removed. Historical recording identities remain readable.
+
+GAMMA v2 is BETA plus three rules for Warriors, Mages, Hunters and Rogues: with
+no enemy in view they walk toward the middle of the enemy spawn pads; they never
+damage an enemy with 2 or more Hunter Trap ticks left; and Hunters start a new
+Trap only on an untrapped enemy they can reach now, choosing Priest, Mage,
+Rogue, Warrior, Hunter in that order. Its Priests keep BETA's rules
+([A43](../design/specification_amendments.md#a43-reactive-tdm-gamma)).
 
 These are diagnostic/scenario-pressure tools, not official baselines or Big 12
 entrants. Future official evaluation definitions must bind the same versioned

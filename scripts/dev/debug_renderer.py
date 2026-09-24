@@ -324,9 +324,8 @@ def _recording_policy_execution_included(session: object) -> bool:
         getattr(session, "team_a_controller", None),
         getattr(session, "team_b_controller", None),
     )
-    if controllers[0] not in ("manual", "reactive_tdm", "random_valid") or controllers[
-        1
-    ] not in ("manual", "reactive_tdm", "random_valid", "scenario_5"):
+    supported = ("manual", "reactive_tdm", "random_valid", "scenario_5", "tdm_gamma")
+    if controllers[0] not in supported or controllers[1] not in supported:
         raise ValueError("recording sessions require exact team controllers.")
     return any(controller != "manual" for controller in controllers)
 

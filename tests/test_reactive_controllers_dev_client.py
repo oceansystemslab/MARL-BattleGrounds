@@ -1,4 +1,27 @@
-"""Check DevClient controller selection, execution and recorded identities."""
+"""Check DevClient controller selection, execution and recorded identities.
+
+Most tests put BETA (``scenario_5``) on Team B beside a manual, ALPHA
+(``reactive_tdm``) or Random (``random_valid``) Team A. They check one input
+bank per team, one joint-action build and one Core step per Submit, with the
+submitted actions accepted; any valid horizon and either respawn clock order;
+that Team B's Warrior and Hunter act as ALPHA would, alive or reviving; that
+BETA refuses scripted scenarios; that loads, resets and reselection keep
+BETA selected, and BETA can be chosen after a terminal episode; that a BETA
+failure leaves the session unchanged; and that pressure identities follow the
+BETA descriptor and the launch code revision but not the scenario name. They
+also check:
+
+- The protocol and ``set_combat_configuration`` accept BETA on Team A with
+  SharedObs (BETA on both teams starts a new run generation) and reject BETA
+  on either team without SharedObs.
+- A saved context with Team A BETA or GAMMA (``tdm_gamma``) against a manual
+  Team B gives every Team A row that controller's policy kind, algorithm ID
+  and content digest; ``team_a_pressure_protocol`` reads
+  ``policy_id@version`` and ``team_a_pressure_protocol_digest`` holds the
+  digest; the Team B ``pressure_protocol`` keys are absent.
+- ALPHA and BETA recordings reopen unchanged, and a retired controller name
+  stays valid provenance in a saved replay.
+"""
 
 import json
 from dataclasses import replace
@@ -31,6 +54,7 @@ from scripts.dev.visual_debugger.model import (
     DebuggerSession,
     TeamBController,
     TeamController,
+    team_controller_action_source,
 )
 from scripts.dev.visual_debugger.protocol import CombatConfigurationV1
 from scripts.dev.visual_debugger.recording import (
@@ -42,7 +66,7 @@ from scripts.dev.visual_debugger.service import DebuggerService
 from tests.scenario_controller_fixtures import load_scenario_1
 from tests.visual_debugger_fixtures import debugger_test_launch_specification
 
-from marl_battlegrounds.core.types import TEAM_B_ID, EnvConfig, EnvState
+from marl_battlegrounds.core.types import TEAM_A_ID, TEAM_B_ID, EnvConfig, EnvState
 from marl_battlegrounds.evaluation import policy_execution
 from marl_battlegrounds.evaluation.models import (
     AssignedPolicySlotV2,
@@ -63,6 +87,12 @@ from marl_battlegrounds.evaluation.replay_v3 import ReplayArtifactV3, build_repl
 from marl_battlegrounds.policies.actor import ActorAction
 from marl_battlegrounds.policies.input import ActorInput, Observations
 from marl_battlegrounds.policies.reactive_tdm_alpha import reactive_tdm_alpha_policy
+from marl_battlegrounds.policies.reactive_tdm_beta import (
+    reactive_tdm_beta_controller_descriptor,
+)
+from marl_battlegrounds.policies.reactive_tdm_gamma import (
+    reactive_tdm_gamma_controller_descriptor,
+)
 from marl_battlegrounds.policies.shared_obs import (
     build_shared_obs_sensor_source_bank,
     execute_shared_obs_team_policy,
@@ -333,7 +363,7 @@ def test_scenario_controller_survives_loading_long_or_reviving_rosters(
     assert _tree_equal(restarted.key, loaded.key)
 
 
-def test_scenario_controller_protocol_rejects_team_a_and_nosharedobs(
+def test_scenario_controller_protocol_accepts_team_a_and_rejects_nosharedobs(
     scenario_controller: TeamBController,
 ) -> None:
     configuration = {
@@ -341,34 +371,115 @@ def test_scenario_controller_protocol_rejects_team_a_and_nosharedobs(
         "team_b_controller": scenario_controller,
         "execution_information_mode": "shared_obs",
     }
+    on_team_a = {**configuration, "team_a_controller": scenario_controller}
+    team_a_only = {
+        **configuration,
+        "team_a_controller": scenario_controller,
+        "team_b_controller": "manual",
+    }
     assert (
         CombatConfigurationV1.model_validate(configuration).team_b_controller
         == scenario_controller
     )
-    with pytest.raises(ValidationError, match="team_a_controller"):
-        CombatConfigurationV1.model_validate(
-            {**configuration, "team_a_controller": scenario_controller}
-        )
-    with pytest.raises(ValidationError, match="require SharedObs"):
-        CombatConfigurationV1.model_validate(
-            {**configuration, "execution_information_mode": "no_shared_obs"}
-        )
+    assert (
+        CombatConfigurationV1.model_validate(on_team_a).team_a_controller
+        == scenario_controller
+    )
+    for accepted in (configuration, on_team_a, team_a_only):
+        with pytest.raises(ValidationError, match="require SharedObs"):
+            CombatConfigurationV1.model_validate(
+                {**accepted, "execution_information_mode": "no_shared_obs"}
+            )
     session = _session(team_b=scenario_controller)
-    with pytest.raises(ValueError, match="require SharedObs"):
-        control.set_combat_configuration(
-            session,
-            team_a_controller="manual",
-            team_b_controller=scenario_controller,
-            execution_information_mode="no_shared_obs",
-        )
-    with pytest.raises(ValueError, match="team_a_controller"):
-        control.set_combat_configuration(
-            session,
-            team_a_controller=cast(TeamController, scenario_controller),
-            team_b_controller=scenario_controller,
-            execution_information_mode="shared_obs",
-        )
+    rejected: tuple[tuple[TeamController, TeamBController], ...] = (
+        ("manual", scenario_controller),
+        (scenario_controller, scenario_controller),
+        (scenario_controller, "manual"),
+    )
+    for team_a, team_b in rejected:
+        with pytest.raises(ValueError, match="require SharedObs"):
+            control.set_combat_configuration(
+                session,
+                team_a_controller=team_a,
+                team_b_controller=team_b,
+                execution_information_mode="no_shared_obs",
+            )
+    installed = control.set_combat_configuration(
+        session,
+        team_a_controller=scenario_controller,
+        team_b_controller=scenario_controller,
+        execution_information_mode="shared_obs",
+    )
+    assert installed.team_a_controller == scenario_controller
+    assert installed.team_b_controller == scenario_controller
+    assert installed.run_generation == 1
     assert session.run_generation == 0
+
+
+@pytest.mark.parametrize(
+    ("team_a", "algorithm"),
+    (
+        ("scenario_5", "scenario-5-pressure-controller"),
+        ("tdm_gamma", "reactive-team-deathmatch-gamma-controller"),
+    ),
+)
+def test_saved_context_records_team_a_pressure_controller_beside_manual_team_b(
+    team_a: TeamController,
+    algorithm: str,
+) -> None:
+    scenario = get_scenario("arena_5v5")
+    config, _state = scenario.build_scenario()
+    built = evaluation_bridge.build_debugger_evaluation_context_v1(
+        debugger_test_launch_specification(7),
+        scenario=scenario,
+        config=config,
+        run_generation=0,
+        action_source_kind=team_controller_action_source(team_a, "manual"),
+        team_a_controller=team_a,
+        team_b_controller="manual",
+        execution_information_mode="shared_obs",
+    )
+    # A saved replay header stores the context as JSON; read it back that way.
+    context = EvaluationEpisodeContextV3.model_validate_json(built.model_dump_json())
+    assert context == built
+    descriptor = (
+        reactive_tdm_beta_controller_descriptor()
+        if team_a == "scenario_5"
+        else reactive_tdm_gamma_controller_descriptor()
+    )
+    digest = canonical_digest_sha256(
+        {"behavior": descriptor, "code_revision": context.code_revision}
+    )
+    aggregation = {row.name: row.value for row in context.aggregation_keys}
+    assert aggregation["team_a_controller"] == team_a
+    assert aggregation["team_b_controller"] == "manual"
+    assert aggregation["action_source"] == "mixed"
+    assert aggregation["team_a_pressure_protocol"] == (
+        f"{algorithm}@{descriptor['version']}"
+    )
+    assert aggregation["team_a_pressure_protocol_digest"] == digest
+    # A manual Team B has no pressure controller, so its keys are absent.
+    assert "pressure_protocol" not in aggregation
+    assert "pressure_protocol_digest" not in aggregation
+    team_a_slots: list[int] = []
+    for roster_row, row in zip(context.roster, context.policy_assignments, strict=True):
+        if not roster_row.configured_active:
+            continue
+        assert isinstance(row, AssignedPolicySlotV2)
+        if roster_row.configured_team_id == TEAM_A_ID:
+            assert row.policy_kind == team_a
+            assert row.policy_id == (
+                f"debugger-action-source:{team_a}:slot:{row.global_slot}"
+            )
+            assert row.algorithm_id == algorithm
+            assert row.execution_mode == "deterministic"
+            assert row.policy_content_digest == digest
+            team_a_slots.append(row.global_slot)
+        else:
+            assert row.policy_kind == "manual"
+            assert row.algorithm_id == "not_applicable"
+            assert row.policy_content_digest != digest
+    assert tuple(team_a_slots) == (0, 1, 2, 3, 4)
 
 
 def test_scenario_controller_cannot_replace_registered_scripted_frames(

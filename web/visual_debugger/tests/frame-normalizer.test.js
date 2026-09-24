@@ -1,6 +1,8 @@
 /**
  * @file Check live transport normalization, schema/authority boundaries and
- * production-captured frame identities.
+ * production-captured frame identities. A live combat configuration keeps the
+ * BETA (scenario_5) and GAMMA (tdm_gamma) controllers for either team under
+ * SharedObs and rejects them under NoSharedObs.
  */
 import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
@@ -2193,7 +2195,7 @@ test("live presentation authority is exact and audience-scoped", () => {
   }
 });
 
-test("live combat configuration preserves Random and restricts scenarios to SharedObs Team B", () => {
+test("live combat configuration preserves Random and restricts scenarios to SharedObs", () => {
   for (const [teamAController, teamBController, source] of [
     ["random_valid", "manual", researcherFrame()],
     ["manual", "random_valid", povFrame()],
@@ -2214,8 +2216,7 @@ test("live combat configuration preserves Random and restricts scenarios to Shar
     () => normalizeLiveDebuggerFrameV2(malformed),
     /combat configuration is invalid/u,
   );
-  {
-    const specialist = "scenario_5";
+  for (const specialist of ["scenario_5", "tdm_gamma"]) {
     const scenario = researcherFrame();
     scenario.combat_configuration.team_b_controller = specialist;
     scenario.combat_configuration.execution_information_mode = "shared_obs";
@@ -2223,8 +2224,24 @@ test("live combat configuration preserves Random and restricts scenarios to Shar
       normalizeLiveDebuggerFrameV2(scenario).combat_configuration.team_b_controller,
       specialist,
     );
-    for (const invalid of [
+    for (const teamA of [
       { team_a_controller: specialist },
+      { team_a_controller: specialist, team_b_controller: "manual" },
+    ]) {
+      const changed = structuredClone(scenario);
+      Object.assign(changed.combat_configuration, teamA);
+      assert.deepEqual(normalizeLiveDebuggerFrameV2(changed).combat_configuration, {
+        team_a_controller: specialist,
+        team_b_controller: teamA.team_b_controller ?? specialist,
+        execution_information_mode: "shared_obs",
+      });
+    }
+    for (const invalid of [
+      {
+        team_a_controller: specialist,
+        team_b_controller: "manual",
+        execution_information_mode: "no_shared_obs",
+      },
       { execution_information_mode: "no_shared_obs" },
       { team_b_controller: "scripted_tdm" },
       { team_b_controller: "scenario_1" },

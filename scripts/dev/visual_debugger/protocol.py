@@ -44,8 +44,10 @@ type PendingSubmissionScope = Literal[
     "joint_turn",
     "scripted_playback",
 ]
-type TeamController = Literal["manual", "reactive_tdm", "random_valid"]
-type TeamBController = TeamController | Literal["scenario_5"]
+type TeamController = Literal[
+    "manual", "reactive_tdm", "random_valid", "scenario_5", "tdm_gamma"
+]
+type TeamBController = TeamController
 type ExecutionInformationMode = Literal["shared_obs", "no_shared_obs"]
 type CommandResult = Literal[
     "applied",
@@ -235,7 +237,7 @@ class CombatConfigurationV1(_ProtocolModel):
         """
         if (
             any(
-                controller in ("reactive_tdm", "scenario_5")
+                controller in ("reactive_tdm", "scenario_5", "tdm_gamma")
                 for controller in (self.team_a_controller, self.team_b_controller)
             )
             and self.execution_information_mode != "shared_obs"

@@ -1,6 +1,8 @@
 /**
  * @file Check keyboard and pointer command routing, native browser shortcuts and
- * submission state labels.
+ * submission state labels. Recording restarts accept the BETA (scenario_5)
+ * and GAMMA (tdm_gamma) controllers for either team, and reject them under
+ * NoSharedObs whichever team uses them.
  */
 import assert from "node:assert/strict";
 import test from "node:test";
@@ -356,6 +358,24 @@ test("captured recording prefixes require exact discard confirmation for replace
       team_b_controller: "scenario_5",
       execution_information_mode: "shared_obs",
     },
+    {
+      command_type: "set_combat_configuration",
+      team_a_controller: "manual",
+      team_b_controller: "tdm_gamma",
+      execution_information_mode: "shared_obs",
+    },
+    {
+      command_type: "set_combat_configuration",
+      team_a_controller: "scenario_5",
+      team_b_controller: "manual",
+      execution_information_mode: "shared_obs",
+    },
+    {
+      command_type: "set_combat_configuration",
+      team_a_controller: "tdm_gamma",
+      team_b_controller: "manual",
+      execution_information_mode: "shared_obs",
+    },
     keyboardCommand("r"),
   ]) {
     const decision = recordingCommandDecision(frame, command);
@@ -387,11 +407,26 @@ test("captured recording prefixes require exact discard confirmation for replace
     {
       team_a_controller: "scenario_5",
       team_b_controller: "manual",
-      execution_information_mode: "shared_obs",
+      execution_information_mode: "no_shared_obs",
     },
     {
       team_a_controller: "manual",
       team_b_controller: "scenario_5",
+      execution_information_mode: "no_shared_obs",
+    },
+    {
+      team_a_controller: "tdm_gamma",
+      team_b_controller: "manual",
+      execution_information_mode: "no_shared_obs",
+    },
+    {
+      team_a_controller: "tdm_gamma",
+      team_b_controller: "tdm_gamma",
+      execution_information_mode: "no_shared_obs",
+    },
+    {
+      team_a_controller: "manual",
+      team_b_controller: "tdm_gamma",
       execution_information_mode: "no_shared_obs",
     },
     {
@@ -442,6 +477,37 @@ test("captured recording prefixes require exact discard confirmation for replace
     }),
     null,
   );
+  const gammaCommand = {
+    command_type: "set_combat_configuration",
+    team_a_controller: "random_valid",
+    team_b_controller: "tdm_gamma",
+    execution_information_mode: "shared_obs",
+  };
+  const gammaReplacement = recordingReplacementCommand(frame, gammaCommand);
+  assert.deepEqual(gammaReplacement, gammaCommand);
+  assert.equal(Object.isFrozen(gammaReplacement), true);
+  const gammaFrame = {
+    ...frame,
+    combat_configuration: {
+      team_a_controller: "random_valid",
+      team_b_controller: "tdm_gamma",
+      execution_information_mode: "shared_obs",
+    },
+  };
+  assert.equal(recordingReplacementCommand(gammaFrame, gammaCommand), null);
+  assert.deepEqual(
+    recordingReplacementCommand(gammaFrame, {
+      ...gammaCommand,
+      team_b_controller: "scenario_5",
+    }),
+    { ...gammaCommand, team_b_controller: "scenario_5" },
+  );
+  for (const teamA of ["scenario_5", "tdm_gamma"]) {
+    const teamACommand = { ...gammaCommand, team_a_controller: teamA };
+    const teamAReplacement = recordingReplacementCommand(frame, teamACommand);
+    assert.deepEqual(teamAReplacement, teamACommand);
+    assert.equal(Object.isFrozen(teamAReplacement), true);
+  }
   for (const command of [
     keyboardCommand("w"),
     keyboardCommand("Enter"),

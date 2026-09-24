@@ -6,8 +6,28 @@ actions before one Core step, then captures its matching state, observation, mas
 and transition record. Reset helpers create a new recorded episode. Random keys
 remain explicit in the session; this module does not write replay files or serve
 HTTP requests.
+
+Every Submit's Core step runs compiled, for manual, scripted and policy
+Submits alike. SharedObs policy teams (ALPHA, BETA, GAMMA and Random) also run
+the policy executor compiled. This module wraps the real ``apply_policies`` and
+``step`` in ``jax.jit`` once, at import. JAX reuses a compiled program only
+while the controller pair and every array shape and dtype stay the same.
+Run uncompiled, one Submit took seconds, because every array operation ran on
+its own. NoSharedObs Random still runs uncompiled through
+``execute_no_shared_obs_team_policy``; it is fast once JAX has warmed up. A
+replaced executor or step (for example a test spy) is called as given,
+uncompiled.
+
+Compile cost: the first Submit in a DevClient session (the first in this
+Python process) compiles for several seconds, about 6 s on CPU. The first
+Submit after switching to a controller pair not yet used in this process
+compiles the executor again, about 3 s. After that a Submit takes about
+0.03 s. The DevClient service applies each command while it holds its lock,
+so the browser waits while a compile runs. These times were measured once on
+CPU during review; they are examples, not guarantees.
 """
 
+from collections.abc import Callable
 from dataclasses import replace
 from typing import Literal, cast
 
@@ -15,6 +35,7 @@ import jax
 import jax.numpy as jnp
 from jax import Array
 
+from marl_battlegrounds.core import env as core_env
 from marl_battlegrounds.core.config import validate_product_env_config
 from marl_battlegrounds.core.env import initialize_scenario_state, step
 from marl_battlegrounds.core.types import (
@@ -29,10 +50,14 @@ from marl_battlegrounds.core.types import (
     TEAM_B_ID,
     Action,
     ActionMask,
+    DoneFlags,
     EnvConfig,
     EnvState,
+    Info,
     Observation,
+    Reward,
 )
+from marl_battlegrounds.evaluation import policy_execution
 from marl_battlegrounds.evaluation.capture import (
     capture_evaluation_transition_unit_v2,
     capture_initial_evaluation_frame_v2,
@@ -86,6 +111,24 @@ from scripts.dev.visual_debugger.model import (
     TeamBController,
     TeamController,
 )
+
+# Compiled forms of the real policy executor and Core step. Controller callables
+# are static (the registered adapters are stable objects), so each Team A/Team B
+# controller pair gets its own program. Observations, masks, keys, states and
+# manual actions stay dynamic: new frames, maps and seeds reuse a program only
+# while every array shape and dtype stays the same; any change compiles again.
+# These functions keep their compile cache for the whole process, so a test that
+# patches code inside the compiled path must replace control.apply_policies or
+# control.step; patching deeper internals would not reach a cached program.
+_COMPILED_APPLY_POLICIES = cast(
+    Callable[..., tuple[Action, PolicyTree, PolicyTree]],
+    jax.jit(policy_execution.apply_policies, static_argnums=(0, 1)),
+)
+_COMPILED_STEP = cast(
+    Callable[..., tuple[EnvState, Observation, Reward, DoneFlags, ActionMask, Info]],
+    jax.jit(core_env.step),
+)
+
 
 type DebuggerTransitionFailureStageV1 = Literal[
     "action_build",
@@ -472,13 +515,12 @@ def _configured_policy(
             *(value[team_start : team_start + MAX_AGENTS_PER_TEAM] for value in action)
         )
         return Policy("manual", _manual_policy, variables=local_action)
-    if controller == "scenario_5" and team_identity != TEAM_B_ID:
-        raise ValueError("scenario controller belongs to Team B")
     return policy(
         {
             "reactive_tdm": "tdm-alpha",
             "random_valid": "random",
             "scenario_5": "tdm-beta",
+            "tdm_gamma": "tdm-gamma",
         }[controller]
     )
 
@@ -486,8 +528,11 @@ def _configured_policy(
 def _build_configured_joint_action(session: DebuggerSession) -> Action:
     """Resolve both teams before the single existing simulator step.
 
-    SharedObs uses the public five-argument application authority. Legacy
-    NoSharedObs Random keeps its original three-argument, no-source-bank ABI.
+    SharedObs uses the public five-argument application authority, compiled
+    with one program per controller pair, reused only while array shapes and
+    dtypes stay the same (see the module description); a replaced executor
+    runs uncompiled. Legacy NoSharedObs Random keeps its original
+    three-argument, no-source-bank ABI and runs uncompiled.
     """
     controllers = (session.team_a_controller, session.team_b_controller)
     if controllers == ("manual", "manual"):
@@ -500,7 +545,12 @@ def _build_configured_joint_action(session: DebuggerSession) -> Action:
             raise ValueError("SharedObs requires captured information availability")
         first = _configured_policy(session, TEAM_A_ID, controllers[0])
         second = _configured_policy(session, TEAM_B_ID, controllers[1])
-        action, _, _ = apply_policies(
+        executor = (
+            _COMPILED_APPLY_POLICIES
+            if apply_policies is policy_execution.apply_policies
+            else apply_policies
+        )
+        action, _, _ = executor(
             first.apply,
             second.apply,
             first.variables,
@@ -676,7 +726,7 @@ def _validate_reactive_controller_selection(
 ) -> None:
     """Check execution boundaries, independently of scenario content."""
     if not any(
-        controller in ("reactive_tdm", "scenario_5")
+        controller in ("reactive_tdm", "scenario_5", "tdm_gamma")
         for controller in (team_a_controller, team_b_controller)
     ):
         return
@@ -726,8 +776,9 @@ def create_session(
     team_a_controller : TeamController
         Team A controller; default manual. Reactive choices require SharedObs.
     team_b_controller : TeamBController
-        Team B controller; default manual. Includes supported scenario
-        pressure.
+        Team B controller; default manual. Both teams accept ALPHA
+        (``reactive_tdm``), BETA (``scenario_5``) and GAMMA (``tdm_gamma``),
+        which require SharedObs, as well as Manual and Random.
     execution_information_mode : ExecutionInformationMode
         no_shared_obs by default for direct diagnostics; shared_obs enables the
         composed team input contract.
@@ -1198,6 +1249,22 @@ def submit_joint_action(
         Numerical work runs through Core and transition capture; no file is written.
         The input session is immutable, so a failed call cannot install a partial
         successor. Higher-level recording code decides how to handle a failure.
+
+        Every Submit's Core step runs compiled here, for manual, scripted and
+        policy Submits alike, unless a caller has replaced ``control.step``.
+        Policy actions arrive already built: ``submit_interactive`` runs
+        SharedObs policy teams through the compiled policy executor, and
+        NoSharedObs Random uncompiled through
+        ``execute_no_shared_obs_team_policy`` (fast once JAX has warmed up).
+        The first Submit in a DevClient session (the first in this Python
+        process) compiles for several seconds, about 6 s on CPU, counting the
+        executor's compile when a policy plays. The first Submit after
+        switching to a controller pair not yet used in this process compiles
+        the executor again, about 3 s. After that a Submit takes about 0.03 s
+        while array shapes and dtypes stay the same. The DevClient service
+        calls this while holding its lock, so the browser waits during a
+        compile. These times were measured once on CPU during review; they
+        are examples, not guarantees.
     """
     terminal_reason = _terminal_reason(session)
     if terminal_reason is not None:
@@ -1221,6 +1288,7 @@ def submit_joint_action(
 
     try:
         next_key, step_key = jax.random.split(session.key)
+        stepper = _COMPILED_STEP if step is core_env.step else step
         (
             next_state,
             next_observation,
@@ -1228,7 +1296,7 @@ def submit_joint_action(
             done_flags,
             next_action_mask,
             info,
-        ) = step(
+        ) = stepper(
             session.config,
             session.state,
             session.action_mask,
@@ -1331,6 +1399,19 @@ def submit_interactive(
         Numerical work runs through Core and transition capture; no file is written.
         The input session is immutable, so a failed call cannot install a partial
         successor. Higher-level recording code decides how to handle a failure.
+
+        Every Submit's Core step runs compiled, manual Submits included. With
+        SharedObs, the policy teams (ALPHA, BETA, GAMMA and Random) also run
+        through the compiled policy executor. NoSharedObs Random still runs
+        uncompiled through ``execute_no_shared_obs_team_policy``; it is fast
+        once JAX has warmed up. The first Submit in a DevClient session (the
+        first in this Python process) compiles for several seconds, about 6 s
+        on CPU. The first Submit after switching to a controller pair not yet
+        used in this process compiles the executor again, about 3 s. After
+        that a Submit takes about 0.03 s. The DevClient service calls this
+        while holding its lock, so the browser waits during a compile. These
+        times were measured once on CPU during review; they are examples, not
+        guarantees.
     """
     if any(
         controller != "manual"
@@ -1405,6 +1486,9 @@ def submit_next_script_frame(
         Numerical work runs through Core and transition capture; no file is written.
         The input session is immutable, so a failed call cannot install a partial
         successor. Higher-level recording code decides how to handle a failure.
+
+        The scripted Core step runs compiled through ``submit_joint_action``;
+        its Notes give the first-Submit compile cost.
     """
     scenario = session.scenario
     if session.next_script_frame_index >= len(scenario.frames):
@@ -1604,8 +1688,7 @@ def set_combat_configuration(
     team_a_controller : TeamController
         Supported Team A controller kind.
     team_b_controller : TeamBController
-        Supported Team B controller kind, including scenario pressure where
-        allowed.
+        Supported Team B controller kind; both teams accept the same kinds.
     execution_information_mode : ExecutionInformationMode
         shared_obs or no_shared_obs; must satisfy the selected controllers'
         input needs.
@@ -1623,12 +1706,13 @@ def set_combat_configuration(
     """
     if team_a_controller not in SUPPORTED_TEAM_CONTROLLERS:
         raise CombatConfigurationRejectedError(
-            "team_a_controller must be manual, reactive_tdm, or random_valid"
+            "team_a_controller must be manual, reactive_tdm, random_valid, "
+            "scenario_5, or tdm_gamma"
         )
     if team_b_controller not in SUPPORTED_TEAM_B_CONTROLLERS:
         raise CombatConfigurationRejectedError(
             "team_b_controller must be manual, reactive_tdm, random_valid, "
-            "or scenario_5"
+            "scenario_5, or tdm_gamma"
         )
     if execution_information_mode not in ("shared_obs", "no_shared_obs"):
         raise CombatConfigurationRejectedError(

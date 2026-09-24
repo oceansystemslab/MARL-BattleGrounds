@@ -1,6 +1,10 @@
 /**
  * @file Check separation of DevClient authoring from Replay Viewer startup and the
- * allowed saved-draft surfaces.
+ * allowed saved-draft surfaces. The combat configuration controller binds both
+ * teams' BETA (scenario_5) and GAMMA (tdm_gamma) options, enables them only
+ * under SharedObs, accepts them for either team, disables NoSharedObs while
+ * either team uses ALPHA, BETA or GAMMA, and installs and restores "tdm_gamma"
+ * exactly.
  */
 import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
@@ -382,7 +386,12 @@ test("Combat configuration remains authoritative until one requested successor i
   const teamAController = { value: "manual", disabled: false };
   const teamBController = { value: "manual", disabled: false };
   const informationMode = { value: "shared_obs", disabled: false };
-  const scenarioControllerOptions = [{ disabled: true }];
+  const scenarioControllerOptions = [
+    { disabled: true },
+    { disabled: true },
+    { disabled: true },
+    { disabled: true },
+  ];
   const reactiveControllerOptions = [{ disabled: true }, { disabled: true }];
   const noSharedOption = { disabled: false };
   /** @type {Record<string, string | undefined>} */
@@ -440,17 +449,19 @@ test("Combat configuration remains authoritative until one requested successor i
   assert.equal(root.dataset.executionInformationMode, "no_shared_obs");
   assert.deepEqual(
     scenarioControllerOptions.map((option) => option.disabled),
-    [true],
+    [true, true, true, true],
   );
   assert.deepEqual(
     reactiveControllerOptions.map((option) => option.disabled),
     [true, true],
   );
-  for (const specialist of ["scenario_3", "scenario_5"]) {
-    teamBController.value = specialist;
-    assert.equal(controller.request(), false);
-    assert.equal(teamBController.value, "random_valid");
-    assert.equal(emitted.length, 1);
+  for (const selector of [teamAController, teamBController]) {
+    for (const specialist of ["scenario_3", "scenario_5", "tdm_gamma"]) {
+      selector.value = specialist;
+      assert.equal(controller.request(), false);
+      assert.equal(selector.value, "random_valid");
+      assert.equal(emitted.length, 1);
+    }
   }
   for (const selector of [teamAController, teamBController]) {
     selector.value = "reactive_tdm";
@@ -463,7 +474,7 @@ test("Combat configuration remains authoritative until one requested successor i
   controller.install(emitted[1]);
   assert.deepEqual(
     scenarioControllerOptions.map((option) => option.disabled),
-    [false],
+    [false, false, false, false],
   );
   assert.deepEqual(
     reactiveControllerOptions.map((option) => option.disabled),
@@ -479,7 +490,11 @@ test("Combat configuration remains authoritative until one requested successor i
   assert.equal(noSharedOption.disabled, true);
 
   for (const invalid of [
-    { team_a_controller: "scenario_5" },
+    {
+      team_a_controller: "scenario_5",
+      team_b_controller: "manual",
+      execution_information_mode: "no_shared_obs",
+    },
     { team_b_controller: "scenario_3" },
     { execution_information_mode: "no_shared_obs" },
   ]) {
@@ -489,29 +504,40 @@ test("Combat configuration remains authoritative until one requested successor i
   assert.equal(controller.request(), false);
   assert.equal(informationMode.value, "shared_obs");
   teamAController.value = "scenario_5";
-  assert.equal(controller.request(), false);
+  assert.equal(controller.request(), true);
+  assert.deepEqual(emitted[3], {
+    team_a_controller: "scenario_5",
+    team_b_controller: "scenario_5",
+    execution_information_mode: "shared_obs",
+  });
   assert.equal(teamAController.value, "random_valid");
-  assert.equal(emitted.length, 3);
+  assert.equal(controller.install(emitted[3]), true);
+  assert.equal(teamAController.value, "scenario_5");
+  assert.equal(root.dataset.teamAController, "scenario_5");
   teamBController.value = "scenario_3";
   assert.equal(controller.request(), false);
   assert.equal(teamBController.value, "scenario_5");
   assert.equal(root.dataset.teamBController, "scenario_5");
   assert.equal(noSharedOption.disabled, true);
   assert.equal(controller.request(), false);
-  assert.equal(emitted.length, 3);
-  for (const team of ["team_a_controller", "team_b_controller"]) {
-    const next = {
-      team_a_controller: "manual",
-      team_b_controller: "manual",
-      execution_information_mode: "shared_obs",
-      [team]: "reactive_tdm",
-    };
-    assert.equal(controller.install(next), true);
-    assert.equal(noSharedOption.disabled, true);
-    assert.equal(
-      controller.install({ ...next, execution_information_mode: "no_shared_obs" }),
-      false,
-    );
+  assert.equal(emitted.length, 4);
+  for (const reactive of ["reactive_tdm", "scenario_5", "tdm_gamma"]) {
+    for (const team of ["team_a_controller", "team_b_controller"]) {
+      const next = {
+        team_a_controller: "manual",
+        team_b_controller: "manual",
+        execution_information_mode: "shared_obs",
+        [team]: reactive,
+      };
+      assert.equal(controller.install({ ...next, [team]: "manual" }), true);
+      assert.equal(noSharedOption.disabled, false);
+      assert.equal(controller.install(next), true);
+      assert.equal(noSharedOption.disabled, true);
+      assert.equal(
+        controller.install({ ...next, execution_information_mode: "no_shared_obs" }),
+        false,
+      );
+    }
   }
   for (const retired of ["scripted_tdm", "scenario_1", "scenario_3"]) {
     assert.equal(
@@ -519,6 +545,169 @@ test("Combat configuration remains authoritative until one requested successor i
       false,
     );
   }
+});
+
+test("Combat configuration installs GAMMA for either team only under SharedObs", () => {
+  const teamAController = { value: "manual", disabled: false };
+  const teamBController = { value: "manual", disabled: false };
+  const informationMode = { value: "no_shared_obs", disabled: false };
+  const scenarioControllerOptions = [
+    { disabled: false },
+    { disabled: false },
+    { disabled: false },
+    { disabled: false },
+  ];
+  const reactiveControllerOptions = [{ disabled: false }, { disabled: false }];
+  const noSharedOption = { disabled: false };
+  /** @type {Record<string, string | undefined>} */
+  const dataset = {};
+  const root = { dataset };
+  /** @type {Readonly<Record<string, string>>[]} */
+  const emitted = [];
+  const controller = createCombatConfigurationController({
+    teamAController,
+    teamBController,
+    informationMode,
+    scenarioControllerOptions,
+    reactiveControllerOptions,
+    noSharedOption,
+    root,
+    emit: (configuration) => emitted.push(configuration),
+  });
+  const gamma = {
+    team_a_controller: "manual",
+    team_b_controller: "tdm_gamma",
+    execution_information_mode: "shared_obs",
+  };
+
+  assert.equal(
+    controller.install({ ...gamma, execution_information_mode: "no_shared_obs" }),
+    false,
+  );
+  assert.equal(
+    controller.install({
+      team_a_controller: "manual",
+      team_b_controller: "manual",
+      execution_information_mode: "no_shared_obs",
+    }),
+    true,
+  );
+  assert.deepEqual(
+    scenarioControllerOptions.map((option) => option.disabled),
+    [true, true, true, true],
+  );
+  assert.equal(noSharedOption.disabled, false);
+  for (const selector of [teamAController, teamBController]) {
+    selector.value = "tdm_gamma";
+    assert.equal(controller.request(), false);
+    assert.equal(selector.value, "manual");
+  }
+  assert.deepEqual(emitted, []);
+
+  informationMode.value = "shared_obs";
+  assert.equal(controller.request(), true);
+  assert.equal(controller.install(emitted[0]), true);
+  assert.deepEqual(
+    scenarioControllerOptions.map((option) => option.disabled),
+    [false, false, false, false],
+  );
+  assert.equal(noSharedOption.disabled, false);
+  teamBController.value = "tdm_gamma";
+  assert.equal(controller.request(), true);
+  assert.deepEqual(emitted[1], gamma);
+  assert.equal(Object.isFrozen(emitted[1]), true);
+  assert.equal(teamBController.value, "manual");
+  assert.equal(root.dataset.teamBController, "manual");
+  assert.equal(controller.install(emitted[1]), true);
+  assert.equal(teamBController.value, "tdm_gamma");
+  assert.equal(root.dataset.teamBController, "tdm_gamma");
+  assert.equal(root.dataset.executionInformationMode, "shared_obs");
+  assert.equal(noSharedOption.disabled, true);
+  assert.deepEqual(
+    scenarioControllerOptions.map((option) => option.disabled),
+    [false, false, false, false],
+  );
+
+  for (const invalid of [
+    {
+      team_a_controller: "tdm_gamma",
+      team_b_controller: "manual",
+      execution_information_mode: "no_shared_obs",
+    },
+    { execution_information_mode: "no_shared_obs" },
+  ]) {
+    assert.equal(controller.install({ ...gamma, ...invalid }), false);
+  }
+  assert.equal(teamBController.value, "tdm_gamma");
+  assert.equal(noSharedOption.disabled, true);
+  informationMode.value = "no_shared_obs";
+  assert.equal(controller.request(), false);
+  assert.equal(informationMode.value, "shared_obs");
+  teamAController.value = "tdm_gamma";
+  assert.equal(controller.request(), true);
+  assert.deepEqual(emitted[2], { ...gamma, team_a_controller: "tdm_gamma" });
+  assert.equal(teamAController.value, "manual");
+  assert.equal(controller.install(emitted[2]), true);
+  assert.equal(teamAController.value, "tdm_gamma");
+  assert.equal(root.dataset.teamAController, "tdm_gamma");
+  assert.equal(controller.request(), false);
+  teamAController.value = "manual";
+  assert.equal(controller.request(), true);
+  assert.deepEqual(emitted[3], gamma);
+  assert.equal(controller.install(emitted[3]), true);
+  assert.equal(emitted.length, 4);
+
+  teamBController.value = "scenario_5";
+  assert.equal(controller.request(), true);
+  assert.equal(controller.install(emitted[4]), true);
+  assert.equal(root.dataset.teamBController, "scenario_5");
+  assert.equal(noSharedOption.disabled, true);
+  teamBController.value = "tdm_gamma";
+  assert.equal(controller.request(), true);
+  assert.deepEqual(emitted[5], gamma);
+  assert.equal(controller.install(emitted[5]), true);
+  assert.equal(teamBController.value, "tdm_gamma");
+  teamBController.value = "manual";
+  assert.equal(controller.request(), true);
+  assert.equal(controller.install(emitted[6]), true);
+  assert.equal(root.dataset.teamBController, "manual");
+  assert.equal(noSharedOption.disabled, false);
+  teamAController.value = "tdm_gamma";
+  assert.equal(controller.request(), true);
+  assert.deepEqual(emitted[7], {
+    ...gamma,
+    team_a_controller: "tdm_gamma",
+    team_b_controller: "manual",
+  });
+  assert.equal(controller.install(emitted[7]), true);
+  assert.equal(root.dataset.teamAController, "tdm_gamma");
+  assert.equal(root.dataset.teamBController, "manual");
+  assert.equal(noSharedOption.disabled, true);
+  assert.equal(emitted.length, 8);
+});
+
+test("DevClient binds both teams' BETA and GAMMA options as scenario options", async () => {
+  const devClient = await readFile(devClientUrl, "utf8");
+  assert.match(
+    devClient,
+    /scenarioControllerOptions: \[\s*required\("devclient-team-a-scenario-5-option"\),\s*required\("devclient-team-a-tdm-gamma-option"\),\s*required\("devclient-scenario-5-controller-option"\),\s*required\("devclient-tdm-gamma-controller-option"\),\s*\]/u,
+  );
+  assert.match(
+    devClient,
+    /!isSupportedController\(candidate\.team_a_controller\) \|\|\s*!isSupportedController\(candidate\.team_b_controller\) \|\|/u,
+  );
+  assert.match(
+    devClient,
+    /isReactiveController\(configuration\?\.team_a_controller\) \|\|\s*isReactiveController\(configuration\?\.team_b_controller\);/u,
+  );
+  assert.match(
+    devClient,
+    /value === "reactive_tdm" \|\| value === "scenario_5" \|\| value === "tdm_gamma"/u,
+  );
+  assert.doesNotMatch(
+    devClient,
+    /team_[ab]_controller (?:===|!==) "(?:scenario_5|tdm_gamma)"/u,
+  );
 });
 
 test("successful Debug loads emit one event into the existing frame reload path", async () => {

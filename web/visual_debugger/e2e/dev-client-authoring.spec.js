@@ -1,6 +1,8 @@
 /**
  * @file Check browser authoring, saved revision selectors, persistence through
- * restart and exact-start comparisons.
+ * restart and exact-start comparisons. Both teams offer the BETA (scenario_5)
+ * and GAMMA (tdm_gamma) controllers, disabled under NoSharedObs and enabled
+ * under SharedObs.
  */
 import { mkdtemp, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -450,7 +452,7 @@ test("authoring persists through restart and drives same-start Combat comparison
       {
         team_a_controller: "scenario_5",
         team_b_controller: "manual",
-        execution_information_mode: "shared_obs",
+        execution_information_mode: "no_shared_obs",
       },
       {
         team_a_controller: "manual",
@@ -1193,12 +1195,23 @@ test("authoring persists through restart and drives same-start Combat comparison
       });
     }
 
-    await expect(
-      page.locator("#devclient-scenario-5-controller-option"),
-    ).toHaveJSProperty("disabled", true);
-    await expect(
-      page.locator('#devclient-team-a-controller option[value="scenario_5"]'),
-    ).toHaveCount(0);
+    const scenarioOptionIds = [
+      "#devclient-team-a-scenario-5-option",
+      "#devclient-team-a-tdm-gamma-option",
+      "#devclient-scenario-5-controller-option",
+      "#devclient-tdm-gamma-controller-option",
+    ];
+    for (const optionId of scenarioOptionIds) {
+      await expect(page.locator(optionId)).toHaveJSProperty("disabled", true);
+    }
+    for (const [value, optionId] of [
+      ["scenario_5", "devclient-team-a-scenario-5-option"],
+      ["tdm_gamma", "devclient-team-a-tdm-gamma-option"],
+    ]) {
+      await expect(
+        page.locator(`#devclient-team-a-controller option[value="${value}"]`),
+      ).toHaveAttribute("id", optionId);
+    }
     for (const team of ["a", "b"]) {
       await expect(
         page.locator(`#devclient-team-${team}-reactive-option`),
@@ -1212,9 +1225,9 @@ test("authoring persists through restart and drives same-start Combat comparison
     await applyLiveCommand(page, () =>
       page.locator("#devclient-information-mode").selectOption("shared_obs"),
     );
-    await expect(
-      page.locator("#devclient-scenario-5-controller-option"),
-    ).toHaveJSProperty("disabled", false);
+    for (const optionId of scenarioOptionIds) {
+      await expect(page.locator(optionId)).toHaveJSProperty("disabled", false);
+    }
     const fixture = JSON.parse(
       await readFile(
         new URL("../../../tests/fixtures/scenario_1_r34.json", import.meta.url),

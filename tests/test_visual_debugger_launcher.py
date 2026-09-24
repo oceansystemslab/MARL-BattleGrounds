@@ -1,4 +1,13 @@
-"""Check Python and shell launch commands, including dependency isolation."""
+"""Check Python and shell launch commands, including dependency isolation.
+
+The recording launch metadata reads a session's action source and says that a
+policy plays whenever either team is not manual. It accepts ALPHA
+(``reactive_tdm``) and Random (``random_valid``) on Team A; ALPHA and BETA
+(``scenario_5``) on Team B; BETA and GAMMA (``tdm_gamma``) on Team A against a
+manual Team B; and BETA against GAMMA in both team orders, so GAMMA also plays
+Team B. It rejects the retired IDs ``scripted_tdm``, ``scenario_1`` and
+``scenario_3`` on Team A and ``scenario_3`` on Team B.
+"""
 
 import argparse
 import os
@@ -63,6 +72,10 @@ _HAS_PYPLOT = _HAS_MATPLOTLIB and find_spec("matplotlib.pyplot") is not None
         ("manual", "scenario_5"),
         ("reactive_tdm", "scenario_5"),
         ("random_valid", "scenario_5"),
+        ("scenario_5", "manual"),
+        ("tdm_gamma", "manual"),
+        ("scenario_5", "tdm_gamma"),
+        ("tdm_gamma", "scenario_5"),
     ),
 )
 def test_recording_launch_metadata_accepts_installed_policy_execution(
@@ -80,17 +93,11 @@ def test_recording_launch_metadata_accepts_installed_policy_execution(
     assert _recording_policy_execution_included(session)
 
 
-@pytest.mark.parametrize(
-    "retired_or_forbidden", ("scripted_tdm", "scenario_1", "scenario_3", "scenario_5")
-)
-def test_recording_launch_rejects_invalid_team_a_controllers(
-    retired_or_forbidden: str,
-) -> None:
+@pytest.mark.parametrize("retired", ("scripted_tdm", "scenario_1", "scenario_3"))
+def test_recording_launch_rejects_retired_team_a_controllers(retired: str) -> None:
     with pytest.raises(ValueError, match="exact team controllers"):
         _recording_policy_execution_included(
-            SimpleNamespace(
-                team_a_controller=retired_or_forbidden, team_b_controller="manual"
-            )
+            SimpleNamespace(team_a_controller=retired, team_b_controller="manual")
         )
 
 

@@ -1,6 +1,6 @@
 """Check the one reference loader and the pinned-opponent evidence classes.
 
-load_method turns the three built-in names into their Policies, an exported
+load_method turns the four built-in names into their Policies, an exported
 actor directory into its method's PPO System (or a greedy QMIX or PQN-VDN
 System for such an export, which then plays a complete two-entrant
 tournament), and a module:function factory
@@ -10,8 +10,9 @@ else, and a factory's own error keeps its type. The command line's factory
 branch calls the same factory loader, load_factory, and wraps every error with
 its cause kept.
 pinned_opponent_evidence records the built-in Random team as installed with no
-controller exposure, tdm-alpha and tdm-beta as installed with known exposure
-that makes all eight protected scenarios familiar, a researcher factory as
+controller exposure, tdm-alpha, tdm-beta and tdm-gamma (through its recorded
+Beta ancestry) as installed with known exposure that makes all eight protected
+scenarios familiar, a researcher factory as
 unknown exposure, and an export without its sibling learner description as a
 declared export with unknown exposure.
 """
@@ -87,7 +88,7 @@ def _factory_module(monkeypatch: pytest.MonkeyPatch, value: object) -> str:
 def test_built_in_names_exports_and_factories_resolve(
     exported: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    for name in ("random", "tdm-alpha", "tdm-beta"):
+    for name in ("random", "tdm-alpha", "tdm-beta", "tdm-gamma"):
         value = load_method(name)
         assert isinstance(value, Policy) and value.name == name
     loaded = load_method(str(exported))
@@ -148,7 +149,7 @@ def test_evidence_classes_for_built_ins_factories_and_unlinked_exports(
     random = pinned_opponent_evidence(binding, policy("random"))
     assert random["source"] == "installed" and random["exposure"] == "none"
     assert random["familiar_scenarios"] == []
-    for name in ("tdm-alpha", "tdm-beta"):
+    for name in ("tdm-alpha", "tdm-beta", "tdm-gamma"):
         record = pinned_opponent_evidence(binding, policy(name))
         assert record["source"] == "installed" and record["exposure"] == "known"
         assert record["familiar_scenarios"] == list(range(1, 9))

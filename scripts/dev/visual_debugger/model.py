@@ -47,8 +47,11 @@ type ArmOrigin = Literal["automatic", "explicit"]
 type ScenarioMode = Literal["interactive", "scripted"]
 type ScenarioAudience = Literal["researcher", "stress"]
 type SubmissionKind = Literal["interactive", "scripted"]
-type TeamController = Literal["manual", "reactive_tdm", "random_valid"]
-type TeamBController = TeamController | Literal["scenario_5"]
+type TeamController = Literal[
+    "manual", "reactive_tdm", "random_valid", "scenario_5", "tdm_gamma"
+]
+# Both teams accept the same controllers; the name is kept for existing callers.
+type TeamBController = TeamController
 type TeamControllerActionSource = Literal["manual", "scripted", "mixed", "policy"]
 type ScenarioSourceKind = Literal[
     "current_buffer",
@@ -59,11 +62,10 @@ SUPPORTED_TEAM_CONTROLLERS: tuple[TeamController, ...] = (
     "manual",
     "reactive_tdm",
     "random_valid",
-)
-SUPPORTED_TEAM_B_CONTROLLERS: tuple[TeamBController, ...] = (
-    *SUPPORTED_TEAM_CONTROLLERS,
     "scenario_5",
+    "tdm_gamma",
 )
+SUPPORTED_TEAM_B_CONTROLLERS: tuple[TeamBController, ...] = SUPPORTED_TEAM_CONTROLLERS
 
 
 def team_controller_action_source(
@@ -77,7 +79,8 @@ def team_controller_action_source(
     team_a_controller : TeamController
         Team A's selected controller kind.
     team_b_controller : TeamBController
-        Team B's selected controller kind, including scenario pressure when supported.
+        Team B's selected controller kind; both teams accept ALPHA
+        (``reactive_tdm``), BETA (``scenario_5``) and GAMMA (``tdm_gamma``).
 
     Returns
     -------
@@ -500,16 +503,17 @@ class DebuggerSession:
                 raise ValueError("last report actor slots must be configured active.")
         if self.team_a_controller not in SUPPORTED_TEAM_CONTROLLERS:
             raise ValueError(
-                "team_a_controller must be manual, reactive_tdm, or random_valid."
+                "team_a_controller must be manual, reactive_tdm, random_valid, "
+                "scenario_5, or tdm_gamma."
             )
         if self.team_b_controller not in SUPPORTED_TEAM_B_CONTROLLERS:
             raise ValueError(
                 "team_b_controller must be manual, reactive_tdm, random_valid, "
-                "or scenario_5."
+                "scenario_5, or tdm_gamma."
             )
         if (
             any(
-                controller in ("reactive_tdm", "scenario_5")
+                controller in ("reactive_tdm", "scenario_5", "tdm_gamma")
                 for controller in (self.team_a_controller, self.team_b_controller)
             )
             and self.evaluation_context.execution_information_mode != "shared_obs"

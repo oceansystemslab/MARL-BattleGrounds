@@ -153,21 +153,33 @@ export function targetSelectionCommand(value) {
 }
 
 /**
- * Return whether value is manual, reactive_tdm or random_valid. This exact
- * name check excludes Team B's separately handled scenario_5 controller.
+ * Return whether value is a live controller that either team may use: manual,
+ * random_valid, or one of the reactive controllers reactive_tdm (ALPHA),
+ * scenario_5 (BETA) and tdm_gamma (GAMMA).
  *
  * @param {unknown} value
  */
 function isTeamController(value) {
-  return value === "manual" || value === "reactive_tdm" || value === "random_valid";
+  return value === "manual" || value === "random_valid" || isReactiveController(value);
+}
+
+/**
+ * Return whether value is a reactive controller that needs SharedObs:
+ * reactive_tdm (ALPHA), scenario_5 (BETA) or tdm_gamma (GAMMA).
+ *
+ * @param {unknown} value
+ */
+function isReactiveController(value) {
+  return value === "reactive_tdm" || value === "scenario_5" || value === "tdm_gamma";
 }
 
 /**
  * Project an effective episode replacement from frame and command, or null.
  *
  * Recognize reset, a changed valid combat configuration, an available changed
- * scenario, or an unmodified R keyboard reset. Reactive controllers require
- * SharedObs; scenario_5 is accepted only for Team B. Return a frozen exact
+ * scenario, or an unmodified R keyboard reset. Both teams accept the same five
+ * controllers. The reactive controllers (reactive_tdm, scenario_5 and tdm_gamma)
+ * require SharedObs whichever team uses them. Return a frozen exact
  * replacement request. This is an advisory browser check against the current
  * frame; Python repeats validation against the actual session. Inputs stay
  * unchanged and no reset or recording discard occurs here.
@@ -190,11 +202,10 @@ export function recordingReplacementCommand(frame, command) {
       typeof installed !== "object" ||
       Array.isArray(installed) ||
       !isTeamController(teamAController) ||
-      (!isTeamController(teamBController) && teamBController !== "scenario_5") ||
+      !isTeamController(teamBController) ||
       (informationMode !== "shared_obs" && informationMode !== "no_shared_obs") ||
-      ((teamAController === "reactive_tdm" ||
-        teamBController === "reactive_tdm" ||
-        teamBController === "scenario_5") &&
+      ((isReactiveController(teamAController) ||
+        isReactiveController(teamBController)) &&
         informationMode !== "shared_obs") ||
       (installed.team_a_controller === teamAController &&
         installed.team_b_controller === teamBController &&

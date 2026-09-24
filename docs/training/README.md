@@ -406,11 +406,11 @@ config = training.TrainConfig(
 )
 ```
 
-The reference is a built-in name (`"random"`, `"tdm-alpha"`, `"tdm-beta"`), an
-absolute path to one of our exported actor directories, or a `module:function`
-factory that returns a `System` or `Policy`; the library route's
-`init_training_collection(..., pinned_opponent=...)` also takes the object
-itself. Slot 0 still marks the assignment, so row 1 of the opponent lists in
+The reference is a built-in name (`"random"`, `"tdm-alpha"`, `"tdm-beta"`,
+`"tdm-gamma"`), an absolute path to one of our exported actor directories, or a
+`module:function` factory that returns a `System` or `Policy`; the library
+route's `init_training_collection(..., pinned_opponent=...)` also takes the
+object itself. Slot 0 still marks the assignment, so row 1 of the opponent lists in
 `exposure.json` counts games against the named System, and `exposure.json`
 labels every row. Learner rows record `opponent_update=-2` for those games. The
 named System is frozen once, registered the way evaluation registers it, and
@@ -443,13 +443,16 @@ none of its games is unfinished. Use absolute export paths; a moved export
 fails the resume check. A named pinned System is a training opponent of that
 run and of any run that later pins an export of it. Results against it are
 familiar-opponent results, and a different name is not proof of an unfamiliar
-opponent: Beta's rules include Alpha's. The run's record says what is known
-about the opponent's own training history: `exposure` is `none`, `known` (which
-scripted scenario controllers) or `unknown`. Pinning `tdm-alpha` or `tdm-beta`,
-directly or through an export trained that way, makes all eight protected
-scenarios familiar, so their results from that run are not protected-scenario
-evidence. The validation panel is declared separately and does not change
-because a System was pinned.
+opponent: Beta's rules include Alpha's, and Gamma's descriptor records Beta's
+as its ancestry. The run's record says what is known about the opponent's own
+training history: `exposure` is `none`, `known` (which scripted scenario
+controllers) or `unknown`. Pinning `tdm-alpha`, `tdm-beta` or
+`tdm-gamma`, directly or through an export trained that way, makes all eight
+protected scenarios familiar (Gamma is recorded as known exposure to Beta,
+`scenario-5-pressure-controller@5`, when the run protects that Beta version, and
+as unknown exposure otherwise), so their results from that run are not
+protected-scenario evidence. The validation panel is declared separately and
+does not change because a System was pinned.
 
 Call `refresh_opponents` once after each completed learner update and before
 the next block. Supply already-updated actor-only variables, the exact next

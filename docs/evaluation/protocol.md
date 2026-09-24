@@ -308,6 +308,13 @@ exposure is unknown, as for a researcher method or an export whose training
 history cannot be linked: its eight scenario results do not count as
 protected-scenario evidence.
 
+Addition of 24 September 2026: the built-in `tdm-gamma` team (specification
+amendment A43) falls under the same exception. It is not a scenario pressure
+controller, but its descriptor records BETA's rules as its ancestry, so a run
+that meets it is recorded as known exposure to BETA (or as unknown exposure
+when the run does not protect that BETA version), and its eight scenario
+results are familiar-opponent results either way.
+
 ## Common policy and evaluation lifecycle
 
 [Amendment A12](../design/specification_amendments.md#a12-common-milestone-1012-policy-pipeline-spine)
@@ -604,8 +611,8 @@ behavioral cloning, distillation, curricula, opponent adaptation, architecture,
 hyperparameters, reward or heuristic design, prompts, decoding, checkpoint
 selection, early stopping, repeated-submission selection, population weights,
 or any other adaptive decision. The one exception, for the ordinary built-in
-`tdm-alpha` and `tdm-beta` teams as training opponents, and its reporting rule
-are stated in the scenario section above.
+`tdm-alpha`, `tdm-beta` and `tdm-gamma` teams as training opponents, and its
+reporting rule are stated in the scenario section above.
 
 Training, validation, and evaluation manifests identify content by immutable
 digest and fail closed when their declared content closures intersect where

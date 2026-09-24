@@ -274,8 +274,13 @@ export function isValidAuthoringAssetId(value) {
  * Create install/request/render operations around the supplied selector bindings.
  * Only confirmed host configuration becomes authoritative. A user request first
  * restores displayed confirmed values, then emits a valid changed intent. Return
- * a frozen controller; no HTTP request is sent directly. Reactive/Scenario 5
- * controllers require SharedObs, and Scenario 5 is allowed only on Team B.
+ * a frozen controller; no HTTP request is sent directly. Both teams accept the
+ * same five controllers: Manual, Random and the reactive ALPHA (reactive_tdm),
+ * BETA (scenario_5) and GAMMA (tdm_gamma). Reactive controllers require SharedObs
+ * whichever team uses them. reactiveControllerOptions holds both teams' ALPHA
+ * options and scenarioControllerOptions holds both teams' BETA and GAMMA
+ * options; all of them are enabled only under confirmed SharedObs. The
+ * NoSharedObs option is disabled while either team uses a reactive controller.
  *
  * @param {{
  *   teamAController: {value: string, disabled: boolean},
@@ -293,12 +298,25 @@ export function createCombatConfigurationController(bindings) {
   let authoritative = null;
 
   /**
-   * Return whether value is manual, reactive_tdm, or random_valid.
+   * Return whether value is a controller either team may use: manual,
+   * random_valid, reactive_tdm, scenario_5 or tdm_gamma.
    *
    * @param {unknown} value
    */
   function isSupportedController(value) {
-    return value === "manual" || value === "reactive_tdm" || value === "random_valid";
+    return (
+      value === "manual" || value === "random_valid" || isReactiveController(value)
+    );
+  }
+
+  /**
+   * Return whether value is a reactive controller that needs SharedObs:
+   * reactive_tdm (ALPHA), scenario_5 (BETA) or tdm_gamma (GAMMA).
+   *
+   * @param {unknown} value
+   */
+  function isReactiveController(value) {
+    return value === "reactive_tdm" || value === "scenario_5" || value === "tdm_gamma";
   }
 
   /**
@@ -314,13 +332,11 @@ export function createCombatConfigurationController(bindings) {
     const candidate = /** @type {Record<string, unknown>} */ (value);
     if (
       !isSupportedController(candidate.team_a_controller) ||
-      (!isSupportedController(candidate.team_b_controller) &&
-        candidate.team_b_controller !== "scenario_5") ||
+      !isSupportedController(candidate.team_b_controller) ||
       (candidate.execution_information_mode !== "shared_obs" &&
         candidate.execution_information_mode !== "no_shared_obs") ||
-      ((candidate.team_a_controller === "reactive_tdm" ||
-        candidate.team_b_controller === "reactive_tdm" ||
-        candidate.team_b_controller === "scenario_5") &&
+      ((isReactiveController(candidate.team_a_controller) ||
+        isReactiveController(candidate.team_b_controller)) &&
         candidate.execution_information_mode !== "shared_obs")
     ) {
       return null;
@@ -348,9 +364,8 @@ export function createCombatConfigurationController(bindings) {
       option.disabled = configuration?.execution_information_mode !== "shared_obs";
     }
     bindings.noSharedOption.disabled =
-      configuration?.team_a_controller === "reactive_tdm" ||
-      configuration?.team_b_controller === "reactive_tdm" ||
-      configuration?.team_b_controller === "scenario_5";
+      isReactiveController(configuration?.team_a_controller) ||
+      isReactiveController(configuration?.team_b_controller);
     if (configuration === null) {
       return;
     }
@@ -437,7 +452,12 @@ function installDevClient() {
     teamAController: required("devclient-team-a-controller"),
     teamBController: required("devclient-team-b-controller"),
     informationMode: required("devclient-information-mode"),
-    scenarioControllerOptions: [required("devclient-scenario-5-controller-option")],
+    scenarioControllerOptions: [
+      required("devclient-team-a-scenario-5-option"),
+      required("devclient-team-a-tdm-gamma-option"),
+      required("devclient-scenario-5-controller-option"),
+      required("devclient-tdm-gamma-controller-option"),
+    ],
     reactiveControllerOptions: [
       required("devclient-team-a-reactive-option"),
       required("devclient-team-b-reactive-option"),

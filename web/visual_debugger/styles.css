@@ -2962,13 +2962,16 @@ select {
 
 html[data-team-b-controller="reactive_tdm"] .roster-row[data-team="team-b"],
 html[data-team-b-controller="random_valid"] .roster-row[data-team="team-b"],
-html[data-team-b-controller="scenario_5"] .roster-row[data-team="team-b"] {
+html[data-team-b-controller="scenario_5"] .roster-row[data-team="team-b"],
+html[data-team-b-controller="tdm_gamma"] .roster-row[data-team="team-b"] {
   background: rgb(127 29 29 / 10%);
   box-shadow: inset 0 0 0 1px rgb(248 113 113 / 12%);
 }
 
 html[data-team-a-controller="reactive_tdm"] .roster-row[data-team="team-a"],
-html[data-team-a-controller="random_valid"] .roster-row[data-team="team-a"] {
+html[data-team-a-controller="random_valid"] .roster-row[data-team="team-a"],
+html[data-team-a-controller="scenario_5"] .roster-row[data-team="team-a"],
+html[data-team-a-controller="tdm_gamma"] .roster-row[data-team="team-a"] {
   background: rgb(8 145 178 / 10%);
   box-shadow: inset 0 0 0 1px rgb(34 211 238 / 12%);
 }

@@ -56,7 +56,8 @@
       "files": [
         "recording-handoff.spec.js",
         "authorized-presentation-renderer.spec.js",
-        "resize.spec.js"
+        "resize.spec.js",
+        "tdm-gamma.spec.js"
       ]
     },
     {

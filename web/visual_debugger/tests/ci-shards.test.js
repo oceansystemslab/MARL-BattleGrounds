@@ -1,6 +1,7 @@
 /**
  * @file Check eight nonempty browser profiles, exact disjoint test coverage and safe
- * deterministic profile environments.
+ * deterministic profile environments. The pinned layout keeps profile 5 as the
+ * recording, renderer, resize and TDM-GAMMA specs.
  */
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
@@ -96,6 +97,7 @@ test("CI browser manifest is nonempty, exact, and eight-way", () => {
     "recording-handoff.spec.js",
     "authorized-presentation-renderer.spec.js",
     "resize.spec.js",
+    "tdm-gamma.spec.js",
   ]);
   assert.deepEqual(
     manifest.shards.slice(5).map((shard) => shard.test_titles?.length),

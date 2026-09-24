@@ -88,6 +88,9 @@ opponent is a familiar opponent for that run: results against it, and all
 eight protected-scenario results when it is `tdm-alpha` or `tdm-beta`, are
 reported as familiar-opponent results, and pinning does not change the
 declared validation panel.
+(Note, 24 September 2026: the same holds for the later built-in `tdm-gamma`,
+whose descriptor records Beta as its ancestry; see the
+[training guide](README.md#current-and-historical-self-play).)
 
 **Decision, 20 September 2026:** use **512 parallel environments and rollout
 length 32** as the standard starting configuration for future recurrent MAPPO

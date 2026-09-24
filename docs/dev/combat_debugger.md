@@ -145,7 +145,11 @@ session. A failure leaves the session untouched and reports linked problems.
 Reset restores the immutable loaded snapshot and seed, including its map,
 roster, scores, timers, and current timestep.
 
-Team A and Team B offer **Manual**, **Reactive TDM ALPHA**, and **Random**.
+Team A and Team B offer **Manual**, **Reactive TDM ALPHA**, **Reactive TDM
+BETA**, **Reactive TDM GAMMA** and **Random**. The simulator step and SharedObs
+policy teams run compiled. The first Submit with a controller pair not yet used
+in this DevClient process compiles for a few seconds; later Submits take
+milliseconds. NoSharedObs Random runs uncompiled.
 ALPHA is a deterministic SharedObs policy for all five classes. It chooses
 movement and combat separately. Random samples only the exact current valid
 action support and ignores observation features; the same key and mask therefore
@@ -158,7 +162,7 @@ NoSharedObs remains available when both teams use Manual or Random, and in
 generic custom research. It is disabled while either team uses a reactive
 controller; the application never silently substitutes a regime or controller.
 
-Team B additionally offers **Reactive TDM BETA**, a deterministic SharedObs-only
+**Reactive TDM BETA** is a deterministic SharedObs-only
 specialist. Mage, Warrior, Hunter and Priest use ALPHA unchanged. Rogue pursues
 an observed living enemy Priest first, otherwise Mage, otherwise Hunter,
 choosing lowest current HP within the selected class and then lowest global
@@ -185,6 +189,32 @@ necessarily the attack target. BETA has no target memory, hidden prey positions,
 or opponent-action predictions. It cannot guarantee a route. Dead or inactive
 agents submit no-op actions, and the current action masks take priority over
 controller preferences.
+
+**Reactive TDM GAMMA** (`tdm_gamma`; the same controller as the Python name
+`tdm-gamma`) is a deterministic SharedObs-only controller defined in [amendment
+A43](../design/specification_amendments.md#a43-reactive-tdm-gamma). Version 2
+plays exactly like BETA except for three rules:
+
+- **Search.** With no living enemy in view, Warriors, Mages, Hunters and Rogues
+  walk toward the middle of the enemy team's five spawn pads, and stay once
+  they are there. Priests keep BETA's rules.
+- **Trap hold.** Warriors, Mages, Hunters and Rogues never damage an enemy with
+  2 or more Hunter Trap ticks left. This covers every Basic, Warrior Charge and
+  Rogue Ultimate, and a Mage Bursts only when it has a legal Basic target that
+  is not held this way. At 1 or 0 ticks they may hit that enemy. Movement
+  targets, spacing, Rogue prey and Priest healing stay BETA's.
+- **Trap order.** A Hunter starts a new Trap only on an enemy with 0 Trap
+  ticks. Among the enemies it can Trap now, it Traps the first class in the
+  order Priest, Mage, Rogue, Warrior, Hunter (lowest current health, then
+  lowest row) and stands still that tick. If it cannot, but its Trap is ready (cooldown 0, not stunned,
+  no spawn shield) and such an enemy is in view, it walks toward the first one
+  in that order while it keeps using BETA's Basic, with the Trap hold above.
+  Otherwise it plays BETA's Hunter and does not Trap; ALPHA's 2-unit Trap rule
+  is gone.
+
+By the user's decision of 24 September 2026, BETA and GAMMA are offered for
+both teams. Every row of a team that uses GAMMA, Priests included, is recorded
+as `tdm_gamma`.
 
 ALPHA v2 and BETA v4 add south-preferred steering around nearby vertical walls,
 with north used when the lower passage is unavailable and a turn across the wall
@@ -222,7 +252,8 @@ To play against a reactive controller:
 
 1. Load a valid scenario or map preview, or keep the default diagnostic arena.
 2. Keep Team A Manual and select SharedObs.
-3. Select Reactive TDM ALPHA or Reactive TDM BETA for Team B.
+3. Select Reactive TDM ALPHA, Reactive TDM BETA or Reactive TDM GAMMA for
+   Team B.
 4. Stage Team A's actions and Submit; Reset restores the exact starting state.
 
 After editing and saving a scenario, explicitly load its new saved revision to
@@ -241,12 +272,14 @@ further changes until the session is recovered or restarted.
 
 The old Scripted TDM scorer, separate Reactive MRP/`scenario_1` executable
 interface and standalone Scenario 3 controller are removed. Current recorded
-controller identities are `reactive-team-deathmatch-controller@3` and
-`scenario-5-pressure-controller@5`. Older identities, such as
+controller identities are `reactive-team-deathmatch-controller@3`,
+`scenario-5-pressure-controller@5` and
+`reactive-team-deathmatch-gamma-controller@2`. Older identities, such as
 `reactive-team-deathmatch-controller@2` and `scenario-5-pressure-controller@4`,
-remain historical evidence. Scenario 5 combinations retain private
-action-source V5; other interactive combinations retain V4. Both record
-installed controllers separately from scenario/map identity. Historical
+remain historical evidence. Private action-source V5 records BETA on Team B,
+V6 records GAMMA on Team B, V7 records BETA or GAMMA on Team A (with Team A's
+own controller identity), and other interactive combinations retain V4. All
+record installed controllers separately from scenario/map identity. Historical
 recordings retain their old identities and remain readable; fixed-frame scripted
 diagnostics are unchanged. Availability on a setup does not qualify it
 scientifically or promise the outcome of another scenario's verified witness.

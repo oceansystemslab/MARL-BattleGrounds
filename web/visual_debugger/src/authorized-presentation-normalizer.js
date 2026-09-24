@@ -6286,19 +6286,18 @@ function preflightTransportPresentationIdentity(rawValue, presentationValue) {
       ["execution_information_mode", "team_a_controller", "team_b_controller"],
       "Live combat configuration identity",
     );
+    // Both teams accept the same five controllers; the three reactive ones
+    // (ALPHA, BETA and GAMMA) need SharedObs whichever team uses them.
+    const reactive = ["reactive_tdm", "scenario_5", "tdm_gamma"];
+    const controllers = ["manual", "random_valid", ...reactive];
     if (
-      !["manual", "reactive_tdm", "random_valid"].includes(
-        configuration.team_a_controller,
-      ) ||
-      !["manual", "reactive_tdm", "random_valid", "scenario_5"].includes(
-        configuration.team_b_controller,
-      ) ||
+      !controllers.includes(configuration.team_a_controller) ||
+      !controllers.includes(configuration.team_b_controller) ||
       !["shared_obs", "no_shared_obs"].includes(
         configuration.execution_information_mode,
       ) ||
-      ((configuration.team_a_controller === "reactive_tdm" ||
-        configuration.team_b_controller === "reactive_tdm" ||
-        configuration.team_b_controller === "scenario_5") &&
+      ((reactive.includes(configuration.team_a_controller) ||
+        reactive.includes(configuration.team_b_controller)) &&
         configuration.execution_information_mode !== "shared_obs") ||
       (!oracle &&
         configuration.execution_information_mode !==

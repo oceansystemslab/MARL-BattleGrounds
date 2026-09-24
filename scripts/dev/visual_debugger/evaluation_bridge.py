@@ -55,6 +55,9 @@ from marl_battlegrounds.policies.reactive_tdm_alpha import (
 from marl_battlegrounds.policies.reactive_tdm_beta import (
     reactive_tdm_beta_controller_descriptor,
 )
+from marl_battlegrounds.policies.reactive_tdm_gamma import (
+    reactive_tdm_gamma_controller_descriptor,
+)
 from scripts.dev.visual_debugger.model import (
     SUPPORTED_TEAM_B_CONTROLLERS,
     SUPPORTED_TEAM_CONTROLLERS,
@@ -254,9 +257,23 @@ def _action_source_contract_payload(
     scenario_contract_digest: str,
     reactive_tdm_identity: ContentAddressedIdentityV1 | None = None,
     scenario_controller_identity: ContentAddressedIdentityV1 | None = None,
+    team_a_scenario_controller_identity: ContentAddressedIdentityV1 | None = None,
 ) -> dict[str, object]:
     """Describe both team action sources and their input contract for stable
     provenance.
+
+    Scripted scenarios use schema version 1. Interactive sessions use version
+    4; version 5 adds ``scenario_5_execution_included`` when Team B is BETA
+    (``scenario_5``), and version 6 adds ``tdm_gamma_execution_included`` when
+    Team B is GAMMA (``tdm_gamma``). Versions 5 and 6 need
+    ``scenario_controller_identity``: the content address of Team B's
+    controller descriptor and code revision. When Team A is BETA or GAMMA the
+    payload is version 7: it adds ``team_a_scenario_controller`` (Team A's
+    content address, required) and sets ``scenario_5_execution_included`` and
+    ``tdm_gamma_execution_included`` from both teams. Combinations without BETA
+    or GAMMA on Team A keep their exact version 4, 5 or 6 bytes. Versions 2 and
+    3 are retired and not reused. The payload is only hashed; nothing reads its
+    version back.
     """
     if action_source_kind not in ("manual", "scripted", "mixed", "policy"):
         raise ValueError(
@@ -278,7 +295,10 @@ def _action_source_contract_payload(
     controllers = (team_a_controller, team_b_controller)
     if "reactive_tdm" in controllers and reactive_tdm_identity is None:
         raise ValueError("Reactive TDM action source requires its controller identity")
-    if team_b_controller == "scenario_5" and scenario_controller_identity is None:
+    if (
+        team_b_controller in ("scenario_5", "tdm_gamma")
+        and scenario_controller_identity is None
+    ):
         raise ValueError("Scenario action source requires its controller identity")
     payload: dict[str, object] = {
         "schema_id": "marl_battlegrounds.visual_debugger.action_source_contract",
@@ -302,6 +322,20 @@ def _action_source_contract_payload(
     if team_b_controller == "scenario_5":
         payload["schema_version"] = 5
         payload["scenario_5_execution_included"] = True
+    elif team_b_controller == "tdm_gamma":
+        # GAMMA-only V6: V4's fields plus its own execution flag. The GAMMA
+        # descriptor and code revision are content-addressed in
+        # scenario_controller. V1, V4 and V5 bytes are unchanged.
+        payload["schema_version"] = 6
+        payload["tdm_gamma_execution_included"] = True
+    if team_a_controller in ("scenario_5", "tdm_gamma"):
+        # V7: BETA or GAMMA on Team A. Earlier combinations never reach here.
+        if team_a_scenario_controller_identity is None:
+            raise ValueError("Team A scenario action source requires its identity")
+        payload["schema_version"] = 7
+        payload["team_a_scenario_controller"] = team_a_scenario_controller_identity
+        payload["scenario_5_execution_included"] = "scenario_5" in controllers
+        payload["tdm_gamma_execution_included"] = "tdm_gamma" in controllers
     return payload
 
 
@@ -316,11 +350,15 @@ def _policy_assignments(
     action_contract_digest: str,
     reactive_tdm_identity: ContentAddressedIdentityV1 | None = None,
     scenario_controller_identity: ContentAddressedIdentityV1 | None = None,
+    team_a_scenario_controller_identity: ContentAddressedIdentityV1 | None = None,
 ) -> tuple[PolicyAssignmentSlotV2, ...]:
     """Assign each active fixed slot its recorded role and action-source identity.
 
     Inactive slots remain unassigned. Controller identities and actor projection
     describe execution; they do not introduce a learner or policy registry entry.
+    BETA and GAMMA rows use their own team's identity:
+    ``team_a_scenario_controller_identity`` for Team A and
+    ``scenario_controller_identity`` for Team B.
     """
     profile = config.agent_profile
     active = np.asarray(profile.active_mask, dtype=np.bool_)
@@ -348,6 +386,11 @@ def _policy_assignments(
                 team_a_controller if team_id == TEAM_A_ID else team_b_controller
             )
         controller_identity = None
+        team_scenario_identity = (
+            team_a_scenario_controller_identity
+            if team_id == TEAM_A_ID
+            else scenario_controller_identity
+        )
         if policy_kind == "reactive_tdm":
             algorithm_id = "reactive-team-deathmatch-controller"
             execution_mode = "deterministic"
@@ -358,7 +401,11 @@ def _policy_assignments(
         elif policy_kind == "scenario_5":
             algorithm_id = "scenario-5-pressure-controller"
             execution_mode = "deterministic"
-            controller_identity = scenario_controller_identity
+            controller_identity = team_scenario_identity
+        elif policy_kind == "tdm_gamma":
+            algorithm_id = "reactive-team-deathmatch-gamma-controller"
+            execution_mode = "deterministic"
+            controller_identity = team_scenario_identity
         else:
             algorithm_id = "not_applicable"
             execution_mode = "deterministic"
@@ -410,7 +457,7 @@ def debugger_action_source_kind_v1(
     team_a_controller : TeamController
         Selected Team A controller.
     team_b_controller : TeamBController
-        Selected Team B controller, including supported scenario pressure.
+        Selected Team B controller; both teams accept the same kinds.
 
     Returns
     -------
@@ -473,6 +520,23 @@ def build_debugger_evaluation_context_v1(
         custom map. Without provenance the layout identity is
         ``resolved-debugger-environment`` version 1 with the resolved config digest.
 
+        Four aggregation keys name the BETA (``scenario_5``) and GAMMA
+        (``tdm_gamma``) controllers; each pair appears only when its team uses
+        one of them, and both pairs appear when both teams do:
+
+        - ``pressure_protocol``: Team B's controller as ``policy_id@version``,
+          for example ``scenario-5-pressure-controller@5``. Present only when
+          Team B is BETA or GAMMA.
+        - ``pressure_protocol_digest``: the content digest of that Team B
+          identity (its descriptor plus the launch code revision). Same rule.
+        - ``team_a_pressure_protocol``: Team A's controller as
+          ``policy_id@version``. Present only when Team A is BETA or GAMMA.
+        - ``team_a_pressure_protocol_digest``: the content digest of that
+          Team A identity. Same rule.
+
+        Each BETA or GAMMA policy row records its own team's digest as
+        ``policy_content_digest``.
+
     Raises
     ------
     TypeError
@@ -507,15 +571,16 @@ def build_debugger_evaluation_context_v1(
         raise TypeError("config must be the exact EnvConfig type")
     if team_a_controller not in SUPPORTED_TEAM_CONTROLLERS:
         raise ValueError(
-            "team_a_controller must be manual, reactive_tdm, or random_valid"
+            "team_a_controller must be manual, reactive_tdm, random_valid, "
+            "scenario_5, or tdm_gamma"
         )
     if team_b_controller not in SUPPORTED_TEAM_B_CONTROLLERS:
         raise ValueError(
             "team_b_controller must be manual, reactive_tdm, random_valid, "
-            "or scenario_5"
+            "scenario_5, or tdm_gamma"
         )
     if any(
-        controller in ("reactive_tdm", "scenario_5")
+        controller in ("reactive_tdm", "scenario_5", "tdm_gamma")
         for controller in (team_a_controller, team_b_controller)
     ) and (
         execution_information_mode != "shared_obs" or scenario.mode != "interactive"
@@ -602,11 +667,25 @@ def build_debugger_evaluation_context_v1(
         if "reactive_tdm" in (team_a_controller, team_b_controller)
         else None
     )
-    scenario_controller_identity = (
-        controller_identity(reactive_tdm_beta_controller_descriptor())
-        if team_b_controller == "scenario_5"
-        else None
-    )
+
+    def pressure_identity_for(
+        controller: TeamBController,
+    ) -> ContentAddressedIdentityV1 | None:
+        """Return BETA's or GAMMA's content address for that controller.
+
+        ``scenario_5`` gives BETA's identity and ``tdm_gamma`` gives GAMMA's,
+        each bound to this launch's code revision. Every other controller
+        (manual, ALPHA ``reactive_tdm`` and Random ``random_valid``) returns
+        None.
+        """
+        if controller == "scenario_5":
+            return controller_identity(reactive_tdm_beta_controller_descriptor())
+        if controller == "tdm_gamma":
+            return controller_identity(reactive_tdm_gamma_controller_descriptor())
+        return None
+
+    scenario_controller_identity = pressure_identity_for(team_b_controller)
+    team_a_scenario_controller_identity = pressure_identity_for(team_a_controller)
     action_payload = _action_source_contract_payload(
         action_source_kind=action_source_kind,
         scenario_mode=scenario.mode,
@@ -616,6 +695,7 @@ def build_debugger_evaluation_context_v1(
         scenario_contract_digest=scenario_digest,
         reactive_tdm_identity=reactive_tdm_identity,
         scenario_controller_identity=scenario_controller_identity,
+        team_a_scenario_controller_identity=team_a_scenario_controller_identity,
     )
     action_digest = canonical_digest_sha256(action_payload)
     config_digest = resolved_config.canonical_digest_sha256
@@ -717,6 +797,7 @@ def build_debugger_evaluation_context_v1(
         action_contract_digest=action_digest,
         reactive_tdm_identity=reactive_tdm_identity,
         scenario_controller_identity=scenario_controller_identity,
+        team_a_scenario_controller_identity=team_a_scenario_controller_identity,
     )
     active_roles = {
         row.evaluation_role
@@ -798,6 +879,19 @@ def build_debugger_evaluation_context_v1(
                 AggregationKeyV1(
                     name="pressure_protocol_digest",
                     value=scenario_controller_identity.canonical_digest,
+                ),
+            )
+        )
+    if team_a_scenario_controller_identity is not None:
+        aggregation_keys.extend(
+            (
+                AggregationKeyV1(
+                    name="team_a_pressure_protocol",
+                    value=f"{team_a_scenario_controller_identity.identifier}@{team_a_scenario_controller_identity.version}",
+                ),
+                AggregationKeyV1(
+                    name="team_a_pressure_protocol_digest",
+                    value=team_a_scenario_controller_identity.canonical_digest,
                 ),
             )
         )

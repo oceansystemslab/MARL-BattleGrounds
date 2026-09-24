@@ -2178,13 +2178,24 @@ function isReplayMode() {
 }
 
 /**
- * Return whether a value is a general live team controller: manual, reactive_tdm,
- * or random_valid. The special Scenario 5 Team B controller is checked separately.
+ * Return whether a value is a live controller that either team may use: manual,
+ * random_valid, or one of the reactive controllers reactive_tdm (ALPHA),
+ * scenario_5 (BETA) and tdm_gamma (GAMMA).
  *
  * @param {unknown} value
  */
 function isTeamController(value) {
-  return value === "manual" || value === "reactive_tdm" || value === "random_valid";
+  return value === "manual" || value === "random_valid" || isReactiveController(value);
+}
+
+/**
+ * Return whether a value is a reactive controller that needs SharedObs:
+ * reactive_tdm (ALPHA), scenario_5 (BETA) or tdm_gamma (GAMMA).
+ *
+ * @param {unknown} value
+ */
+function isReactiveController(value) {
+  return value === "reactive_tdm" || value === "scenario_5" || value === "tdm_gamma";
 }
 
 /**
@@ -2204,13 +2215,17 @@ function combatControllerLabel(controller) {
   if (controller === "scenario_5") {
     return "Reactive TDM BETA";
   }
+  if (controller === "tdm_gamma") {
+    return "Reactive TDM GAMMA";
+  }
   return "Manual";
 }
 
 /**
  * Read and validate the three public combat settings from a frame-like object.
- * Require known controllers and information mode; reactive controllers require
- * SharedObs, and scenario_5 is allowed only for Team B. Return a frozen copy of
+ * Require known controllers and information mode. Both teams accept the same
+ * five controllers; the reactive controllers (reactive_tdm, scenario_5 and
+ * tdm_gamma) require SharedObs whichever team uses them. Return a frozen copy of
  * those settings, or null for malformed or unsupported input.
  *
  * @param {unknown} frame
@@ -2223,13 +2238,11 @@ function combatConfigurationFromFrame(frame) {
   if (
     !isRecord(candidate) ||
     !isTeamController(candidate.team_a_controller) ||
-    (!isTeamController(candidate.team_b_controller) &&
-      candidate.team_b_controller !== "scenario_5") ||
+    !isTeamController(candidate.team_b_controller) ||
     (candidate.execution_information_mode !== "shared_obs" &&
       candidate.execution_information_mode !== "no_shared_obs") ||
-    ((candidate.team_a_controller === "reactive_tdm" ||
-      candidate.team_b_controller === "reactive_tdm" ||
-      candidate.team_b_controller === "scenario_5") &&
+    ((isReactiveController(candidate.team_a_controller) ||
+      isReactiveController(candidate.team_b_controller)) &&
       candidate.execution_information_mode !== "shared_obs")
   ) {
     return null;

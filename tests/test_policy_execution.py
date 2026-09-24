@@ -45,6 +45,7 @@ from marl_battlegrounds.policies.no_shared_obs import execute_no_shared_obs_team
 from marl_battlegrounds.policies.random_valid import random_policy
 from marl_battlegrounds.policies.reactive_tdm_alpha import reactive_tdm_alpha_policy
 from marl_battlegrounds.policies.reactive_tdm_beta import reactive_tdm_beta_policy
+from marl_battlegrounds.policies.reactive_tdm_gamma import reactive_tdm_gamma_policy
 from marl_battlegrounds.policies.shared_obs import (
     build_shared_obs_sensor_source_bank,
     execute_shared_obs_team_policy,
@@ -149,7 +150,7 @@ def _inputs() -> tuple[EnvConfig, Observation, ActionMask, Array]:
     return config, observation, mask, jax.random.split(jax.random.key(13), 10)
 
 
-@pytest.mark.parametrize("name", ["random", "tdm-alpha", "tdm-beta"])
+@pytest.mark.parametrize("name", ["random", "tdm-alpha", "tdm-beta", "tdm-gamma"])
 def test_named_adapters_match_existing_controllers_with_dead_and_inactive_slots(
     name: str,
 ) -> None:
@@ -179,11 +180,11 @@ def test_named_adapters_match_existing_controllers_with_dead_and_inactive_slots(
         second = execute(observation, mask, keys, random_policy, TEAM_B_ID)
     else:
         execute = cast(Callable[..., ActorAction], execute_shared_obs_team_policy)
-        original = (
-            reactive_tdm_alpha_policy
-            if name == "tdm-alpha"
-            else reactive_tdm_beta_policy
-        )
+        original = {
+            "tdm-alpha": reactive_tdm_alpha_policy,
+            "tdm-beta": reactive_tdm_beta_policy,
+            "tdm-gamma": reactive_tdm_gamma_policy,
+        }[name]
         bank = build_shared_obs_sensor_source_bank(observation)
         availability = build_observations(observation, config).source_availability
         first = execute(

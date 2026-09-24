@@ -540,9 +540,10 @@ function requireExactKeys(value, expected, message) {
 
 /**
  * Validate value and return a frozen team-controller/information-mode record.
- * Team A accepts manual, reactive_tdm, or random_valid; Team B also accepts scenario_5.
- * Information mode is shared_obs or no_shared_obs. Reactive and scenario_5 controllers
- * require shared_obs. Throw TypeError for extra/missing fields or an unsupported pair.
+ * Each team accepts manual, reactive_tdm (ALPHA), random_valid, scenario_5 (BETA)
+ * or tdm_gamma (GAMMA). Information mode is shared_obs or no_shared_obs.
+ * reactive_tdm, scenario_5 and tdm_gamma require shared_obs on either team. Throw
+ * TypeError for extra/missing fields or an unsupported pair.
  * This describes controller setup; it does not instantiate or call a policy.
  *
  * @param {unknown} value
@@ -557,19 +558,16 @@ function normalizeCombatConfigurationV1(value) {
     COMBAT_CONFIGURATION_KEYS_V1,
     "Live combat configuration has unknown or missing fields.",
   );
+  const reactive = ["reactive_tdm", "scenario_5", "tdm_gamma"];
+  const controllers = ["manual", "random_valid", ...reactive];
   if (
-    !["manual", "reactive_tdm", "random_valid"].includes(
-      configuration.team_a_controller,
-    ) ||
-    !["manual", "reactive_tdm", "random_valid", "scenario_5"].includes(
-      configuration.team_b_controller,
-    ) ||
+    !controllers.includes(configuration.team_a_controller) ||
+    !controllers.includes(configuration.team_b_controller) ||
     !["shared_obs", "no_shared_obs"].includes(
       configuration.execution_information_mode,
     ) ||
-    ((configuration.team_a_controller === "reactive_tdm" ||
-      configuration.team_b_controller === "reactive_tdm" ||
-      configuration.team_b_controller === "scenario_5") &&
+    ((reactive.includes(configuration.team_a_controller) ||
+      reactive.includes(configuration.team_b_controller)) &&
       configuration.execution_information_mode !== "shared_obs")
   ) {
     throw new TypeError("Live combat configuration is invalid.");

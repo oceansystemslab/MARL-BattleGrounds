@@ -1,4 +1,15 @@
-"""Check debugger HTTP routing, security boundaries and server lifetime."""
+"""Check debugger HTTP routing, security boundaries and server lifetime.
+
+Controller requests: a combat configuration that the protocol forbids gets
+HTTP 422 ``invalid_request``, leaves the session, revision and fault flag
+unchanged, and the next command still applies. The forbidden cases are BETA
+(``scenario_5``) or GAMMA (``tdm_gamma``) on Team B without SharedObs, and the
+retired ID ``scenario_3`` on Team A or on Team B. BETA and GAMMA are valid on
+Team A (the controller test files check that), so only a retired ID stands for
+a bad Team A choice. When the control
+layer rejects a request that passed the protocol (Team B BETA here), the reply
+is an HTTP 200 ``no_op`` with the old frame, and later commands still work.
+"""
 
 import json
 import socket
@@ -701,8 +712,8 @@ def test_expected_controller_rejection_is_http_noop_then_commands_still_work(
     assert service.session.run_generation == 2
 
 
-@pytest.mark.parametrize("team_b", ("scenario_5",))
-@pytest.mark.parametrize("forbidden", ("team_a", "no_shared_obs", "retired"))
+@pytest.mark.parametrize("team_b", ("scenario_5", "tdm_gamma"))
+@pytest.mark.parametrize("forbidden", ("team_a_retired", "no_shared_obs", "retired"))
 def test_forbidden_controller_requests_remain_recoverable_protocol_errors(
     running_server: tuple[DebuggerHTTPServer, Thread],
     team_b: TeamBController,
@@ -717,7 +728,11 @@ def test_forbidden_controller_requests_remain_recoverable_protocol_errors(
             "base_revision": 0,
             "command": {
                 "command_type": "set_combat_configuration",
-                "team_a_controller": team_b if forbidden == "team_a" else "manual",
+                # BETA and GAMMA are valid on Team A (checked in the controller
+                # test files); a retired ID is not.
+                "team_a_controller": (
+                    "scenario_3" if forbidden == "team_a_retired" else "manual"
+                ),
                 "team_b_controller": "scenario_3" if forbidden == "retired" else team_b,
                 "execution_information_mode": (
                     "no_shared_obs" if forbidden == "no_shared_obs" else "shared_obs"

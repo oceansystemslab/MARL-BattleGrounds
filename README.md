@@ -158,12 +158,18 @@ ignored `artifacts/dev_client/` storage. Validation uses existing simulator
 rules. Deletion requires confirmation. A saved map opens as a labelled standard
 5v5 preview; loading it does not change the saved map.
 
-Each team may be Manual, Random or Reactive TDM ALPHA. Team B also offers BETA,
-whose Rogues prioritize observed living Priests, then Mages, then Hunters and
-try body-avoidance routes. Other classes use ALPHA behavior. Reactive controllers
-require SharedObs; Random supports both observation modes and samples exact
-current masks. These are diagnostic/pressure controllers, not official learned
-baselines. Their limitations and versioned rules remain explicit.
+Each team may be Manual, Random, Reactive TDM ALPHA, BETA or GAMMA. BETA's
+Rogues prioritize observed living Priests, then Mages, then Hunters and try
+body-avoidance routes; its other classes use ALPHA behavior. GAMMA
+(`tdm-gamma`) is BETA plus three rules for its Warriors, Mages, Hunters and
+Rogues: with no enemy in view they walk toward the middle of the enemy spawn
+pads; they never damage an enemy with 2 or more Hunter Trap ticks left; and
+Hunters start a new Trap only on an untrapped enemy they can reach now,
+choosing Priest, Mage, Rogue, Warrior, Hunter in that order (see
+[A43](docs/design/specification_amendments.md#a43-reactive-tdm-gamma)).
+Reactive controllers require SharedObs; Random supports both observation modes
+and samples exact current masks. These are diagnostic/pressure controllers, not
+official learned baselines. Their limitations and versioned rules remain explicit.
 
 Record one episode to a new replay file:
 
@@ -260,11 +266,14 @@ do not contribute to Elo or establish general strength. See
 The current sequence is M7 TDM Benchmark and Researcher Tools → M8 Policy
 Execution and Evaluation → M9 Training Distributions and Curriculum → M10
 Learning Platform and Baselines → M11 LLM-Agent Integration → M12 Manuscript
-Experiments and Release. After manuscript completion, a dedicated profiler-driven
-optimization audit will cover runtime, VRAM, RAM and disk costs across the research
-workflow. KOTH (M13) and CTF (M14) follow manuscript submission and that audit.
+Experiments and Release. M12 starts by cleaning up the whole repository: a
+refactor, an audit of all documentation, and a profiler-driven optimization audit
+of runtime, VRAM, RAM and disk costs across the research workflow. The manuscript
+experiments then run on the cleaned code. M12 ends with the public release,
+including a documentation website and tutorials. KOTH (M13) and CTF (M14) follow
+manuscript submission.
 [Amendment A36](docs/design/specification_amendments.md#a36-submission-roadmap-approved-tdm-content-and-m7-closeout)
-records the executive override and historical milestone-number mapping.
+records the roadmap and the historical milestone-number mapping.
 
 M8's native API scope is complete. M9 will define training distributions and
 curricula; M10 will add learners and learning experiments. The growing-pool
@@ -329,7 +338,7 @@ The Paper 1 snapshot stays frozen. Pool-centred Elo values from different
 populations are not directly comparable over time. Current and former entrants
 retain immutable identities and supporting records in the Baseline Library.
 The earlier weekly update wording is superseded by this monthly direction.
-Reactive TDM, specialist scenario controllers,
+Reactive TDM (ALPHA, BETA and GAMMA), specialist scenario controllers,
 Random, and internal training-population members are not Big 12 entrants.
 See
 [specification amendment A27](docs/design/specification_amendments.md#a27-rolling-big-12-and-baseline-library-governance).

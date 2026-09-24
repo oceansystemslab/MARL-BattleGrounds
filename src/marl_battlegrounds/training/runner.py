@@ -138,8 +138,8 @@ default="mappo"
     pinned_opponent : str or None, default=None
         None keeps the pinned share playing that first-update actor. Otherwise
         a method reference that plays the pinned share instead: a built-in name
-        ("random", "tdm-alpha", "tdm-beta"), an absolute path to an exported
-        actor directory (a relative path is rejected), or a
+        ("random", "tdm-alpha", "tdm-beta", "tdm-gamma"), an absolute path to
+        an exported actor directory (a relative path is rejected), or a
         ``module:function`` factory, resolved by
         ``load_method`` when the run is set up and again on resume. Requires a
         positive pinned_opponent_share. JAX methods and host methods (for

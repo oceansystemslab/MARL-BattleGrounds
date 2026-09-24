@@ -182,7 +182,7 @@ def test_result_is_immutable_and_learning_outputs_keep_gradients_and_rng() -> No
         setattr(result, attribute, jnp.int32(4))
 
 
-@pytest.mark.parametrize("name", ["random", "tdm-alpha", "tdm-beta"])
+@pytest.mark.parametrize("name", ["random", "tdm-alpha", "tdm-beta", "tdm-gamma"])
 def test_legacy_policy_application_keeps_supplied_keys_and_scalar_results(
     name: str,
 ) -> None:

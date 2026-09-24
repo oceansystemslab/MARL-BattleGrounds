@@ -1,6 +1,8 @@
 /**
  * @file Check exact Python presentation shapes, immutable normalization, authority
- * joins and rejection of forged or inconsistent data.
+ * joins and rejection of forged or inconsistent data. A live transport join keeps
+ * the BETA (scenario_5) and GAMMA (tdm_gamma) controllers for either team under
+ * SharedObs and rejects them under NoSharedObs.
  */
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
@@ -2024,9 +2026,13 @@ test("live transport identity accepts Random independently for either team", asy
   }
 });
 
-test("live scenario identity permits only SharedObs Team B without changing Replay", async () => {
-  const specialist = "scenario_5";
-  for (const kind of ["live_oracle", "live_shared_obs_agent_pov"]) {
+test("live scenario identity permits either team only under SharedObs without changing Replay", async () => {
+  for (const [kind, specialist] of [
+    ["live_oracle", "scenario_5"],
+    ["live_shared_obs_agent_pov", "scenario_5"],
+    ["live_oracle", "tdm_gamma"],
+    ["live_shared_obs_agent_pov", "tdm_gamma"],
+  ]) {
     const pair = clone(fixture.pairs[kind]);
     pair.transport.combat_configuration.team_b_controller = specialist;
     pair.transport.combat_configuration.execution_information_mode = "shared_obs";
@@ -2035,8 +2041,31 @@ test("live scenario identity permits only SharedObs Team B without changing Repl
       pair.presentation,
     );
     assert.equal(joined.transport.combat_configuration.team_b_controller, specialist);
-    for (const invalid of [
+    for (const teamA of [
       { team_a_controller: specialist },
+      { team_a_controller: specialist, team_b_controller: "manual" },
+    ]) {
+      const changed = clone(pair);
+      Object.assign(changed.transport.combat_configuration, teamA);
+      const installed = await joinTransportAndAuthorizedPresentationV1(
+        changed.transport,
+        changed.presentation,
+      );
+      assert.equal(
+        installed.transport.combat_configuration.team_a_controller,
+        specialist,
+      );
+      assert.equal(
+        installed.transport.combat_configuration.team_b_controller,
+        teamA.team_b_controller ?? specialist,
+      );
+    }
+    for (const invalid of [
+      {
+        team_a_controller: specialist,
+        team_b_controller: "manual",
+        execution_information_mode: "no_shared_obs",
+      },
       { execution_information_mode: "no_shared_obs" },
       { team_b_controller: "scripted_tdm" },
       { team_b_controller: "scenario_1" },

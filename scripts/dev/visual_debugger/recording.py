@@ -291,12 +291,14 @@ def recording_policy_execution_included(context: EvaluationEpisodeContext) -> bo
     Returns
     -------
     bool
-        True for a reactive TDM, random-valid, or Scenario 5 policy assignment.
+        True for a reactive TDM, random-valid, Scenario 5 (BETA) or TDM-GAMMA
+        policy assignment.
         Manual and scripted assignments do not count as policy execution.
     """
     return any(
         isinstance(row, (AssignedPolicySlotV1, AssignedPolicySlotV2))
-        and row.policy_kind in ("reactive_tdm", "random_valid", "scenario_5")
+        and row.policy_kind
+        in ("reactive_tdm", "random_valid", "scenario_5", "tdm_gamma")
         for row in context.policy_assignments
     )
 

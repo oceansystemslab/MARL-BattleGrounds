@@ -1,6 +1,9 @@
 /**
  * @file Check unique page IDs, supported control choices and required keyboard/help
- * text in static markup.
+ * text in static markup. Both team controller lists offer the same five
+ * choices in the same order. Each team's BETA (scenario_5) and GAMMA
+ * (tdm_gamma) option has its own ID, the label "Reactive TDM BETA" or
+ * "Reactive TDM GAMMA", and starts disabled until SharedObs.
  */
 import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
@@ -79,7 +82,7 @@ test("static debugger IDs are unique", async () => {
   assert.equal(new Set(ids).size, ids.length);
 });
 
-test("only Team B exposes the SharedObs scenario controller", async () => {
+test("both teams expose the same SharedObs scenario controllers", async () => {
   const markup = await readFile(indexUrl, "utf8");
   for (const id of ["devclient-team-a-controller", "devclient-team-b-controller"]) {
     const select = elementBody(markup, id, "select");
@@ -91,10 +94,38 @@ test("only Team B exposes the SharedObs scenario controller", async () => {
         ["manual", "Manual"],
         ["reactive_tdm", "Reactive TDM ALPHA"],
         ["random_valid", "Random"],
-        ...(id === "devclient-team-b-controller"
-          ? [["scenario_5", "Reactive TDM BETA"]]
-          : []),
+        ["scenario_5", "Reactive TDM BETA"],
+        ["tdm_gamma", "Reactive TDM GAMMA"],
       ],
+    );
+  }
+  const teamA = elementBody(markup, "devclient-team-a-controller", "select");
+  const teamB = elementBody(markup, "devclient-team-b-controller", "select");
+  assert.match(
+    teamA,
+    /<option value="scenario_5" id="devclient-team-a-scenario-5-option" disabled>Reactive TDM BETA<\/option>/u,
+  );
+  assert.match(
+    teamA,
+    /<option value="tdm_gamma" id="devclient-team-a-tdm-gamma-option" disabled>Reactive TDM GAMMA<\/option>/u,
+  );
+  assert.match(
+    teamB,
+    /<option value="scenario_5" id="devclient-scenario-5-controller-option" disabled>Reactive TDM BETA<\/option>/u,
+  );
+  assert.match(
+    teamB,
+    /<option value="tdm_gamma" id="devclient-tdm-gamma-controller-option" disabled>Reactive TDM GAMMA<\/option>/u,
+  );
+  for (const optionId of [
+    "devclient-team-a-scenario-5-option",
+    "devclient-team-a-tdm-gamma-option",
+    "devclient-scenario-5-controller-option",
+    "devclient-tdm-gamma-controller-option",
+  ]) {
+    assert.equal(
+      [...markup.matchAll(new RegExp(`\\bid="${optionId}"`, "gu"))].length,
+      1,
     );
   }
   for (const id of [

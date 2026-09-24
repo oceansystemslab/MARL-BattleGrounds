@@ -50,6 +50,10 @@ from marl_battlegrounds.policies.reactive_tdm_beta import (
     reactive_tdm_beta_controller_descriptor,
     reactive_tdm_beta_policy,
 )
+from marl_battlegrounds.policies.reactive_tdm_gamma import (
+    reactive_tdm_gamma_controller_descriptor,
+    reactive_tdm_gamma_policy,
+)
 from marl_battlegrounds.policies.shared_obs import SharedObsPolicy
 
 if TYPE_CHECKING:
@@ -184,6 +188,7 @@ _CONTROLLERS: dict[str, PolicyApply] = {
     "random": _random_apply,
     "tdm-alpha": _shared_apply(reactive_tdm_alpha_policy),
     "tdm-beta": _shared_apply(reactive_tdm_beta_policy),
+    "tdm-gamma": _shared_apply(reactive_tdm_gamma_policy),
 }
 
 
@@ -193,7 +198,7 @@ def policy(name: str) -> Policy:
     Parameters
     ----------
     name : str
-        Exactly "random", "tdm-alpha" or "tdm-beta".
+        Exactly "random", "tdm-alpha", "tdm-beta" or "tdm-gamma".
 
     Returns
     -------
@@ -225,14 +230,16 @@ def controller_identity(team: Policy) -> dict[str, object] | None:
     -------
     dict[str, object] | None
         A fresh dict with identifier, version and canonical_digest for the exact
-        registered ALPHA or BETA callable; otherwise None. A matching policy name
-        alone does not establish identity.
+        registered ALPHA, BETA or GAMMA callable; otherwise None. A matching
+        policy name alone does not establish identity. GAMMA's identity is its
+        own descriptor; its recorded BETA ancestry is not an execution identity.
 
     This host metadata lookup does not execute the policy or hash its variables.
     """
     for name, describe in (
         ("tdm-alpha", reactive_tdm_alpha_controller_descriptor),
         ("tdm-beta", reactive_tdm_beta_controller_descriptor),
+        ("tdm-gamma", reactive_tdm_gamma_controller_descriptor),
     ):
         if team.apply is _CONTROLLERS[name]:
             descriptor = describe()
