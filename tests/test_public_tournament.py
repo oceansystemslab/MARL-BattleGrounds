@@ -1,5 +1,10 @@
 """Check small complete tournaments, selected outputs and resumed execution.
 
+Completed full-metric tournaments resume without execution, refitting or file
+changes. Every matchup records all of its full-metric episode IDs even when
+the explicit selection is empty or partial; tampered saved selections fail
+before writes. Priority mode retains its sparse full-metric selection.
+
 Red Zone depth: a new run records its depth (5.0 by default) as
 "red_zone_depth"; 0.0 and 6.0 give different configuration IDs from 5.0; a
 resume that omits the depth inherits it, and a different explicit depth fails
@@ -233,6 +238,73 @@ def test_persisted_tournament_resumes_without_reexecution_or_repeated_summary_ro
             full_metrics_episodes=[1],
             resume_from=paths["run_details"].parent,
         )
+
+
+@pytest.mark.parametrize("full_selection", [(), (2,)])
+def test_completed_full_metrics_resume_keeps_all_matchup_rows_and_checks_saved_ids(
+    full_selection: tuple[int, ...],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    entrants = _entrants(3)
+    result = run_tournament(
+        entrants,
+        maps=[12],
+        episodes_per_pair=2,
+        max_steps=1,
+        num_envs=2,
+        chunk_size=1,
+        metrics="full",
+        full_metrics_episodes=full_selection,
+        output_dir=tmp_path,
+    )
+    assert result.run_dir is not None and result.paths is not None
+    directory = result.run_dir
+    path = result.paths["run_details"]
+    manifest = json.loads(path.read_bytes())
+    schedule = manifest["passes"]['["tournament","schedule"]']
+    assert schedule["details"]["full_metrics_episodes"] == list(full_selection)
+    pairs = [
+        manifest["passes"][f'["tournament","pair-{index}"]'] for index in (1, 2, 3)
+    ]
+    assert [entry["details"]["full_metrics_episodes"] for entry in pairs] == [
+        [1, 2],
+        [3, 4],
+        [5, 6],
+    ]
+    with result.paths["full_metrics"].open(newline="") as stream:
+        assert [row["episode_id"] for row in csv.DictReader(stream)] == [
+            "1",
+            "2",
+            "3",
+            "4",
+            "5",
+            "6",
+        ]
+    before = _files(directory)
+    module = import_module("marl_battlegrounds.evaluation.tournament")
+
+    def forbidden(*args: object, **kwargs: object) -> None:
+        raise AssertionError("a completed tournament must not run or refit")
+
+    monkeypatch.setattr(module, "evaluate_episodes", forbidden)
+    monkeypatch.setattr(module, "summarize_tournament", forbidden)
+    monkeypatch.setattr(module, "summarize_headlines", forbidden)
+    saved = run_tournament(entrants, resume_from=directory)
+    assert saved.status == "complete"
+    assert saved.matches == result.matches
+    assert saved.tournament_results == result.tournament_results
+    assert saved.matchup_results == result.matchup_results
+    assert saved.map_results == result.map_results
+    assert saved.headline_metrics == result.headline_metrics
+    assert _files(directory) == before
+
+    pairs[1]["details"]["full_metrics_episodes"] = [3]
+    path.write_text(json.dumps(manifest))
+    changed = _files(directory)
+    with pytest.raises(ValueError, match="scientific conditions"):
+        run_tournament(entrants, resume_from=directory)
+    assert _files(directory) == changed
 
 
 def test_interrupted_pair_pass_resumes_only_missing_episodes(

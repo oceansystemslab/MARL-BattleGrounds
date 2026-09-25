@@ -4,10 +4,10 @@
  * Replay Viewer starts with the eleven default filters on, including Cooldown
  * Effects and Red Zone Floors, and Ranges off ("11 enabled"). Default
  * Configuration, Enable All and Disable All change only local paint and the
- * Ranges setting. The Red Zone Floors option shows its exact help on hover and
- * focus, and its checkbox lists both help IDs. Turning Red Zone Floors off and
- * on in Oracle, or Cooldown Effects off and on in Oracle and Agent POV, sends
- * no request and leaves the scientific data unchanged.
+ * Ranges setting. Every filter has short help on hover and keyboard focus, and
+ * its checkbox names both the shared help and its own description. Turning Red
+ * Zone Floors off and on in Oracle, or Cooldown Effects off and on in Oracle
+ * and Agent POV, sends no request and leaves the scientific data unchanged.
  */
 import { expect, test } from "@playwright/test";
 
@@ -66,11 +66,9 @@ const CHOREOGRAPHY_ROOTS =
   "#battlefield .combat-choreography, #battlefield .combat-choreography-connectors, #battlefield .combat-choreography-routes";
 const RED_ZONE_FLOOR_PAINT =
   "#battlefield .red-zone-floor-clip, #battlefield .red-zone-floor";
-const RED_ZONE_FLOORS_HELP_ID = "visual-filter-red-zone-floors-help";
 const RED_ZONE_FLOORS_HELP =
   "Tint each team's Red Zone floor deep red. When an agent dies inside its own " +
-  "team's Red Zone, the enemy team gets 2 points. Turning this off only hides " +
-  "the tint.";
+  "team's Red Zone, the enemy team gets 2 points.";
 const DEFAULT_CONFIGURATION_HELP =
   "Restore the eleven default effects, including Cooldown Effects, Death Announcer " +
   "and Red Zone Floors, and turn off Ranges.";
@@ -303,7 +301,7 @@ async function expectFilterSurface(page, disabledIds = [], rangesEnabled = true)
           id: input.dataset.visualFilterId,
           option: input.parentElement?.dataset.visualFilterOption,
           label: input.parentElement?.textContent?.trim(),
-          // Focus adds visual-tooltip for a moment; expectRedZoneFloorsHelp checks it.
+          // Focus adds visual-tooltip for a moment; expectVisualFilterHelp checks it.
           describedBy: (input.getAttribute("aria-describedby") ?? "")
             .split(/\s+/u)
             .filter((token) => token !== "visual-tooltip")
@@ -321,10 +319,7 @@ async function expectFilterSurface(page, disabledIds = [], rangesEnabled = true)
       id,
       option: id,
       label,
-      describedBy:
-        id === "red_zone_floors"
-          ? `visual-filters-help ${RED_ZONE_FLOORS_HELP_ID}`
-          : "visual-filters-help",
+      describedBy: `visual-filters-help visual-filter-${id.replaceAll("_", "-")}-help`,
       value: id,
       type: "checkbox",
       autocomplete: "off",
@@ -365,45 +360,55 @@ async function expectFilterSurface(page, disabledIds = [], rangesEnabled = true)
 }
 
 /** @param {import("@playwright/test").Page} page */
-async function expectRedZoneFloorsHelp(page) {
-  const option = page.locator(
-    '#visual-filter-options [data-visual-filter-option="red_zone_floors"]',
-  );
-  const input = option.locator(FILTER_INPUT);
-  const hiddenHelp = page.locator(`#visual-filter-options #${RED_ZONE_FLOORS_HELP_ID}`);
+async function expectVisualFilterHelp(page) {
   const tooltip = page.locator("#visual-tooltip");
-  const ownDescribedBy = `visual-filters-help ${RED_ZONE_FLOORS_HELP_ID}`;
   const sectionHelp = (await page.locator("#visual-filters-help").textContent()) ?? "";
-  await expect(hiddenHelp).toHaveText(RED_ZONE_FLOORS_HELP);
-  await expect(hiddenHelp).toHaveClass("sr-only");
-  await expect(input).toHaveAttribute("aria-describedby", ownDescribedBy);
-  await expect(input).toHaveAccessibleName("Red Zone Floors");
-  await expect(input).toHaveAccessibleDescription(
-    `${sectionHelp.replace(/\s+/gu, " ").trim()} ${RED_ZONE_FLOORS_HELP}`,
-  );
+  const descriptions = new Set();
+  for (const [id, label] of FILTERS) {
+    const helpId = `visual-filter-${id.replaceAll("_", "-")}-help`;
+    const option = page.locator(
+      `#visual-filter-options [data-visual-filter-option="${id}"]`,
+    );
+    const input = option.locator(FILTER_INPUT);
+    const hiddenHelp = page.locator(`#visual-filter-options #${helpId}`);
+    const ownDescribedBy = `visual-filters-help ${helpId}`;
+    await expect(hiddenHelp).toHaveCount(1);
+    await expect(hiddenHelp).toHaveClass("sr-only");
+    const help = (await hiddenHelp.textContent()) ?? "";
+    expect(help.trim()).not.toBe("");
+    const sentenceCount = help.match(/[.!?](?:\s|$)/gu)?.length ?? 0;
+    expect(sentenceCount).toBeGreaterThanOrEqual(1);
+    expect(sentenceCount).toBeLessThanOrEqual(2);
+    descriptions.add(help);
+    if (id === "red_zone_floors") {
+      expect(help).toBe(RED_ZONE_FLOORS_HELP);
+    }
+    await expect(input).toHaveAttribute("aria-describedby", ownDescribedBy);
+    await expect(input).toHaveAccessibleName(label);
+    await expect(input).toHaveAccessibleDescription(
+      `${sectionHelp.replace(/\s+/gu, " ").trim()} ${help}`,
+    );
 
-  await option.hover();
-  await expect(tooltip).toBeVisible();
-  await expect(page.locator("#visual-tooltip-title")).toHaveText("Red Zone Floors");
-  await expect(page.locator("#visual-tooltip-details")).toHaveText(
-    RED_ZONE_FLOORS_HELP,
-  );
-  await page.mouse.move(1, 1);
-  await expect(tooltip).toBeHidden();
+    await option.hover();
+    await expect(tooltip).toBeVisible();
+    await expect(page.locator("#visual-tooltip-title")).toHaveText(label);
+    await expect(page.locator("#visual-tooltip-details")).toHaveText(help);
+    await page.mouse.move(1, 1);
+    await expect(tooltip).toBeHidden();
 
-  await input.focus();
-  await expect(tooltip).toBeVisible();
-  await expect(page.locator("#visual-tooltip-title")).toHaveText("Red Zone Floors");
-  await expect(page.locator("#visual-tooltip-details")).toHaveText(
-    RED_ZONE_FLOORS_HELP,
-  );
-  await expect(input).toHaveAttribute(
-    "aria-describedby",
-    `${ownDescribedBy} visual-tooltip`,
-  );
-  await input.blur();
-  await expect(tooltip).toBeHidden();
-  await expect(input).toHaveAttribute("aria-describedby", ownDescribedBy);
+    await input.focus();
+    await expect(tooltip).toBeVisible();
+    await expect(page.locator("#visual-tooltip-title")).toHaveText(label);
+    await expect(page.locator("#visual-tooltip-details")).toHaveText(help);
+    await expect(input).toHaveAttribute(
+      "aria-describedby",
+      `${ownDescribedBy} visual-tooltip`,
+    );
+    await input.blur();
+    await expect(tooltip).toBeHidden();
+    await expect(input).toHaveAttribute("aria-describedby", ownDescribedBy);
+  }
+  expect(descriptions.size).toBe(FILTERS.length);
 }
 
 /** @param {import("@playwright/test").Page} page
@@ -416,7 +421,7 @@ async function expectFreshDefaults(page, rangesSelector) {
     "aria-description",
     DEFAULT_CONFIGURATION_HELP,
   );
-  await expectRedZoneFloorsHelp(page);
+  await expectVisualFilterHelp(page);
 }
 
 /** @param {string[]} disabledIds */

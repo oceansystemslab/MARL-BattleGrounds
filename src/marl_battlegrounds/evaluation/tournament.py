@@ -393,6 +393,9 @@ def _check_saved_matchups(
 
     Partial runs may lack later passes or have a pass with no declarations yet.
     Existing declarations may not change source, seed, ownership or capture mode.
+    Full mode records every episode in each matchup; other modes record only
+    the explicitly selected full-metric episodes. Check these effective saved
+    selections without changing the coordinator's original selection.
     Execution batch/chunk sizes remain changeable. No files are changed here.
     Unknown saved tournament passes or conflicting fields raise ValueError.
     """
@@ -420,7 +423,9 @@ def _check_saved_matchups(
         options = {
             "seed": seed,
             "metrics": metrics,
-            "full_metrics_episodes": sorted(ids.intersection(full_ids)),
+            "full_metrics_episodes": sorted(
+                ids if metrics == "full" else ids.intersection(full_ids)
+            ),
             "replay_episodes": sorted(ids.intersection(replay_ids)),
             "episode_ids": sorted(ids),
             "num_episodes": len(group),

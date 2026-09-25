@@ -248,20 +248,120 @@ const elements = {
 };
 
 /**
- * Extra help for Visual Filters options whose label alone does not explain them,
- * keyed by filter ID. title and text fill the option's hover and focus tooltip
- * (through CONTROL_HELP). text also fills a hidden element with ID id, which the
- * checkbox lists after visual-filters-help in its aria-describedby, so screen
- * readers read both. Each ID must be unique in the page.
+ * Short help for every Visual Filters option, keyed by filter ID.
+ * title and text fill the option's hover and focus tooltip (through CONTROL_HELP).
+ * text also fills a hidden element with ID id, which the checkbox lists after
+ * visual-filters-help in its aria-describedby, so screen readers read both.
+ * Each ID must be unique in the page.
  */
 const VISUAL_FILTER_OPTION_HELP = Object.freeze({
+  aura_fields: Object.freeze({
+    id: "visual-filter-aura-fields-help",
+    title: "Aura Fields",
+    text: "Show the areas around Mages and Warriors where their auras help teammates.",
+  }),
+  aura_modifier_badges: Object.freeze({
+    id: "visual-filter-aura-modifier-badges-help",
+    title: "Aura Modifier Badges",
+    text: "Show badges for the extra damage or damage protection an agent gets from auras.",
+  }),
+  duration_status_badges: Object.freeze({
+    id: "visual-filter-duration-status-badges-help",
+    title: "Duration Status Badges",
+    text:
+      "Show badges for active effects, such as slows and stuns. Show their remaining " +
+      "ticks when known, including the In Combat countdown.",
+  }),
+  spawn_shield: Object.freeze({
+    id: "visual-filter-spawn-shield-help",
+    title: "Spawn Shield",
+    text: "Show the shield around an agent while it is protected after spawning.",
+  }),
+  target_selection_visuals: Object.freeze({
+    id: "visual-filter-target-selection-visuals-help",
+    title: "Target Selection Visuals",
+    text: "Mark the selected target and show whether the chosen ability can target it.",
+  }),
+  basic_ability_effects: Object.freeze({
+    id: "visual-filter-basic-ability-effects-help",
+    title: "Basic Ability Effects",
+    text: "Show effects when agents use Basic abilities, including attack and healing effects.",
+  }),
+  ultimate_ability_effects: Object.freeze({
+    id: "visual-filter-ultimate-ability-effects-help",
+    title: "Ultimate Ability Effects",
+    text: "Show effects when agents use Ultimate abilities, including their paths and impacts.",
+  }),
+  regeneration_effects: Object.freeze({
+    id: "visual-filter-regeneration-effects-help",
+    title: "Regeneration Effects",
+    text: "Show the recovery effect when an agent regains health outside combat.",
+  }),
+  cooldown_effects: Object.freeze({
+    id: "visual-filter-cooldown-effects-help",
+    title: "Cooldown Effects",
+    text:
+      "Show how many ticks remain before an agent can use its Ultimate again. " +
+      "Show a signal when it is ready.",
+  }),
+  status_application: Object.freeze({
+    id: "visual-filter-status-application-help",
+    title: "Status Application",
+    text: "Show a short effect when an agent gets a slow, stun or other status, or that status is applied again.",
+  }),
+  natural_status_expiry: Object.freeze({
+    id: "visual-filter-natural-status-expiry-help",
+    title: "Natural Status Expiry",
+    text: "Show a short effect when a timed status ends on its own, including when an agent leaves combat.",
+  }),
+  freezing_trap_break: Object.freeze({
+    id: "visual-filter-freezing-trap-break-help",
+    title: "Freezing Trap Break",
+    text: "Show a shattering effect when damage breaks a Hunter's Freezing Trap.",
+  }),
+  status_clear_on_death: Object.freeze({
+    id: "visual-filter-status-clear-on-death-help",
+    title: "Status Clear on Death",
+    text: "Show a short effect when an agent's death removes its active statuses.",
+  }),
+  death_effects: Object.freeze({
+    id: "visual-filter-death-effects-help",
+    title: "Death Effects",
+    text: "Show a ring around an agent when it dies.",
+  }),
+  respawn_wave: Object.freeze({
+    id: "visual-filter-respawn-wave-help",
+    title: "Respawn Wave",
+    text: "Show a team message when it is time for its dead agents to return.",
+  }),
+  resurrection_effects: Object.freeze({
+    id: "visual-filter-resurrection-effects-help",
+    title: "Resurrection Effects",
+    text: "Show a ring around an agent when it returns at its spawn pad.",
+  }),
+  spawn_shield_expiry: Object.freeze({
+    id: "visual-filter-spawn-shield-expiry-help",
+    title: "Spawn-Shield Expiry",
+    text: "Show a short effect when an agent's spawn protection ends.",
+  }),
+  scrolling_battle_text: Object.freeze({
+    id: "visual-filter-scrolling-battle-text-help",
+    title: "Scrolling Battle Text",
+    text: "Show health-change numbers beside agents, including health regained outside combat. Combat numbers show the final health change after damage and healing are combined.",
+  }),
+  death_announcer: Object.freeze({
+    id: "visual-filter-death-announcer-help",
+    title: "Death Announcer",
+    text:
+      "Show which team got a kill and which agents died. Each victim's info box " +
+      "lists who helped with the kill, when those details were recorded.",
+  }),
   red_zone_floors: Object.freeze({
     id: "visual-filter-red-zone-floors-help",
     title: "Red Zone Floors",
     text:
       "Tint each team's Red Zone floor deep red. When an agent dies inside its own " +
-      "team's Red Zone, the enemy team gets 2 points. Turning this off only hides " +
-      "the tint.",
+      "team's Red Zone, the enemy team gets 2 points.",
   }),
 });
 
