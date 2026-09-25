@@ -1,7 +1,12 @@
 """Check exact TDM scenario starts, witness identities and replay round trips.
 
 Single authored qualifications retain their scenario/seed correlation without
-claiming a two-game spawn comparison. Existing scenario content stays unchanged.
+claiming a two-game spawn comparison. The eight installed scenarios are the
+republished Red Zone versions: each loads at Red Zone depth 5.0, and its
+manifest digest, its specification digest, the config digest rebuilt from the
+loaded scenario and the config its replay records are one value. Current
+evidence is replay V4 with context V4 and scenario record V5, and both round
+trip through their loaders.
 """
 
 from __future__ import annotations
@@ -17,22 +22,24 @@ from scripts.dev.qualify_tdm_scenarios import (
 )
 
 from marl_battlegrounds.evaluation import recording_context
+from marl_battlegrounds.evaluation.catalog import build_resolved_env_config_v2
 from marl_battlegrounds.evaluation.metric_catalog import FULL_METRIC_NAMES
 from marl_battlegrounds.evaluation.models import (
     AggregationKeyV1,
     AssignedPolicySlotV2,
     ContentAddressedIdentityV1,
-    EvaluationEpisodeContextV3,
+    EvaluationEpisodeContextV4,
+    ResolvedEnvConfigV2,
     canonical_digest_sha256,
     canonical_json_bytes,
 )
 from marl_battlegrounds.evaluation.replay_io import (
     load_replay,
-    load_scenario_evaluation_record_v4,
+    load_scenario_evaluation_record_v5,
     save_replay,
-    save_scenario_evaluation_record_v4,
+    save_scenario_evaluation_record_v5,
 )
-from marl_battlegrounds.evaluation.replay_v3 import ReplayArtifactV3, build_replay_v3
+from marl_battlegrounds.evaluation.replay_v4 import ReplayArtifactV4, build_replay_v4
 from marl_battlegrounds.evaluation.run_writer import IDENTITY_COLUMNS
 from marl_battlegrounds.evaluation.scenario import ResolvedScenarioSpecificationV3
 from marl_battlegrounds.evaluation.tdm_scenarios import (
@@ -41,7 +48,11 @@ from marl_battlegrounds.evaluation.tdm_scenarios import (
     build_tdm_scenario_evaluation_record,
     tdm_scenario_pressure_identity,
 )
-from marl_battlegrounds.tasks import list_tdm_scenarios
+from marl_battlegrounds.tasks import (
+    DEFAULT_TDM_RED_ZONE_DEPTH,
+    list_tdm_scenarios,
+    load_tdm_scenario,
+)
 
 
 @pytest.fixture(scope="module")
@@ -77,9 +88,18 @@ def test_all_eight_scenarios_join_packaged_content_and_roundtrip_evidence(
         evidence.record,
     )
     source = list_tdm_scenarios()[scenario_id - 1]
+    assert source.source == source.approved_source
+    runtime = load_tdm_scenario(scenario_id).config
+    assert runtime.team_deathmatch_red_zone_depth == DEFAULT_TDM_RED_ZONE_DEPTH
+    recorded = replay.header.context.resolved_env_config
+    assert isinstance(recorded, ResolvedEnvConfigV2)
+    assert recorded.team_deathmatch_red_zone_depth == DEFAULT_TDM_RED_ZONE_DEPTH
+    # Manifest, specification, runtime and replay configs are one identity.
     assert (
         specification.resolved_config_digest_sha256
         == source.resolved_configuration_digest
+        == build_resolved_env_config_v2(runtime).canonical_digest_sha256
+        == recorded.canonical_digest_sha256
     )
     assert (
         specification.authored_initial_condition.canonical_digest
@@ -116,12 +136,12 @@ def test_all_eight_scenarios_join_packaged_content_and_roundtrip_evidence(
     replay_path = tmp_path / "episode.marlbg-replay.json"
     record_path = tmp_path / "episode.marlbg-scenario.json"
     save_replay(replay, replay_path)
-    save_scenario_evaluation_record_v4(record, replay, record_path)
+    save_scenario_evaluation_record_v5(record, replay, record_path)
     reloaded = load_replay(replay_path).replay
-    assert isinstance(reloaded, ReplayArtifactV3)
+    assert isinstance(reloaded, ReplayArtifactV4)
     assert reloaded == replay
     assert (
-        load_scenario_evaluation_record_v4(record_path, source_replay=reloaded)
+        load_scenario_evaluation_record_v5(record_path, source_replay=reloaded)
         == record
     )
     assert not list(tmp_path.glob("*.marlbg-metrics.json"))
@@ -205,9 +225,9 @@ def test_resealed_changed_definition_cannot_enter_official_tdm_results(
 
 
 def _replace_context(
-    replay: ReplayArtifactV3, context: EvaluationEpisodeContextV3
-) -> ReplayArtifactV3:
-    return build_replay_v3(
+    replay: ReplayArtifactV4, context: EvaluationEpisodeContextV4
+) -> ReplayArtifactV4:
+    return build_replay_v4(
         context,
         replay.frames,
         replay.transitions,
@@ -233,7 +253,7 @@ def test_changed_opponent_content_is_rejected_even_with_valid_replay_joins(
                 name=row.name,
                 value=canonical_json_bytes(changed_pressure).decode("ascii"),
             )
-    changed_context = EvaluationEpisodeContextV3.model_validate(
+    changed_context = EvaluationEpisodeContextV4.model_validate(
         {**context.model_dump(mode="python"), "aggregation_keys": tuple(keys)}
     )
     changed = _replace_context(evidence.replay, changed_context)
@@ -286,7 +306,7 @@ def test_changed_policy_role_cannot_join_frozen_scenario() -> None:
     assignments[1] = assignment.model_copy(
         update={"evaluation_role": "cooperative_partner"}
     )
-    changed_context = EvaluationEpisodeContextV3.model_validate(
+    changed_context = EvaluationEpisodeContextV4.model_validate(
         {
             **context.model_dump(mode="python"),
             "policy_assignments": tuple(assignments),

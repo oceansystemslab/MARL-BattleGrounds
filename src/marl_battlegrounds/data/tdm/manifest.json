@@ -736,23 +736,23 @@
       "scenario_id": 1,
       "approved_source": {
         "asset_id": "scenario_1",
-        "revision": 41,
-        "source_path": "artifacts/dev_client/drafts/scenarios/scenario_1/r41.json",
-        "source_sha256": "57b3603125b1c2fa1968cbb007de1a8e3132bd85a164cf45c3154f20c9c71831",
-        "semantic_digest": "d3d2f7196fa5eb64622ebf38bb83b13f07af226af808c024852bf75be351bdad"
+        "revision": 42,
+        "source_path": "artifacts/dev_client/drafts/scenarios/scenario_1/r42.json",
+        "source_sha256": "8cfb9eb650679771cdcb515b3aa4369c6c0b26923baa009a1b41c8c996d0cb73",
+        "semantic_digest": "f139154cfb166d44049de5930fadfa0ca71094905b02890852564cbc112d75bd"
       },
       "name": "scenario_1_HRP_vs_MRP",
       "description": "Can a team turn a dying healer's last action into a win? Hunter, Rogue and Priest must disable the enemy healer, lure a pursuer into an ambush, and finish two targets in five ticks. This scenario makes healing priorities, cover, coordinated attacks and strategic sacrifice part of the same short team puzzle. Multi-Step Team-Level Planning connects that last heal to the two finishing attacks.",
       "source": {
         "asset_id": "scenario_1",
-        "revision": 41,
-        "source_path": "artifacts/dev_client/drafts/scenarios/scenario_1/r41.json",
-        "source_sha256": "57b3603125b1c2fa1968cbb007de1a8e3132bd85a164cf45c3154f20c9c71831",
-        "semantic_digest": "d3d2f7196fa5eb64622ebf38bb83b13f07af226af808c024852bf75be351bdad"
+        "revision": 42,
+        "source_path": "artifacts/dev_client/drafts/scenarios/scenario_1/r42.json",
+        "source_sha256": "8cfb9eb650679771cdcb515b3aa4369c6c0b26923baa009a1b41c8c996d0cb73",
+        "semantic_digest": "f139154cfb166d44049de5930fadfa0ca71094905b02890852564cbc112d75bd"
       },
-      "map_semantic_digest": "acd2cf8640483dac77d93fc4f7189a0a035d587a08f0c8233c9fb685e5b98c94",
-      "resolved_configuration_digest": "01ef4a1ca925ab447aa8c80530e69dfb5327afa22a4fb2896c41f22b60e57ad4",
-      "resolved_initial_state_digest": "6a22190f5f4fad225ce7d2753d536881ab90bf7b450987e54797737454bd66a0",
+      "map_semantic_digest": "97055fa75250257fa2169e5bbc2aa169e478026a78be1ee55784bf2a248d3c5f",
+      "resolved_configuration_digest": "b51169091247111dd4507592d828ce2749e9d75f88b4cf205a127f9e1d26926d",
+      "resolved_initial_state_digest": "cf541c2924ce8414c682295ecb2c27710e4a8245e4983b776307a814cda08ed8",
       "class_ids": [
         1,
         2,
@@ -770,28 +770,28 @@
         5
       ],
       "horizon": 5,
-      "resource_sha256": "ca6e836fb04addd8c93ad69331a6634afa1f0f5607b56e0710478e586c836d44"
+      "resource_sha256": "42ee70b07fff3420c8ad72bbfc784187635e0d8c0a94f841d81dd01ecc72ef78"
     },
     {
       "scenario_id": 2,
       "approved_source": {
         "asset_id": "scenario_2",
-        "revision": 19,
-        "source_path": "artifacts/dev_client/drafts/scenarios/scenario_2/r19.json",
-        "source_sha256": "71922f19522c03ba8847b2c845934ac98e0cd555f83b665dc00113dde016dbbf",
-        "semantic_digest": "52e3a759435d66a8c462bc80d96f2ddb616d164868c4f3d45bba3eb19689c0b3"
+        "revision": 20,
+        "source_path": "artifacts/dev_client/drafts/scenarios/scenario_2/r20.json",
+        "source_sha256": "552e973d6f6e4a3994e573499d19856847c176557e1743df8e26387940260a62",
+        "semantic_digest": "671b031f93bde60123f49b630b0e419f0e5d6bffe636b686ce4c07b13abaa76d"
       },
       "name": "scenario_2_WP_vs_MR",
       "description": "A nearly dead Priest must keep healing its partner rather than itself, while Warrior uses cover and positioning to make that rescue possible. With five ticks and no spare life, this scenario tests whether a team can coordinate protection, target choice and a precisely timed Ultimate heal—not merely follow the smallest health bar. Multi-Step Team-Level Planning connects the retreat, rescue and final approach.",
       "source": {
         "asset_id": "scenario_2",
-        "revision": 19,
-        "source_path": "artifacts/dev_client/drafts/scenarios/scenario_2/r19.json",
-        "source_sha256": "71922f19522c03ba8847b2c845934ac98e0cd555f83b665dc00113dde016dbbf",
-        "semantic_digest": "52e3a759435d66a8c462bc80d96f2ddb616d164868c4f3d45bba3eb19689c0b3"
+        "revision": 20,
+        "source_path": "artifacts/dev_client/drafts/scenarios/scenario_2/r20.json",
+        "source_sha256": "552e973d6f6e4a3994e573499d19856847c176557e1743df8e26387940260a62",
+        "semantic_digest": "671b031f93bde60123f49b630b0e419f0e5d6bffe636b686ce4c07b13abaa76d"
       },
       "map_semantic_digest": "3a3e8437990e0ed3fa71781642ec16acb7306a160b746bdc4e76cbd147df46f4",
-      "resolved_configuration_digest": "6af35604d4dcb485349426536dcc47dfd29b3ea22760306be1b8067d61bbc090",
+      "resolved_configuration_digest": "a7ce3a62024b41afbe401c5724ddc8f47fcc2637d26250741e843965d6c297fa",
       "resolved_initial_state_digest": "48b120979bdb9fe08d1cba27dbf7f5f3878d486120bb7a35e59e177c86ecc00b",
       "class_ids": [
         1,
@@ -810,28 +810,28 @@
         5
       ],
       "horizon": 5,
-      "resource_sha256": "63327115d80194bcd6af8f114af585620c40b22c9f4374efaa8a07d8b12ffe97"
+      "resource_sha256": "c7e7cd8876b5deea32f0a57ae1b6d0fdd87f219355b9110f753599c39e07ba51"
     },
     {
       "scenario_id": 3,
       "approved_source": {
         "asset_id": "scenario_3",
-        "revision": 24,
-        "source_path": "artifacts/dev_client/drafts/scenarios/scenario_3/r24.json",
-        "source_sha256": "e61114b2da7c9a7a88aa6ceb6ed83f90e753d5e5561deb27da25ba094d7d88ba",
-        "semantic_digest": "c5c409e4f64deacc5e54b7c09ee62c59667342138786303b2fc52103a5dc3459"
+        "revision": 27,
+        "source_path": "artifacts/dev_client/drafts/scenarios/scenario_3/r27.json",
+        "source_sha256": "8a973d051c8fa6486e0b8204eb2007a460b1abd6484abc866dbc8bc15337e8e6",
+        "semantic_digest": "9d9fe8e94353911ab9fa232784de54767c841fa630aab4e9cb65f931bf5be9bb"
       },
       "name": "scenario_3_WH_vs_W",
       "description": "A Hunter has just 1 HP, and the enemy Rogue deliberately hunts it. Warrior and Hunter must move as a pair: keep Warrior between the pursuer and its prey while both keep attacking. This ten-tick scenario explores prediction, body screening and kiting against an opponent willing to brush past a defender's shoulder. Five-tick respawn waves can bring reinforcements into the second half of the fight.",
       "source": {
         "asset_id": "scenario_3",
-        "revision": 26,
-        "source_path": "artifacts/dev_client/drafts/scenarios/scenario_3/r26.json",
-        "source_sha256": "f5db4f1c5be75c7505ea317fbac1fba57e0b9f1d70e51162fedf8db1f60d0654",
-        "semantic_digest": "c5c409e4f64deacc5e54b7c09ee62c59667342138786303b2fc52103a5dc3459"
+        "revision": 27,
+        "source_path": "artifacts/dev_client/drafts/scenarios/scenario_3/r27.json",
+        "source_sha256": "8a973d051c8fa6486e0b8204eb2007a460b1abd6484abc866dbc8bc15337e8e6",
+        "semantic_digest": "9d9fe8e94353911ab9fa232784de54767c841fa630aab4e9cb65f931bf5be9bb"
       },
       "map_semantic_digest": "2e9c468c90b6b147e7b5991d486b9ca03079fc3e78dac3f8693c619742b34a40",
-      "resolved_configuration_digest": "d67b37814456019f8f9c062e07d894e0b6ce1bf84c834c8af7e267aca7096a69",
+      "resolved_configuration_digest": "faaa0bdf5baae690e67c3d166d3309684be3e9dc93e75b0e44643ae7eaa26568",
       "resolved_initial_state_digest": "43bf4bbe5b6f70ff14d85533b9aaec4d626580a55ac6b1cf665e70ded33fea8a",
       "class_ids": [
         1,
@@ -850,28 +850,28 @@
         5
       ],
       "horizon": 10,
-      "resource_sha256": "57af05a21460ebc2b654c2ba73696b2671b45fd4c8c7a4dd522e1c6837c423ac"
+      "resource_sha256": "b5d1eff8077ab7ebc6236d142898d52c1e8f7b82138f3d827b4808e8907b477e"
     },
     {
       "scenario_id": 4,
       "approved_source": {
         "asset_id": "scenario_4",
-        "revision": 14,
-        "source_path": "artifacts/dev_client/drafts/scenarios/scenario_4/r14.json",
-        "source_sha256": "b5ef586573d39288a749acf6c9d5d07d1e19537ee72ec5ff38ae6a150b1f6ee6",
-        "semantic_digest": "49c4ec87d228870ef03be6af58bcdac047ba54131a7dff0a59b10e84ba7fa9f8"
+        "revision": 15,
+        "source_path": "artifacts/dev_client/drafts/scenarios/scenario_4/r15.json",
+        "source_sha256": "277c32076c0e855547bdd4a2b472369dbc644e8062ae144e915fb74cd7135a11",
+        "semantic_digest": "966ae82a45b650946d62a900a71d2816e9ef8ce54568036dee6d880fbab4032b"
       },
       "name": "scenario_4_WR_vs_MWP",
       "description": "Warrior and Rogue must win a two-kill finish before either teammate falls. A concealed Rogue uses its partner's sightings; Warrior's positioning then displaces a stunned Mage into reach. This scenario tests anticipation, body blocking and kill order: finish the dangerous target first, not simply the easiest one. Multi-Step Team-Level Planning prepares Rogue's finishing job before Warrior is stunned.",
       "source": {
         "asset_id": "scenario_4",
-        "revision": 14,
-        "source_path": "artifacts/dev_client/drafts/scenarios/scenario_4/r14.json",
-        "source_sha256": "b5ef586573d39288a749acf6c9d5d07d1e19537ee72ec5ff38ae6a150b1f6ee6",
-        "semantic_digest": "49c4ec87d228870ef03be6af58bcdac047ba54131a7dff0a59b10e84ba7fa9f8"
+        "revision": 15,
+        "source_path": "artifacts/dev_client/drafts/scenarios/scenario_4/r15.json",
+        "source_sha256": "277c32076c0e855547bdd4a2b472369dbc644e8062ae144e915fb74cd7135a11",
+        "semantic_digest": "966ae82a45b650946d62a900a71d2816e9ef8ce54568036dee6d880fbab4032b"
       },
       "map_semantic_digest": "74ce8bb0e2235559743e481d2aa600fa24c4c100af544dba59901f499d962cdb",
-      "resolved_configuration_digest": "5f8d39d6a4abc00158030b31d076c8bf1520d63147a66a207d35d1fde2185188",
+      "resolved_configuration_digest": "2c6969da243a6dedf013d0d73798ef12be00653e229e15c69af30a056f117307",
       "resolved_initial_state_digest": "4fbdda9c4cc5ce1526120e3176a79e2080955e54e9cc8a03846b8077b4f93b97",
       "class_ids": [
         1,
@@ -890,29 +890,29 @@
         5
       ],
       "horizon": 5,
-      "resource_sha256": "6f9094c4691eda80b2e521660e108112972ce13affafd004dbe5922e05d72549"
+      "resource_sha256": "e011b1afb248bd0ca978f56a73b9d28aa22d258488fd2adba1c278770bbedb9e"
     },
     {
       "scenario_id": 5,
       "approved_source": {
         "asset_id": "scenario_5",
-        "revision": 15,
-        "source_path": "artifacts/dev_client/drafts/scenarios/scenario_5/r15.json",
-        "source_sha256": "443665ddff46513eda7ab3dfdeab1355b02b8ef35f572ab15053070e311f870a",
-        "semantic_digest": "813d0013a84d6e67bd678032ebd195ecbf588b96d886a3ccac564e7673d43a6c"
+        "revision": 16,
+        "source_path": "artifacts/dev_client/drafts/scenarios/scenario_5/r16.json",
+        "source_sha256": "18e4473c10e9f776a6b812e7ba0d7daddde7cf58d1c59f1bf3fe2e035d80ef0f",
+        "semantic_digest": "5c76203fa3f133059b64ce42c94dbed315ed4be0db40b7e1033762ee072f4f0c"
       },
       "name": "scenario_5_MWP_vs_MRP",
       "description": "A healer with only 1 HP keeps its teammates alive instead of healing itself. Warrior must screen a Priest-hunting Rogue while Mage removes enemy support and finishes the fight. This five-tick comeback tests coordinated healing, crowd-control and damage priorities, Burst timing, and positioning that makes a teammate's next action possible. Multi-Step Team-Level Planning connects the moving screen, heals and finishing attacks.",
       "source": {
         "asset_id": "scenario_5",
-        "revision": 15,
-        "source_path": "artifacts/dev_client/drafts/scenarios/scenario_5/r15.json",
-        "source_sha256": "443665ddff46513eda7ab3dfdeab1355b02b8ef35f572ab15053070e311f870a",
-        "semantic_digest": "813d0013a84d6e67bd678032ebd195ecbf588b96d886a3ccac564e7673d43a6c"
+        "revision": 16,
+        "source_path": "artifacts/dev_client/drafts/scenarios/scenario_5/r16.json",
+        "source_sha256": "18e4473c10e9f776a6b812e7ba0d7daddde7cf58d1c59f1bf3fe2e035d80ef0f",
+        "semantic_digest": "5c76203fa3f133059b64ce42c94dbed315ed4be0db40b7e1033762ee072f4f0c"
       },
-      "map_semantic_digest": "4539006531a070d3f0f79da07e95a4563c7b385808beb30ecbb2bb13263b415e",
-      "resolved_configuration_digest": "663a5563e5b6a25d9e62e4d130414078551dcc8f45b0f37eaa6d4dbf8ec6ae1d",
-      "resolved_initial_state_digest": "5d9f09fedca7134f22632121b301418e606c12e999645b40d76ac2414a751f6b",
+      "map_semantic_digest": "73b03d2727122d82a221cb8ed299204cfeaf7d0ea4dc38a3f9f39e1043d10bf3",
+      "resolved_configuration_digest": "790c885064007541b44fc65b823829c5c4f4a3351bee2da2ebc2e8f8ffb24e01",
+      "resolved_initial_state_digest": "2b78cb1f719fa0cd056c998e16d2f3c9448c6c743a8bb3b2115beb5dc9450f48",
       "class_ids": [
         1,
         2,
@@ -930,29 +930,29 @@
         5
       ],
       "horizon": 5,
-      "resource_sha256": "1895a07e46aae28a2c5f4182593549036d8e82e183f300127719d82da4b3b3b5"
+      "resource_sha256": "d81b4588794754a298a46dbe173ac03fcdc0ed5c4f458ac625d9223bdb55dd79"
     },
     {
       "scenario_id": 6,
       "approved_source": {
         "asset_id": "scenario_6",
-        "revision": 16,
-        "source_path": "artifacts/dev_client/drafts/scenarios/scenario_6/r16.json",
-        "source_sha256": "4513e3df45464d0a258f08bf2741c0340ff4e5b6aafc2d3b654317733b923d99",
-        "semantic_digest": "f877634397579599c437a8470ccf3d758f45e4ca28af139c9fd8905ef220f33f"
+        "revision": 17,
+        "source_path": "artifacts/dev_client/drafts/scenarios/scenario_6/r17.json",
+        "source_sha256": "6f256774e9d17a046fef63614c76feb633bf4e776310488e02135a78d91fbcc6",
+        "semantic_digest": "8e7ec300623cb6efca97c6a637ac0064de444a9c41e1bcce5b5e64cb18998554"
       },
       "name": "scenario_6_MHP_vs_MWR",
       "description": "A trapped enemy can be more useful alive than dead. In this five-tick comeback, Mage and Hunter prepare an ambush while a Priest with only 1 HP keeps the exposed Hunter alive. The team must delay one attack, hide its finisher, and turn an incoming Warrior Charge into the last kill it needs. Multi-Step Team-Level Planning connects preserved Trap, healed bait and the final ambush.",
       "source": {
         "asset_id": "scenario_6",
-        "revision": 16,
-        "source_path": "artifacts/dev_client/drafts/scenarios/scenario_6/r16.json",
-        "source_sha256": "4513e3df45464d0a258f08bf2741c0340ff4e5b6aafc2d3b654317733b923d99",
-        "semantic_digest": "f877634397579599c437a8470ccf3d758f45e4ca28af139c9fd8905ef220f33f"
+        "revision": 17,
+        "source_path": "artifacts/dev_client/drafts/scenarios/scenario_6/r17.json",
+        "source_sha256": "6f256774e9d17a046fef63614c76feb633bf4e776310488e02135a78d91fbcc6",
+        "semantic_digest": "8e7ec300623cb6efca97c6a637ac0064de444a9c41e1bcce5b5e64cb18998554"
       },
-      "map_semantic_digest": "cb0120436de9d2b8601e8889220dddbd40da275226e70b3224e7bd5f2c0cb307",
-      "resolved_configuration_digest": "f2fc5c57e38356e4f1c9f5e702062746b43573ad9009fa8300156e27d3651a31",
-      "resolved_initial_state_digest": "849a4bae4001d67c38e9c52dccba29d7832274dc1acef93164d4763cb3eeb6a1",
+      "map_semantic_digest": "9f9254acbe921a5a1b886bdda39e3901832da911bfb03ef318382ca97405517c",
+      "resolved_configuration_digest": "51f3c10066e628e624cc61458cebe90cad2f3e3d49945c4a3c60339183335306",
+      "resolved_initial_state_digest": "c367f30c4028cd7515a01249823a54d80a6ca652c29f79304b6e0d8a9483134f",
       "class_ids": [
         1,
         2,
@@ -970,28 +970,28 @@
         5
       ],
       "horizon": 5,
-      "resource_sha256": "27f7802f184e712f55e09b4cd6f66e113caaa07aa9cce2a1c4d495f8004ae7dc"
+      "resource_sha256": "dc7884f080f11b66e98705ce1331a945a46135444bbfadaeeb7acfc63105c34f"
     },
     {
       "scenario_id": 7,
       "approved_source": {
         "asset_id": "scenario_7",
-        "revision": 29,
-        "source_path": "artifacts/dev_client/drafts/scenarios/scenario_7/r29.json",
-        "source_sha256": "3fdc9e9a210682768fdee9fd704136429d753064bbc24cd70958cec1dce52d52",
-        "semantic_digest": "1e498b67cb37730c9f0d6a6aaa8bd4599f6e4559bf7741fe8c87584f5d8419a6"
+        "revision": 30,
+        "source_path": "artifacts/dev_client/drafts/scenarios/scenario_7/r30.json",
+        "source_sha256": "b8a1a24a4db73ac82850045ed86ed8a861411bdec6feda25395f4a49a08afcdd",
+        "semantic_digest": "959fdf8e71f5898721d0dd09689106d7ca8ca722de2cbf1fbf261270e30880ab"
       },
       "name": "scenario_7_MWP_vs_MHR",
       "description": "Three kills are needed, but one allied death loses the fight. A 1-HP Warrior must delay the pursuer instead of taking a tempting instant kill, while Mage and Priest make its retreat possible. This scenario tests Multi-Step Team-Level Planning through protective crowd control, changing healing priorities, and a deliberately delayed Burst that turns retreat into pursuit.",
       "source": {
         "asset_id": "scenario_7",
-        "revision": 29,
-        "source_path": "artifacts/dev_client/drafts/scenarios/scenario_7/r29.json",
-        "source_sha256": "3fdc9e9a210682768fdee9fd704136429d753064bbc24cd70958cec1dce52d52",
-        "semantic_digest": "1e498b67cb37730c9f0d6a6aaa8bd4599f6e4559bf7741fe8c87584f5d8419a6"
+        "revision": 30,
+        "source_path": "artifacts/dev_client/drafts/scenarios/scenario_7/r30.json",
+        "source_sha256": "b8a1a24a4db73ac82850045ed86ed8a861411bdec6feda25395f4a49a08afcdd",
+        "semantic_digest": "959fdf8e71f5898721d0dd09689106d7ca8ca722de2cbf1fbf261270e30880ab"
       },
       "map_semantic_digest": "4db3e80258257bf050451d85c1d9da0e0f243bef9acfef495e922d68480dc4ab",
-      "resolved_configuration_digest": "f567e834d3d1a6b18523a05e43d0dfbb092a0979dfcb7748f04acfc2dbba88d5",
+      "resolved_configuration_digest": "ef300bba1555b1d76c4454dc8e5a0d028a8413bd1524343e06b173a503593f84",
       "resolved_initial_state_digest": "3dfd751f1a95dcd003b6f804872bdda53cc6fec864dfaeb955c94c9854e9ee48",
       "class_ids": [
         1,
@@ -1010,28 +1010,28 @@
         5
       ],
       "horizon": 5,
-      "resource_sha256": "39562205762d61a34837f52584434f5b85062323426e569c809f8cb77185ba28"
+      "resource_sha256": "ed499d4ebafc683ba3483c9ac501e06fe4bceb966479a280e7b10beab58178bc"
     },
     {
       "scenario_id": 8,
       "approved_source": {
         "asset_id": "scenario_8",
-        "revision": 18,
-        "source_path": "artifacts/dev_client/drafts/scenarios/scenario_8/r18.json",
-        "source_sha256": "daec01c18347a612addaf2ac7ac0def05234b668b45948a21388149a0e5a9623",
-        "semantic_digest": "3a5c0eb7977d814b7ae33914b46a78d46ab19e50c6095b60895b174f115a9194"
+        "revision": 19,
+        "source_path": "artifacts/dev_client/drafts/scenarios/scenario_8/r19.json",
+        "source_sha256": "f1da11d48a3db1f17e18dbac853a5554be76ec5959b5a877290e5a01d6f50a57",
+        "semantic_digest": "8256488b21588a6f29b47eb78df6974223974844b35a841bb3504cb02c840153"
       },
       "name": "scenario_8_WRP_vs_RP",
       "description": "A 1-HP healer keeps its bodyguard alive while Warrior deliberately leaves a trapped enemy healer untouched. The team must survive until its Ultimates become available, then finish before the enemy healer can act. This five-tick scenario connects protection, healing allocation and coordinated cooldown timing.",
       "source": {
         "asset_id": "scenario_8",
-        "revision": 18,
-        "source_path": "artifacts/dev_client/drafts/scenarios/scenario_8/r18.json",
-        "source_sha256": "daec01c18347a612addaf2ac7ac0def05234b668b45948a21388149a0e5a9623",
-        "semantic_digest": "3a5c0eb7977d814b7ae33914b46a78d46ab19e50c6095b60895b174f115a9194"
+        "revision": 19,
+        "source_path": "artifacts/dev_client/drafts/scenarios/scenario_8/r19.json",
+        "source_sha256": "f1da11d48a3db1f17e18dbac853a5554be76ec5959b5a877290e5a01d6f50a57",
+        "semantic_digest": "8256488b21588a6f29b47eb78df6974223974844b35a841bb3504cb02c840153"
       },
       "map_semantic_digest": "fbde57bdb7774f00562c9a690b29a37c96e6b3076a3a61b66a977bda8eaf1930",
-      "resolved_configuration_digest": "5620afe4a41895d6d1831cc484298d09997d84fc655d87920d318cf42dce664d",
+      "resolved_configuration_digest": "29e2ae6e0c3eecfc9650bc98b9c0551f63af4dc27d2a74389b041783103a1a65",
       "resolved_initial_state_digest": "c1a880a31186b7be48513f6ad4b50bc25737e026f5f6f3797f910161f395c605",
       "class_ids": [
         1,
@@ -1050,7 +1050,7 @@
         5
       ],
       "horizon": 5,
-      "resource_sha256": "bf5e87d6e9af310baaaf6ef2005e3ef187df1999ee4e7e4f791e93c3664c41bc"
+      "resource_sha256": "5e64288a9da7a445e215e57744bc94d0071b0a4aaf240896ae444781c29aa332"
     }
   ]
 }

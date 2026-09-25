@@ -3,6 +3,9 @@
 Call spies prove that command parsing does not replace scientific authority.
 Fresh processes check lazy help. Short CPU games compare Python/CLI outcomes,
 full measurements and submitted replay actions under the same exact conditions.
+evaluate's --red-zone-depth reaches the API as a Python float ("6" gives 6.0);
+text with an exponent, NaN, infinity, underscores or a second point is a usage
+error, and tournament and canonical have no such flag.
 """
 
 from __future__ import annotations
@@ -244,6 +247,22 @@ def test_ordered_rosters_and_all_explicit_evaluation_options(
             "old",
         ],
         ["canonical", "--met", "full"],
+        *(
+            [
+                "evaluate",
+                "--system",
+                "research:make",
+                "--opponent",
+                "random",
+                "--episodes",
+                "2",
+                "--red-zone-depth",
+                text,
+            ]
+            for text in ("abc", "nan", "inf", "1e3", "1_0", "1.2.3", "", "+", "\u0665")
+        ),
+        ["tournament", "--config", "population.json", "--red-zone-depth", "5.0"],
+        ["canonical", "--red-zone-depth", "5.0"],
     ),
 )
 def test_usage_errors_do_not_load_methods(
@@ -256,6 +275,25 @@ def test_usage_errors_do_not_load_methods(
     with pytest.raises(SystemExit) as error:
         _cli.main(arguments)
     assert error.value.code == 2
+
+
+@pytest.mark.parametrize(
+    ("text", "depth"),
+    (("6", 6.0), ("6.0", 6.0), ("0", 0.0), ("+2.5", 2.5), ("-0.5", -0.5), (".5", 0.5)),
+)
+def test_red_zone_depth_reaches_evaluate_as_a_float(
+    text: str, depth: float, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    received: dict[str, Any] = {}
+
+    def receive(_: str, values: dict[str, Any]) -> None:
+        received.update(values)
+
+    monkeypatch.setattr(_cli, "_run_experiment", receive)
+    command = ["evaluate", "--system", "random", "--opponent", "random"]
+    assert _cli.main([*command, "--episodes", "2", "--red-zone-depth", text]) == 0
+    assert type(received["red_zone_depth"]) is float
+    assert received["red_zone_depth"] == depth
 
 
 def test_factory_runs_once_per_occurrence_without_actions(

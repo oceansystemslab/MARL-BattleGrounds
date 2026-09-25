@@ -2,6 +2,11 @@
 
 Fixtures include explicit historical observation layouts for old file versions.
 Using an old layout is a test choice; it does not change the live input contract.
+"Current" helpers capture context V4 and frame V3 (20 context columns; column
+19 is the Red Zone depth). "Pre-Red-Zone" helpers capture context V3 and frame
+V2 from live observations with column 19 dropped, and the historical V1 helpers
+also use the 19-column layout. evaluation_env_config takes an explicit
+team_deathmatch_red_zone_depth, 0.0 by default.
 """
 
 from dataclasses import dataclass
@@ -38,21 +43,27 @@ from marl_battlegrounds.core.types import (
 )
 from marl_battlegrounds.evaluation.actor_projection import (
     NO_SHARED_OBS_ACTOR_PROJECTION_V3,
+    NO_SHARED_OBS_ACTOR_PROJECTION_V4,
     SHARED_OBS_ACTOR_PROJECTION_V2,
+    SHARED_OBS_ACTOR_PROJECTION_V3,
 )
 from marl_battlegrounds.evaluation.capture import (
     capture_evaluation_transition_unit_v1,
     capture_evaluation_transition_unit_v2,
+    capture_evaluation_transition_unit_v3,
     capture_initial_evaluation_frame_v1,
     capture_initial_evaluation_frame_v2,
+    capture_initial_evaluation_frame_v3,
 )
 from marl_battlegrounds.evaluation.catalog import (
     build_code_revision_v1,
     build_evaluation_episode_context_v1,
     build_evaluation_seed_protocol_v1,
+    build_resolved_env_config_v2,
 )
 from marl_battlegrounds.evaluation.models import (
     REQUIRED_SCHEMA_BINDINGS_V3,
+    REQUIRED_SCHEMA_BINDINGS_V4,
     AggregationKeyV1,
     AssignedPolicySlotV1,
     CaptureProfile,
@@ -60,9 +71,11 @@ from marl_battlegrounds.evaluation.models import (
     EvaluationEpisodeContext,
     EvaluationEpisodeContextV1,
     EvaluationEpisodeContextV3,
+    EvaluationEpisodeContextV4,
     EvaluationEpisodeIdentityV1,
     EvaluationFrameV1,
     EvaluationFrameV2,
+    EvaluationFrameV3,
     EvaluationRole,
     EvaluationSeedProtocolV1,
     EvaluationTransitionV1,
@@ -72,14 +85,22 @@ from marl_battlegrounds.evaluation.models import (
     VersionedIdentityV1,
 )
 from marl_battlegrounds.evaluation.replay_v2 import context_v2
+from marl_battlegrounds.evaluation.wire_shapes import CONTEXT_FEATURES_V1
 
 _DIGEST_A = "1" * 64
 _DIGEST_B = "2" * 64
 _DIGEST_C = "3" * 64
 
 
+def pre_red_zone_observation(observation: Observation) -> Observation:
+    return observation._replace(
+        context_features=observation.context_features[..., :CONTEXT_FEATURES_V1]
+    )
+
+
 def historical_observation(config: EnvConfig, observation: Observation) -> Observation:
     team_ids = config.agent_profile.team_ids.astype(jnp.float32)
+    observation = pre_red_zone_observation(observation)
     return observation._replace(
         self_features=observation.self_features.at[:, 3].set(team_ids),
         ally_unit_features=observation.ally_unit_features.at[:, :, 3].set(
@@ -119,6 +140,7 @@ def evaluation_env_config(
     team_sizes: tuple[int, int] = (3, 2),
     task_mode: int = TASK_MODE_NEUTRAL,
     team_deathmatch_score_threshold: int = 0,
+    team_deathmatch_red_zone_depth: float = 0.0,
     max_steps: int = 100,
 ) -> EnvConfig:
     requested_classes = jnp.asarray(
@@ -159,6 +181,7 @@ def evaluation_env_config(
     return EnvConfig(
         task_mode=task_mode,
         team_deathmatch_score_threshold=team_deathmatch_score_threshold,
+        team_deathmatch_red_zone_depth=team_deathmatch_red_zone_depth,
         max_steps=max_steps,
         map_width=20.0,
         map_height=12.0,
@@ -720,13 +743,21 @@ __all__ = [
 
 @dataclass(frozen=True)
 class CurrentCapturedEvaluationTrajectory:
+    context: EvaluationEpisodeContextV4
+    frames: tuple[EvaluationFrameV3, ...]
+    transitions: tuple[EvaluationTransitionV1, ...]
+    observations: tuple[Observation, ...]
+
+
+@dataclass(frozen=True)
+class PreRedZoneCapturedEvaluationTrajectory:
     context: EvaluationEpisodeContextV3
     frames: tuple[EvaluationFrameV2, ...]
     transitions: tuple[EvaluationTransitionV1, ...]
     observations: tuple[Observation, ...]
 
 
-def current_evaluation_context(
+def pre_red_zone_evaluation_context(
     config: EnvConfig,
     *,
     execution_information_mode: ExecutionInformationMode = "no_shared_obs",
@@ -754,6 +785,36 @@ def current_evaluation_context(
     return EvaluationEpisodeContextV3.model_validate(payload)
 
 
+def current_evaluation_context(
+    config: EnvConfig,
+    *,
+    execution_information_mode: ExecutionInformationMode = "no_shared_obs",
+    aggregation_keys: tuple[AggregationKeyV1, ...] | None = None,
+) -> EvaluationEpisodeContextV4:
+    # The pre-Red-Zone base has no depth field; the V2 record below restores it.
+    payload = pre_red_zone_evaluation_context(
+        config._replace(team_deathmatch_red_zone_depth=0.0),
+        execution_information_mode=execution_information_mode,
+        aggregation_keys=aggregation_keys,
+    ).model_dump(mode="python")
+    payload.update(
+        schema_version=4,
+        schema_versions=tuple(
+            {"schema_id": name, "schema_version": version}
+            for name, version in REQUIRED_SCHEMA_BINDINGS_V4
+        ),
+        resolved_env_config=build_resolved_env_config_v2(config).model_dump(
+            mode="python"
+        ),
+        actor_projection=(
+            SHARED_OBS_ACTOR_PROJECTION_V3
+            if execution_information_mode == "shared_obs"
+            else NO_SHARED_OBS_ACTOR_PROJECTION_V4
+        ),
+    )
+    return EvaluationEpisodeContextV4.model_validate(payload)
+
+
 def current_captured_evaluation_trajectory(
     *,
     transition_count: int = 1,
@@ -776,7 +837,7 @@ def current_captured_evaluation_trajectory(
         else None
     )
     frames = [
-        capture_initial_evaluation_frame_v2(
+        capture_initial_evaluation_frame_v3(
             context, state, observation, mask, availability
         )
     ]
@@ -786,7 +847,7 @@ def current_captured_evaluation_trajectory(
         state, observation, reward, done, mask, info = step(
             config, state, mask, neutral_action(), jax.random.PRNGKey(index + 1)
         )
-        transition, frame = capture_evaluation_transition_unit_v2(
+        transition, frame = capture_evaluation_transition_unit_v3(
             context,
             frames[-1],
             state,
@@ -801,5 +862,58 @@ def current_captured_evaluation_trajectory(
         observations.append(observation)
         transitions.append(transition)
     return CurrentCapturedEvaluationTrajectory(
+        context, tuple(frames), tuple(transitions), tuple(observations)
+    )
+
+
+def pre_red_zone_captured_evaluation_trajectory(
+    *,
+    transition_count: int = 1,
+    execution_information_mode: ExecutionInformationMode = "no_shared_obs",
+    aggregation_keys: tuple[AggregationKeyV1, ...] | None = None,
+    config: EnvConfig | None = None,
+) -> PreRedZoneCapturedEvaluationTrajectory:
+    config = (
+        evaluation_env_config(max_steps=transition_count) if config is None else config
+    )
+    context = pre_red_zone_evaluation_context(
+        config,
+        execution_information_mode=execution_information_mode,
+        aggregation_keys=aggregation_keys,
+    )
+    state, observation, mask, _ = reset(config, jax.random.PRNGKey(0))
+    observation = pre_red_zone_observation(observation)
+    availability = (
+        valid_shared_availability(context)
+        if execution_information_mode == "shared_obs"
+        else None
+    )
+    frames = [
+        capture_initial_evaluation_frame_v2(
+            context, state, observation, mask, availability
+        )
+    ]
+    observations = [observation]
+    transitions: list[EvaluationTransitionV1] = []
+    for index in range(transition_count):
+        state, observation, reward, done, mask, info = step(
+            config, state, mask, neutral_action(), jax.random.PRNGKey(index + 1)
+        )
+        observation = pre_red_zone_observation(observation)
+        transition, frame = capture_evaluation_transition_unit_v2(
+            context,
+            frames[-1],
+            state,
+            observation,
+            mask,
+            info.transition_facts,
+            reward,
+            done,
+            successor_shared_obs_information_availability_by_recipient_and_sensor_source=availability,
+        )
+        frames.append(frame)
+        observations.append(observation)
+        transitions.append(transition)
+    return PreRedZoneCapturedEvaluationTrajectory(
         context, tuple(frames), tuple(transitions), tuple(observations)
     )

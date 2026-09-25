@@ -5,6 +5,14 @@ strict models before compiling or saving it. Unknown fields and nonfinite values
 are rejected. Use ``new_map_draft`` and ``new_scenario_draft`` for starter content.
 Factories return in-memory drafts and never write files. Geometry and simulator
 validity remain the compiler's responsibility.
+
+Scenario drafts come in two versions. Version 1 (``dev-scenario-draft@1``) has no
+Red Zone depth and always keeps its original one-point scoring, that is depth
+0.0. Version 2 (``dev-scenario-draft@2``) declares ``task.red_zone_depth``. The
+editor edits only version 2; ``upgrade_scenario_draft`` turns an old draft into
+version 2 at depth 0.0. ``declared_red_zone_depth`` is the one owner of the
+depth a draft means. This module imports only Pydantic, so callers pass any
+default depth in themselves.
 """
 
 from __future__ import annotations
@@ -210,6 +218,31 @@ class DevTeamDeathmatchTaskV1(_AuthoringModel):
     score_threshold: int = 5
 
 
+class DevTeamDeathmatchTaskV2(_AuthoringModel):
+    """Authored Team Deathmatch settings with a declared Red Zone depth.
+
+    Attributes
+    ----------
+    task : {"team_deathmatch"}
+        The task name, default ``"team_deathmatch"``.
+    score_threshold : int
+        Points a team needs to win, default 5. The compiler checks its range.
+    red_zone_depth : float
+        Required, in map units. How far each team's Red Zone reaches in from its
+        own spawn edge. When an agent dies inside its own team's Red Zone, the
+        enemy team gets 2 points instead of 1. 0.0 turns the rule off. A JSON
+        integer such as 5 reads as 5.0; booleans, strings, NaN and infinity are
+        rejected here. The compiler checks the raw value before it rounds it to
+        float32: it must not be negative (-0.0 included), a positive value must
+        not round to zero or a subnormal float32, and it must not exceed the map
+        width.
+    """
+
+    task: Literal["team_deathmatch"] = "team_deathmatch"
+    score_threshold: int = 5
+    red_zone_depth: float
+
+
 class DevEpisodeConfigurationV1(_AuthoringModel):
     """Authored episode limits, spawn shield settings, and team respawn periods.
 
@@ -321,36 +354,64 @@ class DevScenarioContentV1(_AuthoringModel):
         """Require fixed slot order, matching roster/state IDs, and unique object
         IDs.
         """
-        expected = tuple(
-            ("A" if global_slot < 5 else "B", global_slot % 5 + 1, global_slot)
-            for global_slot in range(10)
-        )
-        actual = tuple(
-            (slot.team, slot.team_local_slot, slot.global_slot) for slot in self.roster
-        )
-        if actual != expected:
-            raise ValueError("roster must contain ordered fixed slots A1-A5 then B1-B5")
-        roster_ids = tuple(slot.object_id for slot in self.roster)
-        state_ids = tuple(state.object_id for state in self.agent_states)
-        if roster_ids != state_ids:
-            raise ValueError("agent_states must join roster rows by ordered object_id")
-        if len(roster_ids) != len(set(roster_ids)):
-            raise ValueError("roster object_id values must be unique")
-        map_ids = {
-            *(obstacle.object_id for obstacle in self.embedded_map.obstacles),
-            *(pad.object_id for pad in self.embedded_map.spawn_pads),
-        }
-        if map_ids.intersection(roster_ids):
-            raise ValueError(
-                "scenario object_id values must be unique across map and agent objects"
-            )
-
+        _validate_scenario_topology(self.embedded_map, self.roster, self.agent_states)
         return self
+
+
+def _validate_scenario_topology(
+    embedded_map: DevMapContentV1,
+    roster: tuple[DevRosterSlotV1, ...],
+    agent_states: tuple[DevAgentStateV1, ...],
+) -> None:
+    """Check the fixed-slot rules that every scenario content version shares.
+
+    Parameters
+    ----------
+    embedded_map : DevMapContentV1
+        The scenario's map; its obstacle and pad IDs must not reuse agent IDs.
+    roster : tuple of DevRosterSlotV1
+        Ten rows that must be ordered A1-A5 then B1-B5 with global slots 0-9.
+    agent_states : tuple of DevAgentStateV1
+        Ten rows that must use the roster's object IDs in the same order.
+
+    Raises
+    ------
+    ValueError
+        If the roster order is wrong, the state rows do not join the roster by
+        ordered object ID, a roster ID repeats, or an agent ID is also a map ID.
+        Pydantic reports the error as a validation error of the content model.
+    """
+    expected = tuple(
+        ("A" if global_slot < 5 else "B", global_slot % 5 + 1, global_slot)
+        for global_slot in range(10)
+    )
+    actual = tuple(
+        (slot.team, slot.team_local_slot, slot.global_slot) for slot in roster
+    )
+    if actual != expected:
+        raise ValueError("roster must contain ordered fixed slots A1-A5 then B1-B5")
+    roster_ids = tuple(slot.object_id for slot in roster)
+    state_ids = tuple(state.object_id for state in agent_states)
+    if roster_ids != state_ids:
+        raise ValueError("agent_states must join roster rows by ordered object_id")
+    if len(roster_ids) != len(set(roster_ids)):
+        raise ValueError("roster object_id values must be unique")
+    map_ids = {
+        *(obstacle.object_id for obstacle in embedded_map.obstacles),
+        *(pad.object_id for pad in embedded_map.spawn_pads),
+    }
+    if map_ids.intersection(roster_ids):
+        raise ValueError(
+            "scenario object_id values must be unique across map and agent objects"
+        )
 
 
 class DevScenarioDraftV1(_AuthoringModel):
     """An editable scenario revision with a stable asset ID and self-contained
     content.
+
+    This is the old version with no Red Zone depth; it always means depth 0.0.
+    Saved version 1 files stay readable and are never rewritten.
     """
 
     schema_id: Literal["dev-scenario-draft@1"] = Field(
@@ -361,6 +422,182 @@ class DevScenarioDraftV1(_AuthoringModel):
     asset_id: SafeAssetId
     revision: DevDraftRevision = 0
     content: DevScenarioContentV1
+
+
+class DevScenarioContentV2(_AuthoringModel):
+    """A self-contained scenario that declares its Red Zone depth.
+
+    It has every field of ``DevScenarioContentV1`` with the same meaning and
+    defaults, except ``task``, which is a required ``DevTeamDeathmatchTaskV2``.
+    Roster and state rows share fixed A1-A5 then B1-B5 order, checked by the same
+    rule as version 1. Source-map provenance records where the embedded map came
+    from; it does not resolve mutable content.
+
+    Attributes
+    ----------
+    task : DevTeamDeathmatchTaskV2
+        Required task settings, including ``red_zone_depth`` in map units.
+    """
+
+    schema_id: Literal["dev-scenario-content@2"] = Field(
+        default="dev-scenario-content@2",
+        alias="schema",
+        serialization_alias="schema",
+    )
+    name: Annotated[
+        str,
+        StringConstraints(
+            strip_whitespace=True,
+            min_length=1,
+            max_length=_MAX_NAME_LENGTH,
+        ),
+    ]
+    description: Annotated[
+        str,
+        StringConstraints(strip_whitespace=True, max_length=_MAX_DESCRIPTION_LENGTH),
+    ] = ""
+    notes: Annotated[
+        str,
+        StringConstraints(strip_whitespace=True, max_length=_MAX_NOTES_LENGTH),
+    ] = ""
+    embedded_map: DevMapContentV1
+    source_map_provenance: DevSourceMapProvenanceV1 | None = None
+    task: DevTeamDeathmatchTaskV2
+    episode: DevEpisodeConfigurationV1 = DevEpisodeConfigurationV1()
+    global_state: DevScenarioGlobalStateV1 = DevScenarioGlobalStateV1()
+    team_a_size: int = 5
+    team_b_size: int = 5
+    roster: Annotated[
+        tuple[DevRosterSlotV1, ...],
+        Field(min_length=_MAX_AGENT_SLOTS, max_length=_MAX_AGENT_SLOTS),
+    ]
+    agent_states: Annotated[
+        tuple[DevAgentStateV1, ...],
+        Field(min_length=_MAX_AGENT_SLOTS, max_length=_MAX_AGENT_SLOTS),
+    ]
+
+    @model_validator(mode="after")
+    def _validate_fixed_slot_topology(self) -> DevScenarioContentV2:
+        """Apply the fixed-slot rules shared with version 1."""
+        _validate_scenario_topology(self.embedded_map, self.roster, self.agent_states)
+        return self
+
+
+class DevScenarioDraftV2(_AuthoringModel):
+    """An editable scenario revision whose content declares its Red Zone depth.
+
+    Revision zero describes a draft that has not yet been saved. This is the only
+    scenario version the editor edits.
+    """
+
+    schema_id: Literal["dev-scenario-draft@2"] = Field(
+        default="dev-scenario-draft@2",
+        alias="schema",
+        serialization_alias="schema",
+    )
+    asset_id: SafeAssetId
+    revision: DevDraftRevision = 0
+    content: DevScenarioContentV2
+
+
+# Either scenario content version; ``declared_red_zone_depth`` reads its depth.
+type DevScenarioContent = DevScenarioContentV1 | DevScenarioContentV2
+# Either scenario draft version. Use a plain union, as the store does, so each
+# draft's schema tag picks its class.
+type DevScenarioDraft = DevScenarioDraftV1 | DevScenarioDraftV2
+
+
+def declared_red_zone_depth(content: DevScenarioContent) -> float:
+    """Return the Red Zone depth that scenario content means, in map units.
+
+    Parameters
+    ----------
+    content : DevScenarioContentV1 or DevScenarioContentV2
+        Scenario content of either version.
+
+    Returns
+    -------
+    float
+        0.0 for version 1 content, its original one-point rule. The
+        ``task.red_zone_depth`` value, unchanged, for version 2 content.
+
+    Notes
+    -----
+    This is the one owner of that rule; the compiler, the service and the
+    semantic digest all read the depth through it. It checks nothing: the
+    compiler checks the value before use.
+    """
+    if isinstance(content, DevScenarioContentV1):
+        return 0.0
+    return content.task.red_zone_depth
+
+
+def _scenario_content_v2(
+    content: DevScenarioContent,
+    *,
+    red_zone_depth: float,
+) -> DevScenarioContentV2:
+    """Copy scenario content of either version into version 2 at one depth.
+
+    Every field except the schema tag and the task's new ``red_zone_depth`` is
+    copied deeply and keeps its value. Strict model validation may raise
+    ``pydantic.ValidationError`` for a depth that is not a float.
+    """
+    return DevScenarioContentV2(
+        name=content.name,
+        description=content.description,
+        notes=content.notes,
+        embedded_map=content.embedded_map.model_copy(deep=True),
+        source_map_provenance=(
+            None
+            if content.source_map_provenance is None
+            else content.source_map_provenance.model_copy(deep=True)
+        ),
+        task=DevTeamDeathmatchTaskV2(
+            task=content.task.task,
+            score_threshold=content.task.score_threshold,
+            red_zone_depth=red_zone_depth,
+        ),
+        episode=content.episode.model_copy(deep=True),
+        global_state=content.global_state.model_copy(deep=True),
+        team_a_size=content.team_a_size,
+        team_b_size=content.team_b_size,
+        roster=tuple(row.model_copy(deep=True) for row in content.roster),
+        agent_states=tuple(row.model_copy(deep=True) for row in content.agent_states),
+    )
+
+
+def upgrade_scenario_draft(draft: DevScenarioDraft) -> DevScenarioDraftV2:
+    """Return the version 2 form of a scenario draft, the form the editor edits.
+
+    Parameters
+    ----------
+    draft : DevScenarioDraftV1 or DevScenarioDraftV2
+        A parsed scenario draft of either version.
+
+    Returns
+    -------
+    DevScenarioDraftV2
+        The same object for a version 2 draft. For a version 1 draft, a new
+        version 2 draft with the same asset ID, revision and content at Red Zone
+        depth 0.0, so it keeps its original one-point rule and its semantic,
+        map, configuration and state digests.
+
+    Notes
+    -----
+    Nothing is saved. Keeping the revision lets the next Save write revision
+    N + 1 as version 2 while saved revision N stays version 1.
+    """
+    if isinstance(draft, DevScenarioDraftV2):
+        return draft
+    return DevScenarioDraftV2(
+        asset_id=draft.asset_id,
+        revision=draft.revision,
+        content=_scenario_content_v2(
+            draft.content,
+            red_zone_depth=declared_red_zone_depth(draft.content),
+        ),
+    )
 
 
 def default_spawn_pads(
@@ -473,7 +710,8 @@ def new_scenario_draft(
     asset_id: SafeAssetId = "untitled_scenario",
     *,
     source_map: DevMapDraftV1 | None = None,
-) -> DevScenarioDraftV1:
+    red_zone_depth: float,
+) -> DevScenarioDraftV2:
     """Create an unsaved Team Deathmatch scenario with two complete starter teams.
 
     Parameters
@@ -483,22 +721,29 @@ def new_scenario_draft(
     source_map : DevMapDraftV1 or None, optional
         Map to copy into the scenario. None creates a default blank map. A supplied
         map is copied deeply and its source identity is retained as provenance.
+    red_zone_depth : float
+        Required keyword, in map units: the declared Red Zone depth. 0.0 keeps
+        one-point scoring. This module has no default; the DevClient passes
+        ``marl_battlegrounds.tasks.DEFAULT_TDM_RED_ZONE_DEPTH`` (5.0).
 
     Returns
     -------
-    DevScenarioDraftV1
+    DevScenarioDraftV2
         Revision-zero draft with ten living agents at their assigned pads, default
-        class health, and the declared default episode/task settings.
+        class health, the declared default episode settings, score threshold 5
+        and the given Red Zone depth.
 
     Raises
     ------
     ValueError
-        If strict draft models reject an identity or content field.
+        If strict draft models reject an identity or content field, including a
+        depth that is not a float (``pydantic.ValidationError`` is a
+        ``ValueError``).
 
     Notes
     -----
     Copied maps are independent of later source edits. The compiler must still check
-    geometry and simulator-state validity. No files are written.
+    geometry, the depth's range and simulator-state validity. No files are written.
     """
     if source_map is None:
         embedded_map = DevMapContentV1(
@@ -535,12 +780,13 @@ def new_scenario_draft(
         )
         for global_slot, roster_slot in enumerate(roster)
     )
-    return DevScenarioDraftV1(
+    return DevScenarioDraftV2(
         asset_id=asset_id,
-        content=DevScenarioContentV1(
+        content=DevScenarioContentV2(
             name="Untitled TDM scenario",
             embedded_map=embedded_map,
             source_map_provenance=source_provenance,
+            task=DevTeamDeathmatchTaskV2(red_zone_depth=red_zone_depth),
             roster=roster,
             agent_states=states,
         ),
@@ -548,35 +794,41 @@ def new_scenario_draft(
 
 
 def duplicate_scenario_draft(
-    source: DevScenarioDraftV1,
+    source: DevScenarioDraft,
     *,
     asset_id: SafeAssetId,
-) -> DevScenarioDraftV1:
+    red_zone_depth: float,
+) -> DevScenarioDraftV2:
     """Copy complete scenario content into an independent unsaved identity.
 
     Parameters
     ----------
-    source : DevScenarioDraftV1
+    source : DevScenarioDraftV1 or DevScenarioDraftV2
         Validated scenario whose embedded content is copied deeply.
     asset_id : str
         Safe lowercase snake_case identity for the copy.
+    red_zone_depth : float
+        Required keyword, in map units: the copy's declared Red Zone depth. To
+        keep the source's rule, pass ``declared_red_zone_depth(source.content)``,
+        which is 0.0 for a version 1 source.
 
     Returns
     -------
-    DevScenarioDraftV1
-        Revision-zero draft with independent copied content.
+    DevScenarioDraftV2
+        Revision-zero draft with independent copied content and the given depth.
+        Every other field keeps the source's value.
 
     Raises
     ------
     ValueError
-        If the destination identity fails strict model validation.
+        If the destination identity or depth fails strict model validation.
 
     Notes
     -----
     The source is unchanged and no storage operation is performed.
     """
-    return DevScenarioDraftV1(
+    return DevScenarioDraftV2(
         asset_id=asset_id,
         revision=0,
-        content=source.content.model_copy(deep=True),
+        content=_scenario_content_v2(source.content, red_zone_depth=red_zone_depth),
     )

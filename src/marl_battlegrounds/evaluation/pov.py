@@ -5,15 +5,19 @@ own submitted and accepted actions, reward, and public end flags. Presentation c
 describe changes in those allowed rows; they do not read privileged state or the
 simulator event feed. These host-side Pydantic records are not JAX rollout state.
 
-POV V1 reads historical replay V1. POV V2 reads replay V3 and preserves current
-actor-relative relation flags and public roster classes. Export requires NoSharedObs
-and a configured-active actor; dead actors remain selectable. No files are written
-here. replay_io owns storage.
+POV V1 reads historical replay V1. POV V2 reads replay V3 and preserves
+actor-relative relation flags and public roster classes. POV V3 is current: it
+reads replay V4 (context V4, frame V3) and keeps the same rows plus context
+column 19, the Team Deathmatch Red Zone depth. Each POV version pairs with exactly
+one context, frame and projection version; the records are separate classes, so
+one version never passes where another is expected. Export requires NoSharedObs
+and a configured-active actor; dead actors remain selectable. No files are
+written here. replay_io owns storage.
 
 Content hashes cover the selected actor's content. Artifact hashes also cover the
 full source replay reference. Standalone checks prove internal consistency;
-validate_actor_pov_replay_against_replay_v1/v2 additionally prove the exact source
-projection. EvaluationModel owns the shared strict, frozen record rules.
+validate_actor_pov_replay_against_replay_v1/v2/v3 additionally prove the exact
+source projection. EvaluationModel owns the shared strict, frozen record rules.
 """
 
 from __future__ import annotations
@@ -45,6 +49,7 @@ from marl_battlegrounds.evaluation.models import (
     EvaluationFrame,
     EvaluationFrameV1,
     EvaluationFrameV2,
+    EvaluationFrameV3,
     EvaluationModel,
     EvaluationTransitionV1,
     RosterSlotV1,
@@ -62,13 +67,20 @@ from marl_battlegrounds.evaluation.replay_v3 import (
     ReplayArtifactV3,
     replay_reference_v3,
 )
+from marl_battlegrounds.evaluation.replay_v4 import (
+    ReplayArtifactReferenceV4,
+    ReplayArtifactV4,
+    replay_reference_v4,
+)
 from marl_battlegrounds.evaluation.validation import (
     validate_declared_model_tree,
     validate_initial_evaluation_frame_v1,
 )
+from marl_battlegrounds.evaluation.wire_shapes import CONTEXT_FEATURES_V2
 
 ACTOR_POV_SCHEMA_VERSION: Literal[1] = 1
 ACTOR_POV_SCHEMA_VERSION_V2: Literal[2] = 2
+ACTOR_POV_SCHEMA_VERSION_V3: Literal[3] = 3
 ACTOR_POV_COMPLETION_SCHEMA_ID = "marl_battlegrounds.evaluation.actor_pov_completion"
 ACTOR_POV_PREVIOUS_ACTIONS_SCHEMA_ID = (
     "marl_battlegrounds.evaluation.actor_pov_previous_actions"
@@ -111,6 +123,18 @@ _FEATURE_CURRENT_HEALTH = 12
 _FEATURE_ULTIMATE_COOLDOWN = 14
 _STATUS_FEATURE_START = 15
 _STATUS_FEATURE_STOP = 29
+
+
+def _require_schema_version_three(value: object) -> object:
+    """Return value only when it is the exact Python integer 3; otherwise raise
+    ValueError.
+    """
+    if type(value) is not int or value != 3:
+        raise ValueError("schema_version must be the exact integer 3")
+    return value
+
+
+_SchemaVersionV3 = Annotated[Literal[3], BeforeValidator(_require_schema_version_three)]
 
 
 def _require_schema_version_two(value: object) -> object:
@@ -499,32 +523,52 @@ class ActorPovActionMaskV1(EvaluationModel):
         return self
 
 
-def _validate_axismapping[T: ActorPovAxisMappingV1 | ActorPovAxisMappingV2](
+def _validate_axismapping[
+    T: ActorPovAxisMappingV1 | ActorPovAxisMappingV2 | ActorPovAxisMappingV3
+](
     self: T,
 ) -> T:
     """Return the axis record after checking supported projection identity, fixed
     lengths, unique action names, disjoint public agent IDs, target order, and Own
     Team/Opponent Team order; raise ValueError for a mismatch.
+
+    POV V1 needs projection version 1. POV V2 needs NoSharedObs V3 or SharedObs
+    V2 (context V3). POV V3 needs NoSharedObs V4 or SharedObs V3 (context V4).
     """
     from marl_battlegrounds.evaluation.actor_projection import (
         NO_SHARED_OBS_ACTOR_PROJECTION_V3,
+        NO_SHARED_OBS_ACTOR_PROJECTION_V4,
         SHARED_OBS_ACTOR_PROJECTION_V2,
+        SHARED_OBS_ACTOR_PROJECTION_V3,
     )
 
+    projection = (self.actor_projection_identifier, self.actor_projection_version)
     if self.schema_version == 1:
         if self.actor_projection_version != 1:
             raise ValueError("POV V1 requires actor projection version 1")
-    elif (self.actor_projection_identifier, self.actor_projection_version) not in (
+    elif self.schema_version == 2:
+        if projection not in (
+            (
+                NO_SHARED_OBS_ACTOR_PROJECTION_V3.identifier,
+                NO_SHARED_OBS_ACTOR_PROJECTION_V3.version,
+            ),
+            (
+                SHARED_OBS_ACTOR_PROJECTION_V2.identifier,
+                SHARED_OBS_ACTOR_PROJECTION_V2.version,
+            ),
+        ):
+            raise ValueError("POV V2 requires the current actor projection")
+    elif projection not in (
         (
-            NO_SHARED_OBS_ACTOR_PROJECTION_V3.identifier,
-            NO_SHARED_OBS_ACTOR_PROJECTION_V3.version,
+            NO_SHARED_OBS_ACTOR_PROJECTION_V4.identifier,
+            NO_SHARED_OBS_ACTOR_PROJECTION_V4.version,
         ),
         (
-            SHARED_OBS_ACTOR_PROJECTION_V2.identifier,
-            SHARED_OBS_ACTOR_PROJECTION_V2.version,
+            SHARED_OBS_ACTOR_PROJECTION_V3.identifier,
+            SHARED_OBS_ACTOR_PROJECTION_V3.version,
         ),
     ):
-        raise ValueError("POV V2 requires the current actor projection")
+        raise ValueError("POV V3 requires the current actor projection")
     for field_name, length in (
         (
             "target_action_recipient_public_agent_id_by_id",
@@ -667,8 +711,9 @@ class ActorPovAxisMappingV1(EvaluationModel):
 class ActorPovAxisMappingV2(EvaluationModel):
     """Name the public categories for POV version 2.
 
-    Reads context V3, frame V2, and transition V1. The record accepts the current
-    NoSharedObs V3 or SharedObs V2 projection identity; export separately requires
+    Reads context V3, frame V2, and transition V1. The record accepts the
+    NoSharedObs V3 or SharedObs V2 projection identity (the relative-input
+    projections recorded before the Red Zone rule); export separately requires
     NoSharedObs.
 
     Attributes
@@ -746,11 +791,97 @@ class ActorPovAxisMappingV2(EvaluationModel):
         return _validate_axismapping(self)
 
 
-def _validate_frame[T: ActorPovFrameV1 | ActorPovFrameV2](self: T) -> T:
-    """Return the frame after checking canonical IDs and feature shapes. For V2 also
-    check public roster classes, self slot, and visible ally/enemy relation flags.
-    Raise ValueError for mismatches; this does not compare the frame to its source
-    replay.
+class ActorPovAxisMappingV3(EvaluationModel):
+    """Name the public categories for POV version 3, the current version.
+
+    Reads context V4, frame V3 and transition V1. The record accepts the
+    NoSharedObs V4 or SharedObs V3 projection identity (context V4, which records
+    the Red Zone depth); export separately requires NoSharedObs. A separate class
+    from V2, so a V3 record never passes a V2-typed field.
+
+    Attributes
+    ----------
+    schema_id : Literal['marl_battlegrounds.evaluation.actor_pov_axis_mapping']
+        Fixed actor POV axis-mapping schema identifier.
+    schema_version : _SchemaVersionV3
+        Exact integer 3, the default.
+    actor_projection_identifier : _AsciiIdentifier
+        Source actor-input projection identifier.
+    actor_projection_version : Annotated[int, Field(gt=0)]
+        Source projection version: 4 for NoSharedObs or 3 for SharedObs.
+    source_context_schema_id : Literal['marl_battlegrounds.evaluation.episode_context']
+        Fixed evaluation context schema identifier.
+    source_context_schema_version : Literal[4]
+        Exact integer 4, the default.
+    source_frame_schema_id : Literal['marl_battlegrounds.evaluation.frame']
+        Fixed evaluation frame schema identifier.
+    source_frame_schema_version : _SchemaVersionV3
+        Exact integer 3, the default.
+    source_transition_schema_id : Literal['marl_battlegrounds.evaluation.transition']
+        Fixed evaluation transition schema identifier.
+    source_transition_schema_version : _SchemaVersionV1
+        Exact integer 1, the default.
+    target_action_recipient_public_agent_id_by_id : tuple[_AsciiIdentifier | None, ...]
+        Length-11 tuple: None, then five ally IDs, then five enemy IDs.
+    ally_observation_row_public_agent_id_by_id : tuple[_AsciiIdentifier, ...]
+        Five distinct public IDs in ally observation order.
+    enemy_observation_row_public_agent_id_by_id : tuple[_AsciiIdentifier, ...]
+        Five distinct public IDs in enemy observation order, disjoint from allies.
+    movement_action_name_by_id : tuple[_AsciiText, ...]
+        Nine unique movement labels.
+    unit_direction_vector_by_movement_action : _FloatMatrix
+        Finite float tuples, shape (9, 2), indexed by movement category.
+    target_action_name_by_id : tuple[_AsciiText, ...]
+        Eleven unique target labels.
+    use_ultimate_action_name_by_id : tuple[_AsciiText, ...]
+        Two unique Ultimate labels.
+    spawn_lifecycle_team_axis_name_by_id : tuple[_AsciiText, ...]
+        Exactly Own Team then Opponent Team.
+    """
+
+    schema_id: Literal["marl_battlegrounds.evaluation.actor_pov_axis_mapping"] = (
+        ACTOR_POV_AXIS_MAPPING_SCHEMA_ID
+    )
+    schema_version: _SchemaVersionV3 = ACTOR_POV_SCHEMA_VERSION_V3
+    actor_projection_identifier: _AsciiIdentifier
+    actor_projection_version: Annotated[int, Field(gt=0)]
+    source_context_schema_id: Literal[
+        "marl_battlegrounds.evaluation.episode_context"
+    ] = CONTEXT_SCHEMA_ID
+    source_context_schema_version: Literal[4] = 4
+    source_frame_schema_id: Literal["marl_battlegrounds.evaluation.frame"] = (
+        FRAME_SCHEMA_ID
+    )
+    source_frame_schema_version: _SchemaVersionV3 = 3
+    source_transition_schema_id: Literal["marl_battlegrounds.evaluation.transition"] = (
+        TRANSITION_SCHEMA_ID
+    )
+    source_transition_schema_version: _SchemaVersionV1 = ACTOR_POV_SCHEMA_VERSION
+    target_action_recipient_public_agent_id_by_id: tuple[_AsciiIdentifier | None, ...]
+    ally_observation_row_public_agent_id_by_id: tuple[_AsciiIdentifier, ...]
+    enemy_observation_row_public_agent_id_by_id: tuple[_AsciiIdentifier, ...]
+    movement_action_name_by_id: tuple[_AsciiText, ...]
+    unit_direction_vector_by_movement_action: _FloatMatrix
+    target_action_name_by_id: tuple[_AsciiText, ...]
+    use_ultimate_action_name_by_id: tuple[_AsciiText, ...]
+    spawn_lifecycle_team_axis_name_by_id: tuple[_AsciiText, ...]
+
+    @model_validator(mode="after")
+    def _validate_axes(self) -> ActorPovAxisMappingV3:
+        """Return this record after the shared projection, shape, identity, and
+        category-order checks; raise ValueError for a mismatch.
+        """
+        return _validate_axismapping(self)
+
+
+def _validate_frame[T: ActorPovFrameV1 | ActorPovFrameV2 | ActorPovFrameV3](
+    self: T,
+) -> T:
+    """Return the frame after checking canonical IDs and feature shapes. For V2 and
+    V3 also check public roster classes, self slot, and visible ally/enemy relation
+    flags. V1 and V2 hold 19 context columns; V3 holds 20 (column 19 is the Red
+    Zone depth). Raise ValueError for mismatches; this does not compare the frame
+    to its source replay.
     """
     expected_pov_id = (
         f"{self.episode_id}:actor-pov:{self.public_agent_id}:frame:{self.frame_index}"
@@ -768,7 +899,14 @@ def _validate_frame[T: ActorPovFrameV1 | ActorPovFrameV2](self: T) -> T:
             (MAX_OBSTACLE_SLOTS, OBSTACLE_FEATURES),
         ),
         ("objective_features", (MAX_OBJECTIVE_SLOTS, OBJECTIVE_FEATURES)),
-        ("context_features", (CONTEXT_FEATURES,)),
+        (
+            "context_features",
+            (
+                CONTEXT_FEATURES_V2
+                if isinstance(self, ActorPovFrameV3)
+                else CONTEXT_FEATURES,
+            ),
+        ),
         ("ally_visibility_mask", (MAX_AGENTS_PER_TEAM,)),
         ("enemy_visibility_mask", (MAX_AGENTS_PER_TEAM,)),
     ):
@@ -777,7 +915,7 @@ def _validate_frame[T: ActorPovFrameV1 | ActorPovFrameV2](self: T) -> T:
             shape,
             field_name=field_name,
         )
-    if isinstance(self, ActorPovFrameV2):
+    if isinstance(self, (ActorPovFrameV2, ActorPovFrameV3)):
         _require_tuple_shape(
             self.class_ids_by_team,
             (NUM_TEAMS, MAX_AGENTS_PER_TEAM),
@@ -979,6 +1117,67 @@ class ActorPovFrameV2(EvaluationModel):
 
     @model_validator(mode="after")
     def _validate_frame(self) -> ActorPovFrameV2:
+        """Return this frame after the shared canonical-ID, shape, and version-specific
+        roster/relation checks; otherwise raise ValueError.
+        """
+        return _validate_frame(self)
+
+
+class ActorPovFrameV3(EvaluationModel):
+    """Store one actor's exact version-3 decision frame without privileged state.
+
+    Attributes
+    ----------
+    schema_id : Literal['marl_battlegrounds.evaluation.actor_pov_frame']
+        Fixed actor POV frame schema identifier.
+    schema_version : _SchemaVersionV3
+        Exact integer 3, the default.
+    episode_id, public_agent_id, frame_index, pov_frame_id, source_frame_id,
+    simulator_step_count, self_ally_index, class_ids_by_team, self_features,
+    ally_unit_features, enemy_unit_features, map_obstacle_features,
+    objective_features, ally_visibility_mask, enemy_visibility_mask,
+    previous_timestep_actions, spawn_lifecycle, action_mask
+        Same meaning and shapes as in ActorPovFrameV2.
+    context_features : _FloatVector
+        Finite float tuple of length 20 for public task context: the 19 V2
+        columns plus column 19, the configured Team Deathmatch Red Zone depth
+        in map units (0.0 when the rule is off).
+
+    Notes
+    -----
+    Read from frame V3 of a context V4 replay. The 20-column width comes from
+    wire_shapes.CONTEXT_FEATURES_V2. A separate class from V2, so a V3 frame
+    never passes a V2-typed field. Feature column 3 is actor-relative, as in V2.
+    Array data is held as frozen host tuples. Visibility and source topology are
+    checked more fully by the live/content validators and source projection.
+    """
+
+    schema_id: Literal["marl_battlegrounds.evaluation.actor_pov_frame"] = (
+        ACTOR_POV_FRAME_SCHEMA_ID
+    )
+    schema_version: _SchemaVersionV3 = ACTOR_POV_SCHEMA_VERSION_V3
+    episode_id: _AsciiIdentifier
+    public_agent_id: _AsciiIdentifier
+    frame_index: _NonNegativeInt
+    pov_frame_id: _AsciiIdentifier
+    source_frame_id: _AsciiIdentifier
+    simulator_step_count: _NonNegativeInt
+    self_ally_index: _TeamLocalSlot
+    class_ids_by_team: _IntegerMatrix
+    self_features: _FloatVector
+    ally_unit_features: _FloatMatrix
+    enemy_unit_features: _FloatMatrix
+    map_obstacle_features: _FloatMatrix
+    objective_features: _FloatMatrix
+    context_features: _FloatVector
+    ally_visibility_mask: _BooleanVector
+    enemy_visibility_mask: _BooleanVector
+    previous_timestep_actions: ActorPovPreviousTimestepActionsV1
+    spawn_lifecycle: ActorPovSpawnLifecycleV1
+    action_mask: ActorPovActionMaskV1
+
+    @model_validator(mode="after")
+    def _validate_frame(self) -> ActorPovFrameV3:
         """Return this frame after the shared canonical-ID, shape, and version-specific
         roster/relation checks; otherwise raise ValueError.
         """
@@ -1503,7 +1702,9 @@ class ActorPovTransitionV1(EvaluationModel):
         return self
 
 
-def _validate_currentslice[T: ActorPovCurrentSliceV1 | ActorPovCurrentSliceV2](
+def _validate_currentslice[
+    T: ActorPovCurrentSliceV1 | ActorPovCurrentSliceV2 | ActorPovCurrentSliceV3
+](
     self: T,
 ) -> T:
     """Return the current slice after checking selected slot/team/class identity and its
@@ -1526,7 +1727,7 @@ def _validate_currentslice[T: ActorPovCurrentSliceV1 | ActorPovCurrentSliceV2](
         raise ValueError("POV ally axis must place the selected public agent")
     frame = self.frame
     if (
-        isinstance(frame, ActorPovFrameV2)
+        isinstance(frame, (ActorPovFrameV2, ActorPovFrameV3))
         and frame.self_ally_index != self.selected_team_local_slot
     ):
         raise ValueError("POV self index must match its selected local slot")
@@ -1686,6 +1887,56 @@ class ActorPovCurrentSliceV2(EvaluationModel):
         return _validate_currentslice(self)
 
 
+class ActorPovCurrentSliceV3(EvaluationModel):
+    """Carry the selected actor's current version-3 frame and its incoming transition.
+
+    Attributes
+    ----------
+    schema_id : Literal['marl_battlegrounds.evaluation.actor_pov_current_slice']
+        Fixed actor POV current-slice schema identifier.
+    schema_version : _SchemaVersionV3
+        Exact integer 3, the default.
+    episode_id, selected_global_slot, selected_team_local_slot, public_agent_id,
+    configured_team_id, class_id, observation_materialization, incoming_transition
+        Same meaning as in ActorPovCurrentSliceV2.
+    axis_mapping : ActorPovAxisMappingV3
+        Version-matched public action and observation axes.
+    frame : ActorPovFrameV3
+        Version-3 selected-actor frame (20 context columns).
+
+    Notes
+    -----
+    An in-memory live carrier built from context V4 and frame V3, not a saved
+    replay artifact. It holds no earlier prefix, privileged event stream,
+    completion claim, or source replay reference. Use
+    build_actor_pov_current_slice_v1 to validate the source records and derive cues.
+    """
+
+    schema_id: Literal["marl_battlegrounds.evaluation.actor_pov_current_slice"] = (
+        ACTOR_POV_CURRENT_SLICE_SCHEMA_ID
+    )
+    schema_version: _SchemaVersionV3 = ACTOR_POV_SCHEMA_VERSION_V3
+    episode_id: _AsciiIdentifier
+    selected_global_slot: _GlobalSlot
+    selected_team_local_slot: _TeamLocalSlot
+    public_agent_id: _AsciiIdentifier
+    configured_team_id: _TeamId
+    class_id: _ClassId
+    observation_materialization: Literal["exact_no_shared_obs_actor_input"] = (
+        "exact_no_shared_obs_actor_input"
+    )
+    axis_mapping: ActorPovAxisMappingV3
+    frame: ActorPovFrameV3
+    incoming_transition: ActorPovTransitionV1 | None = None
+
+    @model_validator(mode="after")
+    def _validate_current_slice(self) -> ActorPovCurrentSliceV3:
+        """Return this carrier after checking selected identity and the current/incoming
+        frame join; otherwise raise ValueError.
+        """
+        return _validate_currentslice(self)
+
+
 def _adjacent_cue_endpoint(frame: ActorPovFrame) -> ActorPovFrame:
     """Copy a frame with every hidden ally/enemy row replaced by zeros.
 
@@ -1731,7 +1982,9 @@ def _adjacent_cue_endpoint(frame: ActorPovFrame) -> ActorPovFrame:
 
 
 def _validate_adjacenttransitionslice[
-    T: ActorPovAdjacentTransitionSliceV1 | ActorPovAdjacentTransitionSliceV2
+    T: ActorPovAdjacentTransitionSliceV1
+    | ActorPovAdjacentTransitionSliceV2
+    | ActorPovAdjacentTransitionSliceV3
 ](self: T) -> T:
     """Return this live carrier after checking selected actor identity, visible
     self/lifecycle agreement, adjacent frame indices and simulator ticks, and exact
@@ -1766,7 +2019,7 @@ def _validate_adjacenttransitionslice[
                 f"POV {endpoint_name} frame must join the selected identity"
             )
         if (
-            isinstance(endpoint, ActorPovFrameV2)
+            isinstance(endpoint, (ActorPovFrameV2, ActorPovFrameV3))
             and endpoint.self_ally_index != self.selected_team_local_slot
         ):
             raise ValueError("POV self index must match its selected local slot")
@@ -1967,7 +2220,63 @@ class ActorPovAdjacentTransitionSliceV2(EvaluationModel):
         return _validate_adjacenttransitionslice(self)
 
 
-def _validate_replaycontent[T: ActorPovReplayContentV1 | ActorPovReplayContentV2](
+class ActorPovAdjacentTransitionSliceV3(EvaluationModel):
+    """Carry one actor's transition with both allowed version-3 observation endpoints.
+
+    Attributes
+    ----------
+    schema_id :
+    Literal['marl_battlegrounds.evaluation.actor_pov_adjacent_transition_slice']
+        Fixed actor POV adjacent-transition-slice schema identifier.
+    schema_version : _SchemaVersionV3
+        Exact integer 3, the default.
+    episode_id, selected_global_slot, selected_team_local_slot, public_agent_id,
+    configured_team_id, class_id, observation_materialization, transition
+        Same meaning as in ActorPovAdjacentTransitionSliceV2.
+    axis_mapping : ActorPovAxisMappingV3
+        Version-matched public action and observation axes.
+    start_frame : ActorPovFrameV3
+        Version-3 observation used to choose the action.
+    successor_frame : ActorPovFrameV3
+        Version-3 observation exactly one simulator tick later.
+
+    Notes
+    -----
+    In-memory live carrier from context V4; contains no privileged events or
+    source-evidence root. Validation checks actor/topology/time joins and derives
+    cues after masking hidden relation rows. Stored endpoints themselves remain
+    exact source rows.
+    """
+
+    schema_id: Literal[
+        "marl_battlegrounds.evaluation.actor_pov_adjacent_transition_slice"
+    ] = ACTOR_POV_ADJACENT_TRANSITION_SLICE_SCHEMA_ID
+    schema_version: _SchemaVersionV3 = ACTOR_POV_SCHEMA_VERSION_V3
+    episode_id: _AsciiIdentifier
+    selected_global_slot: _GlobalSlot
+    selected_team_local_slot: _TeamLocalSlot
+    public_agent_id: _AsciiIdentifier
+    configured_team_id: _TeamId
+    class_id: _ClassId
+    observation_materialization: Literal["exact_no_shared_obs_actor_input"] = (
+        "exact_no_shared_obs_actor_input"
+    )
+    axis_mapping: ActorPovAxisMappingV3
+    start_frame: ActorPovFrameV3
+    transition: ActorPovTransitionV1
+    successor_frame: ActorPovFrameV3
+
+    @model_validator(mode="after")
+    def _validate_adjacent_slice(self) -> ActorPovAdjacentTransitionSliceV3:
+        """Return this carrier after the shared endpoint, actor, lifecycle, and
+        cue-consistency checks; otherwise raise ValueError.
+        """
+        return _validate_adjacenttransitionslice(self)
+
+
+def _validate_replaycontent[
+    T: ActorPovReplayContentV1 | ActorPovReplayContentV2 | ActorPovReplayContentV3
+](
     self: T,
 ) -> T:
     """Return actor content after checking canonical identity/digest, a gap-free T+1/T
@@ -1998,7 +2307,7 @@ def _validate_replaycontent[T: ActorPovReplayContentV1 | ActorPovReplayContentV2
         raise ValueError("POV completion count must equal transition count")
     for frame_index, frame in enumerate(self.frames):
         if (
-            isinstance(frame, ActorPovFrameV2)
+            isinstance(frame, (ActorPovFrameV2, ActorPovFrameV3))
             and frame.self_ally_index != self.selected_team_local_slot
         ):
             raise ValueError("POV self index must match its selected local slot")
@@ -2206,7 +2515,64 @@ class ActorPovReplayContentV2(EvaluationModel):
         return _validate_replaycontent(self)
 
 
-def _validate_replayartifact[T: ActorPovReplayArtifactV1 | ActorPovReplayArtifactV2](
+class ActorPovReplayContentV3(EvaluationModel):
+    """Store version-3 actor content independently of full-source provenance.
+
+    Attributes
+    ----------
+    schema_id : Literal['marl_battlegrounds.evaluation.actor_pov_content']
+        Fixed actor POV content schema identifier.
+    schema_version : _SchemaVersionV3
+        Exact integer 3, the default.
+    content_id, canonical_digest_sha256, episode_id, selected_global_slot,
+    selected_team_local_slot, public_agent_id, configured_team_id, class_id,
+    observation_materialization, completion, transitions
+        Same meaning as in ActorPovReplayContentV2.
+    axis_mapping : ActorPovAxisMappingV3
+        Version-matched public action and observation axes.
+    frames : tuple[ActorPovFrameV3, ...]
+        Ordered version-3 frame tuple, length T+1, beginning at frame zero. Each
+        frame keeps context column 19, the recorded Red Zone depth, including
+        frames where the actor is dead.
+
+    Notes
+    -----
+    Content construction checks IDs, topology, adjacent ticks, completion, and
+    digest. Public content validators also rederive cues. To establish that this
+    content is the exact source projection, validate its artifact against a replay.
+    """
+
+    schema_id: Literal["marl_battlegrounds.evaluation.actor_pov_content"] = (
+        ACTOR_POV_CONTENT_SCHEMA_ID
+    )
+    schema_version: _SchemaVersionV3 = ACTOR_POV_SCHEMA_VERSION_V3
+    content_id: _AsciiIdentifier
+    canonical_digest_sha256: _Sha256Hex
+    episode_id: _AsciiIdentifier
+    selected_global_slot: _GlobalSlot
+    selected_team_local_slot: _TeamLocalSlot
+    public_agent_id: _AsciiIdentifier
+    configured_team_id: _TeamId
+    class_id: _ClassId
+    observation_materialization: Literal["exact_no_shared_obs_actor_input"] = (
+        "exact_no_shared_obs_actor_input"
+    )
+    axis_mapping: ActorPovAxisMappingV3
+    completion: ActorPovEpisodeCompletionV1
+    frames: tuple[ActorPovFrameV3, ...]
+    transitions: tuple[ActorPovTransitionV1, ...]
+
+    @model_validator(mode="after")
+    def _validate_content(self) -> ActorPovReplayContentV3:
+        """Return this content after the shared prefix, identity, completion, topology,
+        and digest checks; otherwise raise ValueError.
+        """
+        return _validate_replaycontent(self)
+
+
+def _validate_replayartifact[
+    T: ActorPovReplayArtifactV1 | ActorPovReplayArtifactV2 | ActorPovReplayArtifactV3
+](
     self: T,
 ) -> T:
     """Return the envelope after checking canonical artifact ID/digest and the
@@ -2311,19 +2677,95 @@ class ActorPovReplayArtifactV2(EvaluationModel):
         return _validate_replayartifact(self)
 
 
-type ActorPovAxisMapping = ActorPovAxisMappingV1 | ActorPovAxisMappingV2
+class ActorPovReplayArtifactV3(EvaluationModel):
+    """Wrap version-3 actor content with its full source replay V4 reference.
 
-type ActorPovFrame = ActorPovFrameV1 | ActorPovFrameV2
+    Attributes
+    ----------
+    schema_id : Literal['marl_battlegrounds.evaluation.actor_pov_artifact']
+        Fixed actor POV artifact schema identifier.
+    schema_version : _SchemaVersionV3
+        Exact integer 3, the default.
+    artifact_id : _AsciiIdentifier
+        Canonical episode/actor artifact identity.
+    canonical_digest_sha256 : _Sha256Hex
+        SHA-256 of the full canonical envelope excluding this field.
+    source_replay : ReplayArtifactReferenceV4
+        Reference to replay V4, including its identities, digests, and byte length.
+    content : ActorPovReplayContentV3
+        Version-3 actor-authorized replay content.
 
-type ActorPovCurrentSlice = ActorPovCurrentSliceV1 | ActorPovCurrentSliceV2
+    Notes
+    -----
+    Source provenance can change while actor content remains equal. The envelope
+    checks its own digest and episode join; against-replay validation is required
+    to prove that the referenced source produced this exact content.
+    """
 
-type ActorPovAdjacentTransitionSlice = (
-    ActorPovAdjacentTransitionSliceV1 | ActorPovAdjacentTransitionSliceV2
+    schema_id: Literal["marl_battlegrounds.evaluation.actor_pov_artifact"] = (
+        ACTOR_POV_ARTIFACT_SCHEMA_ID
+    )
+    schema_version: _SchemaVersionV3 = ACTOR_POV_SCHEMA_VERSION_V3
+    artifact_id: _AsciiIdentifier
+    canonical_digest_sha256: _Sha256Hex
+    source_replay: ReplayArtifactReferenceV4
+    content: ActorPovReplayContentV3
+
+    @model_validator(mode="after")
+    def _validate_artifact(self) -> ActorPovReplayArtifactV3:
+        """Return this envelope after checking canonical artifact identity/digest and
+        the source/content episode join; otherwise raise ValueError.
+        """
+        return _validate_replayartifact(self)
+
+
+type ActorPovAxisMapping = (
+    ActorPovAxisMappingV1 | ActorPovAxisMappingV2 | ActorPovAxisMappingV3
 )
 
-type ActorPovReplayContent = ActorPovReplayContentV1 | ActorPovReplayContentV2
+type ActorPovFrame = ActorPovFrameV1 | ActorPovFrameV2 | ActorPovFrameV3
 
-type ActorPovReplayArtifact = ActorPovReplayArtifactV1 | ActorPovReplayArtifactV2
+type ActorPovCurrentSlice = (
+    ActorPovCurrentSliceV1 | ActorPovCurrentSliceV2 | ActorPovCurrentSliceV3
+)
+
+type ActorPovAdjacentTransitionSlice = (
+    ActorPovAdjacentTransitionSliceV1
+    | ActorPovAdjacentTransitionSliceV2
+    | ActorPovAdjacentTransitionSliceV3
+)
+
+type ActorPovReplayContent = (
+    ActorPovReplayContentV1 | ActorPovReplayContentV2 | ActorPovReplayContentV3
+)
+
+type ActorPovReplayArtifact = (
+    ActorPovReplayArtifactV1 | ActorPovReplayArtifactV2 | ActorPovReplayArtifactV3
+)
+
+# The one owner of POV version pairing: evaluation frame V1 gives POV V1, frame
+# V2 (context V3) gives POV V2, and frame V3 (context V4) gives POV V3.
+_POV_FRAME_TYPE_BY_SOURCE_FRAME_TYPE: dict[
+    type[EvaluationFrame], type[ActorPovFrame]
+] = {
+    EvaluationFrameV1: ActorPovFrameV1,
+    EvaluationFrameV2: ActorPovFrameV2,
+    EvaluationFrameV3: ActorPovFrameV3,
+}
+_CURRENT_SLICE_TYPE_BY_SOURCE_FRAME_TYPE: dict[
+    type[EvaluationFrame], type[ActorPovCurrentSlice]
+] = {
+    EvaluationFrameV1: ActorPovCurrentSliceV1,
+    EvaluationFrameV2: ActorPovCurrentSliceV2,
+    EvaluationFrameV3: ActorPovCurrentSliceV3,
+}
+_ADJACENT_SLICE_TYPE_BY_SOURCE_FRAME_TYPE: dict[
+    type[EvaluationFrame], type[ActorPovAdjacentTransitionSlice]
+] = {
+    EvaluationFrameV1: ActorPovAdjacentTransitionSliceV1,
+    EvaluationFrameV2: ActorPovAdjacentTransitionSliceV2,
+    EvaluationFrameV3: ActorPovAdjacentTransitionSliceV3,
+}
 
 
 def _actor_class_ids(
@@ -2334,17 +2776,18 @@ def _actor_class_ids(
     Parameters
     ----------
     context : EvaluationEpisodeContext
-        Valid evaluation context. Historical versions return None.
+        Valid evaluation context. Contexts V1 and V2 return None.
     global_slot : int
         Selected simulator slot, from 0 through 9.
 
     Returns
     -------
     tuple[tuple[int, ...], ...] | None
-        For context V3, immutable integer tuples of shape (2, 5), Own Team first;
-        zero marks inactive slots. Otherwise None.
+        For context V3 or V4, immutable integer tuples of shape (2, 5), Own Team
+        first; zero marks inactive slots. Otherwise None (POV V1 frames carry no
+        class rows).
     """
-    if context.schema_version != 3:
+    if context.schema_version not in (3, 4):
         return None
     from marl_battlegrounds.evaluation.actor_projection import (
         reconstruct_actor_class_ids_by_team_v3,
@@ -2357,18 +2800,18 @@ def _actor_class_ids(
 
 
 def _build_replay_reference_from_validated(
-    replay: ReplayArtifactV1 | ReplayArtifactV3,
-) -> ReplayArtifactReferenceV1 | ReplayArtifactReferenceV3:
+    replay: ReplayArtifactV1 | ReplayArtifactV3 | ReplayArtifactV4,
+) -> ReplayArtifactReferenceV1 | ReplayArtifactReferenceV3 | ReplayArtifactReferenceV4:
     """Build a source reference without repeating full replay validation.
 
     Parameters
     ----------
-    replay : ReplayArtifactV1 | ReplayArtifactV3
-        Already validated exact replay V1 or V3.
+    replay : ReplayArtifactV1 | ReplayArtifactV3 | ReplayArtifactV4
+        Already validated exact replay V1, V3 or V4.
 
     Returns
     -------
-    ReplayArtifactReferenceV1 | ReplayArtifactReferenceV3
+    ReplayArtifactReferenceV1 | ReplayArtifactReferenceV3 | ReplayArtifactReferenceV4
         Version-matched reference with source identities, digests, and canonical byte
         length.
 
@@ -2376,6 +2819,8 @@ def _build_replay_reference_from_validated(
     -----
     Serializes canonical bytes to measure their length; writes no file.
     """
+    if type(replay) is ReplayArtifactV4:
+        return replay_reference_v4(replay)
     if type(replay) is ReplayArtifactV3:
         return replay_reference_v3(replay)
     return ReplayArtifactReferenceV1(
@@ -2400,23 +2845,26 @@ def _slice_frame_from_source(
     Parameters
     ----------
     source : EvaluationFrame
-        Evaluation frame V1 or V2 containing simulator-global actor rows.
+        Evaluation frame V1, V2 or V3 containing simulator-global actor rows.
     global_slot : int
         Selected simulator slot from 0 through 9.
     public_agent_id : str
         Matching public roster identity used in POV IDs.
     class_ids_by_team : tuple[tuple[int, ...], ...] | None
-        Public class tuples of shape (2, 5), Own Team first. Required by V2; default
-        None suits V1.
+        Public class tuples of shape (2, 5), Own Team first. Required by V2 and
+        V3; default None suits V1.
 
     Returns
     -------
     ActorPovFrame
-        A new POV V1/V2 frame with the matching feature schema and no privileged
-        snapshot.
+        A new POV frame of the matching version (frame V1 gives POV V1, V2 gives
+        POV V2, V3 gives POV V3) with no privileged snapshot. A POV V3 frame
+        keeps all 20 context columns, including the Red Zone depth.
 
     Raises
     ------
+    TypeError
+        source is not an exact supported evaluation frame.
     ValueError
         Selected fields fail the POV record contract.
 
@@ -2429,11 +2877,11 @@ def _slice_frame_from_source(
     previous = observation.previous_timestep_actions
     lifecycle = observation.spawn_lifecycle
     mask = source.action_mask
-    frame_type = (
-        ActorPovFrameV2 if type(source) is EvaluationFrameV2 else ActorPovFrameV1
-    )
+    frame_type = _POV_FRAME_TYPE_BY_SOURCE_FRAME_TYPE.get(type(source))
+    if frame_type is None:
+        raise TypeError("actor POV slicing requires an exact supported frame")
     current_fields: dict[str, object] = {}
-    if type(source) is EvaluationFrameV2:
+    if type(source) is EvaluationFrameV2 or type(source) is EvaluationFrameV3:
         current_fields = {
             "self_ally_index": source.base_observation.self_ally_index[global_slot],
             "class_ids_by_team": class_ids_by_team,
@@ -2525,7 +2973,7 @@ def _slice_frame_from_source(
 
 
 def _slice_frame(
-    replay: ReplayArtifactV1 | ReplayArtifactV3,
+    replay: ReplayArtifactV1 | ReplayArtifactV3 | ReplayArtifactV4,
     *,
     global_slot: int,
     public_agent_id: str,
@@ -2535,8 +2983,8 @@ def _slice_frame(
 
     Parameters
     ----------
-    replay : ReplayArtifactV1 | ReplayArtifactV3
-        Valid replay V1 or V3.
+    replay : ReplayArtifactV1 | ReplayArtifactV3 | ReplayArtifactV4
+        Valid replay V1, V3 or V4.
     global_slot : int
         Selected simulator slot from 0 through 9.
     public_agent_id : str
@@ -2895,7 +3343,7 @@ def _slice_transition_from_source(
 
 
 def _slice_transition(
-    replay: ReplayArtifactV1 | ReplayArtifactV3,
+    replay: ReplayArtifactV1 | ReplayArtifactV3 | ReplayArtifactV4,
     *,
     global_slot: int,
     team_local_slot: int,
@@ -2907,8 +3355,8 @@ def _slice_transition(
 
     Parameters
     ----------
-    replay : ReplayArtifactV1 | ReplayArtifactV3
-        Valid replay V1 or V3.
+    replay : ReplayArtifactV1 | ReplayArtifactV3 | ReplayArtifactV4
+        Valid replay V1, V3 or V4.
     global_slot : int
         Selected simulator slot from 0 through 9.
     team_local_slot : int
@@ -2957,7 +3405,8 @@ def _axis_mapping_from_context(
     Returns
     -------
     ActorPovAxisMapping
-        Version-matched immutable axis record; target zero is None, followed by five
+        Version-matched immutable axis record (V1 for contexts V1 and V2, V2 for
+        context V3, V3 for context V4); target zero is None, followed by five
         allies and five enemies.
 
     Raises
@@ -2978,7 +3427,11 @@ def _axis_mapping_from_context(
         return context.roster[slot].public_agent_id
 
     axis_type = (
-        ActorPovAxisMappingV2 if context.schema_version == 3 else ActorPovAxisMappingV1
+        ActorPovAxisMappingV3
+        if context.schema_version == 4
+        else ActorPovAxisMappingV2
+        if context.schema_version == 3
+        else ActorPovAxisMappingV1
     )
     return axis_type.model_validate(
         dict(
@@ -3007,7 +3460,7 @@ def _axis_mapping_from_context(
 
 
 def _axis_mapping_from_replay(
-    replay: ReplayArtifactV1 | ReplayArtifactV3,
+    replay: ReplayArtifactV1 | ReplayArtifactV3 | ReplayArtifactV4,
     *,
     global_slot: int,
 ) -> ActorPovAxisMapping:
@@ -3015,8 +3468,8 @@ def _axis_mapping_from_replay(
 
     Parameters
     ----------
-    replay : ReplayArtifactV1 | ReplayArtifactV3
-        Replay V1 or V3 with validated context and mechanics catalog.
+    replay : ReplayArtifactV1 | ReplayArtifactV3 | ReplayArtifactV4
+        Replay V1, V3 or V4 with validated context and mechanics catalog.
     global_slot : int
         Selected simulator slot from 0 through 9.
 
@@ -3034,13 +3487,21 @@ def _axis_mapping_from_replay(
 def _require_actor_projection_v1(context: EvaluationEpisodeContext) -> None:
     """Require the projection version supported by this context's POV path.
 
-    Context V3 requires actor projection version 3; older contexts require version 1.
-    Return None when supported; otherwise raise ValueError. Information mode is
-    checked separately by the selected-actor/export boundary.
+    Context V4 requires actor projection version 4 (NoSharedObs V4), context V3
+    requires version 3 (NoSharedObs V3), and older contexts require version 1.
+    A SharedObs context therefore fails here (its projection versions are 1, 2
+    and 3). Return None when supported; otherwise raise ValueError with the
+    historical message. Information mode is checked separately by the
+    selected-actor/export boundary.
     """
-    if context.actor_projection.version != (
-        3 if context.schema_version == 3 else ACTOR_POV_SCHEMA_VERSION
-    ):
+    expected_version = (
+        4
+        if context.schema_version == 4
+        else 3
+        if context.schema_version == 3
+        else ACTOR_POV_SCHEMA_VERSION
+    )
+    if context.actor_projection.version != expected_version:
         raise ValueError("actor POV V1 requires actor projection version 1")
 
 
@@ -3055,7 +3516,7 @@ def _require_selected_self_topology(
     Parameters
     ----------
     frame : ActorPovFrame
-        Sliced POV V1 or V2 frame.
+        Sliced POV V1, V2 or V3 frame.
     configured_team_id : int
         Simulator Team A/B ID, respectively 1 or 2.
     class_id : int
@@ -3069,8 +3530,8 @@ def _require_selected_self_topology(
     Raises
     ------
     ValueError
-        ACTIVE is not one, ALIVE is not binary, or team/class features disagree. V2 uses
-        actor-relative self relation zero.
+        ACTIVE is not one, ALIVE is not binary, or team/class features disagree. V2
+        and V3 use actor-relative self relation zero.
     """
     row = frame.self_features
     if row[_FEATURE_ACTIVE] != 1.0:
@@ -3138,8 +3599,8 @@ def build_actor_pov_current_slice_v1(
         Valid evaluation episode context. Only supported NoSharedObs projections are
         accepted.
     frame : EvaluationFrame
-        Decision frame V1 or V2 from that context. Without an incoming view it must be
-        the initial frame.
+        Decision frame V1, V2 or V3 from that context (frame V3 pairs with context
+        V4). Without an incoming view it must be the initial frame.
     global_slot : int
         Exact Python integer from 0 through 9 selecting a configured-active actor; dead
         actors are allowed.
@@ -3151,7 +3612,8 @@ def build_actor_pov_current_slice_v1(
     Returns
     -------
     ActorPovCurrentSlice
-        New ActorPovCurrentSliceV1 for frame V1 or ActorPovCurrentSliceV2 for frame V2.
+        New ActorPovCurrentSliceV1 for frame V1, ActorPovCurrentSliceV2 for frame V2,
+        or ActorPovCurrentSliceV3 for frame V3.
         Frame zero has no incoming transition; later frames include only their own
         incoming actor transition, not a reconstructed earlier prefix.
 
@@ -3192,8 +3654,8 @@ def build_actor_pov_current_slice_v1(
         Valid evaluation episode context. Only supported NoSharedObs projections are
         accepted.
     frame : EvaluationFrame
-        Decision frame V1 or V2 from that context. Without an incoming view it must be
-        the initial frame.
+        Decision frame V1, V2 or V3 from that context (frame V3 pairs with context
+        V4). Without an incoming view it must be the initial frame.
     global_slot : int
         Exact Python integer from 0 through 9 selecting a configured-active actor; dead
         actors are allowed.
@@ -3205,7 +3667,63 @@ def build_actor_pov_current_slice_v1(
     Returns
     -------
     ActorPovCurrentSlice
-        New ActorPovCurrentSliceV1 for frame V1 or ActorPovCurrentSliceV2 for frame V2.
+        New ActorPovCurrentSliceV1 for frame V1, ActorPovCurrentSliceV2 for frame V2,
+        or ActorPovCurrentSliceV3 for frame V3.
+        Frame zero has no incoming transition; later frames include only their own
+        incoming actor transition, not a reconstructed earlier prefix.
+
+    Raises
+    ------
+    TypeError
+        A source model or incoming view is not the exact supported type.
+    ValueError
+        Source records, actor selection, projection, or time/identity joins fail
+        validation.
+
+    Notes
+    -----
+    Host-only immutable projection; does not run the simulator or write a file.
+    The incoming view is reconstructed using EvaluationTransitionViewV1's actual
+    version-specific validation. V1 views receive full legacy checks; later view
+    versions have narrower structural checks. This function additionally checks
+    selected-actor topology and exact context/successor equality.
+    Only this actor's base inputs, actions, rejection flags, reward, public done
+    flags, and locally derived cues enter the result.
+    """
+    ...
+
+
+@overload
+def build_actor_pov_current_slice_v1(
+    context: EvaluationEpisodeContext,
+    frame: EvaluationFrameV3,
+    *,
+    global_slot: int,
+    incoming_transition_view: EvaluationTransitionViewV1 | None = None,
+) -> ActorPovCurrentSliceV3:
+    """Build the selected actor's current observation and incoming transition.
+
+    Parameters
+    ----------
+    context : EvaluationEpisodeContext
+        Valid evaluation episode context. Only supported NoSharedObs projections are
+        accepted.
+    frame : EvaluationFrame
+        Decision frame V1, V2 or V3 from that context (frame V3 pairs with context
+        V4). Without an incoming view it must be the initial frame.
+    global_slot : int
+        Exact Python integer from 0 through 9 selecting a configured-active actor; dead
+        actors are allowed.
+    incoming_transition_view : EvaluationTransitionViewV1 | None
+        None for the initial frame. For later frames, the exact
+        EvaluationTransitionViewV1 whose successor equals frame and whose context equals
+        context.
+
+    Returns
+    -------
+    ActorPovCurrentSlice
+        New ActorPovCurrentSliceV1 for frame V1, ActorPovCurrentSliceV2 for frame V2,
+        or ActorPovCurrentSliceV3 for frame V3.
         Frame zero has no incoming transition; later frames include only their own
         incoming actor transition, not a reconstructed earlier prefix.
 
@@ -3246,8 +3764,8 @@ def build_actor_pov_current_slice_v1(
         Valid evaluation episode context. Only supported NoSharedObs projections are
         accepted.
     frame : EvaluationFrame
-        Decision frame V1 or V2 from that context. Without an incoming view it must be
-        the initial frame.
+        Decision frame V1, V2 or V3 from that context (frame V3 pairs with context
+        V4). Without an incoming view it must be the initial frame.
     global_slot : int
         Exact Python integer from 0 through 9 selecting a configured-active actor; dead
         actors are allowed.
@@ -3259,7 +3777,8 @@ def build_actor_pov_current_slice_v1(
     Returns
     -------
     ActorPovCurrentSlice
-        New ActorPovCurrentSliceV1 for frame V1 or ActorPovCurrentSliceV2 for frame V2.
+        New ActorPovCurrentSliceV1 for frame V1, ActorPovCurrentSliceV2 for frame V2,
+        or ActorPovCurrentSliceV3 for frame V3.
         Frame zero has no incoming transition; later frames include only their own
         incoming actor transition, not a reconstructed earlier prefix.
 
@@ -3299,8 +3818,8 @@ def build_actor_pov_current_slice_v1(
         Valid evaluation episode context. Only supported NoSharedObs projections are
         accepted.
     frame : EvaluationFrame
-        Decision frame V1 or V2 from that context. Without an incoming view it must be
-        the initial frame.
+        Decision frame V1, V2 or V3 from that context (frame V3 pairs with context
+        V4). Without an incoming view it must be the initial frame.
     global_slot : int
         Exact Python integer from 0 through 9 selecting a configured-active actor; dead
         actors are allowed.
@@ -3312,7 +3831,8 @@ def build_actor_pov_current_slice_v1(
     Returns
     -------
     ActorPovCurrentSlice
-        New ActorPovCurrentSliceV1 for frame V1 or ActorPovCurrentSliceV2 for frame V2.
+        New ActorPovCurrentSliceV1 for frame V1, ActorPovCurrentSliceV2 for frame V2,
+        or ActorPovCurrentSliceV3 for frame V3.
         Frame zero has no incoming transition; later frames include only their own
         incoming actor transition, not a reconstructed earlier prefix.
 
@@ -3410,11 +3930,7 @@ def build_actor_pov_current_slice_v1(
         configured_team_id=roster.configured_team_id,
         class_id=roster.class_id,
     )
-    slice_type = (
-        ActorPovCurrentSliceV2
-        if type(canonical_frame) is EvaluationFrameV2
-        else ActorPovCurrentSliceV1
-    )
+    slice_type = _CURRENT_SLICE_TYPE_BY_SOURCE_FRAME_TYPE[type(canonical_frame)]
     return slice_type.model_validate(
         dict(
             episode_id=canonical_context.identity.episode_id,
@@ -3452,9 +3968,9 @@ def build_actor_pov_adjacent_transition_slice_v1(
     Returns
     -------
     ActorPovAdjacentTransitionSlice
-        New ActorPovAdjacentTransitionSliceV1 for source frame V1, or V2 for frame V2.
-        Contains start_frame, transition, successor_frame, public identity, and actor
-        axes.
+        New ActorPovAdjacentTransitionSliceV1 for source frame V1, V2 for frame V2,
+        or V3 for frame V3. Contains start_frame, transition, successor_frame,
+        public identity, and actor axes.
 
     Raises
     ------
@@ -3515,11 +4031,9 @@ def build_actor_pov_adjacent_transition_slice_v1(
         start_frame=_adjacent_cue_endpoint(start),
         successor_frame=_adjacent_cue_endpoint(successor),
     )
-    slice_type = (
-        ActorPovAdjacentTransitionSliceV2
-        if type(canonical_view.start_frame) is EvaluationFrameV2
-        else ActorPovAdjacentTransitionSliceV1
-    )
+    slice_type = _ADJACENT_SLICE_TYPE_BY_SOURCE_FRAME_TYPE[
+        type(canonical_view.start_frame)
+    ]
     return slice_type.model_validate(
         dict(
             episode_id=canonical_view.context.identity.episode_id,
@@ -3555,8 +4069,8 @@ def slice_actor_pov_current_frame_v1(
         Valid evaluation episode context. Only supported NoSharedObs projections are
         accepted.
     frame : EvaluationFrame
-        Decision frame V1 or V2 from that context. Without an incoming view it must be
-        the initial frame.
+        Decision frame V1, V2 or V3 from that context (frame V3 pairs with context
+        V4). Without an incoming view it must be the initial frame.
     global_slot : int
         Exact Python integer from 0 through 9 selecting a configured-active actor; dead
         actors are allowed.
@@ -3568,7 +4082,8 @@ def slice_actor_pov_current_frame_v1(
     Returns
     -------
     ActorPovFrame
-        New ActorPovFrameV1 for source frame V1 or ActorPovFrameV2 for source frame V2.
+        New ActorPovFrameV1 for source frame V1, ActorPovFrameV2 for source frame V2,
+        or ActorPovFrameV3 (20 context columns) for source frame V3.
         The current frame includes authorized observations, masks, and lifecycle data.
 
     Raises
@@ -3605,8 +4120,8 @@ def slice_actor_pov_current_frame_v1(
         Valid evaluation episode context. Only supported NoSharedObs projections are
         accepted.
     frame : EvaluationFrame
-        Decision frame V1 or V2 from that context. Without an incoming view it must be
-        the initial frame.
+        Decision frame V1, V2 or V3 from that context (frame V3 pairs with context
+        V4). Without an incoming view it must be the initial frame.
     global_slot : int
         Exact Python integer from 0 through 9 selecting a configured-active actor; dead
         actors are allowed.
@@ -3618,7 +4133,59 @@ def slice_actor_pov_current_frame_v1(
     Returns
     -------
     ActorPovFrame
-        New ActorPovFrameV1 for source frame V1 or ActorPovFrameV2 for source frame V2.
+        New ActorPovFrameV1 for source frame V1, ActorPovFrameV2 for source frame V2,
+        or ActorPovFrameV3 (20 context columns) for source frame V3.
+        The current frame includes authorized observations, masks, and lifecycle data.
+
+    Raises
+    ------
+    TypeError
+        A source model or incoming view is not the exact supported type.
+    ValueError
+        Source records, actor selection, projection, or time/identity joins fail
+        validation.
+
+    Notes
+    -----
+    Uses build_actor_pov_current_slice_v1 and its host-side source checks, including
+    the required incoming view after frame zero. Discards the carrier's axis metadata
+    and incoming transition from the return value. Does not change inputs or write
+    files.
+    """
+    ...
+
+
+@overload
+def slice_actor_pov_current_frame_v1(
+    context: EvaluationEpisodeContext,
+    frame: EvaluationFrameV3,
+    *,
+    global_slot: int,
+    incoming_transition_view: EvaluationTransitionViewV1 | None = None,
+) -> ActorPovFrameV3:
+    """Return only the selected actor's current observation frame.
+
+    Parameters
+    ----------
+    context : EvaluationEpisodeContext
+        Valid evaluation episode context. Only supported NoSharedObs projections are
+        accepted.
+    frame : EvaluationFrame
+        Decision frame V1, V2 or V3 from that context (frame V3 pairs with context
+        V4). Without an incoming view it must be the initial frame.
+    global_slot : int
+        Exact Python integer from 0 through 9 selecting a configured-active actor; dead
+        actors are allowed.
+    incoming_transition_view : EvaluationTransitionViewV1 | None
+        None for the initial frame. For later frames, the exact
+        EvaluationTransitionViewV1 whose successor equals frame and whose context equals
+        context.
+
+    Returns
+    -------
+    ActorPovFrame
+        New ActorPovFrameV1 for source frame V1, ActorPovFrameV2 for source frame V2,
+        or ActorPovFrameV3 (20 context columns) for source frame V3.
         The current frame includes authorized observations, masks, and lifecycle data.
 
     Raises
@@ -3655,8 +4222,8 @@ def slice_actor_pov_current_frame_v1(
         Valid evaluation episode context. Only supported NoSharedObs projections are
         accepted.
     frame : EvaluationFrame
-        Decision frame V1 or V2 from that context. Without an incoming view it must be
-        the initial frame.
+        Decision frame V1, V2 or V3 from that context (frame V3 pairs with context
+        V4). Without an incoming view it must be the initial frame.
     global_slot : int
         Exact Python integer from 0 through 9 selecting a configured-active actor; dead
         actors are allowed.
@@ -3668,7 +4235,8 @@ def slice_actor_pov_current_frame_v1(
     Returns
     -------
     ActorPovFrame
-        New ActorPovFrameV1 for source frame V1 or ActorPovFrameV2 for source frame V2.
+        New ActorPovFrameV1 for source frame V1, ActorPovFrameV2 for source frame V2,
+        or ActorPovFrameV3 (20 context columns) for source frame V3.
         The current frame includes authorized observations, masks, and lifecycle data.
 
     Raises
@@ -3704,8 +4272,8 @@ def slice_actor_pov_current_frame_v1(
         Valid evaluation episode context. Only supported NoSharedObs projections are
         accepted.
     frame : EvaluationFrame
-        Decision frame V1 or V2 from that context. Without an incoming view it must be
-        the initial frame.
+        Decision frame V1, V2 or V3 from that context (frame V3 pairs with context
+        V4). Without an incoming view it must be the initial frame.
     global_slot : int
         Exact Python integer from 0 through 9 selecting a configured-active actor; dead
         actors are allowed.
@@ -3717,7 +4285,8 @@ def slice_actor_pov_current_frame_v1(
     Returns
     -------
     ActorPovFrame
-        New ActorPovFrameV1 for source frame V1 or ActorPovFrameV2 for source frame V2.
+        New ActorPovFrameV1 for source frame V1, ActorPovFrameV2 for source frame V2,
+        or ActorPovFrameV3 (20 context columns) for source frame V3.
         The current frame includes authorized observations, masks, and lifecycle data.
 
     Raises
@@ -3789,8 +4358,19 @@ def slice_actor_pov_current_transition_v1(
     return current.incoming_transition
 
 
+# Replay V1 exports POV V1, replay V3 exports POV V2 and replay V4 exports POV V3.
+_POV_EXPORT_TYPES_BY_REPLAY_TYPE: dict[
+    type[ReplayArtifactV1 | ReplayArtifactV3 | ReplayArtifactV4],
+    tuple[int, type[ActorPovReplayContent], type[ActorPovReplayArtifact]],
+] = {
+    ReplayArtifactV1: (1, ActorPovReplayContentV1, ActorPovReplayArtifactV1),
+    ReplayArtifactV3: (2, ActorPovReplayContentV2, ActorPovReplayArtifactV2),
+    ReplayArtifactV4: (3, ActorPovReplayContentV3, ActorPovReplayArtifactV3),
+}
+
+
 def _export_from_validated_replay(
-    replay: ReplayArtifactV1 | ReplayArtifactV3,
+    replay: ReplayArtifactV1 | ReplayArtifactV3 | ReplayArtifactV4,
     *,
     global_slot: int,
 ) -> ActorPovReplayArtifact:
@@ -3798,17 +4378,17 @@ def _export_from_validated_replay(
 
     Parameters
     ----------
-    replay : ReplayArtifactV1 | ReplayArtifactV3
-        Already validated exact replay V1 or V3.
+    replay : ReplayArtifactV1 | ReplayArtifactV3 | ReplayArtifactV4
+        Already validated exact replay V1, V3 or V4.
     global_slot : int
         Exact Python integer from 0 through 9 selecting a configured-active actor.
 
     Returns
     -------
     ActorPovReplayArtifact
-        POV V1 for replay V1, or POV V2 for replay V3, with a complete stored prefix,
-        copied completion metadata, separate content/envelope hashes, and source
-        reference.
+        POV V1 for replay V1, POV V2 for replay V3, or POV V3 for replay V4, with a
+        complete stored prefix, copied completion metadata, separate
+        content/envelope hashes, and source reference.
 
     Raises
     ------
@@ -3870,12 +4450,12 @@ def _export_from_validated_replay(
         completion_bases=source_completion.completion_bases,
         public_end_or_failure_reason=source_completion.end_or_failure_reason,
     )
-    current = type(replay) is ReplayArtifactV3
-    content_type = ActorPovReplayContentV2 if current else ActorPovReplayContentV1
-    artifact_type = ActorPovReplayArtifactV2 if current else ActorPovReplayArtifactV1
+    pov_version, content_type, artifact_type = _POV_EXPORT_TYPES_BY_REPLAY_TYPE[
+        type(replay)
+    ]
     content_payload: dict[str, object] = {
         "schema_id": ACTOR_POV_CONTENT_SCHEMA_ID,
-        "schema_version": 2 if current else ACTOR_POV_SCHEMA_VERSION,
+        "schema_version": pov_version,
         "content_id": f"{episode_id}:actor-pov:{public_agent_id}:content",
         "episode_id": episode_id,
         "selected_global_slot": global_slot,
@@ -3897,7 +4477,7 @@ def _export_from_validated_replay(
     )
     artifact_payload: dict[str, object] = {
         "schema_id": ACTOR_POV_ARTIFACT_SCHEMA_ID,
-        "schema_version": 2 if current else ACTOR_POV_SCHEMA_VERSION,
+        "schema_version": pov_version,
         "artifact_id": f"{episode_id}:actor-pov:{public_agent_id}",
         "source_replay": _build_replay_reference_from_validated(replay),
         "content": content,
@@ -4163,12 +4743,13 @@ def canonical_actor_pov_replay_json_bytes_v1(
 
 
 def validate_actor_pov_replay_content(content: ActorPovReplayContent) -> None:
-    """Validate either supported actor-content version and all local cues.
+    """Validate any supported actor-content version and all local cues.
 
     Parameters
     ----------
     content : ActorPovReplayContent
-        Exact ActorPovReplayContentV1 or ActorPovReplayContentV2.
+        Exact ActorPovReplayContentV1, ActorPovReplayContentV2 or
+        ActorPovReplayContentV3.
 
     Returns
     -------
@@ -4188,7 +4769,11 @@ def validate_actor_pov_replay_content(content: ActorPovReplayContent) -> None:
     Host-only. This checks actor content without a source provenance reference;
     against-replay validation is the separate source-correspondence check.
     """
-    if type(content) not in (ActorPovReplayContentV1, ActorPovReplayContentV2):
+    if type(content) not in (
+        ActorPovReplayContentV1,
+        ActorPovReplayContentV2,
+        ActorPovReplayContentV3,
+    ):
         raise TypeError("actor POV content requires an exact supported root")
     validate_declared_model_tree(
         content, record_name="actor POV content", expected_type=type(content)
@@ -4245,8 +4830,9 @@ def export_actor_pov_replay_v2(
     Notes
     -----
     Host-only; builds and validates immutable models and canonical hashes. No input
-    is changed and no file is written. SharedObs exports are unavailable. Current
-    actor-relative feature flags and public class topology are preserved.
+    is changed and no file is written. SharedObs exports are unavailable.
+    Actor-relative feature flags and public class topology are preserved. Replay
+    V4 (the current version) exports with export_actor_pov_replay_v3 instead.
     Use replay_io for storage. Export cost grows with the retained trajectory.
     """
     from marl_battlegrounds.evaluation.replay_v3 import validate_replay_artifact_v3
@@ -4363,6 +4949,159 @@ def canonical_actor_pov_replay_json_bytes_v2(
     return canonical_json_bytes(artifact)
 
 
+def export_actor_pov_replay_v3(
+    replay: ReplayArtifactV4, *, global_slot: int
+) -> ActorPovReplayArtifactV3:
+    """Export a configured-active actor's exact NoSharedObs view from replay V4.
+
+    Parameters
+    ----------
+    replay : ReplayArtifactV4
+        Exact ReplayArtifactV4; the full source is validated before export.
+    global_slot : int
+        Exact Python integer from 0 through 9; booleans and inactive roster slots are
+        rejected. A dead configured-active actor is allowed.
+
+    Returns
+    -------
+    ActorPovReplayArtifactV3
+        New ActorPovReplayArtifactV3 with T+1 selected-actor frames (20 context
+        columns each; column 19 is the recorded Red Zone depth), T own
+        transitions, public completion metadata, an actor-content digest, and a
+        separate source provenance envelope/digest.
+
+    Raises
+    ------
+    TypeError
+        replay is not the exact ReplayArtifactV4.
+    ValueError
+        Replay validation, projection/mode, actor selection, topology, or result
+        validation fails. A SharedObs replay fails with the projection-version
+        message.
+
+    Notes
+    -----
+    Host-only; builds and validates immutable models and canonical hashes. No input
+    is changed and no file is written. SharedObs exports are unavailable.
+    Actor-relative feature flags and public class topology are preserved, as in
+    POV V2. Use replay_io for storage. Export cost grows with the retained
+    trajectory.
+    """
+    from marl_battlegrounds.evaluation.replay_v4 import validate_replay_artifact_v4
+
+    if type(replay) is not ReplayArtifactV4:
+        raise TypeError("actor POV V3 export requires ReplayArtifactV4")
+    validate_replay_artifact_v4(replay)
+    artifact = _export_from_validated_replay(replay, global_slot=global_slot)
+    if type(artifact) is not ActorPovReplayArtifactV3:
+        raise TypeError("replay V4 must produce actor POV V3")
+    validate_actor_pov_replay_artifact_v3(artifact)
+    return artifact
+
+
+def validate_actor_pov_replay_artifact_v3(artifact: ActorPovReplayArtifactV3) -> None:
+    """Validate a standalone POV V3 envelope and its local actor content.
+
+    Parameters
+    ----------
+    artifact : ActorPovReplayArtifactV3
+        Exact ActorPovReplayArtifactV3, including its declared nested model types.
+
+    Returns
+    -------
+    None
+        None when canonical structure, IDs, digests, completion, and local cue
+        derivation agree.
+
+    Raises
+    ------
+    ValueError
+        The root or a declared nested model is not the exact expected type (for
+        example a POV V2 artifact), or stored values, hashes, temporal joins, or
+        cues are inconsistent.
+
+    Notes
+    -----
+    Host-only; does not read the referenced replay or write files. To establish
+    source correspondence, use validate_actor_pov_replay_against_replay_v3.
+    """
+    validate_declared_model_tree(
+        artifact, record_name="actor POV replay", expected_type=ActorPovReplayArtifactV3
+    )
+    validate_actor_pov_replay_content(artifact.content)
+
+
+def validate_actor_pov_replay_against_replay_v3(
+    artifact: ActorPovReplayArtifactV3, replay: ReplayArtifactV4
+) -> None:
+    """Prove that this POV V3 artifact equals the selected source-replay export.
+
+    Parameters
+    ----------
+    artifact : ActorPovReplayArtifactV3
+        ActorPovReplayArtifactV3 to compare, including its selected global slot.
+    replay : ReplayArtifactV4
+        Exact ReplayArtifactV4 declared as the source.
+
+    Returns
+    -------
+    None
+        None when the entire artifact equals the independently rebuilt source
+        projection.
+
+    Raises
+    ------
+    TypeError
+        The artifact or the source replay has an unsupported exact type.
+    ValueError
+        Source validation, actor selection, or exact artifact comparison fails.
+
+    Notes
+    -----
+    Host-only; recomputes the source projection and hashes without writing files.
+    Checks the supplied artifact's exact root first, then compares it with the
+    validated rebuilt export by model equality.
+    """
+    if type(artifact) is not ActorPovReplayArtifactV3:
+        raise TypeError("actor POV V3 source check requires ActorPovReplayArtifactV3")
+    if artifact != export_actor_pov_replay_v3(
+        replay, global_slot=artifact.content.selected_global_slot
+    ):
+        raise ValueError("actor POV does not match its source replay")
+
+
+def canonical_actor_pov_replay_json_bytes_v3(
+    artifact: ActorPovReplayArtifactV3,
+) -> bytes:
+    """Validate and serialize the full POV V3 provenance envelope.
+
+    Parameters
+    ----------
+    artifact : ActorPovReplayArtifactV3
+        Exact ActorPovReplayArtifactV3 with valid local content.
+
+    Returns
+    -------
+    bytes
+        Canonical compact, key-sorted UTF-8 JSON bytes including content, its digest,
+        and the full source replay reference. No file is written.
+
+    Raises
+    ------
+    TypeError
+        A declared model type is unsupported.
+    ValueError
+        Artifact validation or canonical serialization fails.
+
+    Notes
+    -----
+    Envelope bytes can differ when full-source provenance differs even if the
+    actor-authorized content is identical.
+    """
+    validate_actor_pov_replay_artifact_v3(artifact)
+    return canonical_json_bytes(artifact)
+
+
 __all__ = [
     "ACTOR_POV_ADJACENT_TRANSITION_SLICE_SCHEMA_ID",
     "ACTOR_POV_ARTIFACT_SCHEMA_ID",
@@ -4371,22 +5110,27 @@ __all__ = [
     "ACTOR_POV_CURRENT_SLICE_SCHEMA_ID",
     "ACTOR_POV_SCHEMA_VERSION",
     "ACTOR_POV_SCHEMA_VERSION_V2",
+    "ACTOR_POV_SCHEMA_VERSION_V3",
     "ActorPovAcceptedActionV1",
     "ActorPovActionMaskV1",
     "ActorPovAdjacentTransitionSlice",
     "ActorPovAdjacentTransitionSliceV1",
     "ActorPovAdjacentTransitionSliceV2",
+    "ActorPovAdjacentTransitionSliceV3",
     "ActorPovAxisMapping",
     "ActorPovAxisMappingV1",
     "ActorPovAxisMappingV2",
+    "ActorPovAxisMappingV3",
     "ActorPovCurrentSlice",
     "ActorPovCurrentSliceV1",
     "ActorPovCurrentSliceV2",
+    "ActorPovCurrentSliceV3",
     "ActorPovEpisodeCompletionV1",
     "ActorPovEpisodeEndedCueV1",
     "ActorPovFrame",
     "ActorPovFrameV1",
     "ActorPovFrameV2",
+    "ActorPovFrameV3",
     "ActorPovOwnActionOutcomeCueV1",
     "ActorPovOwnCooldownChangedCueV1",
     "ActorPovOwnHealthChangedCueV1",
@@ -4398,9 +5142,11 @@ __all__ = [
     "ActorPovReplayArtifact",
     "ActorPovReplayArtifactV1",
     "ActorPovReplayArtifactV2",
+    "ActorPovReplayArtifactV3",
     "ActorPovReplayContent",
     "ActorPovReplayContentV1",
     "ActorPovReplayContentV2",
+    "ActorPovReplayContentV3",
     "ActorPovSpawnLifecycleV1",
     "ActorPovSubmittedActionV1",
     "ActorPovTransitionV1",
@@ -4410,14 +5156,18 @@ __all__ = [
     "canonical_actor_pov_content_json_bytes_v1",
     "canonical_actor_pov_replay_json_bytes_v1",
     "canonical_actor_pov_replay_json_bytes_v2",
+    "canonical_actor_pov_replay_json_bytes_v3",
     "export_actor_pov_replay_v1",
     "export_actor_pov_replay_v2",
+    "export_actor_pov_replay_v3",
     "slice_actor_pov_current_frame_v1",
     "slice_actor_pov_current_transition_v1",
     "validate_actor_pov_replay_against_replay_v1",
     "validate_actor_pov_replay_against_replay_v2",
+    "validate_actor_pov_replay_against_replay_v3",
     "validate_actor_pov_replay_artifact_v1",
     "validate_actor_pov_replay_artifact_v2",
+    "validate_actor_pov_replay_artifact_v3",
     "validate_actor_pov_replay_content",
     "validate_actor_pov_replay_content_v1",
 ]

@@ -25,11 +25,14 @@ loop, checkpoint, curriculum or training run; ``training.qmix_learner`` joins
 these pieces to the shared collection owner.
 
 Actors read only their permitted SharedObs input and their own memory. The
-mixer alone reads the separate 919-value physical training state; it never
-enters action selection. Requires the optional training extra. Everything here
-is pure JAX that works inside jit, vmap and scan, except the host-only setting
-checks. The default settings are the donor's starting values, not settings
-qualified for learning in MARL-BGs.
+mixer alone reads the separate 920-value physical training state; it never
+enters action selection. Q-networks trained before Red Zone, on historical
+actor input schema 1, play through a separate cached schema-1 hook that
+removes the Red Zone depth column and keeps the old spawn-side formula.
+Requires the optional training extra. Everything here is pure JAX that works
+inside jit, vmap and scan, except the host-only setting checks. The default
+settings are the donor's starting values, not settings qualified for learning
+in MARL-BGs.
 """
 
 import functools
@@ -63,13 +66,20 @@ from marl_battlegrounds.baselines.actions import (
 )
 from marl_battlegrounds.baselines.inputs import (
     ACTOR_FEATURE_SIZE,
+    ACTOR_INPUT_SCHEMA_VERSION,
     SPAWN_FRAMES,
     TRAINING_STATE_FEATURE_SIZE,
     encode_actor_inputs,
+    schema_1_actor_input,
     spawn_frame_flag,
     team_obstacle_partners,
 )
-from marl_battlegrounds.baselines.ppo import MLPTorso, _input_scale, _spawn_frame
+from marl_battlegrounds.baselines.ppo import (
+    MLPTorso,
+    _actor_input_schema,
+    _input_scale,
+    _spawn_frame,
+)
 from marl_battlegrounds.evaluation.policy_execution import (
     System,
     SystemInput,
@@ -350,7 +360,7 @@ class QMIXBatch(NamedTuple):
     ----------
     actor_features : Array
         Float32 (M,S,5,F_A) encoded permitted actor inputs in the network frame.
-        F_A is ACTOR_FEATURE_SIZE (5164) for real inputs; reference tests may
+        F_A is ACTOR_FEATURE_SIZE (5165) for real inputs; reference tests may
         use a smaller width.
     action_mask : Array
         Bool (M,S,5,198) categorical legality in the network frame.
@@ -375,7 +385,7 @@ class QMIXBatch(NamedTuple):
         configured actors stay active.
     training_state : Array
         Float32 (M,S,F_S) world-frame physical state for the mixer only. F_S is
-        TRAINING_STATE_FEATURE_SIZE (919) for real inputs.
+        TRAINING_STATE_FEATURE_SIZE (920) for real inputs.
 
     Notes
     -----
@@ -571,8 +581,8 @@ class QMixingNetwork(nn.Module):
     """Combine five local utilities into one team value, monotonically.
 
     Hypernetworks read the layer-normalized physical state: ``hyper_w1``
-    (919→64→160), ``hyper_b1`` (919→32), ``hyper_w2`` (919→64→32) and
-    ``hyper_b2`` (919→32→ReLU→1). The first and second weights pass through
+    (920→64→160), ``hyper_b1`` (920→32), ``hyper_w2`` (920→64→32) and
+    ``hyper_b2`` (920→32→ReLU→1). The first and second weights pass through
     absolute value, so raising any utility never lowers the team value. The
     hidden layer uses ELU. Parameter paths match the donor's QMixingNetwork.
     """
@@ -1112,6 +1122,65 @@ def _q_actor_apply(
     return apply
 
 
+@functools.lru_cache(maxsize=16)
+def _schema_1_q_actor_apply(
+    scale: float, spawn_frame: str
+) -> Callable[[QMIXActorVariables, Array, SystemInput, Array], SystemOutput]:
+    """Cache a QMIX hook for Q-networks trained on actor input schema 1.
+
+    Parameters
+    ----------
+    scale : float
+        Already checked positive finite input scale.
+    spawn_frame : str
+        Already checked frame name, "world" or "left".
+
+    Returns
+    -------
+    Callable
+        An apply hook that turns each call's actor views into the historical
+        19-column view with schema_1_actor_input, then runs the unchanged
+        _apply_q_actor. The encoder uses the 5,164-feature schema-1 layout,
+        and the "left" frame uses the old spawn-side formula for both the
+        reflected view and the returned actions, so the actor plays exactly
+        as before Red Zone. Keyword defaults record scale and frame index as
+        in _q_actor_apply; the hook's own name and code give it a distinct
+        registration ID.
+
+    Notes
+    -----
+    Host-only construction; the hook captures no weights or live inputs.
+    Caching keeps one callable, and so one compiled program, per setting.
+    """
+    frame_index = SPAWN_FRAMES.index(spawn_frame)
+
+    def apply(
+        variables: QMIXActorVariables,
+        memory: Array,
+        inputs: SystemInput,
+        keys: Array,
+        *,
+        input_scale: float = scale,
+        spawn_frame_index: int = frame_index,
+    ) -> SystemOutput:
+        """Apply a schema-1 QMIX actor to its historical 19-column view.
+
+        Arguments, outputs and effects follow _apply_q_actor; only the context
+        depth column is removed first. Normal System execution supplies only
+        the first four arguments.
+        """
+        return _apply_q_actor(
+            variables,
+            memory,
+            inputs._replace(actors=schema_1_actor_input(inputs.actors)),
+            keys,
+            input_scale=input_scale,
+            spawn_frame_index=spawn_frame_index,
+        )
+
+    return apply
+
+
 def make_qmix_system(
     params: Tree,
     *,
@@ -1120,6 +1189,7 @@ def make_qmix_system(
     spawn_frame: str = "left",
     name: str = "QMIX",
     checkpoint: str | None = None,
+    actor_input_schema: int = ACTOR_INPUT_SCHEMA_VERSION,
 ) -> System:
     """Wrap Q-network variables as an M8 JAX System with epsilon-greedy actions.
 
@@ -1140,6 +1210,13 @@ def make_qmix_system(
         Nonempty display name; it proves nothing about training.
     checkpoint : str or None, default=None
         Optional identity label. No file is opened.
+    actor_input_schema : int, default=ACTOR_INPUT_SCHEMA_VERSION
+        Actor input schema the weights were trained on: 2, the current
+        5,165-feature schema (the default), or 1 for Q-networks trained before
+        Red Zone (5,164 features). Schema 1 picks the cached
+        _schema_1_q_actor_apply hook once here, so the actor sees and acts
+        exactly as before. The factory does not compare the weights' width
+        with the schema.
 
     Returns
     -------
@@ -1151,7 +1228,8 @@ def make_qmix_system(
     Raises
     ------
     ValueError
-        epsilon, input_scale, spawn_frame or name is invalid.
+        epsilon, input_scale, spawn_frame, actor_input_schema or name is
+        invalid.
 
     Notes
     -----
@@ -1159,7 +1237,14 @@ def make_qmix_system(
     no mixer, target network, optimizer, replay or physical state.
     """
     rate = _unit_interval(epsilon, "epsilon")
-    apply = _q_actor_apply(_input_scale(input_scale), _spawn_frame(spawn_frame))
+    scale = _input_scale(input_scale)
+    frame = _spawn_frame(spawn_frame)
+    hook = (
+        _schema_1_q_actor_apply
+        if _actor_input_schema(actor_input_schema) == 1
+        else _q_actor_apply
+    )
+    apply = hook(scale, frame)
     return System(
         name,
         apply,

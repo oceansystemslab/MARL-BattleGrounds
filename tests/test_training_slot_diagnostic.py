@@ -3,6 +3,8 @@
 Physical classes and complete respawn banks must stay fixed for a focal-side
 comparison. Synthetic complete blocks prove score direction, weights, uncertainty,
 coverage rejection and the declared power calculation without training a model.
+Built schedules use the declared Red Zone depth (default 5.0, or 6.0 and 0.0 when
+given); explicit configs keep their own rules, so a depth beside them is refused.
 """
 
 import math
@@ -77,6 +79,31 @@ def test_controlled_schedule_preserves_class_positions_and_all_respawn_pads() ->
             assert (
                 on_a.metadata["physical_side"] == on_b.metadata["physical_side"] == side
             )
+
+
+def test_built_schedule_uses_the_declared_red_zone_depth() -> None:
+    def depths(schedules: tuple[tuple[Any, ...], tuple[Any, ...]]) -> set[float]:
+        return {
+            float(row.env_config.team_deathmatch_red_zone_depth)
+            for rows in schedules
+            for row in rows
+        }
+
+    assert depths(make_slot_diagnostic_schedule(maps=(42,), seed_blocks=1)) == {5.0}
+    assert depths(
+        make_slot_diagnostic_schedule(maps=(42,), seed_blocks=1, red_zone_depth=6.0)
+    ) == {6.0}
+    assert depths(
+        make_slot_diagnostic_schedule(maps=(42,), seed_blocks=1, red_zone_depth=0.0)
+    ) == {0.0}
+    a, b = canonical_tournament_rosters()
+    config = make_standard_team_deathmatch_config(
+        map_id=42, team_a_roster=a, team_b_roster=b, red_zone_depth=0.0
+    )
+    with pytest.raises(ValueError, match="owns its rules"):
+        make_slot_diagnostic_schedule(
+            maps=(42,), seed_blocks=1, configs=(config,), red_zone_depth=0.0
+        )
 
 
 def test_exact_fixed_population_schedule_and_planning_bound() -> None:

@@ -6,6 +6,7 @@
  */
 import { authoringObjects, mapContent } from "./authoring-model.js";
 import { createSvgIcon } from "./icons.js";
+import { redZoneFloorIntervals } from "./layout.js";
 
 const SVG_NAMESPACE = "http://www.w3.org/2000/svg";
 const DEFAULT_MAP_WIDTH = 20;
@@ -261,14 +262,21 @@ export function panAuthoringCamera(camera, deltaVisualX, deltaVisualY) {
 }
 
 /**
- * Replace svg's children with the draft map, grid, objects and selection.
+ * Replace svg's children with the draft map, Red Zone tint, grid, objects and
+ * selection.
  *
  * draft is a map/scenario draft understood by mapContent. selectedId marks
  * the matching object; null selects none. camera is normalized against map
  * dimensions. gridSpacing is positive in world units. catalog defaults to
- * null; missing mechanics use the documented display radii. Return the
- * resolved frozen camera. Invalid map dimensions render an explanatory
- * fallback panel and return its camera.
+ * null; missing mechanics use the documented display radii. redZone defaults
+ * to null (no tint); otherwise it is the host validation reply's `red_zone`
+ * strips for this exact draft, `{team_a_x_range, team_b_x_range}` in world x.
+ * Each strip is clipped to the map, merged where strips overlap
+ * (redZoneFloorIntervals) and painted full height after the floor and before
+ * the grid, inside the map clip, so obstacles, pads and agents stay on top.
+ * No side rule or depth number is computed here. Return the resolved frozen
+ * camera. Invalid map dimensions render an explanatory fallback panel and
+ * return its camera.
  *
  * The function mutates svg, using fixed clip/grid IDs and the page document
  * for primitives. Use one authoring surface in that document. Shape values
@@ -277,6 +285,7 @@ export function panAuthoringCamera(camera, deltaVisualX, deltaVisualY) {
  * file writes, network calls or simulator steps occur.
  *
  * @param {SVGSVGElement} svg @param {any} draft @param {string | null} selectedId @param {any} camera @param {number} gridSpacing @param {any} catalog
+ * @param {Readonly<{team_a_x_range: readonly number[], team_b_x_range: readonly number[]}> | null} [redZone]
  */
 export function renderAuthoringSvg(
   svg,
@@ -285,6 +294,7 @@ export function renderAuthoringSvg(
   camera,
   gridSpacing,
   catalog = null,
+  redZone = null,
 ) {
   const map = mapContent(draft);
   const dimensions = authoringMapDimensions(map.width, map.height);
@@ -364,6 +374,18 @@ export function renderAuthoringSvg(
       height: dimensions.height,
     }),
   );
+  for (const interval of redZoneFloorIntervals(dimensions.width, redZone)) {
+    svg.append(
+      svgElement("rect", {
+        class: "authoring-svg-red-zone",
+        x: interval.start,
+        y: 0,
+        width: interval.end - interval.start,
+        height: dimensions.height,
+        "clip-path": "url(#authoring-map-clip)",
+      }),
+    );
+  }
   svg.append(
     svgElement("rect", {
       class: "authoring-svg-grid",

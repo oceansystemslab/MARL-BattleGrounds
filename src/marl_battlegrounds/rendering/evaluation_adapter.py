@@ -53,6 +53,7 @@ from marl_battlegrounds.evaluation.models import (
     EvaluationFrame,
     EvaluationFrameV1,
     EvaluationFrameV2,
+    EvaluationFrameV3,
     EvaluationTransitionV1,
     evaluation_context_type,
 )
@@ -109,6 +110,7 @@ from marl_battlegrounds.evaluation.pov import (
     ActorPovAxisMapping,
     ActorPovAxisMappingV1,
     ActorPovAxisMappingV2,
+    ActorPovAxisMappingV3,
     ActorPovPreviousTimestepActionsV1,
     ActorPovSpawnLifecycleV1,
 )
@@ -118,6 +120,7 @@ from marl_battlegrounds.evaluation.validation import (
 )
 from marl_battlegrounds.evaluation.wire_shapes import (
     CONTEXT_FEATURES_V1,
+    CONTEXT_FEATURES_V2,
     MAX_AGENT_SLOTS_V1,
     MAX_AGENTS_PER_TEAM_V1,
     MAX_OBJECTIVE_SLOTS_V1,
@@ -460,7 +463,8 @@ class _SharedObsBaseSensorFrame:
     Attributes
     ----------
     schema_version : int
-        Python int 1 for the historical subtype or 2 for the current subtype.
+        Python int matching the subtype: 1 (historical, physical team IDs), 2
+        (relative flags, 19 context columns) or 3 (current, 20 context columns).
     observation_materialization : Literal['source_material_only']
         The literal source_material_only; this is not composed SharedObs input.
     episode_id : str
@@ -487,7 +491,9 @@ class _SharedObsBaseSensorFrame:
     objective_features : tuple[tuple[float, ...], ...]
         Finite Python float tuples (8, 12) copied from the base observation.
     context_features : tuple[float, ...]
-        Finite Python float tuple (19,) of base-observation context.
+        Finite Python float tuple of base-observation context: (19,) for
+        versions 1 and 2, or (20,) for version 3, whose column 19 is the Team
+        Deathmatch Red Zone depth.
     ally_visibility_mask : tuple[bool, ...]
         Exact Python bool tuple (5,) gating own-team base sensor rows.
     enemy_visibility_mask : tuple[bool, ...]
@@ -510,12 +516,12 @@ class _SharedObsBaseSensorFrame:
     Notes
     -----
     Feature column meanings depend on schema version. V1 column three stores
-    physical team IDs; V2 stores is_enemy. This record retains no arrays and
-    does not combine teammate observations.
+    physical team IDs; V2 and V3 store is_enemy. This record retains no arrays
+    and does not combine teammate observations.
     """
 
     schema_version: int
-    """Python int 1 for the historical subtype or 2 for the current subtype."""
+    """Python int 1, 2 or 3 matching the subtype (see the class Attributes)."""
     observation_materialization: Literal["source_material_only"]
     """The literal source_material_only; this is not composed SharedObs input."""
     episode_id: str
@@ -545,7 +551,9 @@ class _SharedObsBaseSensorFrame:
     objective_features: tuple[tuple[float, ...], ...]
     """Finite Python float tuples (8, 12) copied from the base observation."""
     context_features: tuple[float, ...]
-    """Finite Python float tuple (19,) of base-observation context."""
+    """Finite Python float tuple (19,) for versions 1 and 2, or (20,) for version 3
+    (column 19 is the Red Zone depth).
+    """
     ally_visibility_mask: tuple[bool, ...]
     """Exact Python bool tuple (5,) gating own-team base sensor rows."""
     enemy_visibility_mask: tuple[bool, ...]
@@ -569,9 +577,20 @@ class _SharedObsBaseSensorFrame:
         """
         if type(self.schema_version) is not int or (
             self.schema_version
-            != (2 if type(self) is SharedObsBaseSensorFrameV2 else 1)
+            != (
+                3
+                if type(self) is SharedObsBaseSensorFrameV3
+                else 2
+                if type(self) is SharedObsBaseSensorFrameV2
+                else 1
+            )
         ):
             raise ValueError("unknown SharedObs base-sensor frame version.")
+        context_width = (
+            CONTEXT_FEATURES_V2
+            if type(self) is SharedObsBaseSensorFrameV3
+            else CONTEXT_FEATURES_V1
+        )
         if self.observation_materialization != "source_material_only":
             raise ValueError("SharedObs base-sensor frames are source material only.")
         for name in ("episode_id", "public_agent_id"):
@@ -608,7 +627,7 @@ class _SharedObsBaseSensorFrame:
                 "objective_features",
                 (MAX_OBJECTIVE_SLOTS_V1, OBJECTIVE_FEATURES_V1),
             ),
-            ("context_features", (CONTEXT_FEATURES_V1,)),
+            ("context_features", (context_width,)),
         ):
             _require_tuple_shape(
                 getattr(self, name),
@@ -673,7 +692,7 @@ class SharedObsBaseSensorFrameV1(_SharedObsBaseSensorFrame):
 
 @dataclass(frozen=True, slots=True, kw_only=True)
 class SharedObsBaseSensorFrameV2(_SharedObsBaseSensorFrame):
-    """Keep current base-sensor data with actor-relative relation flags.
+    """Keep base-sensor data with actor-relative relation flags (19 context columns).
 
     Inherited fields follow _SharedObsBaseSensorFrame.
     This is a frozen, slotted, keyword-only host record.
@@ -693,7 +712,8 @@ class SharedObsBaseSensorFrameV2(_SharedObsBaseSensorFrame):
     -----
     Feature column three is is_enemy, with zero for self/own team and one for
     opponents. Self retains its roster position rather than being moved to the
-    first row.
+    first row. Read from frame V2 (context V3); SharedObsBaseSensorFrameV3 is the
+    20-column subclass for frame V3.
     """
 
     self_ally_index: int
@@ -713,7 +733,32 @@ class SharedObsBaseSensorFrameV2(_SharedObsBaseSensorFrame):
             raise ValueError("self is_enemy must be zero.")
 
 
-type SharedObsBaseSensorFrame = SharedObsBaseSensorFrameV1 | SharedObsBaseSensorFrameV2
+@dataclass(frozen=True, slots=True, kw_only=True)
+class SharedObsBaseSensorFrameV3(SharedObsBaseSensorFrameV2):
+    """Keep current base-sensor data with 20 context columns.
+
+    Inherited fields and the self_ally_index rule follow SharedObsBaseSensorFrameV2,
+    so that rule keeps one owner. This subclass adds no field.
+    This is a frozen, slotted, keyword-only host record.
+
+    Raises
+    ------
+    ValueError
+        Inherited frame validation fails, schema_version is not 3, or
+        context_features does not hold 20 values.
+
+    Notes
+    -----
+    Read from frame V3 of a context V4 recording. Context column 19 is the
+    configured Team Deathmatch Red Zone depth. Checks that accept V2 by exact
+    type must name V3 too, because the exact-type check does not follow
+    inheritance.
+    """
+
+
+type SharedObsBaseSensorFrame = (
+    SharedObsBaseSensorFrameV1 | SharedObsBaseSensorFrameV2 | SharedObsBaseSensorFrameV3
+)
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
@@ -725,7 +770,7 @@ class SharedObsBaseSensorSceneV1:
     Attributes
     ----------
     schema_version : int
-        Exact Python int 1; this scene root serves both supported source-frame versions.
+        Exact Python int 1; this scene root serves all supported source-frame versions.
     audience_badge : str
         Exact source-material disclosure label defined by this module.
     observation_materialization : Literal['source_material_only']
@@ -764,7 +809,7 @@ class SharedObsBaseSensorSceneV1:
     """
 
     schema_version: int
-    """Exact Python int 1; this scene root serves both supported source-frame
+    """Exact Python int 1; this scene root serves all supported source-frame
     versions.
     """
     audience_badge: str
@@ -856,7 +901,7 @@ class _SharedObsSourceMaterialProjection:
     Attributes
     ----------
     schema_version : int
-        Python int 1 for the historical subtype or 2 for the current subtype.
+        Python int 1, 2 or 3 matching the subtype and its base-sensor frame.
     disclosure_label : str
         Exact source-material disclosure label defined by this module.
     observation_materialization : Literal['source_material_only']
@@ -895,7 +940,7 @@ class _SharedObsSourceMaterialProjection:
     """
 
     schema_version: int
-    """Python int 1 for the historical subtype or 2 for the current subtype."""
+    """Python int 1, 2 or 3 matching the subtype and its base-sensor frame."""
     disclosure_label: str
     """Exact source-material disclosure label defined by this module."""
     observation_materialization: Literal["source_material_only"]
@@ -933,7 +978,13 @@ class _SharedObsSourceMaterialProjection:
         """
         if type(self.schema_version) is not int or (
             self.schema_version
-            != (2 if type(self) is SharedObsSourceMaterialProjectionV2 else 1)
+            != (
+                3
+                if type(self) is SharedObsSourceMaterialProjectionV3
+                else 2
+                if type(self) is SharedObsSourceMaterialProjectionV2
+                else 1
+            )
         ):
             raise ValueError("unknown SharedObs source-material projection version.")
         if self.disclosure_label != _SHARED_OBS_SOURCE_MATERIAL_DISCLOSURE:
@@ -942,9 +993,10 @@ class _SharedObsSourceMaterialProjection:
             raise ValueError("SharedObs projection must remain source material only.")
         if self.exact_actor_input_export_available is not False:
             raise ValueError("SharedObs exact actor-input export is unavailable.")
-        if (
-            type(self.axis_mapping) is not ActorPovAxisMappingV1
-            and type(self.axis_mapping) is not ActorPovAxisMappingV2
+        if type(self.axis_mapping) not in (
+            ActorPovAxisMappingV1,
+            ActorPovAxisMappingV2,
+            ActorPovAxisMappingV3,
         ):
             raise ValueError("axis_mapping must be the exact actor POV mapping root.")
         reconstructed_axis = type(self.axis_mapping).model_validate(
@@ -971,9 +1023,10 @@ class _SharedObsSourceMaterialProjection:
             )
         ) != set(range(MAX_AGENT_SLOTS_V1)):
             raise ValueError("SharedObs relation axes must partition global slots.")
-        if (
-            type(self.base_sensor_frame) is not SharedObsBaseSensorFrameV1
-            and type(self.base_sensor_frame) is not SharedObsBaseSensorFrameV2
+        if type(self.base_sensor_frame) not in (
+            SharedObsBaseSensorFrameV1,
+            SharedObsBaseSensorFrameV2,
+            SharedObsBaseSensorFrameV3,
         ):
             raise ValueError(
                 "base_sensor_frame must use its exact source-material root."
@@ -1124,7 +1177,7 @@ class SharedObsSourceMaterialProjectionV1(_SharedObsSourceMaterialProjection):
 
 @dataclass(frozen=True, slots=True, kw_only=True)
 class SharedObsSourceMaterialProjectionV2(_SharedObsSourceMaterialProjection):
-    """Keep current actor-relative SharedObs source material.
+    """Keep actor-relative SharedObs source material recorded before the Red Zone rule.
 
     Inherited fields follow _SharedObsSourceMaterialProjection.
     This is a frozen, slotted, keyword-only host record.
@@ -1153,8 +1206,43 @@ class SharedObsSourceMaterialProjectionV2(_SharedObsSourceMaterialProjection):
     """Exact SharedObsBaseSensorFrameV2 for the selected recipient."""
 
 
+@dataclass(frozen=True, slots=True, kw_only=True)
+class SharedObsSourceMaterialProjectionV3(_SharedObsSourceMaterialProjection):
+    """Keep current SharedObs source material with 20 context columns.
+
+    Inherited fields follow _SharedObsSourceMaterialProjection.
+    This is a frozen, slotted, keyword-only host record.
+
+    Attributes
+    ----------
+    axis_mapping : ActorPovAxisMappingV3
+        Exact ActorPovAxisMappingV3 for this schema.
+    base_sensor_frame : SharedObsBaseSensorFrameV3
+        Exact SharedObsBaseSensorFrameV3 for the selected recipient.
+
+    Raises
+    ------
+    ValueError
+        Inherited projection checks fail or schema_version is not 3.
+
+    Notes
+    -----
+    Built from frame V3 of a context V4 recording (SharedObs projection V3). A
+    sibling of V1 and V2. All other fields follow
+    _SharedObsSourceMaterialProjection. This record does not claim to contain
+    the composed actor input.
+    """
+
+    axis_mapping: ActorPovAxisMappingV3
+    """Exact ActorPovAxisMappingV3 for this schema."""
+    base_sensor_frame: SharedObsBaseSensorFrameV3
+    """Exact SharedObsBaseSensorFrameV3 for the selected recipient."""
+
+
 type SharedObsSourceMaterialProjection = (
-    SharedObsSourceMaterialProjectionV1 | SharedObsSourceMaterialProjectionV2
+    SharedObsSourceMaterialProjectionV1
+    | SharedObsSourceMaterialProjectionV2
+    | SharedObsSourceMaterialProjectionV3
 )
 
 
@@ -1173,7 +1261,7 @@ def _validate_projection_inputs(
     for broken structural, temporal or episode joins.
     """
     evaluation_context_type(context)
-    if type(frame) is not EvaluationFrameV1 and type(frame) is not EvaluationFrameV2:
+    if type(frame) not in (EvaluationFrameV1, EvaluationFrameV2, EvaluationFrameV3):
         raise TypeError("frame must be the exact EvaluationFrameV1 root.")
     if frame.episode_id != context.identity.episode_id:
         raise ValueError("selected frame must join the context episode.")
@@ -1244,7 +1332,8 @@ def _base_sensor_axis_mapping(
     """Copy recorded public action/observation mappings for one recipient.
 
     context owns the catalog and roster; selected_global_slot is a validated
-    slot in 0..9. Return V2 axes for context schema 3, otherwise historical V1.
+    slot in 0..9. Return V3 axes for context schema 4, V2 axes for context
+    schema 3, otherwise historical V1.
     The mapping includes self and unused slots, and leaves world movement
     directions unchanged. No policy input is materialized.
     """
@@ -1268,7 +1357,11 @@ def _base_sensor_axis_mapping(
         selected_global_slot
     ]
     axis_type = (
-        ActorPovAxisMappingV2 if context.schema_version == 3 else ActorPovAxisMappingV1
+        ActorPovAxisMappingV3
+        if context.schema_version == 4
+        else ActorPovAxisMappingV2
+        if context.schema_version == 3
+        else ActorPovAxisMappingV1
     )
     return axis_type(
         actor_projection_identifier=context.actor_projection.identifier,
@@ -1304,20 +1397,23 @@ def _base_sensor_frame(
 
     frame supplies the selected epoch; selected_global_slot in 0..9 chooses
     the actor, and public_agent_id supplies its already-joined identity. Return
-    a version-matched SharedObsBaseSensorFrame, including history/lifecycle
-    records and V2 self index. Do not combine other sources or grant access.
+    a version-matched SharedObsBaseSensorFrame (frame V1, V2 or V3 gives base
+    sensor frame V1, V2 or V3), including history/lifecycle records and the V2/V3
+    self index. Do not combine other sources or grant access.
     """
     observation = frame.base_observation
     previous = observation.previous_timestep_actions
     lifecycle = observation.spawn_lifecycle
     mask = frame.action_mask
     frame_type = (
-        SharedObsBaseSensorFrameV2
+        SharedObsBaseSensorFrameV3
+        if type(frame) is EvaluationFrameV3
+        else SharedObsBaseSensorFrameV2
         if type(frame) is EvaluationFrameV2
         else SharedObsBaseSensorFrameV1
     )
     fields: dict[str, int] = {}
-    if type(frame) is EvaluationFrameV2:
+    if type(frame) is EvaluationFrameV2 or type(frame) is EvaluationFrameV3:
         fields = {
             "self_ally_index": frame.base_observation.self_ally_index[
                 selected_global_slot
@@ -1907,7 +2003,7 @@ def initialize_status_source_evidence_v2(
     ----------
     context : EvaluationEpisodeContext
         Exact supported episode context.
-    initial_frame : EvaluationFrameV1 or EvaluationFrameV2
+    initial_frame : EvaluationFrameV1, EvaluationFrameV2 or EvaluationFrameV3
         Matching frame zero. Authored initial statuses are allowed.
 
     Returns
@@ -2030,7 +2126,7 @@ def build_status_source_evidence_index_v2(
     ----------
     context : EvaluationEpisodeContext
         Exact supported context for the trajectory.
-    frames : tuple of EvaluationFrameV1 or EvaluationFrameV2
+    frames : tuple of EvaluationFrameV1, EvaluationFrameV2 or EvaluationFrameV3
         Nonempty exact Python tuple of T+1 coherent frames starting at frame zero.
     transitions : tuple of EvaluationTransitionV1
         Exact Python tuple of T transitions joining consecutive frame pairs.
@@ -2614,7 +2710,7 @@ def build_evaluation_battlefield_scene_v2(
     ----------
     context : EvaluationEpisodeContext
         Exact supported recorded context, including roster, catalog and episode ID.
-    frame : EvaluationFrameV1 or EvaluationFrameV2
+    frame : EvaluationFrameV1, EvaluationFrameV2 or EvaluationFrameV3
         Exact selected recorded frame joined to context.
     transition_view : EvaluationTransitionViewV1 or None, optional
         Coherent incoming transition whose successor equals frame. Required after
@@ -2789,7 +2885,9 @@ def _build_shared_obs_source_material_projection_v1(
             )
         )
     projection_type = (
-        SharedObsSourceMaterialProjectionV2
+        SharedObsSourceMaterialProjectionV3
+        if type(frame) is EvaluationFrameV3
+        else SharedObsSourceMaterialProjectionV2
         if type(frame) is EvaluationFrameV2
         else SharedObsSourceMaterialProjectionV1
     )
@@ -2823,7 +2921,7 @@ def build_shared_obs_source_material_projection_v1(
     ----------
     context : EvaluationEpisodeContext
         Exact recorded context with execution_information_mode='shared_obs'.
-    frame : EvaluationFrameV1 or EvaluationFrameV2
+    frame : EvaluationFrameV1, EvaluationFrameV2 or EvaluationFrameV3
         Matching exact frame with recorded source-availability values.
     selected_global_slot : int
         Exact Python configured-active recipient slot in 0..9.
@@ -2833,9 +2931,10 @@ def build_shared_obs_source_material_projection_v1(
 
     Returns
     -------
-    SharedObsSourceMaterialProjectionV1 or SharedObsSourceMaterialProjectionV2
-        Version follows frame. Includes the recipient's base sensor frame/scene
-        and ten availability cells. Exact composed actor-input export is False.
+    SharedObsSourceMaterialProjection
+        Version follows frame: frame V1, V2 or V3 gives projection V1, V2 or V3.
+        Includes the recipient's base sensor frame/scene and ten availability
+        cells. Exact composed actor-input export is False.
 
     Raises
     ------
@@ -2867,7 +2966,7 @@ def build_shared_obs_source_material_projection_v1(
     ----------
     context : EvaluationEpisodeContext
         Exact recorded context with execution_information_mode='shared_obs'.
-    frame : EvaluationFrameV1 or EvaluationFrameV2
+    frame : EvaluationFrameV1, EvaluationFrameV2 or EvaluationFrameV3
         Matching exact frame with recorded source-availability values.
     selected_global_slot : int
         Exact Python configured-active recipient slot in 0..9.
@@ -2877,9 +2976,55 @@ def build_shared_obs_source_material_projection_v1(
 
     Returns
     -------
-    SharedObsSourceMaterialProjectionV1 or SharedObsSourceMaterialProjectionV2
-        Version follows frame. Includes the recipient's base sensor frame/scene
-        and ten availability cells. Exact composed actor-input export is False.
+    SharedObsSourceMaterialProjection
+        Version follows frame: frame V1, V2 or V3 gives projection V1, V2 or V3.
+        Includes the recipient's base sensor frame/scene and ten availability
+        cells. Exact composed actor-input export is False.
+
+    Raises
+    ------
+    TypeError
+        An input has the wrong exact record type.
+    ValueError
+        Record validation, episode identity, frame ordering or incoming joins fail.
+
+    Notes
+    -----
+    This is a full-record researcher aid, explicitly labelled source material.
+    It does not export or claim the composed actor input. Exact SharedObs input
+    materialization is unavailable through this route. No policy is executed.
+    """
+    ...
+
+
+@overload
+def build_shared_obs_source_material_projection_v1(
+    context: EvaluationEpisodeContext,
+    frame: EvaluationFrameV3,
+    *,
+    selected_global_slot: int,
+    transition_view: EvaluationTransitionViewV1 | None = None,
+) -> SharedObsSourceMaterialProjectionV3:
+    """Project labelled base-sensor and availability evidence for SharedObs.
+
+    Parameters
+    ----------
+    context : EvaluationEpisodeContext
+        Exact recorded context with execution_information_mode='shared_obs'.
+    frame : EvaluationFrameV1, EvaluationFrameV2 or EvaluationFrameV3
+        Matching exact frame with recorded source-availability values.
+    selected_global_slot : int
+        Exact Python configured-active recipient slot in 0..9.
+    transition_view : EvaluationTransitionViewV1 or None, optional
+        Required coherent incoming view after frame zero. None is allowed only
+        at frame zero; the complete context/frame/transition join is revalidated.
+
+    Returns
+    -------
+    SharedObsSourceMaterialProjection
+        Version follows frame: frame V1, V2 or V3 gives projection V1, V2 or V3.
+        Includes the recipient's base sensor frame/scene and ten availability
+        cells. Exact composed actor-input export is False.
 
     Raises
     ------
@@ -2911,7 +3056,7 @@ def build_shared_obs_source_material_projection_v1(
     ----------
     context : EvaluationEpisodeContext
         Exact recorded context with execution_information_mode='shared_obs'.
-    frame : EvaluationFrameV1 or EvaluationFrameV2
+    frame : EvaluationFrameV1, EvaluationFrameV2 or EvaluationFrameV3
         Matching exact frame with recorded source-availability values.
     selected_global_slot : int
         Exact Python configured-active recipient slot in 0..9.
@@ -2921,9 +3066,10 @@ def build_shared_obs_source_material_projection_v1(
 
     Returns
     -------
-    SharedObsSourceMaterialProjectionV1 or SharedObsSourceMaterialProjectionV2
-        Version follows frame. Includes the recipient's base sensor frame/scene
-        and ten availability cells. Exact composed actor-input export is False.
+    SharedObsSourceMaterialProjection
+        Version follows frame: frame V1, V2 or V3 gives projection V1, V2 or V3.
+        Includes the recipient's base sensor frame/scene and ten availability
+        cells. Exact composed actor-input export is False.
 
     Raises
     ------
@@ -2954,7 +3100,7 @@ def build_shared_obs_source_material_projection_v1(
     ----------
     context : EvaluationEpisodeContext
         Exact recorded context with execution_information_mode='shared_obs'.
-    frame : EvaluationFrameV1 or EvaluationFrameV2
+    frame : EvaluationFrameV1, EvaluationFrameV2 or EvaluationFrameV3
         Matching exact frame with recorded source-availability values.
     selected_global_slot : int
         Exact Python configured-active recipient slot in 0..9.
@@ -2964,9 +3110,10 @@ def build_shared_obs_source_material_projection_v1(
 
     Returns
     -------
-    SharedObsSourceMaterialProjectionV1 or SharedObsSourceMaterialProjectionV2
-        Version follows frame. Includes the recipient's base sensor frame/scene
-        and ten availability cells. Exact composed actor-input export is False.
+    SharedObsSourceMaterialProjection
+        Version follows frame: frame V1, V2 or V3 gives projection V1, V2 or V3.
+        Includes the recipient's base sensor frame/scene and ten availability
+        cells. Exact composed actor-input export is False.
 
     Raises
     ------
@@ -3005,16 +3152,17 @@ def build_shared_obs_authority_source_material_projection_v1(
     ----------
     context : EvaluationEpisodeContext
         Exact recorded context with execution_information_mode='shared_obs'.
-    frame : EvaluationFrameV1 or EvaluationFrameV2
+    frame : EvaluationFrameV1, EvaluationFrameV2 or EvaluationFrameV3
         Matching exact frame with recorded source-availability values.
     selected_global_slot : int
         Exact Python configured-active recipient slot in 0..9.
 
     Returns
     -------
-    SharedObsSourceMaterialProjectionV1 or SharedObsSourceMaterialProjectionV2
-        Version-matched base-sensor and availability evidence. Incoming transition
-        identity is formed from frame_index; no incoming event data is supplied.
+    SharedObsSourceMaterialProjection
+        Version-matched base-sensor and availability evidence (frame V1, V2 or V3
+        gives projection V1, V2 or V3). Incoming transition identity is formed
+        from frame_index; no incoming event data is supplied.
 
     Raises
     ------
@@ -3046,16 +3194,59 @@ def build_shared_obs_authority_source_material_projection_v1(
     ----------
     context : EvaluationEpisodeContext
         Exact recorded context with execution_information_mode='shared_obs'.
-    frame : EvaluationFrameV1 or EvaluationFrameV2
+    frame : EvaluationFrameV1, EvaluationFrameV2 or EvaluationFrameV3
         Matching exact frame with recorded source-availability values.
     selected_global_slot : int
         Exact Python configured-active recipient slot in 0..9.
 
     Returns
     -------
-    SharedObsSourceMaterialProjectionV1 or SharedObsSourceMaterialProjectionV2
-        Version-matched base-sensor and availability evidence. Incoming transition
-        identity is formed from frame_index; no incoming event data is supplied.
+    SharedObsSourceMaterialProjection
+        Version-matched base-sensor and availability evidence (frame V1, V2 or V3
+        gives projection V1, V2 or V3). Incoming transition identity is formed
+        from frame_index; no incoming event data is supplied.
+
+    Raises
+    ------
+    TypeError
+        An input has the wrong exact record type.
+    ValueError
+        Record validation, episode identity, frame ordering or incoming joins fail.
+
+    Notes
+    -----
+    Revalidate the context/frame join, then use the same source-material builder
+    as the full-record diagnostic route. This narrower authority is for visual
+    union construction and does not claim composed actor-input export. It does
+    not require a transition view, read history files or execute a policy.
+    """
+    ...
+
+
+@overload
+def build_shared_obs_authority_source_material_projection_v1(
+    context: EvaluationEpisodeContext,
+    frame: EvaluationFrameV3,
+    *,
+    selected_global_slot: int,
+) -> SharedObsSourceMaterialProjectionV3:
+    """Build SharedObs visual source authority without incoming history.
+
+    Parameters
+    ----------
+    context : EvaluationEpisodeContext
+        Exact recorded context with execution_information_mode='shared_obs'.
+    frame : EvaluationFrameV1, EvaluationFrameV2 or EvaluationFrameV3
+        Matching exact frame with recorded source-availability values.
+    selected_global_slot : int
+        Exact Python configured-active recipient slot in 0..9.
+
+    Returns
+    -------
+    SharedObsSourceMaterialProjection
+        Version-matched base-sensor and availability evidence (frame V1, V2 or V3
+        gives projection V1, V2 or V3). Incoming transition identity is formed
+        from frame_index; no incoming event data is supplied.
 
     Raises
     ------
@@ -3087,16 +3278,17 @@ def build_shared_obs_authority_source_material_projection_v1(
     ----------
     context : EvaluationEpisodeContext
         Exact recorded context with execution_information_mode='shared_obs'.
-    frame : EvaluationFrameV1 or EvaluationFrameV2
+    frame : EvaluationFrameV1, EvaluationFrameV2 or EvaluationFrameV3
         Matching exact frame with recorded source-availability values.
     selected_global_slot : int
         Exact Python configured-active recipient slot in 0..9.
 
     Returns
     -------
-    SharedObsSourceMaterialProjectionV1 or SharedObsSourceMaterialProjectionV2
-        Version-matched base-sensor and availability evidence. Incoming transition
-        identity is formed from frame_index; no incoming event data is supplied.
+    SharedObsSourceMaterialProjection
+        Version-matched base-sensor and availability evidence (frame V1, V2 or V3
+        gives projection V1, V2 or V3). Incoming transition identity is formed
+        from frame_index; no incoming event data is supplied.
 
     Raises
     ------
@@ -3127,16 +3319,17 @@ def build_shared_obs_authority_source_material_projection_v1(
     ----------
     context : EvaluationEpisodeContext
         Exact recorded context with execution_information_mode='shared_obs'.
-    frame : EvaluationFrameV1 or EvaluationFrameV2
+    frame : EvaluationFrameV1, EvaluationFrameV2 or EvaluationFrameV3
         Matching exact frame with recorded source-availability values.
     selected_global_slot : int
         Exact Python configured-active recipient slot in 0..9.
 
     Returns
     -------
-    SharedObsSourceMaterialProjectionV1 or SharedObsSourceMaterialProjectionV2
-        Version-matched base-sensor and availability evidence. Incoming transition
-        identity is formed from frame_index; no incoming event data is supplied.
+    SharedObsSourceMaterialProjection
+        Version-matched base-sensor and availability evidence (frame V1, V2 or V3
+        gives projection V1, V2 or V3). Incoming transition identity is formed
+        from frame_index; no incoming event data is supplied.
 
     Raises
     ------
@@ -3587,7 +3780,7 @@ def build_researcher_analyzer_projection_v2(
     ----------
     context : EvaluationEpisodeContext
         Exact supported recorded context, including roster, catalog and episode ID.
-    frame : EvaluationFrameV1 or EvaluationFrameV2
+    frame : EvaluationFrameV1, EvaluationFrameV2 or EvaluationFrameV3
         Exact selected recorded frame joined to context.
     transition_view : EvaluationTransitionViewV1 or None, optional
         Coherent incoming transition whose successor equals frame. Required after
@@ -3657,11 +3850,13 @@ __all__ = [
     "SharedObsBaseSensorFrame",
     "SharedObsBaseSensorFrameV1",
     "SharedObsBaseSensorFrameV2",
+    "SharedObsBaseSensorFrameV3",
     "SharedObsBaseSensorSceneV1",
     "SharedObsSensorSourceAvailabilityV1",
     "SharedObsSourceMaterialProjection",
     "SharedObsSourceMaterialProjectionV1",
     "SharedObsSourceMaterialProjectionV2",
+    "SharedObsSourceMaterialProjectionV3",
     "advance_status_source_evidence_v2",
     "build_evaluation_battlefield_scene_v2",
     "build_researcher_analyzer_projection_v2",

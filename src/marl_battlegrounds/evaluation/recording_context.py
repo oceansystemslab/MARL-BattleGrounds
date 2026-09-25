@@ -17,12 +17,12 @@ from pydantic import TypeAdapter
 
 from marl_battlegrounds.core.types import EnvConfig
 from marl_battlegrounds.evaluation.actor_projection import (
-    NO_SHARED_OBS_ACTOR_PROJECTION_V3,
-    SHARED_OBS_ACTOR_PROJECTION_V2,
+    NO_SHARED_OBS_ACTOR_PROJECTION_V4,
+    SHARED_OBS_ACTOR_PROJECTION_V3,
 )
 from marl_battlegrounds.evaluation.catalog import (
-    build_evaluation_episode_context_v3,
-    build_resolved_env_config_v1,
+    build_evaluation_episode_context_v4,
+    build_resolved_env_config_v2,
 )
 from marl_battlegrounds.evaluation.models import (
     AggregationKeyV1,
@@ -30,7 +30,7 @@ from marl_battlegrounds.evaluation.models import (
     CodeRevisionV1,
     CodeRevisionV2,
     ContentAddressedIdentityV1,
-    EvaluationEpisodeContextV3,
+    EvaluationEpisodeContextV4,
     EvaluationEpisodeIdentityV1,
     EvaluationRole,
     EvaluationSeedProtocolV2,
@@ -275,7 +275,7 @@ def _map_recording_keys(
         if type(map_id) is not int:
             raise ValueError("recorded map_id must be an integer")
         if metadata is None:
-            source_geometry = build_resolved_env_config_v1(source)
+            source_geometry = build_resolved_env_config_v2(source)
             keys.extend(registered_map_metadata(map_id, source_geometry))  # pyright: ignore[reportArgumentType]
         else:
             if not isinstance(metadata, (list, tuple)):
@@ -309,7 +309,7 @@ def build_recording_context(
     episode: dict[str, object],
     policies: dict[str, object],
     details: dict[str, object],
-) -> tuple[EvaluationEpisodeContextV3, RuntimeProvenanceV1]:
+) -> tuple[EvaluationEpisodeContextV4, RuntimeProvenanceV1]:
     """Build replay context using only known execution and source facts.
 
     Parameters
@@ -342,9 +342,10 @@ def build_recording_context(
 
     Returns
     -------
-    tuple[EvaluationEpisodeContextV3, RuntimeProvenanceV1]
-        (EvaluationEpisodeContextV3, RuntimeProvenanceV1). The context records exact
-        resolved conditions, actor assignments, information contract, known seed
+    tuple[EvaluationEpisodeContextV4, RuntimeProvenanceV1]
+        (EvaluationEpisodeContextV4, RuntimeProvenanceV1). The context records exact
+        resolved conditions (resolved config V2, including the Team Deathmatch
+        Red Zone depth), actor assignments, information contract, known seed
         coordinates and verified map keys. Unknown training/checkpoint facts remain
         absent rather than being guessed.
 
@@ -385,7 +386,7 @@ def build_recording_context(
         if isinstance(runtime_payload, RuntimeProvenanceV1)
         else RuntimeProvenanceV1.model_validate_json(json.dumps(runtime_payload))
     )
-    resolved = build_resolved_env_config_v1(config)
+    resolved = build_resolved_env_config_v2(config)
     descriptor_rows = details.get("policies", [])
     descriptors = (
         cast(list[dict[str, object]], descriptor_rows)
@@ -569,7 +570,7 @@ def build_recording_context(
         )
     ):
         raise ValueError("public_agent_id_by_global_slot must contain ten string IDs")
-    context = build_evaluation_episode_context_v3(
+    context = build_evaluation_episode_context_v4(
         identity=EvaluationEpisodeIdentityV1(
             run_id=_identifier(run_id),
             evaluation_id=f"{_identifier(phase)}:{_identifier(pass_id)}",
@@ -617,9 +618,9 @@ def build_recording_context(
         capture_profile="debug",
         execution_information_mode=mode,
         actor_projection=(
-            SHARED_OBS_ACTOR_PROJECTION_V2
+            SHARED_OBS_ACTOR_PROJECTION_V3
             if mode == "shared_obs"
-            else NO_SHARED_OBS_ACTOR_PROJECTION_V3
+            else NO_SHARED_OBS_ACTOR_PROJECTION_V4
         ),
         critic_information_regime=VersionedIdentityV1(
             identifier="not_applicable", version=1

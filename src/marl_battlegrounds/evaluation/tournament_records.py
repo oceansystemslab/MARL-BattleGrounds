@@ -3,7 +3,9 @@
 TournamentRecords joins full original run/pass/episode keys to a selected logical
 schedule. The runner, physical checks, writer and result views share this host
 accessor. Reused wide reports stay in their original files and use the shared
-indexed scalar reader. This module imports no simulator, policy or JAX runtime.
+indexed scalar reader. The snapshot's pinned scalar schema picks the full-report
+header and the scalar version every record source must have. This module
+imports no simulator, policy or JAX runtime.
 """
 
 # Shared private scalar helpers own all original pass checks.
@@ -19,6 +21,8 @@ from typing import TYPE_CHECKING, Any, cast
 
 from marl_battlegrounds.evaluation.metric_catalog import (
     FULL_METRIC_NAMES,
+    FULL_METRIC_NAMES_BY_SCHEMA_VERSION,
+    METRIC_SCHEMA_VERSION,
     PRIORITY_METRIC_NAMES,
 )
 from marl_battlegrounds.evaluation.run_writer import IDENTITY_COLUMNS, MATCH_COLUMNS
@@ -38,6 +42,25 @@ _HEADERS = {
     "full_metrics.csv": (*IDENTITY_COLUMNS, *FULL_METRIC_NAMES),
     "priority_metrics.csv": (*IDENTITY_COLUMNS, *PRIORITY_METRIC_NAMES),
 }
+
+
+def _pinned_scalar_schema(config: Mapping[str, Any]) -> int:
+    """Return the scalar schema a tournament snapshot pins for its records.
+
+    config is the resolved format-1 tournament configuration. A config with a
+    compatibility section returns its scalar_schema, which must be a key of
+    FULL_METRIC_NAMES_BY_SCHEMA_VERSION (14 before the Red Zone columns, 15
+    now). A config without that section, such as a narrow internal accessor,
+    uses the current METRIC_SCHEMA_VERSION. Raises ValueError for an unknown
+    pinned version.
+    """
+    compatibility = config.get("compatibility")
+    if not isinstance(compatibility, Mapping):
+        return METRIC_SCHEMA_VERSION
+    pinned = cast(Mapping[str, Any], compatibility).get("scalar_schema")
+    if type(pinned) is not int or pinned not in FULL_METRIC_NAMES_BY_SCHEMA_VERSION:
+        raise ValueError("Unsupported tournament scalar_schema")
+    return pinned
 
 
 def origin_key(origin: Mapping[str, Any]) -> OriginKey:
@@ -81,6 +104,16 @@ class TournamentRecords:
         Local original table-name to row sequence. Defaults to no local rows.
         Reused reports are never copied into this mapping.
 
+    Attributes
+    ----------
+    scalar_schema : int
+        The snapshot's pinned scalar schema (see ``_pinned_scalar_schema``).
+        Every foreign record source manifest must record this version.
+    headers : dict of str to tuple of str
+        Raw table headers for this snapshot. ``full_metrics.csv`` uses the
+        pinned schema's saved column order, so schema-14 reports keep their
+        original 11,148 metric columns.
+
     Notes
     -----
     The accessor caches verified manifests and narrow byte indexes. It makes no
@@ -101,8 +134,20 @@ class TournamentRecords:
         run_dir: Path | None = None,
         memory: Mapping[str, Sequence[Mapping[str, Any]]] | None = None,
     ) -> None:
-        """Index narrow logical ownership, rejecting duplicate or missing jobs."""
+        """Index narrow logical ownership, rejecting duplicate or missing jobs.
+
+        Also reads the snapshot's pinned scalar schema; an unknown pinned
+        version raises ValueError.
+        """
         self.config = config
+        self.scalar_schema = _pinned_scalar_schema(config)
+        self.headers: dict[str, tuple[str, ...]] = {
+            **_HEADERS,
+            "full_metrics.csv": (
+                *IDENTITY_COLUMNS,
+                *FULL_METRIC_NAMES_BY_SCHEMA_VERSION[self.scalar_schema],
+            ),
+        }
         self.games = tuple(games)
         self.verifier = verifier
         self.manifest = manifest
@@ -165,10 +210,41 @@ class TournamentRecords:
     def source_manifest(self, game: Mapping[str, Any]) -> Mapping[str, Any]:
         """Verify the originating manifest and retain its original schema/pass data.
 
+        Parameters
+        ----------
+        game : Mapping[str, Any]
+            One selected logical game from this accessor's schedule.
+
+        Returns
+        -------
+        Mapping[str, Any]
+            The run manifest that recorded the game. A local game (its origin
+            has no source_id) gets the supplied current snapshot. A reused game
+            gets its record source's manifest, parsed once and then cached.
+            Callers must not change the returned mapping.
+
+        Raises
+        ------
+        ValueError
+            The game names an undeclared record source; the source's manifest
+            asset is missing, changed or not a JSON object; or the manifest is
+            not host schema 2 with the snapshot's pinned scalar schema
+            (scalar_schema), the "marlbg.tdm.scalar" metric schema ID, no
+            pending coordinated restore and the exact declared run identity.
+
+        Notes
+        -----
         Local games use the supplied current snapshot. Foreign manifests must be
-        current schema 2/14 with no pending coordinated restore and the exact
-        declared run identity. Historical files remain readable elsewhere but
-        cannot certify new canonical fixed-team reuse.
+        host schema 2 with the snapshot's pinned scalar schema, no pending
+        coordinated restore and the exact declared run identity. A snapshot
+        saved before the Red Zone rule pins scalar schema 14, so its own sources
+        still pass. Historical files remain readable elsewhere but cannot
+        certify new canonical fixed-team reuse. Host-only. Outside
+        AssetVerifier.verification_scope, every call rechecks the manifest
+        file's stamps through the verifier (and rehashes the file when they
+        changed), even when its parsed content is cached. Inside a scope,
+        repeated calls reuse the first check, and the file is checked for
+        changes once, when the outermost scope exits.
         """
         origin = self.origin(game)
         source_id = origin.get("source_id")
@@ -187,7 +263,7 @@ class TournamentRecords:
                 value.get("run_id") != source["run_id"]
                 or value.get("run_id") != origin["run_id"]
                 or value.get("schema_version") != 2
-                or value.get("metric_schema_version") != 14
+                or value.get("metric_schema_version") != self.scalar_schema
                 or value.get("metric_schema_id") != "marlbg.tdm.scalar"
                 or "recording_restore" in value
             ):
@@ -300,7 +376,7 @@ class TournamentRecords:
                 path,
                 table_name=filename,
                 manifest=self.source_manifest(game),
-                expected_header=_HEADERS[filename],
+                expected_header=self.headers[filename],
                 origins=origins,
             )
         return self._indexes[key]
@@ -478,7 +554,7 @@ class TournamentRecords:
                         "full report is missing a required priority measurement"
                     )
         # Cache successful conversion only after the source boundary check passes.
-        # Unchanged bytes need no second conversion of 11,148 cells per row.
+        # Unchanged bytes need no second conversion of every full-report cell.
         self._checked_full.update(selected_full)
 
     def verify_stored_ratings(self, participants: Sequence[Mapping[str, Any]]) -> None:
@@ -536,7 +612,43 @@ class TournamentRecords:
                     raise ValueError("snapshot Elo differs from its stored result row")
 
     def replay_path(self, game: Mapping[str, Any]) -> Path | None:
-        """Verify a selected original replay without rewriting its V3 identity."""
+        """Verify a selected original replay without rewriting its identity.
+
+        Parameters
+        ----------
+        game : Mapping[str, Any]
+            One selected logical game from this accessor's schedule.
+
+        Returns
+        -------
+        Path or None
+            The verified replay file's path. For a local game, None means no
+            durable replay record exists yet: none was requested, the local
+            pass has not started, or the replay is not saved yet. None also
+            comes back when a local replay record exists but this accessor has
+            no run_dir (memory-only use). A reused game never returns None.
+
+        Raises
+        ------
+        ValueError
+            A reused game lacks its requested replay ("prepare assets or use
+            rerun_existing=True"); a reused replay lacks exactly one original
+            identity in its record source, or its asset is missing; a local
+            replay path leaves its run; the file is missing, a symbolic link,
+            the wrong size or changed during verification; or its content does
+            not parse under the pinned replay model, is not canonical JSON, or
+            differs from the game's original identity (digest, run, phase, pass,
+            episode or config ID). source_manifest errors also pass through.
+
+        Notes
+        -----
+        The snapshot's replay pin picks the replay model: replay V3 for
+        snapshots saved before the Red Zone rule (pins 14, 2, 3) and replay V4
+        for current ones. Records are never read under another version.
+        Host-only: the whole file is read and parsed on the first check, and
+        again only when its file stamps (inode, size, change times) differ. No
+        file is written.
+        """
         origin = self.origin(game)
         entry = self.entry(game)
         record = (
@@ -582,9 +694,17 @@ class TournamentRecords:
         if self._replay_checks.get(identity) != counters:
             from marl_battlegrounds.evaluation.models import canonical_json_bytes
             from marl_battlegrounds.evaluation.replay_v3 import ReplayArtifactV3
+            from marl_battlegrounds.evaluation.replay_v4 import ReplayArtifactV4
 
             payload = path.read_bytes()
-            replay = ReplayArtifactV3.model_validate_json(payload)
+            # The snapshot's own replay pin picks the model: 3 before Red Zone,
+            # 4 after. Records are never read under another version.
+            model = (
+                ReplayArtifactV4
+                if self.config["compatibility"]["replay_schema"] == 4
+                else ReplayArtifactV3
+            )
+            replay = model.model_validate_json(payload)
             context = replay.header.context
             labels = {item.name: item.value for item in context.aggregation_keys}
             if (

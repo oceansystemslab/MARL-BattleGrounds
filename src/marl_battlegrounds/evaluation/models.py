@@ -2,8 +2,16 @@
 
 Records use immutable Python tuples with frozen versioned schemas. Ten global
 slots are Team A 0-4 then Team B 5-9; policy relation rows remain actor-relative.
-Context V3 and frame V2 describe current relative actor inputs. Older versions
-remain readable with their original meanings.
+Context V4, frame V3 and resolved config V2 describe current records, including
+the Team Deathmatch Red Zone depth (context column 19). Older versions remain
+readable with their original meanings: context V3 with frame V2 describes
+relative actor inputs before Red Zone, and a record without a depth means
+one point per death.
+
+This module also owns the host (JAX-free) copy of the Red Zone side and strip
+rules: red_zone_team_on_right decides a spawn bank's side exactly, and
+red_zone_x_range gives each strip's float32 bounds. Validators, scene records
+and the authoring canvas use them without importing Core.
 
 Models check their local fields and joins. Full cross-record admission lives in
 validation and replay readers; constructing one model does not rerun physics.
@@ -17,8 +25,10 @@ from __future__ import annotations
 
 import hashlib
 import json
-from collections.abc import Mapping
-from math import hypot, isfinite
+from array import array
+from collections.abc import Mapping, Sequence
+from fractions import Fraction
+from math import copysign, hypot, isfinite
 from typing import Annotated, Literal, cast
 
 from pydantic import BaseModel, ConfigDict, Field, StringConstraints, model_validator
@@ -232,6 +242,177 @@ def canonical_digest_sha256(
     else:
         payload = {key: item for key, item in value.items() if key not in excluded}
     return hashlib.sha256(canonical_json_bytes(payload)).hexdigest()
+
+
+# ---------------------------------------------------------------------------
+# Red Zone host rules (one JAX-free owner; Core owns the compiled rules)
+# ---------------------------------------------------------------------------
+
+# The smallest positive normal float32. Smaller positive depths underflow
+# (JAX treats subnormals as zero), so Core rejects them.
+FLOAT32_SMALLEST_NORMAL = 2.0**-126
+
+
+def float32_value(value: float) -> float:
+    """Round a Python float to the nearest float32 value, as Core stores it.
+
+    Parameters
+    ----------
+    value : float
+        Any Python float.
+
+    Returns
+    -------
+    float
+        The float32 value as a Python float. Values beyond the float32 range
+        become infinity; tiny values keep float32 subnormals (they are not
+        flushed); -0.0 stays -0.0.
+
+    Notes
+    -----
+    Pure Python (``array("f")``); no NumPy or JAX import. One add or subtract
+    of two float32 values done in Python floats and then rounded here equals
+    the float32 operation exactly, because float64 carries more than
+    2 x 24 + 2 bits.
+    """
+    return array("f", [value])[0]
+
+
+def red_zone_team_on_right(map_width: float, spawn_pad_x: Sequence[float]) -> bool:
+    """Tell exactly whether one team's spawn bank is on the right half of the map.
+
+    Parameters
+    ----------
+    map_width : float
+        Map width in world units; its float32 value is used.
+    spawn_pad_x : Sequence[float]
+        The team's five pad x values in any order, unused pads included; each
+        is converted to float32.
+
+    Returns
+    -------
+    bool
+        True when the exact sum of the five float32 pad x values is greater
+        than 5 times half the float32 width, that is when the mean is past
+        the centre. An exactly centred bank is False (left).
+
+    Raises
+    ------
+    ValueError
+        spawn_pad_x does not hold exactly five values, or the float32 width or
+        a float32 pad value is not finite (a record Core could never write).
+
+    Notes
+    -----
+    The host copy of Core's core.axis_mappings.spawn_bank_on_right, computed
+    with exact fractions, so it is exact and independent of pad order.
+    """
+    if len(spawn_pad_x) != MAX_AGENTS_PER_TEAM:
+        raise ValueError("spawn_pad_x must hold exactly five pad x values")
+    values = [float32_value(x) for x in (map_width, *spawn_pad_x)]
+    if not all(isfinite(x) for x in values):
+        raise ValueError("map width and pad x values must be finite in float32")
+    half = Fraction(values[0]) / 2
+    total = sum((Fraction(x) for x in values[1:]), Fraction(0))
+    return total > MAX_AGENTS_PER_TEAM * half
+
+
+def red_zone_x_range(
+    map_width: float, red_zone_depth: float, on_right: bool
+) -> tuple[float, float]:
+    """Return one team's Red Zone as the float32 x bounds Core scores with.
+
+    Parameters
+    ----------
+    map_width : float
+        Map width in world units; w32 is its float32 value.
+    red_zone_depth : float
+        Positive Red Zone depth in map units; d32 is its float32 value.
+    on_right : bool
+        Whether the team's spawn bank is on the right (red_zone_team_on_right).
+
+    Returns
+    -------
+    tuple[float, float]
+        (x_min, x_max), both inclusive: (0.0, d32) on the left, or
+        (float32(w32 - d32), w32) on the right. A range may be collapsed
+        (x_min == x_max), for example on the right at width 20 and depth 1e-8.
+
+    Raises
+    ------
+    ValueError
+        d32 is not finite, is below the smallest normal float32, or is above
+        w32 (the same float32 checks Core makes).
+    """
+    width = float32_value(map_width)
+    depth = float32_value(red_zone_depth)
+    if not isfinite(depth) or depth < FLOAT32_SMALLEST_NORMAL or depth > width:
+        raise ValueError(
+            "red_zone_depth must be a normal float32 value in (0, map_width]"
+        )
+    if on_right:
+        return (float32_value(width - depth), width)
+    return (0.0, depth)
+
+
+# Host mirrors of core.types (this module cannot import Core). The
+# import-isolation test pins both values against Core.
+TEAM_DEATHMATCH_POINTS_PER_DEATH = 1
+"""Points one new death outside the victim's own Red Zone gives the other team."""
+TEAM_DEATHMATCH_POINTS_PER_RED_ZONE_DEATH = 2
+"""Points one new death inside the victim's own Red Zone gives the other team."""
+
+
+def _maximum_team_deathmatch_score_threshold(red_zone_depth: float) -> int:
+    """Return the largest valid score threshold for a recorded Red Zone depth.
+
+    Parameters
+    ----------
+    red_zone_depth : float
+        A recorded, already-checked depth in map units.
+
+    Returns
+    -------
+    int
+        2**24 - (increment - 1), with increment the most points one team can
+        gain in one step: 5 at depth 0.0 (16,777,212) and 10 at a positive
+        depth (16,777,207). The host mirror of
+        core.config.maximum_team_deathmatch_score_threshold; the
+        import-isolation test pins both depths against Core.
+    """
+    points = (
+        TEAM_DEATHMATCH_POINTS_PER_RED_ZONE_DEATH
+        if red_zone_depth > 0.0
+        else TEAM_DEATHMATCH_POINTS_PER_DEATH
+    )
+    return 2**24 - (MAX_AGENTS_PER_TEAM * points - 1)
+
+
+def _validate_recorded_red_zone_depth(
+    depth: float, *, task_mode: int, map_width: float
+) -> None:
+    """Check a recorded Red Zone depth in Core's order; raise ValueError on failure.
+
+    The depth must have a positive sign bit (so -0.0 is refused), be 0.0
+    outside Team Deathmatch, and when positive have a normal float32 value at
+    most the float32 map width, which must itself be finite (Core refuses a
+    wider map). Finiteness of the depth is checked by the field type.
+    """
+    if copysign(1.0, depth) < 0.0:
+        raise ValueError("team_deathmatch_red_zone_depth must be nonnegative")
+    if task_mode != 1 and depth != 0.0:
+        raise ValueError("team_deathmatch_red_zone_depth must be 0.0 in neutral mode")
+    if depth == 0.0:
+        return
+    if not isfinite(float32_value(map_width)):
+        raise ValueError("map_width must remain finite after conversion to float32")
+    depth32 = float32_value(depth)
+    if not isfinite(depth32) or depth32 < FLOAT32_SMALLEST_NORMAL:
+        raise ValueError(
+            "team_deathmatch_red_zone_depth must remain a normal float32 value"
+        )
+    if depth32 > float32_value(map_width):
+        raise ValueError("team_deathmatch_red_zone_depth must not exceed map_width")
 
 
 class ClassMechanicsV1(EvaluationModel):
@@ -979,33 +1160,142 @@ class ResolvedEnvConfigV1(EvaluationModel):
         Require TDM's positive threshold and neutral mode's zero threshold. This model
         checks recorded structure, not full Core geometry or collision validity.
         """
-        if self.task_mode == 1:
-            if self.team_deathmatch_score_threshold == 0:
-                raise ValueError("Team Deathmatch requires a positive score threshold")
-        elif self.team_deathmatch_score_threshold != 0:
-            raise ValueError(
-                "non-Team-Deathmatch modes require a zero Team Deathmatch threshold"
-            )
-        if tuple(row.obstacle_slot for row in self.obstacle_slots) != tuple(
-            range(MAX_OBSTACLE_SLOTS)
-        ):
-            raise ValueError("obstacle rows must be ordered by obstacle_slot")
-        if tuple(row.global_slot for row in self.slot_mechanics) != tuple(
-            range(MAX_AGENT_SLOTS)
-        ):
-            raise ValueError("slot mechanics must be ordered by global_slot")
-        if any(
-            len(team_rows) != MAX_AGENTS_PER_TEAM
-            for team_rows in self.team_spawn_pad_positions
-        ):
-            raise ValueError("each team must retain exactly five spawn-pad rows")
-        expected_digest = canonical_digest_sha256(
-            self,
-            exclude={"canonical_digest_sha256"},
-        )
-        if self.canonical_digest_sha256 != expected_digest:
-            raise ValueError("resolved environment config canonical digest mismatch")
+        _validate_resolved_config_fields(self)
         return self
+
+
+class ResolvedEnvConfigV2(EvaluationModel):
+    """Store the resolved scalar episode configuration, including the Red Zone depth.
+
+    Attributes
+    ----------
+    schema_id : Literal['marl_battlegrounds.evaluation.resolved_env_config']
+        Fixed resolved-config identifier.
+    schema_version : Literal[2]
+        Version 2; the default.
+    canonical_digest_sha256 : _Sha256Hex
+        SHA-256 of all other fields.
+    task_mode : Literal[0, 1]
+        0 neutral or 1 Team Deathmatch.
+    team_deathmatch_score_threshold : Annotated[int, Field(ge=0, le=2 ** 24 - 4)]
+        Zero in neutral mode; positive in TDM.
+    team_deathmatch_red_zone_depth : _FiniteFloat
+        The configured Red Zone depth in map units, always written (even 0.0).
+        0.0 means one point per death. It must have a positive sign, be 0.0
+        in neutral mode, and when positive have a normal float32 value at most
+        the float32 map width (Core's rules).
+    maximum_episode_steps : Annotated[int, Field(gt=0, le=2 ** 24)]
+        Positive simulator horizon, at most 2**24 ticks.
+    map_width, map_height : _PositiveFloat
+        Positive map size in world units.
+    obstacle_slots, slot_mechanics, ordinary_movement_distance_scale,
+    team_spawn_pad_positions, spawn_shield_duration_steps,
+    spawn_shield_movement_speed, team_respawn_wave_period_steps
+        Same meaning and shapes as in ResolvedEnvConfigV1.
+
+    Notes
+    -----
+    A separate class, not a subclass of ResolvedEnvConfigV1: a strict
+    Pydantic field typed V1 would accept a subclass instance and drop the
+    depth when dumping. Context V4 holds this record; older contexts hold V1,
+    whose depth is 0.0 by its original rule. Full physical validity is checked
+    by Core, not this model alone.
+    """
+
+    schema_id: Literal["marl_battlegrounds.evaluation.resolved_env_config"] = (
+        RESOLVED_ENV_CONFIG_SCHEMA_ID
+    )
+    schema_version: Literal[2] = 2
+    canonical_digest_sha256: _Sha256Hex
+    task_mode: Literal[0, 1]
+    team_deathmatch_score_threshold: Annotated[int, Field(ge=0, le=2**24 - 4)]
+    team_deathmatch_red_zone_depth: _FiniteFloat
+    maximum_episode_steps: Annotated[int, Field(gt=0, le=2**24)]
+    map_width: _PositiveFloat
+    map_height: _PositiveFloat
+    obstacle_slots: Annotated[
+        tuple[ResolvedObstacleV1, ...],
+        Field(min_length=MAX_OBSTACLE_SLOTS, max_length=MAX_OBSTACLE_SLOTS),
+    ]
+    slot_mechanics: Annotated[
+        tuple[ResolvedSlotMechanicsV1, ...],
+        Field(min_length=MAX_AGENT_SLOTS, max_length=MAX_AGENT_SLOTS),
+    ]
+    ordinary_movement_distance_scale: _NonNegativeFloat
+    team_spawn_pad_positions: Annotated[
+        tuple[tuple[tuple[float, float], ...], ...],
+        Field(min_length=NUM_TEAMS, max_length=NUM_TEAMS),
+    ]
+    spawn_shield_duration_steps: _NonNegativeInt
+    spawn_shield_movement_speed: _NonNegativeFloat
+    team_respawn_wave_period_steps: Annotated[
+        tuple[_PositiveInt, ...],
+        Field(min_length=NUM_TEAMS, max_length=NUM_TEAMS),
+    ]
+
+    @model_validator(mode="after")
+    def _validate_resolved_config(self) -> ResolvedEnvConfigV2:
+        """Check the depth in Core's order, the depth-aware threshold bound, then
+        V1's threshold, rows, pads and digest.
+
+        Raise ValueError on a bad depth, threshold, row order, pad count or digest.
+        At a positive depth the threshold must be at most 16,777,207.
+        """
+        _validate_recorded_red_zone_depth(
+            self.team_deathmatch_red_zone_depth,
+            task_mode=self.task_mode,
+            map_width=self.map_width,
+        )
+        maximum = _maximum_team_deathmatch_score_threshold(
+            self.team_deathmatch_red_zone_depth
+        )
+        if self.team_deathmatch_score_threshold > maximum:
+            raise ValueError(
+                f"team_deathmatch_score_threshold must be at most {maximum} at a "
+                "positive Red Zone depth"
+            )
+        _validate_resolved_config_fields(self)
+        return self
+
+
+type ResolvedEnvConfig = ResolvedEnvConfigV1 | ResolvedEnvConfigV2
+
+
+def _validate_resolved_config_fields(
+    config: ResolvedEnvConfigV1 | ResolvedEnvConfigV2,
+) -> None:
+    """Check threshold rules, fixed row order, pad count and digest for V1 and V2.
+
+    Require TDM's positive threshold and neutral mode's zero threshold. Raise
+    ValueError with the same messages for both versions. Recorded structure
+    only; Core owns full geometry and collision validity.
+    """
+    if config.task_mode == 1:
+        if config.team_deathmatch_score_threshold == 0:
+            raise ValueError("Team Deathmatch requires a positive score threshold")
+    elif config.team_deathmatch_score_threshold != 0:
+        raise ValueError(
+            "non-Team-Deathmatch modes require a zero Team Deathmatch threshold"
+        )
+    if tuple(row.obstacle_slot for row in config.obstacle_slots) != tuple(
+        range(MAX_OBSTACLE_SLOTS)
+    ):
+        raise ValueError("obstacle rows must be ordered by obstacle_slot")
+    if tuple(row.global_slot for row in config.slot_mechanics) != tuple(
+        range(MAX_AGENT_SLOTS)
+    ):
+        raise ValueError("slot mechanics must be ordered by global_slot")
+    if any(
+        len(team_rows) != MAX_AGENTS_PER_TEAM
+        for team_rows in config.team_spawn_pad_positions
+    ):
+        raise ValueError("each team must retain exactly five spawn-pad rows")
+    expected_digest = canonical_digest_sha256(
+        config,
+        exclude={"canonical_digest_sha256"},
+    )
+    if config.canonical_digest_sha256 != expected_digest:
+        raise ValueError("resolved environment config canonical digest mismatch")
 
 
 class RosterSlotV1(EvaluationModel):
@@ -1790,15 +2080,145 @@ class EvaluationEpisodeContextV3(EvaluationModel):
         return self
 
 
+class SchemaVersionEntryV4(EvaluationModel):
+    """Name one source schema/version used by context V4.
+
+    Attributes
+    ----------
+    schema_id : _AsciiIdentifier
+        Nonempty schema identifier.
+    schema_version : Annotated[int, Field(ge=1, le=4)]
+        Integer from 1 through 4.
+
+    Notes
+    -----
+    The owning context checks exact ordered bindings; a row alone does not establish a
+    supported schema combination.
+    """
+
+    schema_id: _AsciiIdentifier
+    schema_version: Annotated[int, Field(ge=1, le=4)]
+
+
+# Context V4 binds resolved config 2 (with the Red Zone depth), context 4 and
+# frame 3 (20 context columns); every other schema keeps its V1 version.
+REQUIRED_SCHEMA_BINDINGS_V4 = tuple(
+    (
+        schema_id,
+        2
+        if schema_id == RESOLVED_ENV_CONFIG_SCHEMA_ID
+        else 4
+        if schema_id == CONTEXT_SCHEMA_ID
+        else 3
+        if schema_id == FRAME_SCHEMA_ID
+        else version,
+    )
+    for schema_id, version in REQUIRED_SCHEMA_BINDINGS_V1
+)
+
+
+class EvaluationEpisodeContextV4(EvaluationModel):
+    """Current episode metadata, recording the Team Deathmatch Red Zone rule.
+
+    Attributes
+    ----------
+    schema_id : Literal['marl_battlegrounds.evaluation.episode_context']
+        Fixed episode-context identifier.
+    schema_version : Literal[4]
+        Version 4; the default.
+    identity, aggregation_keys, expected_horizon, static_mechanics_catalog,
+    roster, policy_assignments, seed_protocol, capture_profile,
+    execution_information_mode, critic_information_regime,
+    canonical_reward_mode, shaping_configuration, code_revision, scenario_name
+        Same meaning as in EvaluationEpisodeContextV3.
+    schema_versions : tuple[SchemaVersionEntryV4, ...]
+        Exact ordered REQUIRED_SCHEMA_BINDINGS_V4 entries.
+    resolved_env_config : ResolvedEnvConfigV2
+        Recorded scalar config, ten resolved profiles and the Red Zone depth
+        (0.0 when the rule is off).
+    actor_projection : VersionedIdentityV1
+        SharedObs V3 or NoSharedObs V4 matching the information mode, also
+        at depth 0.
+
+    Notes
+    -----
+    Pairs with frame V3, whose context rows carry the depth in column 19.
+    Context validates slot topology, exact class-catalog profiles, active
+    policy roles and known seed joins. It does not grant actor access to all
+    stored provenance.
+    """
+
+    schema_id: Literal["marl_battlegrounds.evaluation.episode_context"] = (
+        CONTEXT_SCHEMA_ID
+    )
+    schema_version: Literal[4] = 4
+    identity: EvaluationEpisodeIdentityV1
+    schema_versions: tuple[SchemaVersionEntryV4, ...]
+    aggregation_keys: tuple[AggregationKeyV1, ...]
+    expected_horizon: _PositiveInt
+    resolved_env_config: ResolvedEnvConfigV2
+    static_mechanics_catalog: StaticMechanicsCatalogV1
+    roster: Annotated[
+        tuple[RosterSlotV1, ...],
+        Field(min_length=MAX_AGENT_SLOTS, max_length=MAX_AGENT_SLOTS),
+    ]
+    policy_assignments: Annotated[
+        tuple[PolicyAssignmentSlotV2, ...],
+        Field(min_length=MAX_AGENT_SLOTS, max_length=MAX_AGENT_SLOTS),
+    ]
+    seed_protocol: EvaluationSeedProtocolV1 | EvaluationSeedProtocolV2
+    capture_profile: CaptureProfile
+    execution_information_mode: ExecutionInformationMode
+    actor_projection: VersionedIdentityV1
+    critic_information_regime: VersionedIdentityV1
+    canonical_reward_mode: VersionedIdentityV1
+    shaping_configuration: ContentAddressedIdentityV1
+    code_revision: CodeRevisionV1 | CodeRevisionV2
+    scenario_name: _AsciiText | None = None
+
+    @model_validator(mode="after")
+    def _validate_context(self) -> EvaluationEpisodeContextV4:
+        """Require exact V4 bindings, the current projection and coherent contents.
+
+        Return this context or raise ValueError.
+        """
+        if (
+            tuple((row.schema_id, row.schema_version) for row in self.schema_versions)
+            != REQUIRED_SCHEMA_BINDINGS_V4
+        ):
+            raise ValueError("schema_versions must equal the V4 context bindings")
+        from marl_battlegrounds.evaluation.actor_projection import (
+            NO_SHARED_OBS_ACTOR_PROJECTION_V4,
+            SHARED_OBS_ACTOR_PROJECTION_V3,
+        )
+
+        expected_projection = (
+            SHARED_OBS_ACTOR_PROJECTION_V3
+            if self.execution_information_mode == "shared_obs"
+            else NO_SHARED_OBS_ACTOR_PROJECTION_V4
+        )
+        if self.actor_projection != expected_projection:
+            raise ValueError(
+                "current context requires the matching relative-input projection"
+            )
+        _validate_context_contents(self)
+        return self
+
+
 type EvaluationEpisodeContext = (
-    EvaluationEpisodeContextV1 | EvaluationEpisodeContextV2 | EvaluationEpisodeContextV3
+    EvaluationEpisodeContextV1
+    | EvaluationEpisodeContextV2
+    | EvaluationEpisodeContextV3
+    | EvaluationEpisodeContextV4
 )
 
 
 def _validate_context_contents(
-    context: EvaluationEpisodeContextV2 | EvaluationEpisodeContextV3,
+    context: EvaluationEpisodeContextV2
+    | EvaluationEpisodeContextV3
+    | EvaluationEpisodeContextV4,
 ) -> None:
-    """Check shared V2/V3 horizon, sorted strata, roster, seeds, and scenario metadata.
+    """Check shared V2-V4 horizon, sorted strata, roster, seeds, and scenario metadata.
 
     Scenario capture/name needs a scenario identity. Raise ValueError on disagreement;
     version-specific schema and actor-projection checks stay with each context model.
@@ -1825,18 +2245,19 @@ def evaluation_context_type(
     type[EvaluationEpisodeContextV1]
     | type[EvaluationEpisodeContextV2]
     | type[EvaluationEpisodeContextV3]
+    | type[EvaluationEpisodeContextV4]
 ):
     """Return the exact supported context class after checking its root type.
 
     Parameters
     ----------
     context : EvaluationEpisodeContext
-        Episode context V1, V2, or V3.
+        Episode context V1, V2, V3 or V4.
 
     Returns
     -------
     type[EvaluationEpisodeContextV1] | type[EvaluationEpisodeContextV2] |
-    type[EvaluationEpisodeContextV3]
+    type[EvaluationEpisodeContextV3] | type[EvaluationEpisodeContextV4]
         Its exact concrete model class.
 
     Raises
@@ -1852,6 +2273,7 @@ def evaluation_context_type(
         EvaluationEpisodeContextV1,
         EvaluationEpisodeContextV2,
         EvaluationEpisodeContextV3,
+        EvaluationEpisodeContextV4,
     ):
         raise TypeError("context must be an exact supported episode-context root")
     return type(context)
@@ -2360,35 +2782,46 @@ class BaseObservationV1(EvaluationModel):
 
         Raise ValueError on mismatch; version-specific identity checks live in V2.
         """
-        shapes = (
-            ("self_features", (MAX_AGENT_SLOTS, SELF_FEATURES)),
-            (
-                "ally_unit_features",
-                (MAX_AGENT_SLOTS, MAX_AGENTS_PER_TEAM, UNIT_FEATURES),
-            ),
-            (
-                "enemy_unit_features",
-                (MAX_AGENT_SLOTS, MAX_AGENTS_PER_TEAM, UNIT_FEATURES),
-            ),
-            (
-                "map_obstacle_features",
-                (MAX_AGENT_SLOTS, MAX_OBSTACLE_SLOTS, OBSTACLE_FEATURES),
-            ),
-            (
-                "objective_features",
-                (MAX_AGENT_SLOTS, MAX_OBJECTIVE_SLOTS, OBJECTIVE_FEATURES),
-            ),
-            ("context_features", (MAX_AGENT_SLOTS, CONTEXT_FEATURES)),
-            ("ally_visibility_mask", (MAX_AGENT_SLOTS, MAX_AGENTS_PER_TEAM)),
-            ("enemy_visibility_mask", (MAX_AGENT_SLOTS, MAX_AGENTS_PER_TEAM)),
-        )
-        for field_name, shape in shapes:
-            _require_tuple_shape(
-                getattr(self, field_name),
-                shape,
-                field_name=field_name,
-            )
+        _validate_base_observation_shapes(self, context_features=CONTEXT_FEATURES)
         return self
+
+
+def _validate_base_observation_shapes(
+    observation: BaseObservationV1 | BaseObservationV3, *, context_features: int
+) -> None:
+    """Require the observer/slot/feature shapes shared by base observations V1-V3.
+
+    context_features is the context width: 19 for V1/V2, 20 for V3. Raise
+    ValueError on a mismatch, with the same messages for every version.
+    """
+    shapes = (
+        ("self_features", (MAX_AGENT_SLOTS, SELF_FEATURES)),
+        (
+            "ally_unit_features",
+            (MAX_AGENT_SLOTS, MAX_AGENTS_PER_TEAM, UNIT_FEATURES),
+        ),
+        (
+            "enemy_unit_features",
+            (MAX_AGENT_SLOTS, MAX_AGENTS_PER_TEAM, UNIT_FEATURES),
+        ),
+        (
+            "map_obstacle_features",
+            (MAX_AGENT_SLOTS, MAX_OBSTACLE_SLOTS, OBSTACLE_FEATURES),
+        ),
+        (
+            "objective_features",
+            (MAX_AGENT_SLOTS, MAX_OBJECTIVE_SLOTS, OBJECTIVE_FEATURES),
+        ),
+        ("context_features", (MAX_AGENT_SLOTS, context_features)),
+        ("ally_visibility_mask", (MAX_AGENT_SLOTS, MAX_AGENTS_PER_TEAM)),
+        ("enemy_visibility_mask", (MAX_AGENT_SLOTS, MAX_AGENTS_PER_TEAM)),
+    )
+    for field_name, shape in shapes:
+        _require_tuple_shape(
+            getattr(observation, field_name),
+            shape,
+            field_name=field_name,
+        )
 
 
 class BaseObservationV2(BaseObservationV1):
@@ -2417,28 +2850,87 @@ class BaseObservationV2(BaseObservationV1):
         Use self feature column 4 for active state. Return this model or raise
         ValueError.
         """
-        _require_tuple_shape(
-            self.self_ally_index, (MAX_AGENT_SLOTS,), field_name="self_ally_index"
+        _validate_relative_identity_rows(self)
+        return self
+
+
+def _validate_relative_identity_rows(
+    observation: BaseObservationV2 | BaseObservationV3,
+) -> None:
+    """Check relative is_enemy flags and self_ally_index for observations V2 and V3.
+
+    Use self feature column 4 for active state. Raise ValueError with the same
+    messages for both versions.
+    """
+    _require_tuple_shape(
+        observation.self_ally_index, (MAX_AGENT_SLOTS,), field_name="self_ally_index"
+    )
+    for slot, row in enumerate(observation.self_features):
+        if row[3] != 0.0:
+            raise ValueError("current self feature is_enemy must be zero")
+        expected_index = slot % MAX_AGENTS_PER_TEAM if row[4] == 1.0 else 0
+        if observation.self_ally_index[slot] != expected_index:
+            raise ValueError(
+                "self_ally_index must match the active actor's own-team row"
+            )
+        if any(
+            candidate[3] != 0.0 for candidate in observation.ally_unit_features[slot]
+        ):
+            raise ValueError("current ally feature is_enemy must be zero")
+        for visible, candidate in zip(
+            observation.enemy_visibility_mask[slot],
+            observation.enemy_unit_features[slot],
+            strict=True,
+        ):
+            if candidate[3] != float(visible):
+                raise ValueError("current enemy feature is_enemy must match visibility")
+
+
+class BaseObservationV3(EvaluationModel):
+    """Store the ten actors' current base observations with 20 context columns.
+
+    Attributes
+    ----------
+    self_features, ally_unit_features, enemy_unit_features,
+    map_obstacle_features, objective_features, ally_visibility_mask,
+    enemy_visibility_mask, previous_timestep_actions, spawn_lifecycle,
+    self_ally_index
+        Same shapes and meanings as BaseObservationV2.
+    context_features : _FloatMatrix
+        Shape (10, 20): the V2 columns plus column 19, the configured Team
+        Deathmatch Red Zone depth (0 on unused observer rows and when the rule
+        is off).
+
+    Notes
+    -----
+    A separate class, not a subclass of V2, so a 20-column record can never
+    pass a V2-typed field. Shape and relative-identity checks are shared with
+    V1/V2 and keep their messages. These are all actors' source observations;
+    actor projection applies the selected actor's information rights.
+    """
+
+    self_features: _FloatMatrix
+    ally_unit_features: _FloatTensor3
+    enemy_unit_features: _FloatTensor3
+    map_obstacle_features: _FloatTensor3
+    objective_features: _FloatTensor3
+    context_features: _FloatMatrix
+    ally_visibility_mask: _BooleanMatrix
+    enemy_visibility_mask: _BooleanMatrix
+    previous_timestep_actions: PreviousTimestepActionObservationV1
+    spawn_lifecycle: SpawnLifecycleObservationV1
+    self_ally_index: tuple[_TeamLocalSlot, ...]
+
+    @model_validator(mode="after")
+    def _validate_observation(self) -> BaseObservationV3:
+        """Require the 20-column shapes and the V2 relative-identity rules.
+
+        Return this model or raise ValueError.
+        """
+        _validate_base_observation_shapes(
+            self, context_features=_wire_shapes.CONTEXT_FEATURES_V2
         )
-        for slot, row in enumerate(self.self_features):
-            if row[3] != 0.0:
-                raise ValueError("current self feature is_enemy must be zero")
-            expected_index = slot % MAX_AGENTS_PER_TEAM if row[4] == 1.0 else 0
-            if self.self_ally_index[slot] != expected_index:
-                raise ValueError(
-                    "self_ally_index must match the active actor's own-team row"
-                )
-            if any(candidate[3] != 0.0 for candidate in self.ally_unit_features[slot]):
-                raise ValueError("current ally feature is_enemy must be zero")
-            for visible, candidate in zip(
-                self.enemy_visibility_mask[slot],
-                self.enemy_unit_features[slot],
-                strict=True,
-            ):
-                if candidate[3] != float(visible):
-                    raise ValueError(
-                        "current enemy feature is_enemy must match visibility"
-                    )
+        _validate_relative_identity_rows(self)
         return self
 
 
@@ -2622,22 +3114,68 @@ class EvaluationFrameV2(EvaluationModel):
         return self
 
 
-type EvaluationFrame = EvaluationFrameV1 | EvaluationFrameV2
+class EvaluationFrameV3(EvaluationModel):
+    """Store one current decision epoch with the 20-column context rows.
+
+    Attributes
+    ----------
+    schema_id : Literal['marl_battlegrounds.evaluation.frame']
+        Fixed frame identifier.
+    schema_version : Literal[3]
+        Version 3; the default.
+    episode_id, frame_index, frame_id, simulator_step_count, snapshot,
+    action_mask, shared_obs_information_availability_by_recipient_and_sensor_source
+        Same meaning as in EvaluationFrameV2.
+    base_observation : BaseObservationV3
+        BaseObservationV3 for all ten actors; context column 19 is the Red
+        Zone depth.
+
+    Notes
+    -----
+    Context V4 owns version and information-mode admission. Model construction
+    checks local ID and shape; cross-team, inactive and self-sharing
+    restrictions need the context join.
+    """
+
+    schema_id: Literal["marl_battlegrounds.evaluation.frame"] = FRAME_SCHEMA_ID
+    schema_version: Literal[3] = 3
+    episode_id: _AsciiIdentifier
+    frame_index: _NonNegativeInt
+    frame_id: _AsciiIdentifier
+    simulator_step_count: _NonNegativeInt
+    snapshot: GlobalAnalysisSnapshotV1
+    base_observation: BaseObservationV3
+    action_mask: ActionMaskV1
+    shared_obs_information_availability_by_recipient_and_sensor_source: (
+        _BooleanMatrix | None
+    ) = None
+
+    @model_validator(mode="after")
+    def _validate_frame(self) -> EvaluationFrameV3:
+        """Check shared canonical ID and availability shape, then return this frame.
+
+        Raise ValueError on a local mismatch; context-specific admission is separate.
+        """
+        _validate_frame_fields(self)
+        return self
+
+
+type EvaluationFrame = EvaluationFrameV1 | EvaluationFrameV2 | EvaluationFrameV3
 
 
 def evaluation_frame_type(
     frame: EvaluationFrame,
-) -> type[EvaluationFrameV1] | type[EvaluationFrameV2]:
+) -> type[EvaluationFrameV1] | type[EvaluationFrameV2] | type[EvaluationFrameV3]:
     """Return the exact supported frame class after checking its root type.
 
     Parameters
     ----------
     frame : EvaluationFrame
-        Historical frame V1 or current frame V2.
+        Historical frame V1 or V2, or current frame V3.
 
     Returns
     -------
-    type[EvaluationFrameV1] | type[EvaluationFrameV2]
+    type[EvaluationFrameV1] | type[EvaluationFrameV2] | type[EvaluationFrameV3]
         Its exact concrete model class.
 
     Raises
@@ -2649,9 +3187,43 @@ def evaluation_frame_type(
     -----
     This helper does not deeply revalidate frame content or its context join.
     """
-    if type(frame) not in (EvaluationFrameV1, EvaluationFrameV2):
+    if type(frame) not in (EvaluationFrameV1, EvaluationFrameV2, EvaluationFrameV3):
         raise TypeError("frame must be an exact supported evaluation frame")
     return type(frame)
+
+
+def evaluation_frame_type_for_context(
+    context: EvaluationEpisodeContext,
+) -> type[EvaluationFrameV1] | type[EvaluationFrameV2] | type[EvaluationFrameV3]:
+    """Return the one frame class that pairs with an exact episode context.
+
+    Parameters
+    ----------
+    context : EvaluationEpisodeContext
+        Exact context V1, V2, V3 or V4.
+
+    Returns
+    -------
+    type[EvaluationFrameV1] | type[EvaluationFrameV2] | type[EvaluationFrameV3]
+        Frame V1 for contexts V1 and V2, V2 for context V3, and V3 for
+        context V4.
+
+    Raises
+    ------
+    TypeError
+        The context root is unsupported (from evaluation_context_type).
+
+    Notes
+    -----
+    The one owner of frame and context pairing; capture, validation, catalog
+    and metrics readers call it instead of repeating the rule.
+    """
+    context_type = evaluation_context_type(context)
+    if context_type is EvaluationEpisodeContextV4:
+        return EvaluationFrameV3
+    if context_type is EvaluationEpisodeContextV3:
+        return EvaluationFrameV2
+    return EvaluationFrameV1
 
 
 def _validate_frame_fields(frame: EvaluationFrame) -> None:
@@ -4114,6 +4686,7 @@ __all__ = [
     "CONTEXT_SCHEMA_VERSION",
     "EVENT_SCHEMA_ID",
     "EVENT_SCHEMA_VERSION",
+    "FLOAT32_SMALLEST_NORMAL",
     "FRAME_SCHEMA_ID",
     "FRAME_SCHEMA_VERSION",
     "GLOBAL_ANALYSIS_SNAPSHOT_SCHEMA_ID",
@@ -4121,8 +4694,11 @@ __all__ = [
     "REQUIRED_SCHEMA_BINDINGS_V1",
     "REQUIRED_SCHEMA_BINDINGS_V2",
     "REQUIRED_SCHEMA_BINDINGS_V3",
+    "REQUIRED_SCHEMA_BINDINGS_V4",
     "RESOLVED_ENV_CONFIG_SCHEMA_ID",
     "RESOLVED_ENV_CONFIG_SCHEMA_VERSION",
+    "TEAM_DEATHMATCH_POINTS_PER_DEATH",
+    "TEAM_DEATHMATCH_POINTS_PER_RED_ZONE_DEATH",
     "TRANSITION_FACTS_SCHEMA_ID",
     "TRANSITION_FACTS_SCHEMA_VERSION",
     "TRANSITION_SCHEMA_ID",
@@ -4142,6 +4718,7 @@ __all__ = [
     "AuraTransitionFactsV1",
     "BaseObservationV1",
     "BaseObservationV2",
+    "BaseObservationV3",
     "CaptureProfile",
     "ChargePhaseDisplacementEventV1",
     "ClassMechanicsV1",
@@ -4157,12 +4734,14 @@ __all__ = [
     "EvaluationEpisodeContextV1",
     "EvaluationEpisodeContextV2",
     "EvaluationEpisodeContextV3",
+    "EvaluationEpisodeContextV4",
     "EvaluationEpisodeIdentityV1",
     "EvaluationEventBaseV1",
     "EvaluationEventV1",
     "EvaluationFrame",
     "EvaluationFrameV1",
     "EvaluationFrameV2",
+    "EvaluationFrameV3",
     "EvaluationModel",
     "EvaluationRole",
     "EvaluationSeedProtocolV1",
@@ -4181,7 +4760,9 @@ __all__ = [
     "PreviousTimestepActionObservationV1",
     "RecipientHealthResolutionEventV1",
     "RegenerationTransitionFactsV1",
+    "ResolvedEnvConfig",
     "ResolvedEnvConfigV1",
+    "ResolvedEnvConfigV2",
     "ResolvedObstacleV1",
     "ResolvedSlotMechanicsV1",
     "RespawnTransitionFactsV1",
@@ -4190,6 +4771,7 @@ __all__ = [
     "SchemaVersionEntryV1",
     "SchemaVersionEntryV2",
     "SchemaVersionEntryV3",
+    "SchemaVersionEntryV4",
     "SourceDamageOutputEventV1",
     "SourceHealingOutputEventV1",
     "SpawnLifecycleObservationV1",
@@ -4213,4 +4795,8 @@ __all__ = [
     "canonical_json_bytes",
     "evaluation_context_type",
     "evaluation_frame_type",
+    "evaluation_frame_type_for_context",
+    "float32_value",
+    "red_zone_team_on_right",
+    "red_zone_x_range",
 ]

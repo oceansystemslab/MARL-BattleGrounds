@@ -6,7 +6,12 @@ These mappings include unused slots and self; they do not decide legality.
 Movement categories retain world directions for both teams.
 
 Python helpers validate concrete IDs on the host. Constant tuples support
-host consumers, while the JAX array tables support compiled indexing."""
+host consumers, while the JAX array tables support compiled indexing.
+
+spawn_bank_on_right is the one Core rule for which side of the map a team's
+spawn bank is on. Team Deathmatch Red Zone scoring uses it, and so does the
+public policy helper team_on_right. It is exact: the answer does not depend
+on pad order or on float32 rounding of a mean."""
 
 from typing import Literal
 
@@ -14,6 +19,7 @@ import jax.numpy as jnp
 from jax import Array
 
 from marl_battlegrounds.core.types import (
+    ENVIRONMENT_DIMENSIONS,
     MAX_AGENT_SLOTS,
     MAX_AGENTS_PER_TEAM,
     NUM_TARGET_ACTIONS,
@@ -289,6 +295,129 @@ def observation_relation_and_row(
     return "enemy", enemy_slots.index(candidate_global_slot)
 
 
+# Exact power of two applied to pads and the half-width before the exact sum.
+# It keeps every intermediate value finite on any map Core accepts (width up
+# to the float32 maximum, pads inside the map); see spawn_bank_on_right Notes.
+_SPAWN_SIDE_SCALE = 0.125
+
+
+def _two_sum(a: Array, b: Array) -> tuple[Array, Array]:
+    """Split a + b into its rounded float32 sum and the exact rounding error.
+
+    Parameters
+    ----------
+    a, b : Array
+        Float32 arrays of one broadcastable shape.
+
+    Returns
+    -------
+    tuple of Array
+        (s, e) with s = fl(a + b) and s + e == a + b exactly (Knuth's
+        error-free sum), provided the adds are evaluated as written with
+        round-to-nearest and nothing overflows.
+    """
+    s = a + b
+    b_virtual = s - a
+    e = (a - (s - b_virtual)) + (b - b_virtual)
+    return s, e
+
+
+def _spawn_side_expansion(pads: Array, map_width: Array | float) -> list[Array]:
+    """Return float32 components whose exact sum is (sum(x_i) - 5 h) / 8.
+
+    Parameters
+    ----------
+    pads : Array
+        Float32 spawn pads with shape (..., 5, 2); x is column 0.
+    map_width : Array or float
+        Map width broadcastable to pads.shape[:-2]; converted to float32.
+        h is float32(map_width) * 0.5, which is exact.
+
+    Returns
+    -------
+    list of Array
+        Ten float32 arrays of shape pads.shape[:-2] forming a nonoverlapping
+        expansion in rising magnitude (Shewchuk's grow-expansion over Knuth
+        two-sums). Their exact sum is (sum of the five pad x values minus
+        5 h) / 8. A non-finite component means an input was outside the
+        validated domain described in spawn_bank_on_right.
+    """
+    x = pads[..., 0] * _SPAWN_SIDE_SCALE
+    half = jnp.asarray(map_width, jnp.float32) * (0.5 * _SPAWN_SIDE_SCALE)
+    terms: list[Array] = []
+    for pad in range(MAX_AGENTS_PER_TEAM):
+        terms.extend(_two_sum(x[..., pad], -half))
+    expansion: list[Array] = []
+    for term in terms:
+        carry, grown = term, []
+        for component in expansion:
+            carry, low = _two_sum(carry, component)
+            grown.append(low)
+        expansion = [*grown, carry]
+    return expansion
+
+
+def spawn_bank_on_right(
+    team_spawn_pad_positions: Array, map_width: Array | float
+) -> Array:
+    """Tell whether one team's spawn bank is on the right half of the map.
+
+    Parameters
+    ----------
+    team_spawn_pad_positions : Array
+        One team's five ordered spawn pads, float32 with shape (..., 5, 2) as
+        [x, y] world positions; any leading shape L, for example (2,) for
+        both teams of one game or (B, 2) for a batch. Unused pad rows count.
+    map_width : Array or float
+        Map width in world units, broadcastable to L; converted to float32.
+
+    Returns
+    -------
+    Array
+        Boolean array of shape L. True exactly when the mean x of the five
+        pads is greater than half the float32 map width, that is when
+        sum(x_i) - 5 * (float32(map_width) / 2) is positive in exact
+        arithmetic. An exactly centred bank reads False (left). The answer is
+        the same for every order of the five pads.
+
+    Raises
+    ------
+    ValueError
+        The pads do not end with shape (5, 2). This is a static shape check.
+
+    Notes
+    -----
+    Pure JAX; works eagerly and under jit and vmap, on CPU and GPU. The pads
+    and half-width are first scaled by exactly 1/8, then the five exact
+    differences are summed without error (Knuth two-sums grown into a
+    Shewchuk expansion); the largest nonzero component gives the sign. For
+    this to be exact, each float32 add and subtract must be evaluated as
+    written with round-to-nearest; the tests check eager, jit and vmap
+    results against an exact reference.
+
+    Validated domain: Core accepts 0 < map_width <= the float32 maximum and
+    pads with radius <= x <= map_width - radius, so 0 <= x_i <= w32. After
+    the 1/8 scale every value in the expansion stays below 0.75 of the
+    float32 maximum, so nothing overflows. In Team Deathmatch every pad is at
+    least one body radius (0.5) inside the map, so every scaled value and
+    rounding error is a whole multiple of 2**-27 and never subnormal. The
+    one remaining limit is outside Team Deathmatch scoring: in a neutral
+    layout an empty team has radius-0 pads, and pad x values or widths below
+    about 1e-30 could flush to zero.
+
+    Cost: 6 exact multiplies and about 55 two-sums per bank.
+    """
+    pads = jnp.asarray(team_spawn_pad_positions, jnp.float32)
+    if pads.shape[-2:] != (MAX_AGENTS_PER_TEAM, ENVIRONMENT_DIMENSIONS):
+        raise ValueError("team_spawn_pad_positions must end with shape (5, 2).")
+    expansion = _spawn_side_expansion(pads, map_width)
+    sign = jnp.zeros_like(expansion[-1])
+    for component in expansion:
+        # Components rise in magnitude, so the last nonzero one decides.
+        sign = jnp.where(component != 0.0, jnp.sign(component), sign)
+    return sign > 0.0
+
+
 __all__ = [
     "GLOBAL_RECIPIENT_SLOT_BY_ACTOR_AND_TARGET_ACTION",
     "GLOBAL_RECIPIENT_SLOT_INDEX_BY_ACTOR_AND_TARGET_ACTION",
@@ -304,5 +433,6 @@ __all__ = [
     "UNIT_DIRECTION_VECTOR_BY_MOVEMENT_ACTION_ARRAY",
     "global_slot_to_target_action",
     "observation_relation_and_row",
+    "spawn_bank_on_right",
     "target_action_to_global_slot",
 ]

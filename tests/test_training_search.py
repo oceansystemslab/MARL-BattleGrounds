@@ -12,6 +12,9 @@ writer is created or recovered. Returned summaries cannot hide a different
 actor, and final exports must match their completed learner descriptions.
 Fresh processes check CPU metadata placement, restoration after errors, lazy
 status and the separate CPU controller and GPU worker environments.
+The declaration pins red_zone_depth 0.0 (the study's one-point scoring), every
+training config and assessment request carries it, assessment plays at the
+request's depth, and a summary at another depth is rejected unpublished.
 """
 
 from __future__ import annotations
@@ -102,6 +105,8 @@ def test_declaration_keeps_all_main_levers_and_three_fresh_seed_blocks(
     assert base["ppo"]["critic_lr"] == 0.00025
     assert base["validation_fractions"] == [0.25, 0.5, 0.75, 1.0]
     assert base["random_diagnostic_seed_pairs"] is None
+    # The frozen study keeps one point per death, not the new 5.0 default.
+    assert base["red_zone_depth"] == 0.0
 
 
 @pytest.mark.parametrize("cost", [1 / 30_000, 1 / 22_000, 1 / 20_000])
@@ -378,6 +383,7 @@ def _fake_worker(
             frozen = search._read(root / "final_selection.json")
             assert frozen["winner"] == "c01"
             request = search._read(job / "request.json")
+            assert request["red_zone_depth"] == 0.0
             # Reverse the assessment ordering: it must never change selection.
             atomic_json(
                 job / "result.json",
@@ -404,6 +410,7 @@ def _fake_worker(
             "actor_digest": "selected-weights",
         }
         config = search._read(job / "config.json")
+        assert config["red_zone_depth"] == 0.0
         for label, steps in (
             ("selected", selected["env_steps"]),
             ("final", case["steps"]),
@@ -705,6 +712,7 @@ def _assessment_request(path: Path) -> dict[str, Any]:
         "opponent": "alpha",
         "seed_pairs": 40,
         "root_seed": 19046700,
+        "red_zone_depth": 0.0,
     }
 
 
@@ -762,6 +770,40 @@ def test_assessment_rejects_returned_identity_before_result_publication(
     with pytest.raises(ValueError, match="summary differs from the frozen actor"):
         search._assess(tmp_path, job)
     assert not (job / "result.json").exists()
+
+
+@pytest.mark.parametrize("returned", [0.0, 5.0])
+def test_assessment_plays_and_checks_the_declared_red_zone_depth(
+    tmp_path: Path,
+    actor_exports: tuple[Path, Path],
+    monkeypatch: pytest.MonkeyPatch,
+    returned: float,
+) -> None:
+    from marl_battlegrounds.training import validation
+
+    job = tmp_path / "job"
+    job.mkdir()
+    request = _assessment_request(actor_exports[0])
+    atomic_json(job / "request.json", request)
+    calls: list[dict[str, Any]] = []
+
+    def assessed(*args: object, **kwargs: object) -> dict[str, Any]:
+        calls.append(dict(kwargs))
+        return {
+            "complete": True,
+            **request["expected_actor"],
+            "red_zone_depth": returned,
+        }
+
+    monkeypatch.setattr(validation, "validate_checkpoint", assessed)
+    if returned != request["red_zone_depth"]:
+        with pytest.raises(ValueError, match="summary differs"):
+            search._assess(tmp_path, job)
+        assert not (job / "result.json").exists()
+    else:
+        search._assess(tmp_path, job)
+        assert search._read(job / "result.json")["red_zone_depth"] == 0.0
+    assert [call["red_zone_depth"] for call in calls] == [0.0]
 
 
 @pytest.mark.parametrize("export", ["selected", "final"])

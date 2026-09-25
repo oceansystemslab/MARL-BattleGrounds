@@ -38,12 +38,13 @@ from marl_battlegrounds.evaluation.models import (
     EvaluationEpisodeContextV1,
     EvaluationEpisodeContextV2,
     EvaluationEpisodeContextV3,
+    EvaluationEpisodeContextV4,
     EvaluationFrame,
     EvaluationFrameV1,
-    EvaluationFrameV2,
     EvaluationModel,
     EvaluationTransitionV1,
     SchemaVersionEntryV1,
+    evaluation_frame_type_for_context,
 )
 from marl_battlegrounds.evaluation.validation import (
     _canonicalize_evaluation_transition_unit_v1,  # pyright: ignore[reportPrivateUsage]
@@ -1623,7 +1624,7 @@ class EvaluationTransitionViewV1:
     Notes
     -----
     Context V1 construction performs full semantic validation and stores detached
-    canonical copies. Context V2/V3 construction checks version/episode/frame
+    canonical copies. Context V2-V4 construction checks version/episode/frame
     links and adjacent simulator ticks only, retaining supplied records; their
     replay admission path owns full integrity checks. The class name alone
     does not promise equally deep validation for every context version.
@@ -1643,14 +1644,11 @@ class EvaluationTransitionViewV1:
         if type(self.context) in (
             EvaluationEpisodeContextV2,
             EvaluationEpisodeContextV3,
+            EvaluationEpisodeContextV4,
         ):
             # V2 carries captured facts; this view joins records without replaying
             # the legacy simulator/metric semantic-validation pipeline.
-            expected_frame = (
-                EvaluationFrameV2
-                if type(self.context) is EvaluationEpisodeContextV3
-                else EvaluationFrameV1
-            )
+            expected_frame = evaluation_frame_type_for_context(self.context)
             if (
                 type(self.start_frame) is not expected_frame
                 or type(self.successor_frame) is not expected_frame

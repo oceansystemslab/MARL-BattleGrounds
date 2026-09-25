@@ -256,6 +256,38 @@ floor: balancing cannot go below it, only removing work or adding machines can.
 Each Python shard also spends about 60 to 90 seconds collecting and starting
 before its tests.
 
+Measurement of 25 September 2026 on the same workstation, after the Red Zone
+tests (6,999 Python tests). All twelve Python shards ran together with nothing
+else running. Times are the seconds pytest reports for each shard. "Before" is
+the 22 September table applied to the new tests; "predicted" is the refreshed
+table's plan. These seconds are about twice the earlier ones because every
+shard ran at once on this machine; what matters for balance is that the
+refreshed table gives every shard the same share. `test_training_ppo_workflows.py`
+alone takes about 1,840 seconds and cannot be split (one test function), so it
+fills most of one shard.
+
+| Shard | Python before | Python predicted |
+| --- | --- | --- |
+| 1 | 2,445 | 2,689 |
+| 2 | 2,841 | 2,689 |
+| 3 | 2,819 | 2,689 |
+| 4 | 2,794 | 2,689 |
+| 5 | 2,768 | 2,689 |
+| 6 | 2,546 | 2,689 |
+| 7 | 2,653 | 2,689 |
+| 8 | 2,681 | 2,689 |
+| 9 | 2,239 | 2,688 |
+| 10 | 2,973 | 2,689 |
+| 11 | 2,694 | 2,688 |
+| 12 | 2,912 | 2,688 |
+
+Before the refresh the slowest shard ran about 11 percent above the average;
+the refreshed table predicts every shard at the average. Browser profiles,
+whole-command seconds with all eight running together: 174, 184, 73, 101, 169,
+192, 194 and 173. Profile 3 stays the lightest on purpose. The Red Zone metrics
+spec then moved from profile 6 to profile 4, the other light profile; run
+alone afterwards, profile 4 took 93 seconds and profile 6 took 146.
+
 ## Authoritative Replay and DevClient integration baseline
 
 Commit `82077d275caef8bc3d08322e6c9f55c8d5242aec` is the accepted product baseline
@@ -434,7 +466,7 @@ Select an affected Playwright case for a browser-specific change. Replay or
 recording changes need a real saved-artifact flow through public routes, including
 relevant initial/terminal/prefix behavior, exact identity, recovery, audience
 limits and cleanup. Synthetic objects alone do not prove that boundary. Preserve
-historical sidecar readers; current V3 replay saving does not require a metric
+historical sidecar readers; current V4 replay saving does not require a metric
 sidecar. Cold launcher/subprocess checks catch setup assumptions hidden by a
 warm development environment.
 

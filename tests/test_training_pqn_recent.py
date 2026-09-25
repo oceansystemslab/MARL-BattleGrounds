@@ -4,9 +4,9 @@ Contracts checked here, all on CPU with four games, blocks of 4 rounds and a
 memory window of 2 (so W = 6 initial rounds: a chunk of 4, then a chunk of 2).
 A compact row keeps only Team A's five observer rows, their 5x5 permissions,
 Team A masks and world-frame actions, the team task and shaping rewards, the
-lifecycle flags and eight int32 identities: 25,988 bytes per game row, with
-the planned sizes for the kept rows (4,637,184 bytes at B32, H4), a full
-window (109,773,312 bytes at T128) and a block's stored memories (41,943,040
+lifecycle flags and eight int32 identities: 26,008 bytes per game row, with
+the planned sizes for the kept rows (4,639,744 bytes at B32, H4), a full
+window (109,857,792 bytes at T128) and a block's stored memories (41,943,040
 bytes). PQN collection keeps no physical state and never calls the physical
 state encoder. Against a numbered host reference, the window puts the kept
 real rows, then the new real rows, with no padding between them, through two
@@ -198,10 +198,10 @@ def test_compact_rows_keep_only_permitted_team_a_facts(blocks: _Blocks) -> None:
     spec = jax.eval_shape(compact, carry)
     leaves = cast(list[jax.ShapeDtypeStruct], jax.tree.leaves(spec))
     per_row = sum(math.prod(leaf.shape[1:]) * leaf.dtype.itemsize for leaf in leaves)
-    assert per_row == 25_988
+    assert per_row == 26_008
     memory_row = 5 * 512 * 4
-    assert 4 * 32 * (per_row + memory_row) == 4_637_184
-    assert 132 * 32 * per_row == 109_773_312
+    assert 4 * 32 * (per_row + memory_row) == 4_639_744
+    assert 132 * 32 * per_row == 109_857_792
     assert 128 * 32 * memory_row == 41_943_040
     assert "training_state" not in learner.PQNRow._fields
     for leaf in jax.tree.leaves(spec.observation):
@@ -414,7 +414,7 @@ def test_expanded_minibatches_equal_the_live_permitted_inputs(
         + transitions.shaping_reward,
     )
     np.testing.assert_array_equal(batch.initial_memory, memory[0][chosen])
-    assert batch.actor_features.shape == (4, 2, 5, 5164)
+    assert batch.actor_features.shape == (4, 2, 5, 5165)
     assert bool(
         jnp.all(jnp.take_along_axis(batch.action_mask, batch.actions[..., None], -1))
     )

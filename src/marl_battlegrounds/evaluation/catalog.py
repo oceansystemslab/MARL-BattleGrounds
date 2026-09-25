@@ -89,6 +89,7 @@ from marl_battlegrounds.core.types import (
 from marl_battlegrounds.evaluation.actor_projection import (
     SHARED_OBS_ACTOR_PROJECTION_V1,
     SHARED_OBS_ACTOR_PROJECTION_V2,
+    SHARED_OBS_ACTOR_PROJECTION_V3,
 )
 from marl_battlegrounds.evaluation.models import (
     CATALOG_SCHEMA_ID,
@@ -96,6 +97,7 @@ from marl_battlegrounds.evaluation.models import (
     REQUIRED_SCHEMA_BINDINGS_V1,
     REQUIRED_SCHEMA_BINDINGS_V2,
     REQUIRED_SCHEMA_BINDINGS_V3,
+    REQUIRED_SCHEMA_BINDINGS_V4,
     RESOLVED_ENV_CONFIG_SCHEMA_ID,
     RESOLVED_ENV_CONFIG_SCHEMA_VERSION,
     AggregationKeyV1,
@@ -109,26 +111,31 @@ from marl_battlegrounds.evaluation.models import (
     EvaluationEpisodeContextV1,
     EvaluationEpisodeContextV2,
     EvaluationEpisodeContextV3,
+    EvaluationEpisodeContextV4,
     EvaluationEpisodeIdentityV1,
     EvaluationFrame,
     EvaluationFrameV1,
     EvaluationFrameV2,
+    EvaluationFrameV3,
     EvaluationSeedProtocolV1,
     EvaluationSeedProtocolV2,
     ExecutionInformationMode,
     PolicyAssignmentSlotV1,
     PolicyAssignmentSlotV2,
     ResolvedEnvConfigV1,
+    ResolvedEnvConfigV2,
     ResolvedObstacleV1,
     ResolvedSlotMechanicsV1,
     RosterSlotV1,
     SchemaVersionEntryV1,
     SchemaVersionEntryV2,
     SchemaVersionEntryV3,
+    SchemaVersionEntryV4,
     StaticMechanicsCatalogV1,
     StatusMechanicV1,
     VersionedIdentityV1,
     canonical_digest_sha256,
+    evaluation_frame_type_for_context,
 )
 
 
@@ -512,9 +519,80 @@ def build_resolved_env_config_v1(config: EnvConfig) -> ResolvedEnvConfigV1:
     -----
     Array conversion can synchronize device data. This is a host boundary,
     not a JIT operation. The record stores resolved mechanics separately from
-    roster identity; use build_roster_v1 for class/team membership.
+    roster identity; use build_roster_v1 for class/team membership. V1 has no
+    Red Zone field: it records only depth-0 configs (their original one-point
+    rule) and stays byte-identical for them; a positive depth raises
+    ValueError. New records use build_resolved_env_config_v2.
     """
     validate_env_config(config)
+    if config.team_deathmatch_red_zone_depth != 0.0:
+        raise ValueError(
+            "ResolvedEnvConfigV1 cannot record a Red Zone depth; "
+            "use build_resolved_env_config_v2"
+        )
+    return ResolvedEnvConfigV1.model_validate(_resolved_config_payload(config))
+
+
+def build_resolved_env_config_v2(config: EnvConfig) -> ResolvedEnvConfigV2:
+    """Validate one scalar runtime config and record it with its Red Zone depth.
+
+    Parameters
+    ----------
+    config : EnvConfig
+        Unbatched EnvConfig accepted by Core's host validator.
+
+    Returns
+    -------
+    ResolvedEnvConfigV2
+        The V1 contents plus team_deathmatch_red_zone_depth, always written
+        (0.0 included), and a digest of all other fields.
+
+    Raises
+    ------
+    TypeError
+        A config field has an unsupported host type or array dtype.
+    ValueError
+        Core configuration validation or strict record validation fails.
+
+    Notes
+    -----
+    Host boundary, not a JIT operation; array conversion can synchronize
+    device data. This is the builder for every new recording, scenario and
+    training identity.
+    """
+    validate_env_config(config)
+    payload = _resolved_config_payload(config)
+    payload["schema_version"] = 2
+    payload["team_deathmatch_red_zone_depth"] = float(
+        config.team_deathmatch_red_zone_depth
+    )
+    del payload["canonical_digest_sha256"]
+    payload["canonical_digest_sha256"] = canonical_digest_sha256(payload)
+    return ResolvedEnvConfigV2.model_validate(payload)
+
+
+def _build_resolved_env_config_for(
+    config: EnvConfig, recorded: ResolvedEnvConfigV1 | ResolvedEnvConfigV2
+) -> ResolvedEnvConfigV1 | ResolvedEnvConfigV2:
+    """Rebuild a config's record with the builder that matches a recorded version.
+
+    config is a validated scalar EnvConfig; recorded is the record it should
+    reproduce. Return a V2 record when recorded is V2 and a V1 record
+    otherwise. The one owner of "use the builder that matches the recorded
+    version" for reprojection and replay checks. Errors propagate from the
+    chosen builder.
+    """
+    if isinstance(recorded, ResolvedEnvConfigV2):
+        return build_resolved_env_config_v2(config)
+    return build_resolved_env_config_v1(config)
+
+
+def _resolved_config_payload(config: EnvConfig) -> dict[str, object]:
+    """Build the V1 record payload (with its digest) from a validated config.
+
+    Shared by the V1 and V2 builders so both record the same values. Host
+    arrays are read once; the input is not changed.
+    """
     pads = np.asarray(config.team_spawn_pad_positions, dtype=np.float32)
     periods = np.asarray(config.team_respawn_wave_period_step_count, dtype=np.int32)
     payload: dict[str, object] = {
@@ -542,7 +620,7 @@ def build_resolved_env_config_v1(config: EnvConfig) -> ResolvedEnvConfigV1:
         "team_respawn_wave_period_steps": tuple(int(value) for value in periods),
     }
     payload["canonical_digest_sha256"] = canonical_digest_sha256(payload)
-    return ResolvedEnvConfigV1.model_validate(payload)
+    return payload
 
 
 def build_roster_v1(
@@ -1036,6 +1114,110 @@ def build_evaluation_episode_context_v3(
     )
 
 
+def build_evaluation_episode_context_v4(
+    *,
+    identity: EvaluationEpisodeIdentityV1,
+    aggregation_keys: tuple[AggregationKeyV1, ...],
+    expected_horizon: int,
+    config: EnvConfig,
+    public_agent_id_by_global_slot: tuple[str, ...],
+    policy_assignments: tuple[PolicyAssignmentSlotV2, ...],
+    seed_protocol: EvaluationSeedProtocolV1 | EvaluationSeedProtocolV2,
+    capture_profile: CaptureProfile,
+    execution_information_mode: ExecutionInformationMode,
+    actor_projection: VersionedIdentityV1,
+    critic_information_regime: VersionedIdentityV1,
+    canonical_reward_mode: VersionedIdentityV1,
+    shaping_configuration: ContentAddressedIdentityV1,
+    code_revision: CodeRevisionV1 | CodeRevisionV2,
+    scenario_name: str | None = None,
+) -> EvaluationEpisodeContextV4:
+    """Build the current version 4 episode context, recording the Red Zone depth.
+
+    Parameters
+    ----------
+    identity : EvaluationEpisodeIdentityV1
+        Runner-owned stable episode, run, evaluation, matchup, and task identities.
+    aggregation_keys : tuple[AggregationKeyV1, ...]
+        Immutable named experiment coordinates; names must be unique.
+    expected_horizon : int
+        Positive number of artifact transitions expected from frame zero.
+    config : EnvConfig
+        Unbatched EnvConfig accepted by Core's host configuration validator.
+    public_agent_id_by_global_slot : tuple[str, ...]
+        Ten unique public IDs in global-slot order,
+        including inactive slots.
+    policy_assignments : tuple[PolicyAssignmentSlotV2, ...]
+        Ten assignment rows in global-slot order. Active slots
+        have policy provenance; inactive slots are marked not applicable.
+    seed_protocol : EvaluationSeedProtocolV1 | EvaluationSeedProtocolV2
+        Realized seed provenance; this builder generates no seeds.
+    capture_profile : CaptureProfile
+        One of training_light, evaluation_metric_complete,
+        scenario_metric_complete, or debug.
+    execution_information_mode : ExecutionInformationMode
+        "shared_obs" or "no_shared_obs".
+    actor_projection : VersionedIdentityV1
+        SharedObs V3 or NoSharedObs V4, matching the information mode.
+    critic_information_regime : VersionedIdentityV1
+        Explicit identifier/version of permitted critic input.
+    canonical_reward_mode : VersionedIdentityV1
+        Explicit identifier/version of the task reward contract.
+    shaping_configuration : ContentAddressedIdentityV1
+        Named/versioned content identity for the declared shaping setup.
+    code_revision : CodeRevisionV1 | CodeRevisionV2
+        Supplied package/source provenance; no repository discovery occurs.
+    scenario_name : str | None
+        Optional human-readable scenario name. Defaults to None.
+
+    Returns
+    -------
+    EvaluationEpisodeContextV4
+        Validated context V4 with its exact schema bindings, resolved config V2
+        (including the Red Zone depth), current static mechanics catalog, and
+        ordered roster. It pairs with frame V3.
+
+    Raises
+    ------
+    TypeError
+        The runtime config has an unsupported field type or dtype.
+    ValueError
+        Config validity, ten-slot assignments, metadata, roster joins,
+        schema bindings, or information-projection consistency fail validation.
+
+    Notes
+    -----
+    Copies runtime arrays to host records during setup, outside JIT. It does not
+    invent policy, seed, reward, or revision provenance. V2 assignments allow explicitly
+    unknown policy facts; seed and revision records may use V1 or V2.
+    """
+    validate_env_config(config)
+    if len(policy_assignments) != MAX_AGENT_SLOTS:
+        raise ValueError("policy_assignments must have length 10")
+    return EvaluationEpisodeContextV4(
+        identity=identity,
+        schema_versions=tuple(
+            SchemaVersionEntryV4(schema_id=name, schema_version=version)
+            for name, version in REQUIRED_SCHEMA_BINDINGS_V4
+        ),
+        aggregation_keys=aggregation_keys,
+        expected_horizon=expected_horizon,
+        resolved_env_config=build_resolved_env_config_v2(config),
+        static_mechanics_catalog=build_static_mechanics_catalog_v1(),
+        roster=build_roster_v1(config, public_agent_id_by_global_slot),
+        policy_assignments=policy_assignments,
+        seed_protocol=seed_protocol,
+        capture_profile=capture_profile,
+        execution_information_mode=execution_information_mode,
+        actor_projection=actor_projection,
+        critic_information_regime=critic_information_regime,
+        canonical_reward_mode=canonical_reward_mode,
+        shaping_configuration=shaping_configuration,
+        code_revision=code_revision,
+        scenario_name=scenario_name,
+    )
+
+
 _INT32_MIN = int(np.iinfo(np.int32).min)
 _INT32_MAX = int(np.iinfo(np.int32).max)
 
@@ -1092,6 +1274,8 @@ def reconstruct_env_config_v1(context: EvaluationEpisodeContext) -> EnvConfig:
     EnvConfig
         Unbatched EnvConfig with Python scalar rules and JAX int32, float32, and bool
         arrays. Recorded profile overrides, geometry, and spawn settings are retained.
+        The Red Zone depth is the recorded one for a ResolvedEnvConfigV2 and 0.0
+        (the original one-point rule) for a ResolvedEnvConfigV1.
 
     Raises
     ------
@@ -1211,6 +1395,12 @@ def reconstruct_env_config_v1(context: EvaluationEpisodeContext) -> EnvConfig:
     config = EnvConfig(
         task_mode=resolved.task_mode,
         team_deathmatch_score_threshold=resolved.team_deathmatch_score_threshold,
+        # A V1 record predates Red Zone: its original rule is depth 0.0.
+        team_deathmatch_red_zone_depth=(
+            resolved.team_deathmatch_red_zone_depth
+            if isinstance(resolved, ResolvedEnvConfigV2)
+            else 0.0
+        ),
         max_steps=resolved.maximum_episode_steps,
         map_width=resolved.map_width,
         map_height=resolved.map_height,
@@ -1276,6 +1466,21 @@ def _validate_official_scenario_context_v4(  # pyright: ignore[reportUnusedFunct
     _validate_official_scenario_context(context, initial_frame)
 
 
+def _validate_official_scenario_context_v5(  # pyright: ignore[reportUnusedFunction]
+    context: EvaluationEpisodeContextV4,
+    initial_frame: EvaluationFrameV3,
+) -> None:
+    """Admit a scenario V5 context only as exact context V4 and frame V3.
+
+    Raise TypeError for a different context type, then apply the shared official
+    catalog, product-config, SharedObs, and initial-state checks, including the
+    exact V2 config reprojection with its Red Zone depth.
+    """
+    if type(context) is not EvaluationEpisodeContextV4:
+        raise TypeError("context must be an EvaluationEpisodeContextV4")
+    _validate_official_scenario_context(context, initial_frame)
+
+
 def _validate_official_scenario_context(
     context: EvaluationEpisodeContext,
     initial_frame: EvaluationFrame,
@@ -1288,11 +1493,7 @@ def _validate_official_scenario_context(
     Raise TypeError or ValueError on disagreement. This host check imports capture
     only when initial-state reconstruction is needed and never steps the simulator.
     """
-    expected_frame = (
-        EvaluationFrameV2
-        if type(context) is EvaluationEpisodeContextV3
-        else EvaluationFrameV1
-    )
+    expected_frame = evaluation_frame_type_for_context(context)
     if type(initial_frame) is not expected_frame:
         raise TypeError(
             "initial_frame must be an EvaluationFrameV1, not "
@@ -1301,7 +1502,9 @@ def _validate_official_scenario_context(
     if context.execution_information_mode != "shared_obs":
         raise ValueError("official scenario evaluation requires shared_obs execution")
     expected_projection = (
-        SHARED_OBS_ACTOR_PROJECTION_V2
+        SHARED_OBS_ACTOR_PROJECTION_V3
+        if type(context) is EvaluationEpisodeContextV4
+        else SHARED_OBS_ACTOR_PROJECTION_V2
         if type(context) is EvaluationEpisodeContextV3
         else SHARED_OBS_ACTOR_PROJECTION_V1
     )
@@ -1324,7 +1527,7 @@ def _validate_official_scenario_context(
     roster = context.roster
     validate_product_env_config(config)
 
-    reprojected_config = build_resolved_env_config_v1(config)
+    reprojected_config = _build_resolved_env_config_for(config, resolved)
     if reprojected_config != resolved:
         raise ValueError("loaded resolved config does not exactly reproject")
     public_agent_ids = tuple(row.public_agent_id for row in roster)
@@ -1342,8 +1545,10 @@ __all__ = [
     "build_evaluation_episode_context_v1",
     "build_evaluation_episode_context_v2",
     "build_evaluation_episode_context_v3",
+    "build_evaluation_episode_context_v4",
     "build_evaluation_seed_protocol_v1",
     "build_resolved_env_config_v1",
+    "build_resolved_env_config_v2",
     "build_roster_v1",
     "build_static_mechanics_catalog_v1",
     "default_schema_versions_v1",

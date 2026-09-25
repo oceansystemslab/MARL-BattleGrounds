@@ -248,10 +248,31 @@ const elements = {
 };
 
 /**
+ * Extra help for Visual Filters options whose label alone does not explain them,
+ * keyed by filter ID. title and text fill the option's hover and focus tooltip
+ * (through CONTROL_HELP). text also fills a hidden element with ID id, which the
+ * checkbox lists after visual-filters-help in its aria-describedby, so screen
+ * readers read both. Each ID must be unique in the page.
+ */
+const VISUAL_FILTER_OPTION_HELP = Object.freeze({
+  red_zone_floors: Object.freeze({
+    id: "visual-filter-red-zone-floors-help",
+    title: "Red Zone Floors",
+    text:
+      "Tint each team's Red Zone floor deep red. When an agent dies inside its own " +
+      "team's Red Zone, the enemy team gets 2 points. Turning this off only hides " +
+      "the tint.",
+  }),
+});
+
+/**
  * Build the page checkboxes from the shared visual-filter registry and defaults.
  * Replace the container so browser form restoration cannot override a fresh
- * page load. Throw TypeError for duplicate IDs or disagreement between registry
- * and default values; this changes only the DOM.
+ * page load. Each option label carries data-visual-filter-option with its filter
+ * ID; an option listed in VISUAL_FILTER_OPTION_HELP also gets its hidden help
+ * element (after the label, so it never joins the checkbox's name) and that
+ * element's ID in aria-describedby. Throw TypeError for duplicate IDs or
+ * disagreement between registry and default values; this changes only the DOM.
  */
 function installVisualFilterControls() {
   const registeredIds = VISUAL_FILTER_REGISTRY.map(({ id }) => id);
@@ -266,19 +287,35 @@ function installVisualFilterControls() {
     }
     const option = document.createElement("label");
     option.className = "visual-filters__option";
+    option.dataset.visualFilterOption = id;
+    const help = Object.hasOwn(VISUAL_FILTER_OPTION_HELP, id)
+      ? VISUAL_FILTER_OPTION_HELP[
+          /** @type {keyof typeof VISUAL_FILTER_OPTION_HELP} */ (id)
+        ]
+      : null;
     const input = document.createElement("input");
     input.type = "checkbox";
     input.id = `visual-filter-${id.replaceAll("_", "-")}`;
     input.value = id;
     input.dataset.visualFilterId = id;
     input.setAttribute("autocomplete", "off");
-    input.setAttribute("aria-describedby", "visual-filters-help");
+    input.setAttribute(
+      "aria-describedby",
+      help ? `visual-filters-help ${help.id}` : "visual-filters-help",
+    );
     input.defaultChecked = enabled;
     input.checked = enabled;
     const text = document.createElement("span");
     text.textContent = label;
     option.append(input, text);
     fragment.append(option);
+    if (help) {
+      const description = document.createElement("span");
+      description.id = help.id;
+      description.className = "sr-only";
+      description.textContent = help.text;
+      fragment.append(description);
+    }
   }
   elements.visualFilterOptions.replaceChildren(fragment);
 }
@@ -840,8 +877,16 @@ const CONTROL_HELP = Object.freeze([
   [
     "#default-visual-filters-button",
     "Default Configuration",
-    "Restore the nine default effects, including Death Announcer, and turn off Ranges.",
+    "Restore the eleven default effects, including Cooldown Effects, Death Announcer and Red Zone Floors, and turn off Ranges.",
   ],
+  ...Object.entries(VISUAL_FILTER_OPTION_HELP).map(
+    ([id, help]) =>
+      /** @type {[string, string, string]} */ ([
+        `[data-visual-filter-option='${id}']`,
+        help.title,
+        help.text,
+      ]),
+  ),
   [
     ".diagnostics > summary",
     "Technical Frame",

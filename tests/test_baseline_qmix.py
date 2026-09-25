@@ -19,7 +19,8 @@ non-Threefry and batched keys. The mixer never decreases when a utility rises.
 The sampled update ignores the contents of invalid rows and inactive slots,
 leaves the state unchanged when no TD pair is eligible, keeps finite
 derivatives with sparse masks, and scans only over time. Parameter counts and
-float32 bytes match the planned sizes (1,833,158 Q and 190,991 mixer values).
+float32 bytes match the planned sizes (1,833,414 Q and 191,185 mixer values,
+with 5,165 actor and 920 training-state features).
 These checks prove software contracts, not learned skill or GPU cost.
 """
 
@@ -553,9 +554,9 @@ def test_initialization_rejects_other_key_kinds() -> None:
 def test_mixer_never_decreases_when_a_utility_rises() -> None:
     key = jax.random.key(19048004)
     mixer = qmix.QMixingNetwork()
-    variables = mixer.init(key, jnp.zeros((1, 5)), jnp.zeros((1, 919)))
+    variables = mixer.init(key, jnp.zeros((1, 5)), jnp.zeros((1, 920)))
     utilities = jax.random.normal(jax.random.key(5), (64, 5)) * 3
-    states = jax.random.normal(jax.random.key(6), (64, 919))
+    states = jax.random.normal(jax.random.key(6), (64, 920))
 
     def total(values: Array) -> Array:
         return jnp.sum(cast(Array, mixer.apply(variables, values, states)))
@@ -658,8 +659,8 @@ def test_parameter_counts_and_bytes_match_the_planned_sizes(
         return sum(math.prod(leaf.shape) for leaf in leaves)
 
     q, mixer = count(state.online_q), count(state.online_mixer)
-    assert (q, mixer) == (1_833_158, 190_991)
-    assert 4 * (q + mixer) == 8_096_596
+    assert (q, mixer) == (1_833_414, 191_185)
+    assert 4 * (q + mixer) == 8_098_396
     # Adam keeps two float32 moments per parameter and one int32 step count.
     assert count(state.opt_state) == 2 * (q + mixer) + 1
     assert count(qmix.qmix_actor_template()) == q

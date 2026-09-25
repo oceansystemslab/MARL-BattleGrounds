@@ -62,6 +62,7 @@ from marl_battlegrounds.policies.reactive_common import (
     _wall_steering,  # pyright: ignore[reportPrivateUsage]
     refine_movement,
 )
+from marl_battlegrounds.tasks import DEFAULT_TDM_RED_ZONE_DEPTH
 
 _STEER = cast(Callable[..., tuple[Array, Array, Array, Array]], jax.jit(_wall_steering))
 _REFINE = cast(Callable[..., Array], jax.jit(refine_movement))
@@ -448,7 +449,9 @@ def test_specialist_equal_phase_alignment_prefers_closer_prey_endpoint(
 
 @pytest.fixture(scope="module")
 def physical_wall_scenario() -> CompiledDevScenarioV1:
-    draft = new_scenario_draft("isolated_wall_steering")
+    draft = new_scenario_draft(
+        "isolated_wall_steering", red_zone_depth=DEFAULT_TDM_RED_ZONE_DEPTH
+    )
     wall = DevWallV1(
         object_id="vertical_wall", center_x=6.0, center_y=5.0, width=1.0, height=3.0
     )

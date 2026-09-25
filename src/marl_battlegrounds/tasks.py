@@ -61,7 +61,7 @@ from marl_battlegrounds.core.types import (
     EnvState,
     ResolvedAgentProfile,
 )
-from marl_battlegrounds.evaluation.catalog import build_resolved_env_config_v1
+from marl_battlegrounds.evaluation.catalog import build_resolved_env_config_v2
 from marl_battlegrounds.evaluation.models import canonical_digest_sha256
 
 type AgentClassName = Literal["mage", "warrior", "hunter", "rogue", "priest"]
@@ -75,6 +75,10 @@ _CLASS_IDS: dict[AgentClassName, int] = {
 }
 _CANONICAL_ROSTER: tuple[AgentClassName, ...] = tuple(_CLASS_IDS)
 CANONICAL_TDM_EVALUATION_MAP_IDS = (47, 48, 49, 50, 51)
+# The one default Team Deathmatch Red Zone depth, in map units. Fresh map
+# configs, default evaluation, new training runs and new DevClient drafts use it;
+# 0.0 keeps one point per death. Saved records keep the depth they recorded.
+DEFAULT_TDM_RED_ZONE_DEPTH = 5.0
 
 # These describe Core's array layout only; Core still owns value/geometry checks.
 _CONFIG_ARRAY_SHAPES = {
@@ -98,7 +102,9 @@ class TDMScenario:
         Catalog entry containing the scenario ID, name, source identities, team
         roster and expected remaining horizon.
     config : EnvConfig
-        Exact resolved scalar configuration for the authored start.
+        Exact resolved scalar configuration for the authored start, including
+        its recorded Red Zone depth (5.0 for all eight installed scenarios, so
+        a death inside the victim's own Red Zone gives 2 points).
     initial_state : EnvState
         Authored scalar state, including its original step count, positions,
         scores, health and history.
@@ -668,6 +674,7 @@ def _make_config(
     team_sizes: tuple[int, int],
     *,
     score_threshold: int,
+    red_zone_depth: float,
     max_steps: int,
     movement_scale: float = float(CANONICAL_PRODUCT_MOVEMENT_SCALE),
     shield_duration: int = 3,
@@ -686,6 +693,9 @@ def _make_config(
         Active counts for Team A and Team B.
     score_threshold : int
         Required TDM winning score threshold.
+    red_zone_depth : float
+        Required Red Zone depth in map units (EnvConfig field
+        team_deathmatch_red_zone_depth). 0.0 keeps one point per death.
     max_steps : int
         Required episode step limit.
     movement_scale : float, optional
@@ -712,6 +722,7 @@ def _make_config(
     config = EnvConfig(
         task_mode=TASK_MODE_TDM,
         team_deathmatch_score_threshold=score_threshold,
+        team_deathmatch_red_zone_depth=red_zone_depth,
         max_steps=max_steps,
         map_width=geometry.map_width,
         map_height=geometry.map_height,
@@ -739,6 +750,7 @@ def make_standard_team_deathmatch_config(
     team_b_roster: Sequence[AgentClassName],
     score_threshold: int = 20,
     max_steps: int = 300,
+    red_zone_depth: float = DEFAULT_TDM_RED_ZONE_DEPTH,
 ) -> EnvConfig:
     """Build TDM on an installed map with the supplied roster order.
 
@@ -754,6 +766,12 @@ def make_standard_team_deathmatch_config(
         Winning score threshold, subject to Core's TDM bounds.
     max_steps : int, default=300
         Episode step limit, subject to Core's valid range.
+    red_zone_depth : float, default=DEFAULT_TDM_RED_ZONE_DEPTH (5.0)
+        How far each team's Red Zone reaches in from its own spawn edge, in
+        map units. When an agent dies inside its own team's Red Zone, the
+        enemy team gets 2 points instead of 1; it is still one kill and one
+        death. 0.0 turns the rule off. Must be a Python float that Core
+        accepts (at most the map width after float32 conversion).
 
     Returns
     -------
@@ -785,24 +803,32 @@ def make_standard_team_deathmatch_config(
         ids,
         (len(team_a_roster), len(team_b_roster)),
         score_threshold=score_threshold,
+        red_zone_depth=red_zone_depth,
         max_steps=max_steps,
     )
 
 
-def make_canonical_team_deathmatch_evaluation_config(*, map_id: int) -> EnvConfig:
+def make_canonical_team_deathmatch_evaluation_config(
+    *, map_id: int, red_zone_depth: float = DEFAULT_TDM_RED_ZONE_DEPTH
+) -> EnvConfig:
     """Build the fixed mirrored 5v5 setup on an installed test map.
 
     Parameters
     ----------
     map_id : int
         One of the held-out test map IDs 47 through 51.
+    red_zone_depth : float, default=DEFAULT_TDM_RED_ZONE_DEPTH (5.0)
+        Red Zone depth in map units; 0.0 keeps one point per death. Official
+        canonical releases keep the rules recorded in their snapshots; this
+        factory does not change them.
 
     Returns
     -------
     EnvConfig
         Scalar TDM configuration with mage, warrior, hunter, rogue and priest
-        in each team's supplied canonical order, score threshold 20 and a
-        300-transition limit. Uses the source map's complete ordered banks.
+        in each team's supplied canonical order, score threshold 20, the
+        given Red Zone depth and a 300-transition limit. Uses the source map's
+        complete ordered banks.
 
     Raises
     ------
@@ -826,6 +852,7 @@ def make_canonical_team_deathmatch_evaluation_config(*, map_id: int) -> EnvConfi
         map_id=map_id,
         team_a_roster=team_a,
         team_b_roster=team_b,
+        red_zone_depth=red_zone_depth,
     )
 
 
@@ -860,7 +887,9 @@ def load_tdm_scenario(scenario_id: int) -> TDMScenario:
     -------
     TDMScenario
         Matching catalog entry, resolved configuration, authored initial state
-        and notes. Authored positions, health, scores and starting step are retained.
+        and notes. Authored positions, health, scores and starting step are
+        retained. The configuration plays at the scenario's recorded Red Zone
+        depth (5.0 for every installed scenario).
 
     Raises
     ------
@@ -890,8 +919,10 @@ def _load_tdm_scenario(info: TDMScenarioInfo, content: ScenarioContent) -> TDMSc
 
     info is its current catalog entry; content comes from scenario_content(info).
     This shared host path performs the public loader's exact configuration,
-    state and horizon checks without reading those bytes again. Return the
-    validated TDMScenario. Validation errors propagate; no episode is advanced.
+    state and horizon checks without reading those bytes again: it rebuilds
+    the config at the record's Red Zone depth and requires the resolved config
+    V2 digest to equal the recorded one. Return the validated TDMScenario.
+    Validation errors propagate; no episode is advanced.
     Internal setup callers own the byte verification and must keep this pair.
     """
     resolved = content.configuration
@@ -918,6 +949,7 @@ def _load_tdm_scenario(info: TDMScenarioInfo, content: ScenarioContent) -> TDMSc
         info.class_ids,
         info.team_sizes,
         score_threshold=resolved.team_deathmatch_score_threshold,
+        red_zone_depth=resolved.team_deathmatch_red_zone_depth,
         max_steps=resolved.maximum_episode_steps,
         movement_scale=resolved.ordinary_movement_distance_scale,
         shield_duration=resolved.spawn_shield_duration_steps,
@@ -925,7 +957,7 @@ def _load_tdm_scenario(info: TDMScenarioInfo, content: ScenarioContent) -> TDMSc
         wave_periods=cast(tuple[int, int], resolved.team_respawn_wave_period_steps),
     )
     if (
-        build_resolved_env_config_v1(config) != resolved
+        build_resolved_env_config_v2(config) != resolved
         or resolved.canonical_digest_sha256 != info.resolved_configuration_digest
     ):
         raise ValueError(

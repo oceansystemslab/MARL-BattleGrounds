@@ -414,8 +414,10 @@ def init_learner(
         Nonnegative finite weight checked by the existing shaping authority.
     shaping_mode : {"potential", "score_delta"}, default="potential"
         Fixed training reward method, used when shaping is enabled. Potential
-        preserves the discounted task objective. Score_delta rewards new team
-        kills minus deaths, including at a real ending, and changes that objective.
+        preserves the discounted task objective. Score_delta rewards the team's
+        new points minus the enemy's new points (a Red Zone death gives 2
+        points, any other death 1), including at a real ending, and changes
+        that objective.
     metrics : str, default="priority"
         Collection metrics mode: "priority" or "none".
     recording : bool, default=False
@@ -583,7 +585,7 @@ def _feedforward_physical_values(
 ) -> tuple[tuple[()], Array]:
     """Value each physical game row once and share its value across five actors.
 
-    params is a feedforward MAPPO critic tree; features is float32 (T,B,919),
+    params is a feedforward MAPPO critic tree; features is float32 (T,B,920),
     valid is bool (T,B) and input_scale is the saved positive multiplier.
     Return empty memory and float32 (T,B,5) raw network predictions, zero on
     invalid rows. This has no recurrent calculation or hidden state. Sharing

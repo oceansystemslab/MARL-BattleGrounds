@@ -3,8 +3,11 @@
 Validate settings once on the host with validate_shaping. Potential feedback
 preserves the discounted task objective; score-delta feedback adds a separate
 combat objective. Both use the producing transition's pre-action scores even
-when AutoReset returns a replacement game. These pure adjustments belong to
-learner feedback, never actor inputs or official benchmark scores.
+when AutoReset returns a replacement game. Scores are Team Deathmatch points,
+so both follow the task's scoring: with a positive Red Zone depth a Red Zone
+death moves a team's score, and this feedback, by 2 instead of 1. There is no
+separate Red Zone reward. These pure adjustments belong to learner feedback,
+never actor inputs or official benchmark scores.
 """
 
 from numbers import Real
@@ -36,8 +39,10 @@ def validate_shaping(
         Zero produces no adjustment. Boolean and complex values are rejected.
     mode : {"potential", "score_delta"}, default="potential"
         Potential feedback preserves the discounted objective. Score-delta
-        feedback rewards new kills minus new deaths, changing that objective.
-        Validate the mode even when the caller disables shaping.
+        feedback rewards the team's new points minus the enemy's new points
+        (one point per kill, two for a Red Zone kill when the depth is
+        positive), changing that objective. Validate the mode even when the
+        caller disables shaping.
 
     Returns
     -------
@@ -139,8 +144,9 @@ def team_potential_shaping(
         Learner's discount per real transition, from zero to one. Python real
         scalars are converted to float32; arrays must be scalar float32.
     coefficient : float or Array, default=0.01
-        Nonnegative scale for own score minus opponent score. Has the same
-        scalar type rules as discount. Zero gives zero adjustments.
+        Nonnegative scale for own score minus opponent score, in points (a Red
+        Zone death is worth 2 when the depth is positive). Has the same scalar
+        type rules as discount. Zero gives zero adjustments.
 
     Returns
     -------
@@ -195,7 +201,7 @@ def team_score_delta_shaping(
     *,
     coefficient: float | Array = 0.01,
 ) -> Array:
-    """Reward each team's new kills minus new deaths on one transition.
+    """Reward each team's new points minus the enemy's new points on one transition.
 
     Parameters
     ----------
@@ -208,14 +214,17 @@ def team_score_delta_shaping(
         (B,). Its scores belong to that transition even when AutoReset returns
         a new game. Other fields, including completion, are not read.
     coefficient : float or Array, default=0.01
-        Finite nonnegative amount per net kill. Python real scalars convert to
+        Finite nonnegative amount per net point. Python real scalars convert to
         float32; arrays must be scalar float32. Zero gives zero adjustments.
 
     Returns
     -------
     Array
-        Float32 (B,2) Team A/Team B adjustments. A new own kill adds the
-        coefficient; a new own death subtracts it. Simultaneous changes net
+        Float32 (B,2) Team A/Team B adjustments: coefficient times the team's
+        score change minus the enemy's score change. Scores are points, so an
+        ordinary kill adds the coefficient once and a Red Zone kill (enemy dies
+        in its own Red Zone, depth positive) adds it twice; an own death
+        subtracts the same amount. Simultaneous changes net
         together. Real endings keep this feedback; they do not cancel it.
         Non-advancing rows return zero. No score change gives zero even when a
         team already leads. Inputs and native task rewards remain unchanged.

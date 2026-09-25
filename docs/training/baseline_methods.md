@@ -6,6 +6,15 @@ where a section says so, from games against ALPHA version 2 and BETA version 4.
 All of those results are superseded and historical only. Methods, rules and
 declarations still describe how the studies were run.
 
+**Scoring, 24 September 2026:** every study here was run with one point per
+death, before the Red Zone rule. Its kills and points were therefore equal, and
+"kill/death shaping" meant points. New training runs default to
+`red_zone_depth=5.0`, where a death inside the victim's own Red Zone gives 2
+points but is still one kill; see the
+[training guide](README.md#red-zone-depth). The frozen screen and MAPPO search
+declarations pin `red_zone_depth=0.0`, so repeating them keeps their original
+scoring. Their saved configs and results are unchanged.
+
 For the current model population, exact checkpoint locations, result tables and
 manuscript evidence links, open the
 [development checkpoint index](checkpoint_population.md). Population V1 keeps

@@ -294,6 +294,33 @@ class TrainingSpeedEstimate:
 def progress_text(status: dict[str, Any]) -> str:
     """Explain progress using existing host records, with no reads or device work.
 
+    Parameters
+    ----------
+    status : dict[str, Any]
+        One training run's status record, as the runner reports it or a screen
+        reads it back. Every key is optional; an empty dict gives a "Starting"
+        line. Keys read: env_steps and total_env_steps (real environment
+        transitions); transitions_per_second, recent_transitions_per_second
+        and estimated_transitions_per_second (transitions per second);
+        pending_work_seconds (seconds of known later work); phase;
+        completed_updates; learning_blocks; elapsed_seconds; score_threshold;
+        random_validation (a saved Random check; when it has games it must also
+        have wins, draws and losses); validation_wins, validation_draws and
+        validation_losses, or validation_score; latest_checkpoint; and error.
+
+    Returns
+    -------
+    str
+        Several lines joined by newlines, with Title Case labels. The phase and
+        step line and the counts and time line always appear; the other lines
+        appear only when their keys are present. At most one check block
+        appears, chosen in this order: a saved Random check with games, then
+        validation wins, draws and losses (all three present), then
+        validation_score. An unknown time shows "Estimating". The status is
+        not changed.
+
+    Notes
+    -----
     Steps count real environment transitions. Training speed includes the first
     compilation and excludes validation and saving. Run elapsed time excludes
     gaps between attempts; wall_seconds includes them. Unknown future costs stay
@@ -301,11 +328,13 @@ def progress_text(status: dict[str, Any]) -> str:
     Before Learning", a PQN-VDN run in the "initial_collection" phase is
     labelled "Initial Random Collection", and a status with learning_blocks
     (QMIX or PQN-VDN) reports optimizer steps and learning blocks where PPO
-    reports learning updates. Raw losses and
-    signed reward averages remain in training_updates.jsonl; they cannot
-    diagnose learning by their size. Saved
-    Random results describe combat per game and are never treated as proof of
-    general competence.
+    reports learning updates. Raw losses and signed reward averages remain in
+    training_updates.jsonl; they cannot diagnose learning by their size. A
+    score-threshold curriculum line says how many points (not kills) new
+    training games need to win, since a Red Zone death gives 2 points;
+    validation still needs 20. Saved Random results describe combat per game as
+    kills and deaths and are never treated as proof of general competence.
+    Host-only and standard library only.
     """
     steps = int(status.get("env_steps", 0))
     total = int(status.get("total_env_steps", 0))
@@ -353,7 +382,7 @@ def progress_text(status: dict[str, Any]) -> str:
     ]
     if status.get("score_threshold") is not None:
         lines.append(
-            f"New Training Games Need {status['score_threshold']} Kills To Win "
+            f"New Training Games Need {status['score_threshold']} Points To Win "
             "| Validation Still Needs 20"
         )
     if rate or recent:
@@ -578,7 +607,9 @@ def validate_host_state(
     initial rounds, then blocks of T (``_check_pqn_host_counts``); its
     validation points come from the same offset schedule. Existing checkpoint
     and selection owners verify artifact identities and selection rules.
-    System-panel records may require loading an actor to verify its
+    Saved validation tasks and Random records are rebuilt at the saved
+    config's red_zone_depth (checkpoints._config_red_zone_depth), so they must
+    carry that depth. System-panel records may require loading an actor to verify its
     registration; learner arrays are not restored here. No games run and no
     writer or log is changed. Call this after complete learner restore and
     before resume_recording.
@@ -593,6 +624,8 @@ def validate_host_state(
     qmix_run = method == "qmix"
     pqn_run = method == "pqn_vdn"
     settings = config[method_settings_field(method)]
+    # The run's Red Zone depth sets the layout of its saved validation tasks.
+    depth = checkpoints._config_red_zone_depth(config)  # pyright: ignore[reportPrivateUsage]
     schemas = checkpoints.checkpoint_schemas(method)
     if checkpoint_details["schemas"] != schemas:
         raise ValueError("Saved model schema differs from the training method")
@@ -853,6 +886,7 @@ def validate_host_state(
             initial_reference,
             actor_digest=checkpoints._inference_digest(initial),  # pyright: ignore[reportPrivateUsage]
             seed_pairs=random_pairs,
+            red_zone_depth=depth,
         )
     pending = host["pending"]
     if pending is not None:
@@ -921,6 +955,7 @@ def validate_host_state(
                 panel=panel,
                 purpose=purpose,
                 seed_pairs=pairs,
+                red_zone_depth=depth,
             )
             directory = root / "validation" / f"{purpose}-{key}"
             task_file = read(directory / "task.json")
@@ -1049,6 +1084,7 @@ def validate_host_state(
             seed_pairs=cast(int, random_pairs),
             checkpoint_id=None if reused else key,
             env_steps=point,
+            red_zone_depth=depth,
         )
         if result["task_id"] in seen:
             raise ValueError("Saved Random task is duplicated")

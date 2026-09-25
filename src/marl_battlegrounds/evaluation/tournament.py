@@ -24,6 +24,7 @@ import jax
 import numpy as np
 
 from marl_battlegrounds._tdm_assets import current_map_id
+from marl_battlegrounds.core.types import EnvConfig
 from marl_battlegrounds.environment import MetricMode, make
 from marl_battlegrounds.evaluation.evaluate import (
     Columns,
@@ -40,7 +41,7 @@ from marl_battlegrounds.evaluation.policy_execution import (
     Policy,
     System,
 )
-from marl_battlegrounds.evaluation.replay_v3 import ReplayArtifactV3
+from marl_battlegrounds.evaluation.replay_v4 import ReplayArtifactV4
 from marl_battlegrounds.evaluation.results import TournamentResult
 from marl_battlegrounds.evaluation.run_writer import (
     IDENTITY_COLUMNS,
@@ -69,6 +70,26 @@ from marl_battlegrounds.tasks import (
 )
 
 _ROSTER_A, _ROSTER_B = canonical_tournament_rosters()
+
+
+def _config_matches_identity(
+    config: EnvConfig, identifier: str | None, *, historical: bool
+) -> bool:
+    """Tell whether a config reproduces a recorded configuration identity.
+
+    config is a scalar EnvConfig; identifier is the recorded SHA-256 (None never
+    matches); historical selects the identity a config had before the Red Zone
+    field existed (only a depth-0.0 config has one). Return False, rather than
+    raising, when a historical identity is impossible for this config.
+    """
+    from marl_battlegrounds.evaluation.evaluation_conditions import config_record
+
+    if identifier is None:
+        return False
+    try:
+        return config_record(config, historical=historical)[0] == identifier
+    except ValueError:
+        return False
 
 
 def _prepare_pair_evidence(
@@ -109,8 +130,7 @@ def _prepare_pair_evidence(
     remain valid for their older statistics but do not earn this evidence.
     """
     from marl_battlegrounds.evaluation.evaluation_conditions import (
-        config_record,
-        restore_config,
+        restore_recorded_config,
     )
     from marl_battlegrounds.evaluation.models import canonical_digest_sha256
     from marl_battlegrounds.evaluation.tournament_statistics import _population
@@ -143,11 +163,12 @@ def _prepare_pair_evidence(
             raise ValueError(
                 "tournament is missing source or resolved configuration content"
             )
-        config = restore_config(configurations[identifier])
-        if config_record(config)[0] != identifier:
+        try:
+            config, _ = restore_recorded_config(configurations[identifier], identifier)
+        except ValueError as error:
             raise ValueError(
                 "tournament configuration content does not match its identity"
-            )
+            ) from error
         configs[identifier] = config
     choices: dict[tuple[str, str], int] = {}
     games: dict[str, dict[str, Any]] = {}
@@ -513,6 +534,7 @@ def run_tournament(
     opponent_weights: Mapping[str, float] | None | Omitted = OMITTED,
     score_threshold: int | Omitted = OMITTED,
     max_steps: int | Omitted = OMITTED,
+    red_zone_depth: float | Omitted = OMITTED,
     chunk_size: int = 16,
 ) -> TournamentResult:
     """Evaluate every participant pair with fixed teams and both spawn locations.
@@ -565,6 +587,16 @@ def run_tournament(
         Positive TDM score target for every map, default 20.
     max_steps : int
         Positive horizon in ticks for each game, default 300.
+    red_zone_depth : float, default=5.0 (DEFAULT_TDM_RED_ZONE_DEPTH)
+        Red Zone depth in map units for every map. When an agent dies inside
+        its own team's Red Zone, the enemy team gets 2 points instead of 1; it
+        is still one kill and one death. 0.0 keeps one point per death. Must
+        be a Python float. New runs record it as "red_zone_depth" in their
+        metadata. On resume, omission inherits the saved run; a run saved
+        before the Red Zone rule reads as 0.0 and keeps its original
+        configuration IDs. A supplied value, even 5.0, must match the saved
+        run. The config route owns its rules, so any supplied value is
+        refused there.
     chunk_size : int
         Positive scheduling chunk length in ticks, default 16.
 
@@ -581,9 +613,14 @@ def run_tournament(
     ------
     ValueError
         Names, map choices, budgets, selections, weights, saved identity
-        or the complete match population are invalid.
+        or the complete match population are invalid, a supplied
+        red_zone_depth differs from the saved run ("red_zone_depth differs
+        from the saved evaluation conditions") or Core rejects it, or the
+        config route receives red_zone_depth. These depth errors are raised
+        before any file is written.
     TypeError
-        A config or policy input/output violates its type contract.
+        A config or policy input/output violates its type contract, or
+        red_zone_depth is not a Python float.
     RuntimeError
         A policy, writer or required statistical fit fails.
     OSError
@@ -622,7 +659,8 @@ def run_tournament(
         config_record,
         option,
         read_saved_pass,
-        restore_config,
+        red_zone_depth_option,
+        restore_recorded_config,
     )
     from marl_battlegrounds.evaluation.recording_identity import (
         normalize_system_registration,
@@ -653,6 +691,7 @@ def run_tournament(
             "opponent_weights": opponent_weights,
             "score_threshold": score_threshold,
             "max_steps": max_steps,
+            "red_zone_depth": red_zone_depth,
         }
         conflicts = [
             name
@@ -687,6 +726,8 @@ def run_tournament(
         int, option(score_threshold, saved_details, "score_threshold", 20)
     )
     max_steps = cast(int, option(max_steps, saved_details, "max_steps", 300))
+    # A run saved before the Red Zone rule has no red_zone_depth: it reads 0.0.
+    red_zone_depth = red_zone_depth_option(red_zone_depth, saved_details)
     full_metrics_episodes = cast(
         Iterable[int],
         option(full_metrics_episodes, saved_details, "full_metrics_episodes", ()),
@@ -773,9 +814,20 @@ def run_tournament(
     ):
         raise ValueError("unknown saved tournament pairing protocol")
     configurations: dict[str, Any] = {}
+    # A saved run may predate the Red Zone rule: its 12-key configurations
+    # restore at depth 0.0 and keep their original (historical) identities.
+    historical_by_map: dict[int, bool] = {}
     if saved is not None:
         assert saved_details is not None
         configurations.update(saved[0]["configurations"])
+        restored = {
+            int(map_id): restore_recorded_config(configurations[identifier], identifier)
+            for map_id, identifier in saved_details["configuration_ids_by_map"].items()
+        }
+        configs = {map_id: config for map_id, (config, _) in restored.items()}
+        historical_by_map = {
+            map_id: historical for map_id, (_, historical) in restored.items()
+        }
         if not isinstance(supplied_maps, Omitted):
             for current in normalize_episode_specs(
                 sorted(map_ids),
@@ -784,18 +836,19 @@ def run_tournament(
                 _ROSTER_B,
                 score_threshold,
                 max_steps,
+                red_zone_depth=red_zone_depth,
             ):
                 recorded = saved_details["configuration_ids_by_map"].get(
                     str(current.map_id)
                 )
-                if config_record(current.env_config)[0] != recorded:
+                if not _config_matches_identity(
+                    current.env_config,
+                    recorded,
+                    historical=historical_by_map.get(cast(int, current.map_id), False),
+                ):
                     raise ValueError(
                         "explicit map contents differ from the saved tournament source"
                     )
-        configs = {
-            int(map_id): restore_config(configurations[identifier])
-            for map_id, identifier in saved_details["configuration_ids_by_map"].items()
-        }
         if not legacy:
             schedule = tuple(
                 TournamentMatch(**record) for record in saved_details["schedule"]
@@ -821,6 +874,7 @@ def run_tournament(
                 _ROSTER_B,
                 score_threshold,
                 max_steps,
+                red_zone_depth=red_zone_depth,
             )
         }
     resolved: dict[tuple[int, int], Any] = {}
@@ -838,14 +892,17 @@ def run_tournament(
         _validate_config_choices(
             env_config, batched=False, both_spawn_choices=not legacy
         )
-        identifier, content = config_record(env_config)
+        historical = historical_by_map.get(cast(int, map_id), False)
+        identifier, content = config_record(env_config, historical=historical)
         configurations[identifier] = content
         source_ids[cast(int, map_id)] = identifier
         resolved[cast(int, map_id), 0] = env_config
         resolved_ids[cast(int, map_id), 0] = identifier
         if not legacy:
             exchanged = _swap_spawn_banks(env_config)
-            swapped_id, swapped_content = config_record(exchanged)
+            swapped_id, swapped_content = config_record(
+                exchanged, historical=historical
+            )
             configurations[swapped_id] = swapped_content
             resolved[cast(int, map_id), 1] = exchanged
             resolved_ids[cast(int, map_id), 1] = swapped_id
@@ -880,6 +937,7 @@ def run_tournament(
             "num_matches": len(schedule),
             "score_threshold": score_threshold,
             "max_steps": max_steps,
+            "red_zone_depth": red_zone_depth,
             "metrics": metrics,
             "full_metrics_episodes": list(selected.full_metrics_episodes),
             "replay_episodes": list(selected.replay_episodes),
@@ -970,7 +1028,7 @@ def run_tournament(
         matches: list[ResultRow] = []
         completion_order: list[int] = []
         full_tables: list[Columns] = []
-        replays: list[ReplayArtifactV3] = []
+        replays: list[ReplayArtifactV4] = []
         for index, ((first, second), group) in enumerate(sorted(groups.items()), 1):
             group_ids = {match.episode_id for match in group}
             execute = evaluate_episodes

@@ -3,6 +3,9 @@
 Saved fixtures exercise current and historical schemas without running games.
 The tests reject ambiguous scopes, incomplete summaries and destructive restore,
 while preserving recorded row order, optional metrics and legacy result fields.
+A host-schema-2 run reads its full report with the header of its own scalar
+schema: a saved schema-14 report keeps its 11,148 metric columns, and a
+schema-14 manifest cannot claim a schema-15 header.
 """
 
 import csv
@@ -17,7 +20,11 @@ from typing import Any
 import numpy as np
 import pytest
 
-from marl_battlegrounds.evaluation.metric_catalog import PRIORITY_METRIC_NAMES
+from marl_battlegrounds.evaluation.metric_catalog import (
+    FULL_METRIC_NAMES_BY_SCHEMA_VERSION,
+    METRIC_SCHEMA_VERSION,
+    PRIORITY_METRIC_NAMES,
+)
 from marl_battlegrounds.evaluation.results import (
     EpisodeResult,
     EvaluationResult,
@@ -32,14 +39,18 @@ from marl_battlegrounds.evaluation.run_writer import (
 
 
 def _fixture(
-    tmp_path: Path, *, modes: tuple[str, ...] = ("priority",), historical: bool = False
+    tmp_path: Path,
+    *,
+    modes: tuple[str, ...] = ("priority",),
+    historical: bool = False,
+    scalar: int = METRIC_SCHEMA_VERSION,
 ) -> tuple[Path, dict[str, Any]]:
     directory = tmp_path / "run"
     directory.mkdir()
     manifest: dict[str, Any] = {
         "schema_version": 1 if historical else 2,
         "metric_schema_id": "marlbg.tdm.scalar",
-        "metric_schema_version": 13 if historical else 14,
+        "metric_schema_version": 13 if historical else scalar,
         "run_id": "run",
         "systems": {},
         "configurations": {"cfg": {}},
@@ -458,6 +469,31 @@ def test_wide_reader_stops_after_requested_prefix(
     assert len(seen) == 2
     assert isinstance(iterator, Generator)
     iterator.close()
+
+
+def test_schema_14_full_report_reads_with_its_own_header_only(tmp_path: Path) -> None:
+    for name, header_version, readable in (("own", 14, True), ("newer", 15, False)):
+        root = tmp_path / name
+        root.mkdir()
+        directory, manifest = _fixture(root, modes=("full",), scalar=14)
+        names = FULL_METRIC_NAMES_BY_SCHEMA_VERSION[header_version]
+        row = _row()
+        row.update(dict.fromkeys(names, 0.5))
+        header = (*IDENTITY_COLUMNS, *names)
+        _table(directory, manifest, "full_metrics.csv", header, [row])
+        _save(directory, manifest)
+        if not readable:
+            with pytest.raises(ValueError, match="incompatible current result table"):
+                load_results(directory)
+            continue
+        result = load_results(directory)
+        assert result.metadata["metric_schema_version"] == 14
+        assert result.metadata["tables"]["full_metrics"]["columns"] == header
+        table = result.table("full_metrics")
+        assert tuple(table) == header
+        assert len(header) - len(IDENTITY_COLUMNS) == 11148
+        assert not any("red_zone" in column for column in table)
+        assert table["team_a_kills"].tolist() == [0.5]
 
 
 def test_truncation_without_manifest_change_is_detected(tmp_path: Path) -> None:

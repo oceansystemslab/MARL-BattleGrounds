@@ -1,9 +1,19 @@
-"""Check replay construction and agreement between its recorded parts."""
+"""Check replay construction and agreement between its recorded parts.
+
+A real captured Team Deathmatch trajectory at Red Zone depth 5, where a victim
+dies inside its own team's strip, seals into replay V4. The replay validates,
+its transition passes the full transition check (events re-derived from the
+recorded start positions give the other team 2 points), and it saves and
+loads unchanged.
+"""
 
 from __future__ import annotations
 
 from dataclasses import dataclass
+from pathlib import Path
 
+import jax
+import jax.numpy as jnp
 import pytest
 from pydantic import ConfigDict, PrivateAttr, ValidationError
 from tests.evaluation_fixtures import (
@@ -11,12 +21,23 @@ from tests.evaluation_fixtures import (
     captured_evaluation_trajectory,
     captured_resumed_team_deathmatch_horizon_trajectory,
     captured_team_deathmatch_threshold_trajectory,
+    current_evaluation_context,
     evaluation_env_config,
     mage_target_none_ultimate_action,
+    neutral_action,
 )
 
 import marl_battlegrounds.evaluation.replay as replay_module
-from marl_battlegrounds.core.types import CONTEXT_FEATURE_CURRENT_TIMESTEP
+from marl_battlegrounds.core.env import initialize_scenario_state, reset, step
+from marl_battlegrounds.core.types import (
+    CONTEXT_FEATURE_CURRENT_TIMESTEP,
+    CONTEXT_FEATURE_TDM_RED_ZONE_DEPTH,
+    TASK_MODE_TDM,
+)
+from marl_battlegrounds.evaluation.capture import (
+    capture_evaluation_transition_unit_v3,
+    capture_initial_evaluation_frame_v3,
+)
 from marl_battlegrounds.evaluation.events import decode_evaluation_events_v1
 from marl_battlegrounds.evaluation.metrics import (
     CompletionState,
@@ -40,6 +61,7 @@ from marl_battlegrounds.evaluation.models import (
     EvaluationFrameV1,
     EvaluationModel,
     EvaluationTransitionV1,
+    TeamDeathmatchScoreChangedEventV1,
     canonical_digest_sha256,
     canonical_json_bytes,
 )
@@ -60,6 +82,15 @@ from marl_battlegrounds.evaluation.replay import (
     iter_replay_transition_views_v1,
     validate_metric_report_artifact_against_replay_v1,
     validate_replay_artifact_v1,
+)
+from marl_battlegrounds.evaluation.replay_io import load_replay, save_replay
+from marl_battlegrounds.evaluation.replay_v4 import (
+    ReplayArtifactV4,
+    build_replay_v4,
+    validate_replay_artifact_v4,
+)
+from marl_battlegrounds.evaluation.validation import (
+    validate_evaluation_transition_unit_v1,
 )
 
 
@@ -1775,3 +1806,75 @@ def test_replay_root_rejects_invalid_processing_progress_combinations(
         )
         with pytest.raises(ValueError):
             validate_replay_artifact_v1(mutated)
+
+
+def test_captured_red_zone_death_replay_validates_end_to_end(
+    tmp_path: Path, runtime_provenance: RuntimeProvenanceV1
+) -> None:
+    # Width 20 with Team A's pads at x = 1.5: at depth 5 Team A's strip is
+    # x <= 5. Team A's Mage (slot 0) starts on its pad with 1 health and Team
+    # B's Hunter (slot 5) stands 3 map units east of it.
+    config = evaluation_env_config(
+        task_mode=TASK_MODE_TDM,
+        team_deathmatch_score_threshold=5,
+        team_deathmatch_red_zone_depth=5.0,
+        max_steps=2,
+    )._replace(spawn_shield_duration_steps=0)
+    context = current_evaluation_context(config)
+    reset_state, _, _, _ = reset(config, jax.random.PRNGKey(0))
+    assert reset_state.agent_positions[0].tolist() == [1.5, 1.5]
+    state, observation, action_mask, _ = initialize_scenario_state(
+        reset_state._replace(
+            agent_positions=reset_state.agent_positions.at[5].set(
+                jnp.asarray((4.5, 1.5), dtype=jnp.float32)
+            ),
+            current_health=reset_state.current_health.at[0].set(1.0),
+        ),
+        config,
+    )
+    frames = [
+        capture_initial_evaluation_frame_v3(context, state, observation, action_mask)
+    ]
+    assert (
+        float(observation.context_features[5, CONTEXT_FEATURE_TDM_RED_ZONE_DEPTH])
+        == 5.0
+    )
+    # Team B's Hunter targets its enemy row 0: Team A's Mage.
+    assert bool(action_mask.select_target_mask[5, 6])
+    action = neutral_action()
+    action = action._replace(select_target=action.select_target.at[5].set(6))
+    next_state, next_observation, reward, done_flags, next_mask, info = step(
+        config, state, action_mask, action, jax.random.PRNGKey(1)
+    )
+    transition, successor_frame = capture_evaluation_transition_unit_v3(
+        context,
+        frames[0],
+        next_state,
+        next_observation,
+        next_mask,
+        info.transition_facts,
+        reward,
+        done_flags,
+    )
+    frames.append(successor_frame)
+
+    replay = build_replay_v4(
+        context, frames, (transition,), runtime_provenance=runtime_provenance
+    )
+    validate_replay_artifact_v4(replay)
+    validate_evaluation_transition_unit_v1(context, frames[0], transition, frames[1])
+    assert (
+        replay.header.context.resolved_env_config.team_deathmatch_red_zone_depth == 5.0
+    )
+    assert successor_frame.snapshot.team_deathmatch_scores == (0, 2)
+    assert [
+        (event.team_id, event.score_increment)
+        for event in replay.transitions[0].events
+        if isinstance(event, TeamDeathmatchScoreChangedEventV1)
+    ] == [(2, 2)]
+
+    path = tmp_path / "red-zone.marlbg-replay.json"
+    save_replay(replay, path)
+    loaded = load_replay(path)
+    assert type(loaded.replay) is ReplayArtifactV4
+    assert loaded.replay == replay

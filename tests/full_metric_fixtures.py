@@ -1,7 +1,10 @@
 """Provide shared game steps and metric lookups for full-metric tests.
 
 The helpers drive public transitions and keep the game state paired with its
-metric counters. Tests choose the setup and expected result.
+metric counters. Tests choose the setup and expected result. start_run builds a
+Team Deathmatch game on the 20 x 12 fixture map with spawn pads at x = 1.5
+(Team A) and x = 18.5 (Team B); its red_zone_depth keyword (default 0.0, the
+rule off) sets the Red Zone depth, so depth 5 gives strips x <= 5 and x >= 15.
 """
 
 from collections.abc import Callable
@@ -75,13 +78,14 @@ def start_run(
     team_sizes: tuple[int, int] = (3, 2),
     classes: tuple[tuple[int, int], ...] = (),
     arrange: Callable[[EnvState], EnvState] | None = None,
+    red_zone_depth: float = 0.0,
 ) -> MetricRun:
     config = evaluation_env_config(
         team_sizes=team_sizes,
         task_mode=1,
         team_deathmatch_score_threshold=20,
         max_steps=16,
-    )
+    )._replace(team_deathmatch_red_zone_depth=red_zone_depth)
     class_ids = config.agent_profile.class_ids
     for slot, class_id in classes:
         class_ids = class_ids.at[slot].set(class_id)

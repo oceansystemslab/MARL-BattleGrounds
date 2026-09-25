@@ -3,7 +3,8 @@
 This CPU test expands permitted features only for its independent source
 reference. Production receives compact observations and per-game critic inputs.
 The fixed synthetic rollout includes two groups, two minibatches, four epochs,
-an internal reset and a continuing final bootstrap. It is no learning trial.
+an internal reset and a continuing final bootstrap, at the current widths of
+5,165 actor features and 920 physical-state features. It is no learning trial.
 """
 
 # The extracted donor namespace has runtime types, not importable annotations.
@@ -143,7 +144,7 @@ def test_compact_whole_sequence_update_matches_original_grouped_epochs() -> None
     reference_observation = ns["ObservationGlobalState"](
         expanded,
         categorical_action_mask(masks),
-        jnp.broadcast_to(physical[..., None, :], (*shape, 919)),
+        jnp.broadcast_to(physical[..., None, :], (*shape, 920)),
     )
     actor_starts = jnp.broadcast_to(starts[..., None], shape)
     _, distribution = actor.apply(

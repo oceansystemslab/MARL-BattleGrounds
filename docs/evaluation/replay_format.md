@@ -1,12 +1,19 @@
 # Standard Evaluation Replay Format
 
-## Current Single-File V3 Recording
+## Current Single-File V4 Recording
 
-A current `ReplayArtifactV3` stores one context/header, T+1 ordered frames,
+A current `ReplayArtifactV4` stores one context/header, T+1 ordered frames,
 T transitions and rollout completion. It is saved as one canonical
 `.marlbg-replay.json` file. It does not need a metric-report sidecar or a metric
 calculation to record a game. `load_replay` dispatches by the recorded version;
-V1/V2 files retain their original strict readers and meanings.
+V1/V2/V3 files retain their original strict readers and meanings.
+
+Version 4 records the Team Deathmatch Red Zone rule (amendment A44). Its
+context V4 holds `ResolvedEnvConfigV2`, which always writes
+`team_deathmatch_red_zone_depth` (0.0 when the rule is off). Its frames V3 hold
+20 context columns; column 19 is the configured depth on every configured row.
+Replay V3 and older were recorded before the rule: their games scored one point
+per death, and readers never add a depth to them.
 
 | Record | What It Owns |
 | --- | --- |
@@ -34,7 +41,7 @@ independent selections.
 
 ### Save and Load
 
-`save_replay` validates and publishes prepared canonical V2/V3 bytes without
+`save_replay` validates and publishes prepared canonical V2/V3/V4 bytes without
 overwriting an existing file. `load_replay` validates bounded local regular files,
 strict UTF-8/JSON, schema identity, semantic joins, digests and canonical bytes.
 The low-level replay I/O module requires existing parent directories and POSIX
@@ -55,17 +62,22 @@ permission to replace scientifically different content at the same path.
 
 ### Actor Inputs and Viewer Analysis
 
-Current records bind `EvaluationEpisodeContextV3` to `EvaluationFrameV2`.
-Unit-row column 3 is `is_enemy`: zero for self/allies and one for visible enemies.
-Hidden rows are zero. `self_ally_index` identifies self among five ally slots.
-Simulator team/global identities remain in roster/transition metadata, outside
-actor feature values.
+Current records bind `EvaluationEpisodeContextV4` to `EvaluationFrameV3`
+(`evaluation_frame_type_for_context` owns this pairing: context V3 pairs with
+frame V2, and V1/V2 with frame V1). Frame V3 has the V2 row meanings plus
+context column 19. Unit-row column 3 is `is_enemy`: zero for self/allies and one
+for visible enemies. Hidden rows are zero. `self_ally_index` identifies self
+among five ally slots. Simulator team/global identities remain in
+roster/transition metadata, outside actor feature values.
 
-Current NoSharedObs actor projection 3 uses `ActorPovReplayArtifactV2` for exact
-actor rows, self index and public class roster. Current SharedObs actor projection
-2 uses five own-team source positions and ten candidate rows ordered allies then
-enemies. Its Viewer source projection is version 2 and explicitly labelled source
-material. It is not a claim that the diagnostic rendering is the learner's final
+Current NoSharedObs actor projection 4 uses `ActorPovReplayArtifactV3` for exact
+actor rows (20 context columns), self index and public class roster. Current
+SharedObs actor projection 3 uses five own-team source positions and ten
+candidate rows ordered allies then enemies. Context V4 pairs only with these
+projections, including at depth 0. Its Viewer source projection is version 3 and
+explicitly labelled source material. Projection versions 3 (NoSharedObs) and 2
+(SharedObs), with `ActorPovReplayArtifactV2`, describe records made before the
+Red Zone rule. It is not a claim that the diagnostic rendering is the learner's final
 network tensor. Historical feature columns keep their recorded meanings; never
 pass a new frame through an old writer by changing a version label.
 
@@ -77,24 +89,27 @@ rewrite an original completion or processing failure. Source documentation
 changes can legitimately change source-byte provenance digests even when
 executable behavior is unchanged.
 
-Current controlled-scenario output uses `ScenarioEvaluationRecordV4` with
-`ResolvedScenarioSpecificationV3`, `ScenarioSeedScheduleV3` and a V3 replay
-reference. Named seed facts may be unknown; no metric-report reference is needed.
-Use the versioned V4 save/load APIs for canonical evidence joins and the separate
-`validate_official_scenario_evaluation_record_v4` for current official eligibility.
+Current controlled-scenario output uses `ScenarioEvaluationRecordV5` with
+`ResolvedScenarioSpecificationV3`, `ScenarioSeedScheduleV3` and a V4 replay
+reference. The specification's resolved configuration digest is the resolved
+config V2 digest, which covers the scenario's Red Zone depth. Named seed facts
+may be unknown; no metric-report reference is needed. Use the versioned V5
+save/load APIs for canonical evidence joins and the separate
+`validate_official_scenario_evaluation_record_v5` for current official
+eligibility. Record V4 (replay V3) stays readable with its own V4 APIs.
 Generic loading does not confer official status. Historical scenario/POV artifacts
 retain their own strict versions and evidence requirements.
 
 The sections below retain the historical V1 normal form, migrations and legacy
 persistence graph. They explain why old files have different bindings and
 sidecars. Their in-place pre-alpha migrations and old milestone/projection names
-do not override current V3 recording or authorize changing historical bytes.
+do not override current V4 recording or authorize changing historical bytes.
 
 ## Historical V1 format
 
 The following sections retain the V1 wire contract and historical migration
 record. Their old in-place migration and sidecar rules apply to those historical
-versions; they do not override the separately versioned V3 recording above.
+versions; they do not override the separately versioned V4 recording above.
 
 This document defines the version-1 semantic replay normal form introduced in
 Milestone 6. It is a contract for evaluation evidence, not a renderer frame,
@@ -420,15 +435,15 @@ surface is:
   core-aware product/curated-state acceptance gate and canonical SharedObs
   mode, projection, and all-frame availability check.
 
-Current controlled-scenario captures use `ScenarioEvaluationRecordV4` with
-`ResolvedScenarioSpecificationV3`, `ScenarioSeedScheduleV3` and a V3 replay
+Current controlled-scenario captures use `ScenarioEvaluationRecordV5` with
+`ResolvedScenarioSpecificationV3`, `ScenarioSeedScheduleV3` and a V4 replay
 reference. Their endpoint/role/initial-state semantics are unchanged; named seed
 facts may be unknown and no metric-report reference is required. Use
-`save_scenario_evaluation_record_v4` / `load_scenario_evaluation_record_v4` for
-canonical artifact joins, then `validate_official_scenario_evaluation_record_v4`
+`save_scenario_evaluation_record_v5` / `load_scenario_evaluation_record_v5` for
+canonical artifact joins, then `validate_official_scenario_evaluation_record_v5`
 for live official eligibility. The latter reuses the same Core-backed product,
-curated-state and all-frame SharedObs checks as the historical V2 gate. Old V1/V2/V3
-scenario files retain their original strict readers and report joins. Current
+curated-state and all-frame SharedObs checks as the historical V2 gate. Old
+V1-V4 scenario files retain their original strict readers and report joins. Current
 full scalar rows live in the run CSV, independently of the replay file.
 
 The filename pair is derived locally, never serialized:
@@ -464,8 +479,11 @@ against current core authorities, requires canonical SharedObs mode and
 projection, and checks the exact configured-roster availability topology on
 every frame. Evaluation-owned V1 wire dimensions are
 frozen at the post-A18 values for artifact decoding and checked against the
-current core dimensions in ordinary tests; changing them again requires an
-explicit schema migration. The V1
+current core dimensions in ordinary tests. The one deliberate difference is the
+context width: Core now has 20 context columns (the Red Zone depth), recorded as
+`CONTEXT_FEATURES_V2` for frame V3, while `CONTEXT_FEATURES_V1` keeps 19 for
+frames V1 and V2. Changing a dimension again requires an explicit schema
+migration. The V1
 filesystem backend requires POSIX directory-descriptor and no-follow support so
 every component and final operation remain bound to one opened directory inode;
 it fails closed with `unsupported_platform` when those guarantees are unavailable.

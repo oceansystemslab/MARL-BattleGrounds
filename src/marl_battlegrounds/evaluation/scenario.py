@@ -6,10 +6,12 @@ measurements and predicate outcomes. This module checks types, identities,
 completion eligibility, and evidence joins; it does not compute a tactical
 measurement or decide whether a hypothesis is true.
 
-Record V1/V2 use replay V1 plus a metric sidecar. Record V3 uses replay V2;
-current record V4 uses replay V3 and frame V2. Generic validation stays on the
-host without current simulator admission. Official validation additionally
-imports current catalog/Core checks and requires canonical SharedObs coverage.
+Record V1/V2 use replay V1 plus a metric sidecar. Record V3 uses replay V2.
+Record V4 uses replay V3 and frame V2 (before Red Zone). Current record V5
+uses replay V4, whose context records the Team Deathmatch Red Zone depth.
+Generic validation stays on the host without current simulator admission.
+Official validation additionally imports current catalog/Core checks and
+requires canonical SharedObs coverage.
 """
 
 from __future__ import annotations
@@ -54,6 +56,11 @@ from marl_battlegrounds.evaluation.replay_v3 import (
     ReplayArtifactV3,
     replay_reference_v3,
 )
+from marl_battlegrounds.evaluation.replay_v4 import (
+    ReplayArtifactReferenceV4,
+    ReplayArtifactV4,
+    replay_reference_v4,
+)
 from marl_battlegrounds.evaluation.validation import validate_declared_model_tree
 
 SCENARIO_SPECIFICATION_SCHEMA_ID = (
@@ -84,6 +91,7 @@ SCENARIO_SCHEMA_VERSION: Literal[1] = 1
 SCENARIO_SCHEMA_VERSION_V2: Literal[2] = 2
 SCENARIO_SCHEMA_VERSION_V3: Literal[3] = 3
 SCENARIO_SCHEMA_VERSION_V4: Literal[4] = 4
+SCENARIO_SCHEMA_VERSION_V5: Literal[5] = 5
 
 type ScenarioClassification = Literal["official", "custom"]
 type ScenarioEvaluationRole = Literal[
@@ -1807,7 +1815,8 @@ class _ScenarioEvaluationRecordFields(EvaluationModel):
         | ResolvedScenarioSpecificationV3,
         replay_reference: ReplayArtifactReferenceV1
         | ReplayArtifactReferenceV2
-        | ReplayArtifactReferenceV3,
+        | ReplayArtifactReferenceV3
+        | ReplayArtifactReferenceV4,
     ) -> None:
         """Check schedule bounds, exact endpoint order/types, predicate identity, and
         digest.
@@ -2075,6 +2084,61 @@ class ScenarioEvaluationRecordV4(_ScenarioEvaluationRecordFields):
         return self
 
 
+def _require_schema_version_five(value: object) -> object:
+    """Return exact Python integer 5; reject bool and other values with ValueError."""
+    if type(value) is not int or value != 5:
+        raise ValueError("schema_version must be the exact integer 5")
+    return value
+
+
+class ScenarioEvaluationRecordV5(_ScenarioEvaluationRecordFields):
+    """Current scenario endpoint evidence joined to replay V4.
+
+    Attributes
+    ----------
+    schema_version : Annotated[Literal[5],
+    BeforeValidator(_require_schema_version_five)]
+        Exact integer 5; the default.
+    specification : ResolvedScenarioSpecificationV3
+        Exact fixed-slot specification V3 (its resolved_config_digest_sha256
+        is the resolved config V2 digest, which covers the Red Zone depth).
+    replay_reference : ReplayArtifactReferenceV4
+        Exact replay reference V4.
+
+    Notes
+    -----
+    Same result fields and checks as ScenarioEvaluationRecordV4; only the
+    replay version differs. V1-V4 stay readable with their original meanings.
+    Actual evidence joins require the public validator.
+    """
+
+    schema_version: Annotated[
+        Literal[5], BeforeValidator(_require_schema_version_five)
+    ] = 5
+    specification: ResolvedScenarioSpecificationV3
+    replay_reference: ReplayArtifactReferenceV4
+
+    @model_validator(mode="after")
+    def _validate_record(self) -> ScenarioEvaluationRecordV5:
+        """Check exact specification/reference versions and shared result/digest
+        constraints.
+
+        Return this record or raise ValueError; no files are loaded.
+        """
+        _require_stable_nested_model(
+            self.specification,
+            record_name="scenario specification",
+            expected_types=(ResolvedScenarioSpecificationV3,),
+        )
+        _require_stable_nested_model(
+            self.replay_reference,
+            record_name="scenario replay reference",
+            expected_types=(ReplayArtifactReferenceV4,),
+        )
+        self._check_record(self.specification, self.replay_reference)
+        return self
+
+
 def _validate_scenario_evaluation_record_against_validated_replay_v2(
     canonical_record: ScenarioEvaluationRecordV2,
     replay: ReplayArtifactV1,
@@ -2104,8 +2168,9 @@ def _validate_scenario_evaluation_record_against_validated_replay_v2(
 def _validate_scenario_replay_joins(
     canonical_record: ScenarioEvaluationRecordV2
     | ScenarioEvaluationRecordV3
-    | ScenarioEvaluationRecordV4,
-    replay: ReplayArtifactV1 | ReplayArtifactV2 | ReplayArtifactV3,
+    | ScenarioEvaluationRecordV4
+    | ScenarioEvaluationRecordV5,
+    replay: ReplayArtifactV1 | ReplayArtifactV2 | ReplayArtifactV3 | ReplayArtifactV4,
     assigned_type: type[AssignedPolicySlotV1] | type[AssignedPolicySlotV2],
 ) -> None:
     """Join scenario declaration to actual layout, config, roster, roles, seeds, and
@@ -2240,7 +2305,7 @@ def _validate_scenario_replay_joins(
 
 
 def _validate_official_scenario_replay_v2(
-    replay: ReplayArtifactV1 | ReplayArtifactV2 | ReplayArtifactV3,
+    replay: ReplayArtifactV1 | ReplayArtifactV2 | ReplayArtifactV3 | ReplayArtifactV4,
 ) -> None:
     """Check recorded context/state against current official rules for each replay
     version.
@@ -2254,10 +2319,14 @@ def _validate_official_scenario_replay_v2(
         _validate_official_scenario_context_v2,  # pyright: ignore[reportPrivateUsage]
         _validate_official_scenario_context_v3,  # pyright: ignore[reportPrivateUsage]
         _validate_official_scenario_context_v4,  # pyright: ignore[reportPrivateUsage]
+        _validate_official_scenario_context_v5,  # pyright: ignore[reportPrivateUsage]
     )
 
     context = replay.header.context
-    if isinstance(replay, ReplayArtifactV3):
+    # V4 subclasses V2 (not V3), so it must be matched first.
+    if isinstance(replay, ReplayArtifactV4):
+        _validate_official_scenario_context_v5(replay.header.context, replay.frames[0])
+    elif isinstance(replay, ReplayArtifactV3):
         _validate_official_scenario_context_v4(replay.header.context, replay.frames[0])
     elif isinstance(replay, ReplayArtifactV2):
         _validate_official_scenario_context_v3(replay.header.context, replay.frames[0])
@@ -2805,6 +2874,162 @@ def build_scenario_evaluation_record_v4(
     return record
 
 
+def validate_scenario_evaluation_record_v5(
+    record: ScenarioEvaluationRecordV5,
+    replay: ReplayArtifactV4,
+) -> None:
+    """Validate scenario record V5 against its actual recorded evidence.
+
+    Parameters
+    ----------
+    record : ScenarioEvaluationRecordV5
+        Exact ScenarioEvaluationRecordV5 with supplied endpoint results.
+    replay : ReplayArtifactV4
+        Exact ReplayArtifactV4 carrying the referenced trajectory.
+
+    Returns
+    -------
+    None
+        None.
+
+    Raises
+    ------
+    TypeError
+        A required root type is unsupported.
+    ValueError
+        Record validity, content references, scenario/config/role/state
+        joins, or endpoint completion eligibility fails.
+
+    Notes
+    -----
+    Host-only validation does not compute supplied measurement values or
+    predicate truth. No legacy metric sidecar is needed.
+    Current official product admission requires the separate official validator.
+    """
+    canonical_record = cast(
+        ScenarioEvaluationRecordV5,
+        validate_declared_model_tree(
+            record,
+            record_name="scenario evaluation record",
+            expected_type=ScenarioEvaluationRecordV5,
+        ),
+    )
+    validate_declared_model_tree(
+        replay, record_name="scenario replay", expected_type=ReplayArtifactV4
+    )
+    if canonical_record.replay_reference != replay_reference_v4(replay):
+        raise ValueError("scenario replay reference does not match replay content")
+    _validate_scenario_replay_joins(canonical_record, replay, AssignedPolicySlotV2)
+
+
+def validate_official_scenario_evaluation_record_v5(
+    record: ScenarioEvaluationRecordV5,
+    replay: ReplayArtifactV4,
+) -> None:
+    """Validate scenario evidence and its context against current official rules.
+
+    Parameters
+    ----------
+    record : ScenarioEvaluationRecordV5
+        Exact ScenarioEvaluationRecordV5 with supplied endpoint results.
+    replay : ReplayArtifactV4
+        Exact ReplayArtifactV4 carrying the referenced trajectory.
+
+    Returns
+    -------
+    None
+        None.
+
+    Raises
+    ------
+    TypeError
+        A record or context type is unsupported.
+    ValueError
+        Evidence joins, current mechanics/product config, initial-state
+        validity, projection, or canonical SharedObs availability fails.
+
+    Notes
+    -----
+    Adds live catalog/Core admission to generic scenario validation. This can
+    allocate JAX arrays while reconstructing recorded config/state; it does not
+    rerun the episode or prove the supplied endpoint calculation.
+    """
+    validate_scenario_evaluation_record_v5(record, replay)
+    _validate_official_scenario_replay_v2(replay)
+
+
+def build_scenario_evaluation_record_v5(
+    specification: ResolvedScenarioSpecificationV3,
+    replay: ReplayArtifactV4,
+    *,
+    schedule_coordinate: int,
+    measurement_results: tuple[ScenarioMeasurementResultV1, ...],
+    violation_results: tuple[ScenarioViolationResultV1, ...],
+    predicate_result: ScenarioPredicateResultV1,
+) -> ScenarioEvaluationRecordV5:
+    """Build and validate a content-addressed scenario record V5.
+
+    Parameters
+    ----------
+    specification : ResolvedScenarioSpecificationV3
+        Exact ResolvedScenarioSpecificationV3 declared before rollout.
+    replay : ReplayArtifactV4
+        Exact ReplayArtifactV4 containing the realized evidence.
+    schedule_coordinate : int
+        Zero-based matched-seed coordinate within the specification.
+    measurement_results : tuple[ScenarioMeasurementResultV1, ...]
+        Caller-computed results in primary-then-secondary definition order.
+    violation_results : tuple[ScenarioViolationResultV1, ...]
+        Caller-computed results in exact violation-definition order.
+    predicate_result : ScenarioPredicateResultV1
+        Caller-computed outcome of the declared success predicate.
+
+    Returns
+    -------
+    ScenarioEvaluationRecordV5
+        Strict ScenarioEvaluationRecordV5 with canonical ID/digest, content references,
+        and complete initial-frame digest.
+
+    Raises
+    ------
+    TypeError
+        Required evidence types are unsupported.
+    ValueError
+        Evidence, declaration/result joins, completion eligibility, or current official
+        context admission fails.
+
+    Notes
+    -----
+    Always applies official live-rule checks, including canonical SharedObs, even though
+    specification classification is a recorded field.
+    Performs no file I/O and does not compute measurements, predicate truth, or
+    a simulator rollout. All supplied endpoint values remain the caller's
+    responsibility.
+    """
+    payload = {
+        "schema_id": SCENARIO_EVALUATION_RECORD_SCHEMA_ID,
+        "schema_version": 5,
+        "record_id": f"{replay.header.context.identity.episode_id}:scenario-evaluation",
+        "specification": specification,
+        "schedule_coordinate": schedule_coordinate,
+        "replay_reference": replay_reference_v4(replay),
+        "realized_initial_frame_digest_sha256": canonical_digest_sha256(
+            replay.frames[0]
+        ),
+        "measurement_results": measurement_results,
+        "violation_results": violation_results,
+        "predicate_result": predicate_result,
+    }
+    record = ScenarioEvaluationRecordV5.model_validate(
+        {
+            **payload,
+            "canonical_digest_sha256": canonical_digest_sha256(payload),
+        }
+    )
+    validate_official_scenario_evaluation_record_v5(record, replay)
+    return record
+
+
 __all__ = [
     "SCENARIO_EVALUATION_RECORD_SCHEMA_ID",
     "SCENARIO_MEASUREMENT_DEFINITION_SCHEMA_ID",
@@ -2814,6 +3039,7 @@ __all__ = [
     "SCENARIO_SCHEMA_VERSION_V2",
     "SCENARIO_SCHEMA_VERSION_V3",
     "SCENARIO_SCHEMA_VERSION_V4",
+    "SCENARIO_SCHEMA_VERSION_V5",
     "SCENARIO_SEED_SCHEDULE_SCHEMA_ID",
     "SCENARIO_SPECIFICATION_SCHEMA_ID",
     "SCENARIO_VIOLATION_DEFINITION_SCHEMA_ID",
@@ -2830,6 +3056,7 @@ __all__ = [
     "ScenarioEvaluationRecordV2",
     "ScenarioEvaluationRecordV3",
     "ScenarioEvaluationRecordV4",
+    "ScenarioEvaluationRecordV5",
     "ScenarioEvaluationRole",
     "ScenarioFixedSlotRoleV2",
     "ScenarioMeasurementDefinitionV1",
@@ -2850,13 +3077,16 @@ __all__ = [
     "build_scenario_evaluation_record_v2",
     "build_scenario_evaluation_record_v3",
     "build_scenario_evaluation_record_v4",
+    "build_scenario_evaluation_record_v5",
     "resolved_initial_state_digest_sha256",
     "resolved_initial_state_digest_sha256_v2",
     "validate_official_scenario_evaluation_record_v2",
     "validate_official_scenario_evaluation_record_v3",
     "validate_official_scenario_evaluation_record_v4",
+    "validate_official_scenario_evaluation_record_v5",
     "validate_scenario_evaluation_record_v1",
     "validate_scenario_evaluation_record_v2",
     "validate_scenario_evaluation_record_v3",
     "validate_scenario_evaluation_record_v4",
+    "validate_scenario_evaluation_record_v5",
 ]

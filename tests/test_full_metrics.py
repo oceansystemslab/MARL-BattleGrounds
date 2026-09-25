@@ -85,8 +85,8 @@ def test_fixed_full_schema_preserves_priority_and_missingness_across_rosters() -
         runs.append(run)
     for run in runs:
         values = cast(MetricValues, compiled(run.full, run.config, _priority(run)))
-        assert len(METRIC_COLUMNS) == 11148
-        assert values.values.shape == values.valid.shape == (11148,)
+        assert len(METRIC_COLUMNS) == 11192
+        assert values.values.shape == values.valid.shape == (11192,)
         assert values.values.dtype == jnp.float32 and values.valid.dtype == jnp.bool_
         assert bool(jnp.isfinite(values.values).all())
         np.testing.assert_array_equal(

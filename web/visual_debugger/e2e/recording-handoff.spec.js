@@ -1,6 +1,7 @@
 /**
  * @file Check live recording finish/discard/exit, saved interrupted prefixes and
- * multi-tab handoff to replay. Exit must end the server with exit code 0 and no
+ * multi-tab handoff to replay. Saved live recordings are replay V4 files (they record
+ * the Red Zone rule) without a metric sidecar. Exit must end the server with exit code 0 and no
  * signal, checked strictly by expectServerShutdown. A server that dies before its
  * shutdown response must reject that response promptly through the browser's real
  * requestfailed event, be reported as a failure naming its SIGKILL outcome (never as
@@ -404,7 +405,7 @@ async function expectSavedArtifacts(replayPath, metricPath, transitionCount) {
   expect(replay.bytes.byteLength).toBeGreaterThan(0);
   expect(replay.value).toMatchObject({
     schema_id: "marl_battlegrounds.evaluation.replay_artifact",
-    schema_version: 3,
+    schema_version: 4,
     header: {
       recorded_transition_count: transitionCount,
       recorded_frame_count: transitionCount + 1,

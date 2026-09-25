@@ -22,6 +22,7 @@ import jax
 import jax.numpy as jnp
 from jax import Array
 
+from marl_battlegrounds.core.axis_mappings import spawn_bank_on_right
 from marl_battlegrounds.core.types import (
     AGENT_FEATURE_ACTIVE,
     AGENT_FEATURE_ALIVE,
@@ -279,13 +280,45 @@ def team_on_right(actors: ActorInput) -> Array:
     -------
     Array
         Boolean array of shape L. True where the mean x of the own team's five
-        pads exceeds half the map width. All-zero padding rows read False.
+        pads is greater than half the float32 map width, decided exactly by
+        Core's spawn_bank_on_right: an exactly centred bank reads False, and
+        pad order never changes the answer. All-zero padding rows read False.
 
     Notes
     -----
     Pure JAX; works under jit and vmap. The answer is constant for a game
     because pads and width change only at reset. It reads only the actor's own
-    permitted view, so it widens no information right.
+    permitted view, so it widens no information right. Team Deathmatch Red
+    Zone scoring uses the same Core rule, so an actor's side here is the side
+    its Red Zone is on. Before Red Zone this helper used a float32 mean, which
+    can read an exactly centred bank as right; actors trained on that input
+    schema keep the old formula (see baselines.inputs.spawn_frame_flag).
+    """
+    pads = actors.observation.spawn_lifecycle.spawn_pad_positions_by_agent_by_team
+    width = actors.observation.context_features[..., CONTEXT_FEATURE_MAP_WIDTH]
+    return spawn_bank_on_right(pads[..., 0, :, :], width)
+
+
+def _historical_team_on_right(  # pyright: ignore[reportUnusedFunction]
+    actors: ActorInput,
+) -> Array:
+    """Apply the pre-Red-Zone side formula kept for actor input schema 1.
+
+    Parameters
+    ----------
+    actors : ActorInput
+        Permitted inputs with any leading shape L, laid out as for
+        team_on_right.
+
+    Returns
+    -------
+    Array
+        Boolean array of shape L: the float32 mean x of the own team's five
+        pads is greater than half the map width. This is the exact expression
+        and array layout team_on_right used before Red Zone, frozen so actors
+        trained on actor input schema 1 reflect their inputs and actions
+        exactly as before, including on exactly centred banks where it reads
+        right. Do not use it for anything else.
     """
     pads = actors.observation.spawn_lifecycle.spawn_pad_positions_by_agent_by_team
     width = actors.observation.context_features[..., CONTEXT_FEATURE_MAP_WIDTH]

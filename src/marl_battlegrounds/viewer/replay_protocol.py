@@ -24,10 +24,12 @@ from pydantic import (
 from marl_battlegrounds.evaluation.replay import ReplayArtifactReferenceV1
 from marl_battlegrounds.evaluation.replay_v2 import ReplayArtifactReferenceV2
 from marl_battlegrounds.evaluation.replay_v3 import ReplayArtifactReferenceV3
+from marl_battlegrounds.evaluation.replay_v4 import ReplayArtifactReferenceV4
 from marl_battlegrounds.rendering.evaluation_adapter import (
     SharedObsSourceMaterialProjection,
     SharedObsSourceMaterialProjectionV1,
     SharedObsSourceMaterialProjectionV2,
+    SharedObsSourceMaterialProjectionV3,
 )
 from marl_battlegrounds.rendering.pov_scene import ActorPovAnalyzerProjectionV1
 from marl_battlegrounds.rendering.scene import ResearcherAnalyzerProjectionV2
@@ -185,13 +187,18 @@ def _private_exact_bool(value: object) -> bool:
 
 
 class ReplayArtifactSummaryV1(_ReplayProtocolModel):
-    """Path-free replay provenance and bounded captured-prefix counts."""
+    """Path-free replay provenance and bounded captured-prefix counts.
+
+    replay_reference names the loaded replay V1, V2, V3 or V4 (V4 records the
+    Team Deathmatch Red Zone rule) by its own exact reference version.
+    """
 
     schema_version: Literal[1] = REPLAY_VIEWER_PROTOCOL_SCHEMA_VERSION
     replay_reference: (
         ReplayArtifactReferenceV1
         | ReplayArtifactReferenceV2
         | ReplayArtifactReferenceV3
+        | ReplayArtifactReferenceV4
     )
     expected_transition_count: _PositiveInt
     recorded_transition_count: _NonNegativeInt
@@ -212,6 +219,7 @@ class ReplayArtifactSummaryV1(_ReplayProtocolModel):
             ReplayArtifactReferenceV1,
             ReplayArtifactReferenceV2,
             ReplayArtifactReferenceV3,
+            ReplayArtifactReferenceV4,
         ):
             raise ValueError(
                 "replay_reference must be an exact supported replay reference."
@@ -1233,6 +1241,7 @@ class SharedObsSourceMaterialReplayViewerFrameV1(_ReplayViewerFrameBaseV1):
         if (
             type(self.projection) is not SharedObsSourceMaterialProjectionV1
             and type(self.projection) is not SharedObsSourceMaterialProjectionV2
+            and type(self.projection) is not SharedObsSourceMaterialProjectionV3
         ):
             raise ValueError(
                 "projection must be exact SharedObsSourceMaterialProjectionV1."

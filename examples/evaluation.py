@@ -5,6 +5,10 @@ The package command ``python -m marl_battlegrounds evaluate --help`` calls the
 same evaluator. Copy example files separately; no checkout runtime is required.
 Selections are ordinary Python iterables; replace the examples with your own
 ``range`` or list when integrating these calls into a research script.
+``--red-zone-depth 6.0`` plays with a deeper Red Zone (an agent that dies in
+its own team's spawn-side strip gives the enemy 2 points instead of 1), and
+``--red-zone-depth 0`` keeps one point per death; the default is 5.0. For
+example: ``python examples/evaluation.py evaluate --red-zone-depth 6.0``.
 """
 
 import argparse
@@ -19,6 +23,8 @@ def main() -> None:
     Tournament mode prints each ranking row and any written file paths. Omitted
     --episodes means 32 total evaluation/validation games or 100 games per
     tournament matchup, covering all five maps with complete spawn pairs.
+    --red-zone-depth (map units, default 5.0) reaches every evaluate and
+    run_tournament call as red_zone_depth.
 
     Raises
     ------
@@ -40,6 +46,12 @@ def main() -> None:
         "--metrics", choices=("none", "priority", "full"), default="priority"
     )
     parser.add_argument("--save-replays", type=int, default=0, metavar="FIRST_N")
+    parser.add_argument(
+        "--red-zone-depth",
+        type=float,
+        default=5.0,
+        help="Red Zone depth in map units (default 5.0; 0 keeps one point per death)",
+    )
     parser.add_argument("--output-dir", type=Path)
     args = parser.parse_args()
     if args.episodes is None:
@@ -60,6 +72,7 @@ def main() -> None:
             metrics=args.metrics,
             replay_episodes=replays,
             output_dir=args.output_dir,
+            red_zone_depth=args.red_zone_depth,
         )
         for row in result.tournament_results:
             print(row)
@@ -86,6 +99,7 @@ def main() -> None:
                     metrics=args.metrics,
                     replay_episodes=replays,
                     writer=writer,
+                    red_zone_depth=args.red_zone_depth,
                     phase="validation",
                     pass_id=f"after-{training_episode}-training-episodes",
                 )
@@ -93,6 +107,7 @@ def main() -> None:
             print("Files:", writer.paths)
         return
 
+    # For example, --red-zone-depth 6.0 gives evaluate(..., red_zone_depth=6.0).
     result = marl_bgs.evaluate(
         "tdm-alpha",
         "tdm-beta",
@@ -102,6 +117,7 @@ def main() -> None:
         metrics=args.metrics,
         replay_episodes=replays,
         output_dir=args.output_dir,
+        red_zone_depth=args.red_zone_depth,
     )
     print("Completed episodes:", result.completed_episode_ids)
     print("Run Directory:", result.run_dir or "Results Were Not Saved")

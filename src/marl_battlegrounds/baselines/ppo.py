@@ -52,6 +52,10 @@ Reference settings are starting values, not qualified learning settings for BG.
 PPOConfig.spawn_frame is a BG adaptation: "left", the default, reflects the
 actor's permitted view so every game looks like a start from the left bank, and
 maps the chosen move back; "world" keeps the donor's raw coordinate convention.
+Actors trained before Red Zone, on historical actor input schema 1, play
+through separate cached schema-1 hooks (actor_input_schema=1 in the System
+factories) that remove the Red Zone depth column and keep the old spawn-side
+formula; learners always train on the current schema 2.
 """
 
 import functools
@@ -84,9 +88,12 @@ from marl_battlegrounds.baselines.actions import (
 )
 from marl_battlegrounds.baselines.inputs import (
     ACTOR_FEATURE_SIZE,
+    ACTOR_FEATURE_SIZES,
+    ACTOR_INPUT_SCHEMA_VERSION,
     SPAWN_FRAMES,
     TRAINING_STATE_FEATURE_SIZE,
     encode_actor_inputs,
+    schema_1_actor_input,
     spawn_frame_flag,
     team_obstacle_partners,
 )
@@ -278,6 +285,20 @@ def _spawn_frame(value: object) -> str:
     return value
 
 
+def _actor_input_schema(value: object) -> int:
+    """Check an actor input schema version and return it as a Python int.
+
+    This host check accepts exactly the int keys of ACTOR_FEATURE_SIZES: 2,
+    the current schema, and 1, the historical schema of actors trained
+    before Red Zone. Booleans, floats, strings, arrays and other versions
+    raise ValueError. It performs no device work. The System factories use
+    it; they do not compare weight widths with the schema.
+    """
+    if type(value) is not int or value not in ACTOR_FEATURE_SIZES:
+        raise ValueError("actor_input_schema must be 1 or 2.")
+    return value
+
+
 @dataclass(frozen=True)
 class PPOConfig:
     """Hold static donor update settings, with separate actor/critic optimizers.
@@ -465,7 +486,7 @@ class PPOBatch(NamedTuple):
         Compact observations with leading (T,B), ten base rows and permissions.
         T is time and B is the number of games. Actor expansion stays temporary.
     training_state : Array or None
-        Float32 (T,B,919) versioned physical-state features, stored once per game.
+        Float32 (T,B,920) versioned physical-state features, stored once per game.
         This input is available to MAPPO critics only. IPPO uses None.
     action_mask : ActionMask
         Team A's action-time native masks, with leading (T,B,5).
@@ -750,7 +771,7 @@ class RecurrentActor(nn.Module):
     """Apply the donor actor with separate per-actor memory and raw logits.
 
     Features are permitted float32 (T,E,5,F); carry is (E,5,128). Reset/valid
-    masks are bool (T,E,5). The ordinary F is 5164; fixed-input reference tests
+    masks are bool (T,E,5). The ordinary F is 5165; fixed-input reference tests
     can initialize the same network with another F. Parameters encode that F.
     No critic state or other actor's private row enters a row's calculation.
 
@@ -805,8 +826,8 @@ class RecurrentValueNet(nn.Module):
     """Apply the separate donor critic to physical or permitted local features.
 
     Carry and masks follow RecurrentActor. Features use (T,E,5,F), normally a
-    temporary broadcast of one 919-value physical view per game for MAPPO, or
-    each actor's 5164-value permitted view for IPPO. Output values
+    temporary broadcast of one 920-value physical view per game for MAPPO, or
+    each actor's 5165-value permitted view for IPPO. Output values
     have shape (T,E,5). This module is never part of the actor-producing System.
     input_scale is a fixed positive finite real multiplier, default 1.0, applied
     before the first Dense layer. Use the same setting as the paired actor.
@@ -825,7 +846,7 @@ class RecurrentValueNet(nn.Module):
         carry : Array
             Float32 (E,5,128) critic memory before the sequence.
         features : Array
-            Float32 (T,E,5,F) critic features, F=919 for MAPPO or 5164 for IPPO.
+            Float32 (T,E,5,F) critic features, F=920 for MAPPO or 5165 for IPPO.
             The width must match the initialized critic. Actor code may not
             read this data.
         resets, valid : Array
@@ -1157,6 +1178,65 @@ def _scaled_actor_apply(
     return apply
 
 
+@functools.lru_cache(maxsize=16)
+def _schema_1_actor_apply(
+    scale: float, spawn_frame: str
+) -> Callable[[Tree, Array, SystemInput, Array], SystemOutput]:
+    """Cache a recurrent PPO hook for actors trained on actor input schema 1.
+
+    Parameters
+    ----------
+    scale : float
+        Already checked positive finite input scale.
+    spawn_frame : str
+        Already checked frame name, "world" or "left".
+
+    Returns
+    -------
+    Callable
+        An apply hook that turns each call's actor views into the historical
+        19-column view with schema_1_actor_input, then runs the unchanged
+        _apply_actor. The encoder then uses the 5,164-feature schema-1 layout,
+        and in the "left" frame spawn_frame_flag uses the old spawn-side
+        formula for both the reflected view and the returned actions, so the
+        actor plays exactly as before Red Zone. Its keyword defaults record
+        scale and frame index as in _scaled_actor_apply. Its own name and code
+        give it a registration ID distinct from the current hooks.
+
+    Notes
+    -----
+    Host-only construction; the hook captures no weights or live inputs.
+    Caching keeps one callable, and so one compiled program, per setting.
+    """
+    frame_index = SPAWN_FRAMES.index(spawn_frame)
+
+    def apply(
+        variables: Tree,
+        memory: Array,
+        inputs: SystemInput,
+        keys: Array,
+        *,
+        input_scale: float = scale,
+        spawn_frame_index: int = frame_index,
+    ) -> SystemOutput:
+        """Apply a schema-1 recurrent actor to its historical 19-column view.
+
+        Arguments, outputs and side effects follow _apply_actor; only the
+        context depth column is removed before the call. Normal System
+        execution supplies only variables, memory, inputs and keys.
+        """
+        return _apply_actor(
+            variables,
+            memory,
+            inputs._replace(actors=schema_1_actor_input(inputs.actors)),
+            keys,
+            input_scale=input_scale,
+            spawn_frame_index=spawn_frame_index,
+        )
+
+    return apply
+
+
 def make_recurrent_mappo_system(
     actor_params: Tree,
     *,
@@ -1164,6 +1244,7 @@ def make_recurrent_mappo_system(
     spawn_frame: str = DEFAULT_PPO_CONFIG.spawn_frame,
     name: str = "Recurrent MAPPO",
     checkpoint: str | None = None,
+    actor_input_schema: int = ACTOR_INPUT_SCHEMA_VERSION,
 ) -> System:
     """Wrap actor parameters as an existing M8 JAX System, with sampled actions.
 
@@ -1189,6 +1270,14 @@ def make_recurrent_mappo_system(
     checkpoint : str or None, default=None
         Optional identity text attached to the System. No file is opened or
         loaded, and this text alone does not verify an artifact's contents.
+    actor_input_schema : int, default=ACTOR_INPUT_SCHEMA_VERSION
+        Actor input schema the weights were trained on: 2, the current
+        5,165-feature schema (the default), or 1, the historical 5,164-feature
+        schema of actors trained before Red Zone. Schema 1 uses the cached
+        _schema_1_actor_apply hook, which removes the Red Zone depth column
+        and keeps the old spawn-side formula, so the actor plays as before.
+        The hook is chosen once here. This factory does not compare the
+        weights' width with the schema; a mismatch fails when the actor runs.
 
     Returns
     -------
@@ -1200,8 +1289,8 @@ def make_recurrent_mappo_system(
     ------
     ValueError
         The scale is not a positive finite real number, is Boolean, the spawn
-        frame is not "world" or "left", or the System rejects an empty or
-        invalid display name.
+        frame is not "world" or "left", actor_input_schema is not the int 1
+        or 2, or the System rejects an empty or invalid display name.
 
     Notes
     -----
@@ -1209,15 +1298,18 @@ def make_recurrent_mappo_system(
     M8 owns episode reset generations, random keys and team routing. The System
     carries no critic weights, privileged inputs, critic memory or training run.
     The factory preserves the weights' training status and makes no competence
-    claim. Execution accepts Threefry action keys only.
+    claim. Execution accepts Threefry action keys only. Schema-2 Systems keep
+    their existing hooks, so their registration IDs are unchanged; schema-1
+    Systems have their own registration IDs.
     """
     scale = _input_scale(input_scale)
     frame = _spawn_frame(spawn_frame)
-    apply = (
-        _apply_actor
-        if scale == 1.0 and frame == "world"
-        else _scaled_actor_apply(scale, frame)
-    )
+    if _actor_input_schema(actor_input_schema) == 1:
+        apply = _schema_1_actor_apply(scale, frame)
+    elif scale == 1.0 and frame == "world":
+        apply = _apply_actor
+    else:
+        apply = _scaled_actor_apply(scale, frame)
     return System(
         name,
         apply,
@@ -1313,6 +1405,64 @@ def _feedforward_actor_apply(
     return apply
 
 
+@functools.lru_cache(maxsize=16)
+def _schema_1_feedforward_actor_apply(
+    scale: float, frame: str
+) -> Callable[[Tree, tuple[()], SystemInput, Array], SystemOutput]:
+    """Cache a feedforward PPO hook for actors trained on actor input schema 1.
+
+    Parameters
+    ----------
+    scale : float
+        Already checked positive finite input scale.
+    frame : str
+        Already checked frame name, "world" or "left".
+
+    Returns
+    -------
+    Callable
+        An apply hook that turns each call's actor views into the historical
+        19-column view with schema_1_actor_input, then runs the unchanged
+        _apply_feedforward_actor. The encoder uses the 5,164-feature schema-1
+        layout, and the "left" frame uses the old spawn-side formula for both
+        the reflected view and the returned actions, so the actor plays
+        exactly as before Red Zone. Keyword defaults record scale and frame
+        index as in _feedforward_actor_apply; the hook's own name and code
+        give it a distinct registration ID.
+
+    Notes
+    -----
+    Host-only construction; the hook captures no weights or live inputs.
+    Caching keeps one callable, and so one compiled program, per setting.
+    """
+    frame_index = SPAWN_FRAMES.index(frame)
+
+    def apply(
+        variables: Tree,
+        memory: tuple[()],
+        inputs: SystemInput,
+        keys: Array,
+        *,
+        input_scale: float = scale,
+        spawn_frame_index: int = frame_index,
+    ) -> SystemOutput:
+        """Apply a schema-1 feedforward actor to its historical 19-column view.
+
+        Inputs and outputs follow _apply_feedforward_actor; only the context
+        depth column is removed first. M8 supplies the first four arguments.
+        """
+        return _apply_feedforward_actor(
+            variables,
+            memory,
+            inputs._replace(actors=schema_1_actor_input(inputs.actors)),
+            keys,
+            input_scale=input_scale,
+            spawn_frame_index=spawn_frame_index,
+        )
+
+    return apply
+
+
 def make_ppo_system(
     actor_params: Tree,
     *,
@@ -1321,6 +1471,7 @@ def make_ppo_system(
     spawn_frame: str = DEFAULT_PPO_CONFIG.spawn_frame,
     name: str | None = None,
     checkpoint: str | None = None,
+    actor_input_schema: int = ACTOR_INPUT_SCHEMA_VERSION,
 ) -> System:
     """Wrap one PPO actor as the existing sampled-action M8 System.
 
@@ -1339,6 +1490,13 @@ def make_ppo_system(
         Display name. None uses the method's name; empty names are rejected.
     checkpoint : str or None, default=None
         Optional identity label. This function opens no checkpoint files.
+    actor_input_schema : int, default=ACTOR_INPUT_SCHEMA_VERSION
+        Actor input schema the weights were trained on: 2, the current
+        5,165-feature schema (the default), or 1 for actors trained before
+        Red Zone (5,164 features). Schema 1 picks the cached legacy hook
+        (_schema_1_actor_apply or _schema_1_feedforward_actor_apply) once
+        here, so the actor sees and acts exactly as before. The factory does
+        not compare the weights' width with the schema.
 
     Returns
     -------
@@ -1348,7 +1506,7 @@ def make_ppo_system(
     Raises
     ------
     ValueError
-        Method, scale, frame or display name is invalid.
+        Method, scale, frame, actor_input_schema or display name is invalid.
 
     Notes
     -----
@@ -1365,10 +1523,18 @@ def make_ppo_system(
             spawn_frame=spawn_frame,
             name=label,
             checkpoint=checkpoint,
+            actor_input_schema=actor_input_schema,
         )
+    scale = _input_scale(input_scale)
+    frame = _spawn_frame(spawn_frame)
+    hook = (
+        _schema_1_feedforward_actor_apply
+        if _actor_input_schema(actor_input_schema) == 1
+        else _feedforward_actor_apply
+    )
     return System(
         label,
-        _feedforward_actor_apply(_input_scale(input_scale), _spawn_frame(spawn_frame)),
+        hook(scale, frame),
         variables=actor_params,
         checkpoint=checkpoint,
     )
@@ -1393,7 +1559,7 @@ def critic_values(
     memory : Array
         Float32 (B,5,128) critic memory before the sequence.
     features : Array
-        Float32 (T,B,919) versioned physical-state features. Store one row per
+        Float32 (T,B,920) versioned physical-state features. Store one row per
         game; the function broadcasts to actor rows only during this call.
     episode_start : Array
         Boolean (T,B) resets before decisions. Death and respawn are not resets.
@@ -1445,7 +1611,7 @@ def _critic_network_values(
 ) -> tuple[Array, Array]:
     """Read exact network outputs once for raw values and frozen clipping anchors.
 
-    Arguments follow critic_values: physical features (T,B,919), memory
+    Arguments follow critic_values: physical features (T,B,920), memory
     (B,5,128), and decision flags (T,B). Return final memory and float32
     (T,B,5) network outputs. Enabled critics produce normalized outputs;
     the caller rescales with their matching statistics. No extra forward pass,

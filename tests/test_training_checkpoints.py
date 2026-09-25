@@ -29,6 +29,17 @@ All four PPO methods retain exact continuation with both normalization modes,
 including a final partial row. Their exports load actor arrays only. Explicit
 model schemas distinguish equal actor bytes and reject conflicts before writer
 tokens, numerical restore or file changes. Feedforward memory stays empty.
+Actors saved before Red Zone (actor input schema 1, 5,164 features, written
+here in the pre-Red-Zone export format) load with the schema-1 template
+through the cached schema-1 hook, keep their inference identity bytes (the
+schema version never enters it), and cannot be exported again: the refusal
+names schema 1 and leaves the directory unchanged. A learner description
+carrying the pre-Red-Zone schemas is still readable, but restore refuses it
+right after the kind check, before any array is read and without changing a
+file. A mixed schema dictionary (actor input 2 with training state 1, or the
+reverse) is rejected. Actor templates are cached per method and schema; the
+schema-1 template differs only in its 5,164-row input kernel, and an unknown
+schema is refused.
 """
 
 from __future__ import annotations
@@ -36,6 +47,7 @@ from __future__ import annotations
 import hashlib
 import json
 from collections import namedtuple
+from collections.abc import Callable
 from contextlib import ExitStack
 from dataclasses import asdict, replace
 from functools import partial
@@ -50,6 +62,7 @@ import pytest
 
 import marl_battlegrounds.training.checkpoints as checkpoints
 import marl_battlegrounds.training.collection as collection_module
+from marl_battlegrounds.baselines import ppo
 from marl_battlegrounds.baselines.ppo import (
     PPOConfig,
     ValueNormState,
@@ -172,6 +185,102 @@ def _files(root: Path) -> dict[str, bytes]:
         for p in root.rglob("*")
         if p.is_file()
     }
+
+
+def _schema_1_export(weights: Tree, destination: Path, method: str) -> Path:
+    # The pre-Red-Zone export format: export_system's files, with 5,164-feature
+    # weights and the frozen schema-1 dictionary, at scale 0.01 in "left".
+    destination.mkdir()
+    checkpoints._save_arrays(destination / "actor", weights)  # pyright: ignore[reportPrivateUsage]
+    metadata: dict[str, object] = {
+        "run_id": "before-red-zone",
+        "seed": 7,
+        "env_steps": 0,
+        "checkpoint_id": "d" * 64,
+    }
+    details: dict[str, Any] = {
+        "schema_version": 1,
+        "kind": "actor",
+        "schemas": dict(checkpoints._ACTOR_INPUT_1_SCHEMAS[method]),  # pyright: ignore[reportPrivateUsage]
+        "metadata": metadata,
+        "actor_layout": checkpoints._layout(weights),  # pyright: ignore[reportPrivateUsage]
+        "actor_digest": tree_digest(weights),
+        "input_scale": 0.01,
+        "files": checkpoints._inventory(destination),  # pyright: ignore[reportPrivateUsage]
+        "spawn_frame": "left",
+    }
+    if method in ("qmix", "pqn_vdn"):
+        metadata["optimizer_steps"] = 0
+        details.update(epsilon=0.0, tie_rule="first_legal_maximum")
+    details["checkpoint_id"] = hashlib.sha256(
+        checkpoints._json_bytes(details)  # pyright: ignore[reportPrivateUsage]
+    ).hexdigest()
+    (destination / "actor_details.json").write_bytes(
+        checkpoints._json_bytes(details)  # pyright: ignore[reportPrivateUsage]
+    )
+    return destination
+
+
+def _small(leaf: jax.ShapeDtypeStruct) -> jax.Array:
+    return jnp.full(leaf.shape, 0.01, leaf.dtype)
+
+
+def _schema_1_round_trip(
+    tmp_path: Path, method: str, hook: Callable[[float, str], object]
+) -> None:
+    template = checkpoints._actor_template(method, 1)  # pyright: ignore[reportPrivateUsage]
+    weights = jax.tree.map(_small, template)
+    path = _schema_1_export(weights, tmp_path / "before", method)
+    details = read_checkpoint_details(path)
+    identity = artifact_identity(path)
+    # The saved schema version never enters the inference identity.
+    current = {**details, "schemas": checkpoints.checkpoint_schemas(method)}
+    assert identity["actor_digest"] == checkpoints._inference_digest(current)  # pyright: ignore[reportPrivateUsage]
+    assert identity["weight_digest"] == tree_digest(weights)
+    system = load_system(path)
+    assert system.apply is hook(0.01, "left")
+    assert system.checkpoint == identity["actor_digest"]
+    variables: Any = system.variables
+    actor = (
+        variables.network
+        if method == "pqn_vdn"
+        else variables.params
+        if method == "qmix"
+        else variables
+    )
+    saved = checkpoints._pqn_actor_item(actor) if method == "pqn_vdn" else actor  # pyright: ignore[reportPrivateUsage]
+    _equal(saved, weights)
+    before = _files(tmp_path)
+    listing = sorted(tmp_path.iterdir())
+    with pytest.raises(ValueError, match="historical actor input schema 1"):
+        export_system(
+            actor,
+            tmp_path / "again",
+            metadata=details["metadata"],
+            input_scale=0.01,
+            spawn_frame="left",
+            method=method,
+        )
+    assert _files(tmp_path) == before
+    assert sorted(tmp_path.iterdir()) == listing
+
+
+def _as_schema_1_learner(path: Path, method: str) -> Path:
+    # Give a saved learner the pre-Red-Zone schemas, re-sign it and rename it.
+    details = read_checkpoint_details(path)
+    details["schemas"] = dict(checkpoints._ACTOR_INPUT_1_SCHEMAS[method])  # pyright: ignore[reportPrivateUsage]
+    del details["checkpoint_id"]
+    details["checkpoint_id"] = hashlib.sha256(
+        checkpoints._json_bytes(details)  # pyright: ignore[reportPrivateUsage]
+    ).hexdigest()
+    (path / "checkpoint_details.json").write_text(json.dumps(details))
+    historical = path.with_name(details["checkpoint_id"])
+    path.rename(historical)
+    assert (
+        checkpoints.read_checkpoint_description(historical)["schemas"]
+        == (details["schemas"])
+    )
+    return historical
 
 
 def test_update_zero_roundtrip_and_recording_token(
@@ -1546,6 +1655,8 @@ def test_equal_actor_bytes_keep_distinct_methods_and_immutable_exports(
         "outer-boolean",
         "extra-key",
         "method",
+        "mixed-training-state",
+        "mixed-actor-input",
     ],
 )
 def test_signed_method_or_full_schema_conflicts_fail_before_payloads(
@@ -1577,6 +1688,11 @@ def test_signed_method_or_full_schema_conflicts_fail_before_payloads(
         details["schema_version"] = True
     elif mutation == "extra-key":
         details["schemas"]["extra"] = 1
+    elif mutation == "mixed-training-state":
+        details["schemas"]["training_state"] = 1
+    elif mutation == "mixed-actor-input":
+        details["schemas"]["actor_input"] = 1
+        details["schemas"]["training_state"] = 2
     else:
         del details["metadata"]["config"]["method"]
     details["checkpoint_id"] = hashlib.sha256(
@@ -1601,3 +1717,70 @@ def test_actor_templates_cache_only_abstract_selected_method_leaves() -> None:
         assert all(
             isinstance(leaf, jax.ShapeDtypeStruct) for leaf in jax.tree.leaves(template)
         )
+
+    for method in ("mappo", "ippo", "ff_mappo", "ff_ippo", "qmix", "pqn_vdn"):
+        current = checkpoints._layout(checkpoints._actor_template(method))  # pyright: ignore[reportPrivateUsage]
+        historical = checkpoints._actor_template(method, 1)  # pyright: ignore[reportPrivateUsage]
+        assert checkpoints._actor_template(method, 1) is historical  # pyright: ignore[reportPrivateUsage]
+        old = checkpoints._layout(historical)  # pyright: ignore[reportPrivateUsage]
+        assert [row["path"] for row in old] == [row["path"] for row in current]
+        changed = [
+            (row["shape"], other["shape"])
+            for row, other in zip(old, current, strict=True)
+            if row != other
+        ]
+        # Only the input width moves: one kernel row count, plus PQN-VDN's
+        # input BatchNorm leaves.
+        assert changed and all(
+            [5165 if size == 5164 else size for size in cast(list[int], shape)] == other
+            and 5164 in cast(list[int], shape)
+            for shape, other in changed
+        )
+        assert len(changed) == (5 if method == "pqn_vdn" else 1)
+    for schema in (0, 3, True):
+        with pytest.raises(ValueError, match="actor_input_schema"):
+            checkpoints._actor_template("mappo", schema)  # pyright: ignore[reportPrivateUsage]
+
+
+@pytest.mark.parametrize("method", ("mappo", "ippo", "ff_mappo", "ff_ippo"))
+def test_schema_1_ppo_actor_loads_through_its_old_route_and_is_not_exported(
+    tmp_path: Path, method: str
+) -> None:
+    hook = (
+        ppo._schema_1_actor_apply  # pyright: ignore[reportPrivateUsage]
+        if method in ("mappo", "ippo")
+        else ppo._schema_1_feedforward_actor_apply  # pyright: ignore[reportPrivateUsage]
+    )
+    _schema_1_round_trip(tmp_path, method, hook)
+
+
+def test_a_learner_saved_before_red_zone_is_readable_but_cannot_resume(
+    context: Context, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    collection, state = context
+    metadata = _metadata()
+    writer = _writer(tmp_path, collection, metadata)
+    try:
+        path = save_checkpoint(
+            tmp_path, collection, state, metadata=metadata, writer=writer, ppo=PPO
+        )
+    finally:
+        if writer is not None:
+            writer.close()
+    historical = _as_schema_1_learner(path, "mappo")
+
+    def forbidden_restore(*args: object, **kwargs: object) -> None:
+        pytest.fail("A pre-Red-Zone learner must be refused before any array")
+
+    monkeypatch.setattr(checkpoints, "_restore_arrays", forbidden_restore)
+    before = _files(tmp_path)
+    with pytest.raises(ValueError, match="saved before Red Zone"):
+        restore_checkpoint(
+            historical,
+            collection,
+            state,
+            expected_metadata=_expected(metadata),
+            ppo=PPO,
+        )
+    assert _files(tmp_path) == before
+    assert not (tmp_path / "checkpoint_recovery.json").exists()

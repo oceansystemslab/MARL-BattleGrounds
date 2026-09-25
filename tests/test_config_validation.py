@@ -1,6 +1,20 @@
-"""Check valid and invalid environment configurations at the host boundary."""
+"""Check valid and invalid environment configurations at the host boundary.
+
+The Team Deathmatch Red Zone depth must be an exact Python float. It is 0.0,
+or a value whose float32 copy is a normal number no larger than the float32
+map width; neutral mode needs 0.0. Each refusal has an exact message, and the
+depth is checked after the map size and before the score threshold range.
+
+The largest score threshold depends on the depth. One step can give a team 5
+points at depth 0.0 and 10 at a positive depth
+(maximum_team_deathmatch_score_increment), so the largest threshold
+(maximum_team_deathmatch_score_threshold) is 2**24 - 4 = 16,777,212 at depth
+0.0 and 2**24 - 9 = 16,777,207 at any positive depth. The next threshold up is
+refused with an exact message.
+"""
 # pyright: reportUnknownArgumentType=false, reportUnknownLambdaType=false
 
+import re
 from collections.abc import Callable
 from typing import Any, cast
 
@@ -13,6 +27,8 @@ from jax import Array
 from marl_battlegrounds.core import combat
 from marl_battlegrounds.core.config import (
     CANONICAL_PRODUCT_MOVEMENT_SCALE,
+    maximum_team_deathmatch_score_increment,
+    maximum_team_deathmatch_score_threshold,
     resolve_agent_profile,
     validate_env_config,
     validate_product_env_config,
@@ -126,6 +142,7 @@ def _valid_config(
     return EnvConfig(
         task_mode=task_mode,
         team_deathmatch_score_threshold=team_deathmatch_score_threshold,
+        team_deathmatch_red_zone_depth=0.0,
         max_steps=100,
         map_width=12.0,
         map_height=8.0,
@@ -199,6 +216,7 @@ def test_validation_inventory_covers_current_public_schemas() -> None:
     assert EnvConfig._fields == (
         "task_mode",
         "team_deathmatch_score_threshold",
+        "team_deathmatch_red_zone_depth",
         "max_steps",
         "map_width",
         "map_height",
@@ -390,6 +408,215 @@ def test_max_steps_accepts_exact_float32_integer_domain(max_steps: int) -> None:
         validate_env_config(_replace_config(_valid_config(), max_steps=max_steps))
         is None
     )
+
+
+_FLOAT32_SMALLEST_NORMAL = float(np.finfo(np.float32).tiny)
+_FLOAT32_SMALLEST_SUBNORMAL = float(np.finfo(np.float32).smallest_subnormal)
+_FLOAT32_LARGEST_SUBNORMAL = float(
+    np.nextafter(np.float32(np.finfo(np.float32).tiny), np.float32(0))
+)
+_FLOAT32_ABOVE_TWELVE = float(np.nextafter(np.float32(12), np.float32(np.inf)))
+_DEPTH = "team_deathmatch_red_zone_depth"
+
+
+def _red_zone_config(depth: object, *, task_mode: int = TASK_MODE_TDM) -> EnvConfig:
+    # The width-12 map of _valid_config, as Team Deathmatch unless told otherwise.
+    config = _valid_config(
+        task_mode=task_mode,
+        team_deathmatch_score_threshold=1 if task_mode == TASK_MODE_TDM else 0,
+    )
+    return _replace_config(config, team_deathmatch_red_zone_depth=depth)
+
+
+def _exact_message(message: str) -> str:
+    return f"^{re.escape(message)}$"
+
+
+@pytest.mark.parametrize(
+    "depth",
+    (0.0, 5.0, 6.0, 7.0, 12.0, 12.000000000000002, _FLOAT32_SMALLEST_NORMAL),
+    ids=(
+        "off",
+        "default",
+        "six",
+        "seven",
+        "equal-to-width",
+        "rounds-to-width-in-float32",
+        "smallest-normal-float32",
+    ),
+)
+def test_red_zone_depth_accepts_zero_and_normal_float32_values_up_to_the_width(
+    depth: float,
+) -> None:
+    assert validate_env_config(_red_zone_config(depth)) is None
+
+
+@pytest.mark.parametrize(
+    ("depth", "message"),
+    (
+        (
+            _FLOAT32_ABOVE_TWELVE,
+            f"{_DEPTH} must not exceed map_width after conversion to float32, "
+            f"not {_FLOAT32_ABOVE_TWELVE} with map_width 12.0.",
+        ),
+        (
+            12.5,
+            f"{_DEPTH} must not exceed map_width after conversion to float32, "
+            "not 12.5 with map_width 12.0.",
+        ),
+        (-1.0, f"{_DEPTH} must be nonnegative, not -1.0."),
+        (-0.0, f"{_DEPTH} must be nonnegative, not -0.0."),
+        (float("nan"), f"{_DEPTH} must be finite, not nan."),
+        (float("inf"), f"{_DEPTH} must be finite, not inf."),
+        (float("-inf"), f"{_DEPTH} must be finite, not -inf."),
+        (1e100, f"{_DEPTH} must remain finite after conversion to float32."),
+        (
+            _FLOAT32_SMALLEST_SUBNORMAL,
+            f"{_DEPTH} must remain at least {_FLOAT32_SMALLEST_NORMAL} after "
+            "conversion to float32; smaller positive values underflow, not "
+            f"{_FLOAT32_SMALLEST_SUBNORMAL}.",
+        ),
+        (
+            _FLOAT32_LARGEST_SUBNORMAL,
+            f"{_DEPTH} must remain at least {_FLOAT32_SMALLEST_NORMAL} after "
+            "conversion to float32; smaller positive values underflow, not "
+            f"{_FLOAT32_LARGEST_SUBNORMAL}.",
+        ),
+    ),
+    ids=(
+        "next-float32-above-width",
+        "above-width",
+        "negative",
+        "negative-zero",
+        "nan",
+        "positive-infinity",
+        "negative-infinity",
+        "overflows-float32",
+        "smallest-subnormal",
+        "largest-subnormal",
+    ),
+)
+def test_red_zone_depth_rejects_values_core_cannot_use_with_exact_messages(
+    depth: float, message: str
+) -> None:
+    with pytest.raises(ValueError, match=_exact_message(message)):
+        validate_env_config(_red_zone_config(depth))
+
+
+@pytest.mark.parametrize(
+    ("depth", "type_name"),
+    (
+        (True, "bool"),
+        (5, "int"),
+        (np.float32(5.0), "float32"),
+        (np.float64(5.0), "float64"),
+    ),
+    ids=("bool", "int", "numpy-float32", "numpy-float64"),
+)
+def test_red_zone_depth_requires_an_exact_python_float(
+    depth: object, type_name: str
+) -> None:
+    with pytest.raises(
+        TypeError, match=_exact_message(f"{_DEPTH} must be a float, not {type_name}.")
+    ):
+        validate_env_config(_red_zone_config(depth))
+
+
+def test_neutral_mode_requires_red_zone_depth_zero() -> None:
+    assert (
+        validate_env_config(_red_zone_config(0.0, task_mode=TASK_MODE_NEUTRAL)) is None
+    )
+    with pytest.raises(
+        ValueError,
+        match=_exact_message(f"{_DEPTH} must be 0.0 in neutral mode, not 5.0."),
+    ):
+        validate_env_config(_red_zone_config(5.0, task_mode=TASK_MODE_NEUTRAL))
+
+
+def test_red_zone_depth_is_checked_after_map_size_and_before_the_threshold_range() -> (
+    None
+):
+    bad_depth_and_threshold = _replace_config(
+        _red_zone_config(-1.0), team_deathmatch_score_threshold=0
+    )
+    with pytest.raises(
+        ValueError, match=_exact_message(f"{_DEPTH} must be nonnegative, not -1.0.")
+    ):
+        validate_env_config(bad_depth_and_threshold)
+    with pytest.raises(TypeError, match=f"{_DEPTH} must be a float"):
+        validate_env_config(
+            _replace_config(_red_zone_config(5), team_deathmatch_score_threshold=0)
+        )
+    # Repairing the depth exposes the threshold fault, so both faults were real.
+    with pytest.raises(ValueError, match="team_deathmatch_score_threshold must be in"):
+        validate_env_config(
+            _replace_config(bad_depth_and_threshold, team_deathmatch_red_zone_depth=5.0)
+        )
+    with pytest.raises(ValueError, match="map_width"):
+        validate_env_config(_replace_config(bad_depth_and_threshold, map_width=0.0))
+
+
+@pytest.mark.parametrize(
+    ("depth", "increment", "maximum_threshold"),
+    (
+        (0.0, 5, 16_777_212),
+        (5.0, 10, 16_777_207),
+        (12.0, 10, 16_777_207),
+        (_FLOAT32_SMALLEST_NORMAL, 10, 16_777_207),
+    ),
+    ids=("off", "default", "equal-to-width", "smallest-normal-float32"),
+)
+def test_largest_score_threshold_leaves_room_for_one_step_of_red_zone_points(
+    depth: float, increment: int, maximum_threshold: int
+) -> None:
+    assert maximum_team_deathmatch_score_increment(depth) == increment
+    assert maximum_team_deathmatch_score_threshold(depth) == maximum_threshold
+    # A score one step past the largest threshold is still exact in float32.
+    assert maximum_threshold + increment - 1 == 2**24
+    config = _red_zone_config(depth)
+    assert (
+        validate_env_config(
+            _replace_config(config, team_deathmatch_score_threshold=maximum_threshold)
+        )
+        is None
+    )
+    too_large = maximum_threshold + 1
+    with pytest.raises(
+        ValueError,
+        match=_exact_message(
+            "team_deathmatch_score_threshold must be in "
+            f"[1, {maximum_threshold}] in Team Deathmatch, not {too_large}."
+        ),
+    ):
+        validate_env_config(
+            _replace_config(config, team_deathmatch_score_threshold=too_large)
+        )
+
+
+def test_positive_depth_accepts_two_to_the_24_minus_9_and_refuses_minus_8() -> None:
+    assert (
+        validate_env_config(
+            _replace_config(
+                _red_zone_config(5.0), team_deathmatch_score_threshold=2**24 - 9
+            )
+        )
+        is None
+    )
+    # 2**24 - 8 is still accepted at depth 0.0, where the largest is 2**24 - 4.
+    assert (
+        validate_env_config(
+            _replace_config(
+                _red_zone_config(0.0), team_deathmatch_score_threshold=2**24 - 8
+            )
+        )
+        is None
+    )
+    with pytest.raises(ValueError, match=r"must be in \[1, 16777207\]"):
+        validate_env_config(
+            _replace_config(
+                _red_zone_config(5.0), team_deathmatch_score_threshold=2**24 - 8
+            )
+        )
 
 
 @pytest.mark.parametrize(
@@ -1287,6 +1514,7 @@ def test_bounds_pillar_wall_and_agent_tangency_are_legal() -> None:
     config = EnvConfig(
         task_mode=0,
         team_deathmatch_score_threshold=0,
+        team_deathmatch_red_zone_depth=0.0,
         max_steps=10,
         map_width=12.0,
         map_height=8.0,

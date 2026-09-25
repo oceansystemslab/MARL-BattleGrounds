@@ -1,8 +1,12 @@
 """Reconstruct recorded actor inputs without inventing extra information.
 
 These host boundaries use immutable episode context and captured base rows.
-Historical V2 class maps and V1 shared banks keep their declared projection;
-current V3 context supplies current relative class rows and redacted V2 banks.
+Historical V2 class maps and V1 shared banks keep their declared projection.
+Relative-input contexts supply relative class rows and redacted V2 banks:
+context V3 with projections NoSharedObs V3 / SharedObs V2 (frame V2, 19
+context columns), and the current context V4 with NoSharedObs V4 / SharedObs V3
+(frame V3, 20 context columns; column 19 is the Red Zone depth). The projection
+version follows the context version, also at Red Zone depth 0.
 Numerical policy/JAX imports stay local until reconstruction is requested.
 """
 
@@ -13,10 +17,13 @@ from typing import TYPE_CHECKING, Final, cast
 from marl_battlegrounds.evaluation.models import (
     EvaluationEpisodeContext,
     EvaluationEpisodeContextV3,
+    EvaluationEpisodeContextV4,
     EvaluationFrameV1,
     EvaluationFrameV2,
+    EvaluationFrameV3,
     VersionedIdentityV1,
     evaluation_context_type,
+    evaluation_frame_type_for_context,
 )
 from marl_battlegrounds.evaluation.wire_shapes import (
     MAX_AGENT_SLOTS_V1,
@@ -31,7 +38,8 @@ if TYPE_CHECKING:
     )
 
 NO_SHARED_OBS_ACTOR_PROJECTION_ID: Final = "base-observation-no-shared-obs"
-NO_SHARED_OBS_ACTOR_PROJECTION_VERSION: Final = 3
+# The current versions, recorded by context V4 (Red Zone depth in context column 19).
+NO_SHARED_OBS_ACTOR_PROJECTION_VERSION: Final = 4
 NO_SHARED_OBS_ACTOR_PROJECTION_V2: Final = VersionedIdentityV1(
     identifier=NO_SHARED_OBS_ACTOR_PROJECTION_ID,
     version=2,
@@ -39,7 +47,7 @@ NO_SHARED_OBS_ACTOR_PROJECTION_V2: Final = VersionedIdentityV1(
 SHARED_OBS_ACTOR_PROJECTION_ID: Final = (
     "base-observation-plus-authorized-sensor-source-bank"
 )
-SHARED_OBS_ACTOR_PROJECTION_VERSION: Final = 2
+SHARED_OBS_ACTOR_PROJECTION_VERSION: Final = 3
 SHARED_OBS_ACTOR_PROJECTION_V1: Final = VersionedIdentityV1(
     identifier=SHARED_OBS_ACTOR_PROJECTION_ID,
     version=1,
@@ -50,6 +58,14 @@ NO_SHARED_OBS_ACTOR_PROJECTION_V3: Final = VersionedIdentityV1(
 )
 SHARED_OBS_ACTOR_PROJECTION_V2: Final = VersionedIdentityV1(
     identifier=SHARED_OBS_ACTOR_PROJECTION_ID, version=2
+)
+# Context V4 pairs only with these, including at Red Zone depth 0: the actor
+# rows then carry 20 context columns.
+NO_SHARED_OBS_ACTOR_PROJECTION_V4: Final = VersionedIdentityV1(
+    identifier=NO_SHARED_OBS_ACTOR_PROJECTION_ID, version=4
+)
+SHARED_OBS_ACTOR_PROJECTION_V3: Final = VersionedIdentityV1(
+    identifier=SHARED_OBS_ACTOR_PROJECTION_ID, version=3
 )
 
 type ActorClassIdsByTeamV2 = tuple[tuple[int, ...], ...]
@@ -335,10 +351,12 @@ __all__ = (
     "NO_SHARED_OBS_ACTOR_PROJECTION_ID",
     "NO_SHARED_OBS_ACTOR_PROJECTION_V2",
     "NO_SHARED_OBS_ACTOR_PROJECTION_V3",
+    "NO_SHARED_OBS_ACTOR_PROJECTION_V4",
     "NO_SHARED_OBS_ACTOR_PROJECTION_VERSION",
     "SHARED_OBS_ACTOR_PROJECTION_ID",
     "SHARED_OBS_ACTOR_PROJECTION_V1",
     "SHARED_OBS_ACTOR_PROJECTION_V2",
+    "SHARED_OBS_ACTOR_PROJECTION_V3",
     "SHARED_OBS_ACTOR_PROJECTION_VERSION",
     "reconstruct_actor_class_ids_by_team_v2",
     "reconstruct_actor_class_ids_by_team_v3",
@@ -351,16 +369,27 @@ __all__ = (
 
 
 def _require_current_projection(context: EvaluationEpisodeContext) -> None:
-    """Require exact context V3 and the current projection matching its information
-    mode.
+    """Require an exact relative-input context and its matching projection.
+
+    Context V3 must record SharedObs V2 or NoSharedObs V3; context V4 must record
+    SharedObs V3 or NoSharedObs V4, matching its information mode. Raise
+    TypeError for any other context type (V1, V2 or a subclass) and ValueError
+    when the recorded projection does not match.
     """
-    if type(context) is not EvaluationEpisodeContextV3:
-        raise TypeError("current actor reconstruction requires context V3")
-    expected = (
-        SHARED_OBS_ACTOR_PROJECTION_V2
-        if context.execution_information_mode == "shared_obs"
-        else NO_SHARED_OBS_ACTOR_PROJECTION_V3
-    )
+    if type(context) is EvaluationEpisodeContextV4:
+        expected = (
+            SHARED_OBS_ACTOR_PROJECTION_V3
+            if context.execution_information_mode == "shared_obs"
+            else NO_SHARED_OBS_ACTOR_PROJECTION_V4
+        )
+    elif type(context) is EvaluationEpisodeContextV3:
+        expected = (
+            SHARED_OBS_ACTOR_PROJECTION_V2
+            if context.execution_information_mode == "shared_obs"
+            else NO_SHARED_OBS_ACTOR_PROJECTION_V3
+        )
+    else:
+        raise TypeError("current actor reconstruction requires context V3 or V4")
     if context.actor_projection != expected:
         raise ValueError("current actor projection does not match its information mode")
 
@@ -368,13 +397,14 @@ def _require_current_projection(context: EvaluationEpisodeContext) -> None:
 def reconstruct_class_ids_by_agent_by_team_v3(
     context: EvaluationEpisodeContext,
 ) -> ClassIdsByAgentByTeamV2:
-    """Rebuild the current public class map from exact V3 context.
+    """Rebuild the relative public class map from exact context V3 or V4.
 
     Parameters
     ----------
     context : EvaluationEpisodeContext
-        EvaluationEpisodeContextV3 with its matching current actor
-        projection, either SharedObs V2 or NoSharedObs V3.
+        EvaluationEpisodeContextV3 with SharedObs V2 or NoSharedObs V3, or
+        EvaluationEpisodeContextV4 with SharedObs V3 or NoSharedObs V4,
+        matching its information mode.
 
     Returns
     -------
@@ -385,7 +415,7 @@ def reconstruct_class_ids_by_agent_by_team_v3(
     Raises
     ------
     TypeError
-        Context is not exact V3.
+        Context is not exact V3 or V4.
     ValueError
         The projection does not match the declared information mode.
 
@@ -401,12 +431,13 @@ def reconstruct_class_ids_by_agent_by_team_v3(
 def reconstruct_actor_class_ids_by_team_v3(
     context: EvaluationEpisodeContext, global_slot: int
 ) -> ActorClassIdsByTeamV2:
-    """Rebuild one current actor's public class rows from exact V3 context.
+    """Rebuild one actor's relative public class rows from exact context V3 or V4.
 
     Parameters
     ----------
     context : EvaluationEpisodeContext
-        EvaluationEpisodeContextV3 with the matching current projection.
+        EvaluationEpisodeContextV3 or EvaluationEpisodeContextV4 with its
+        matching projection (see reconstruct_class_ids_by_agent_by_team_v3).
     global_slot : int
         Exact Python int in 0..9 selecting the observer internally.
 
@@ -419,7 +450,7 @@ def reconstruct_actor_class_ids_by_team_v3(
     Raises
     ------
     TypeError
-        Context is not exact V3.
+        Context is not exact V3 or V4.
     ValueError
         The projection or slot is invalid.
 
@@ -436,18 +467,22 @@ def reconstruct_actor_class_ids_by_team_v3(
 
 def reconstruct_shared_obs_sensor_source_bank_v2(
     context: EvaluationEpisodeContext,
-    frame: EvaluationFrameV2,
+    frame: EvaluationFrameV2 | EvaluationFrameV3,
     selected_global_slot: int,
 ) -> SharedObsSensorSourceBankV2:
-    """Restore one current actor's permitted five-source sensor bank.
+    """Restore one relative-input actor's permitted five-source sensor bank.
 
     Parameters
     ----------
     context : EvaluationEpisodeContext
-        Exact EvaluationEpisodeContextV3 declaring SharedObs V2.
-    frame : EvaluationFrameV2
-        Exact EvaluationFrameV2 for the same episode, with a recorded
-        boolean (10, 10) recipient/source availability matrix.
+        Exact EvaluationEpisodeContextV3 declaring SharedObs V2, or exact
+        EvaluationEpisodeContextV4 declaring SharedObs V3.
+    frame : EvaluationFrameV2 | EvaluationFrameV3
+        The frame version that pairs with the context (frame V2 for context V3,
+        frame V3 for context V4) for the same episode, with a recorded boolean
+        (10, 10) recipient/source availability matrix. The bank holds unit,
+        objective and visibility rows only, so the extra context column of
+        frame V3 does not change it.
     selected_global_slot : int
         Exact Python int in 0..9 selecting the recipient.
 
@@ -461,10 +496,11 @@ def reconstruct_shared_obs_sensor_source_bank_v2(
     Raises
     ------
     TypeError
-        Context is not exact V3.
+        Context is not exact V3 or V4.
     ValueError
-        Projection, mode, frame join, slot or availability is invalid,
-        including self, inactive or opposing sources declared as admitted.
+        Projection, mode, frame version or join, slot or availability is
+        invalid, including self, inactive or opposing sources declared as
+        admitted.
 
     Notes
     -----
@@ -476,10 +512,12 @@ def reconstruct_shared_obs_sensor_source_bank_v2(
     if context.execution_information_mode != "shared_obs":
         raise ValueError("SharedObs reconstruction requires shared_obs execution")
     if (
-        type(frame) is not EvaluationFrameV2
+        type(frame) is not evaluation_frame_type_for_context(context)
         or frame.episode_id != context.identity.episode_id
     ):
-        raise ValueError("current source-bank frame must be V2 and join its context")
+        raise ValueError(
+            "current source-bank frame must match its context version and episode"
+        )
     if (
         type(selected_global_slot) is not int
         or not 0 <= selected_global_slot < MAX_AGENT_SLOTS_V1

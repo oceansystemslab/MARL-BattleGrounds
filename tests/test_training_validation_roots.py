@@ -4,6 +4,11 @@ The real validation and M8 schedule builders pass roots to a stubbed numerical
 executor. Known game rows cover task hashes, native options, strict saved-result
 checks, and unchanged shared initialization. CPU JAX key derivation checks the
 routine and confirmation schedules use distinct reset/game/policy start keys.
+A new Random record carries red_zone_depth 5.0 in its schema 3 task and M8
+options and verifies only at that depth. The same games rewritten as a record
+saved before the Red Zone rule (schema 1 task, no depth option, kills read from
+scores) verify, and are reusable as a shared initialization, only when the
+caller passes red_zone_depth=None.
 """
 
 # Tests inspect the validation owner's strict evidence boundaries.
@@ -339,3 +344,64 @@ def test_shared_initialization_keeps_original_identity_and_expected_root(
         validation.verify_random_result(
             altered, actor_digest="fixed-inference", seed_pairs=20, root_seed=19_044_791
         )
+
+
+def test_random_records_verify_only_under_their_own_scoring_rule(
+    fake_m8: dict[str, Any],
+) -> None:
+    from marl_battlegrounds.training.analysis import summarize_validation
+
+    current = _capture(fake_m8, 19_043_001)
+    assert current["schema_version"] == 3 and current["red_zone_depth"] == 5.0
+    entry = next(
+        iter(
+            fake_m8["saved"][fake_m8["calls"][-1]["directory"]]
+            .metadata["passes"]
+            .values()
+        )
+    )
+    assert entry["details"]["evaluation_contract"]["options"]["red_zone_depth"] == 5.0
+    options: dict[str, Any] = {"actor_digest": "fixed-inference", "seed_pairs": 4}
+    assert validation.verify_random_result(current, **options)["red_zone_depth"] == 5.0
+    for depth in (None, 6.0):
+        with pytest.raises(ValueError, match="summary or task"):
+            validation.verify_random_result(current, **options, red_zone_depth=depth)
+    # Rewrite the same games as a record saved before the rule: a schema 1
+    # task, no depth option and kills read from scores.
+    legacy_task = _task()
+    assert legacy_task["schema_version"] == 1 and "red_zone_depth" not in legacy_task
+    entry["details"]["evaluation_contract"]["options"].pop("red_zone_depth")
+    entry["details"]["pass_id"] = validation.validation_pass_id(
+        legacy_task["task_id"], "Random"
+    )
+    rows = validation._rows(
+        Path(current["pass_paths"][0]), pass_id="unused-by-fake", opponent="Random"
+    )
+    legacy_summary = {
+        **legacy_task,
+        **summarize_validation(
+            rows, maps=validation.VALIDATION_MAPS, opponents=("Random",), seed_pairs=4
+        ),
+        "pass_paths": current["pass_paths"],
+    }
+    directory = Path(current["summary_path"]).parent
+    (directory / "task.json").write_text(json.dumps(legacy_task))
+    (directory / "validation_summary.json").write_text(json.dumps(legacy_summary))
+    legacy = {
+        **legacy_summary,
+        **{key: current[key] for key in validation._RANDOM_CAPTURE_FIELDS},
+    }
+    assert (
+        validation.verify_random_result(legacy, **options, red_zone_depth=None)
+        == legacy_summary
+    )
+    with pytest.raises(ValueError, match="summary or task"):
+        validation.verify_random_result(legacy, **options)
+    reference = fake_m8["root"] / "legacy-initialization.json"
+    reference.write_text(json.dumps(legacy))
+    assert (
+        validation.read_random_initialization(reference, **options, red_zone_depth=None)
+        == legacy
+    )
+    with pytest.raises(ValueError, match="summary or task"):
+        validation.read_random_initialization(reference, **options)

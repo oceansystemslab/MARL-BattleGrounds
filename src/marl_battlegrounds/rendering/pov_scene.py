@@ -7,8 +7,10 @@ incoming POV-local cues. build_actor_pov_projection_index_v1 validates a
 captured prefix once for repeated frame selection.
 
 No researcher snapshot, simulator state or hidden body row is accepted.
-V1 preserves historical physical-team feature columns; V2 decodes current
-actor-relative relation flags using explicit public identity mappings.
+V1 preserves historical physical-team feature columns; V2 and V3 decode
+actor-relative relation flags using explicit public identity mappings. V3 (the
+current POV version) differs from V2 only by context column 19, the Red Zone
+depth, which these scenes do not draw.
 All work is on host records, with no JAX execution, file I/O or input mutation.
 """
 
@@ -21,16 +23,20 @@ from marl_battlegrounds.evaluation.pov import (
     ActorPovAxisMapping,
     ActorPovAxisMappingV1,
     ActorPovAxisMappingV2,
+    ActorPovAxisMappingV3,
     ActorPovCurrentSlice,
     ActorPovCurrentSliceV1,
     ActorPovCurrentSliceV2,
+    ActorPovCurrentSliceV3,
     ActorPovFrame,
     ActorPovFrameV1,
     ActorPovFrameV2,
+    ActorPovFrameV3,
     ActorPovPresentationCueV1,
     ActorPovReplayContent,
     ActorPovReplayContentV1,
     ActorPovReplayContentV2,
+    ActorPovReplayContentV3,
     ActorPovTransitionV1,
     validate_actor_pov_replay_content,
 )
@@ -923,7 +929,8 @@ class ActorPovProjectionIndexV1:
     Attributes
     ----------
     content : ActorPovReplayContent
-        Exact ActorPovReplayContentV1 or V2 containing a coherent recorded prefix.
+        Exact ActorPovReplayContentV1, V2 or V3 containing a coherent recorded
+        prefix.
 
     Raises
     ------
@@ -940,7 +947,9 @@ class ActorPovProjectionIndexV1:
     """
 
     content: ActorPovReplayContent
-    """Exact ActorPovReplayContentV1 or V2 containing a coherent recorded prefix."""
+    """Exact ActorPovReplayContentV1, V2 or V3 containing a coherent recorded
+    prefix.
+    """
 
     def __post_init__(self) -> None:
         """Validate the complete recipient replay before index use.
@@ -949,9 +958,10 @@ class ActorPovProjectionIndexV1:
         malformed trajectory through validate_actor_pov_replay_content. Retain the
         same immutable content and return None; no index file is written.
         """
-        if (
-            type(self.content) is not ActorPovReplayContentV1
-            and type(self.content) is not ActorPovReplayContentV2
+        if type(self.content) not in (
+            ActorPovReplayContentV1,
+            ActorPovReplayContentV2,
+            ActorPovReplayContentV3,
         ):
             raise TypeError("content must be the exact ActorPovReplayContentV1 root.")
         validate_actor_pov_replay_content(self.content)
@@ -964,8 +974,9 @@ def build_actor_pov_projection_index_v1(
 
     Parameters
     ----------
-    content : ActorPovReplayContentV1 or ActorPovReplayContentV2
-        Exact recipient-sliced replay content to validate and retain.
+    content : ActorPovReplayContent
+        Exact ActorPovReplayContentV1, V2 or V3 recipient-sliced replay content to
+        validate and retain.
 
     Returns
     -------
@@ -1010,11 +1021,12 @@ def _build_actor_pov_battlefield_scene_v1(
     self row, identity mismatch or invalid decoded record. No Oracle data is
     accepted and no new information is inferred.
     """
-    if type(frame) is not ActorPovFrameV1 and type(frame) is not ActorPovFrameV2:
+    if type(frame) not in (ActorPovFrameV1, ActorPovFrameV2, ActorPovFrameV3):
         raise TypeError("selected POV frame must be the exact V1 root.")
-    if (
-        type(axis_mapping) is not ActorPovAxisMappingV1
-        and type(axis_mapping) is not ActorPovAxisMappingV2
+    if type(axis_mapping) not in (
+        ActorPovAxisMappingV1,
+        ActorPovAxisMappingV2,
+        ActorPovAxisMappingV3,
     ):
         raise TypeError("POV axis mapping must be the exact V1 root.")
     self_row = frame.self_features
@@ -1149,7 +1161,8 @@ def build_actor_pov_analyzer_projection_v1(
     source : ActorPovProjectionIndexV1, ActorPovReplayContent or ActorPovCurrentSlice
         Exact supported root. An index reuses prior whole-prefix validation;
         raw replay content creates an index for this call. A live slice supplies
-        its own current frame and incoming cues. V1 and V2 sources are supported.
+        its own current frame and incoming cues. V1, V2 and V3 sources are
+        supported.
     frame_index : int or None, optional
         Required Python frame index for an index or replay, in its captured range.
         For a current slice, None selects its own frame; a supplied value must
@@ -1194,13 +1207,16 @@ def build_actor_pov_analyzer_projection_v1(
     elif (
         type(source) is ActorPovReplayContentV1
         or type(source) is ActorPovReplayContentV2
+        or type(source) is ActorPovReplayContentV3
     ):
         return build_actor_pov_analyzer_projection_v1(
             build_actor_pov_projection_index_v1(source),
             frame_index=frame_index,
         )
     elif (
-        type(source) is ActorPovCurrentSliceV1 or type(source) is ActorPovCurrentSliceV2
+        type(source) is ActorPovCurrentSliceV1
+        or type(source) is ActorPovCurrentSliceV2
+        or type(source) is ActorPovCurrentSliceV3
     ):
         if frame_index is not None and frame_index != source.frame.frame_index:
             raise ValueError(

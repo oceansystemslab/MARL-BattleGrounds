@@ -284,7 +284,8 @@ function nullableString(value, label) {
 
 /**
  * Validate and shallow-copy the record value as a frozen replay reference.
- * Require its exact fields, reference/replay version 1, 2, or 3 with matching versions,
+ * Require its exact fields, reference/replay version 1, 2, 3 or 4 (4 records the Team
+ * Deathmatch Red Zone rule) with matching versions,
  * canonical episode:replay ID, lowercase 64-character digest text, and positive byte
  * length. Throw TypeError for an invalid field or join. Digests are checked for syntax;
  * this helper does not read source bytes or recompute their hashes.
@@ -296,7 +297,7 @@ function normalizeArtifactReference(value) {
   exactKeys(value, ARTIFACT_REFERENCE_KEYS, "Replay artifact reference");
   if (
     value.schema_id !== REPLAY_ARTIFACT_REFERENCE_SCHEMA_ID ||
-    ![1, 2, 3].includes(value.schema_version) ||
+    ![1, 2, 3, 4].includes(value.schema_version) ||
     value.replay_schema_version !== value.schema_version
   ) {
     throw new TypeError("Replay artifact reference root is invalid.");

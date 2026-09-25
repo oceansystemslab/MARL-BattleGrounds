@@ -1,14 +1,28 @@
-"""Check deterministic decoding of evaluation events."""
+"""Check deterministic decoding of evaluation events.
+
+Team Deathmatch score edges must equal the points from newly dead configured
+opponents. A context V4 records the Red Zone depth: a victim whose recorded
+start position is inside its own team's strip (both bounds included) gives the
+other team 2 points, any other victim 1, and the successor position never
+matters. Swapped pad banks swap the strips. Contexts V1 and V3, and V4 at
+depth 0.0, keep 1 point per death. Every other increment is refused.
+"""
 
 from __future__ import annotations
 
 import json
 from collections import Counter
 from collections.abc import Iterable
+from functools import cache
 
 import pytest
 from pydantic import TypeAdapter, ValidationError
-from tests.evaluation_fixtures import evaluation_context, evaluation_env_config
+from tests.evaluation_fixtures import (
+    current_evaluation_context,
+    evaluation_context,
+    evaluation_env_config,
+    pre_red_zone_evaluation_context,
+)
 
 from marl_battlegrounds.evaluation.events import decode_evaluation_events_v1
 from marl_battlegrounds.evaluation.models import (
@@ -21,7 +35,7 @@ from marl_battlegrounds.evaluation.models import (
     CombatTransitionFactsV1,
     CooldownReadyEventV1,
     DeathTransitionFactsV1,
-    EvaluationEpisodeContextV1,
+    EvaluationEpisodeContext,
     EvaluationEventV1,
     EvaluationFrameV1,
     EvaluationTransitionV1,
@@ -234,7 +248,7 @@ def _neutral_facts(*, transition_start_step_count: int = 7) -> TransitionFactsV1
 def _decode(
     facts: TransitionFactsV1,
     *,
-    context: EvaluationEpisodeContextV1 | None = None,
+    context: EvaluationEpisodeContext | None = None,
     start_snapshot: GlobalAnalysisSnapshotV1 | None = None,
     successor_snapshot: GlobalAnalysisSnapshotV1 | None = None,
 ) -> tuple[EvaluationEventV1, ...]:
@@ -433,6 +447,109 @@ def test_team_deathmatch_decoder_rejects_score_edges_not_authored_by_deaths() ->
             start_snapshot=_snapshot(team_deathmatch_scores=(0, 0)),
             successor_snapshot=_snapshot(team_deathmatch_scores=(1, 0)),
         )
+
+
+@cache
+def _red_zone_context(
+    version: str, depth: float, swap_banks: bool
+) -> EvaluationEpisodeContext:
+    # Width 20: Team A's pads at x = 1.5 and Team B's at x = 18.5, so at depth
+    # 5 Team A's strip is x <= 5 and Team B's is x >= 15 (swapped: the reverse).
+    config = evaluation_env_config(
+        task_mode=1,
+        team_deathmatch_score_threshold=5,
+        team_deathmatch_red_zone_depth=depth,
+    )
+    if swap_banks:
+        config = config._replace(
+            team_spawn_pad_positions=config.team_spawn_pad_positions[::-1]
+        )
+    if version == "v1":
+        return evaluation_context(config=config)
+    if version == "v3":
+        return pre_red_zone_evaluation_context(config)
+    return current_evaluation_context(config)
+
+
+@pytest.mark.parametrize(
+    (
+        "version",
+        "depth",
+        "swap_banks",
+        "victim",
+        "start_x",
+        "successor_x",
+        "increments",
+    ),
+    (
+        pytest.param("v1", 0.0, False, 0, 4.0, 4.0, (0, 1), id="v1-one-point"),
+        pytest.param("v3", 0.0, False, 0, 4.0, 4.0, (0, 1), id="v3-one-point"),
+        pytest.param("v4", 0.0, False, 0, 4.0, 4.0, (0, 1), id="v4-depth-0"),
+        pytest.param("v4", 5.0, False, 0, 4.0, 4.0, (0, 2), id="team-a-inside"),
+        pytest.param("v4", 5.0, False, 0, 5.0, 5.0, (0, 2), id="team-a-on-boundary"),
+        pytest.param("v4", 5.0, False, 0, 6.0, 6.0, (0, 1), id="team-a-outside"),
+        pytest.param(
+            "v4", 5.0, False, 0, 4.0, 8.0, (0, 2), id="start-inside-successor-outside"
+        ),
+        pytest.param(
+            "v4", 5.0, False, 0, 6.0, 2.0, (0, 1), id="start-outside-successor-inside"
+        ),
+        pytest.param("v4", 5.0, False, 5, 16.0, 16.0, (2, 0), id="team-b-inside"),
+        pytest.param("v4", 5.0, False, 5, 15.0, 15.0, (2, 0), id="team-b-on-boundary"),
+        pytest.param("v4", 5.0, False, 5, 14.0, 14.0, (1, 0), id="team-b-outside"),
+        pytest.param("v4", 5.0, True, 0, 16.0, 16.0, (0, 2), id="swapped-inside"),
+        pytest.param("v4", 5.0, True, 0, 4.0, 4.0, (0, 1), id="swapped-outside"),
+    ),
+)
+def test_team_deathmatch_score_edges_follow_the_red_zone_rule_at_the_start(
+    version: str,
+    depth: float,
+    swap_banks: bool,
+    victim: int,
+    start_x: float,
+    successor_x: float,
+    increments: tuple[int, int],
+) -> None:
+    context = _red_zone_context(version, depth, swap_banks)
+    base_facts = _neutral_facts()
+    facts = base_facts.model_copy(
+        update={
+            "death_facts": base_facts.death_facts.model_copy(
+                update={
+                    "is_newly_dead_by_recipient": _replace_item(_FALSE_10, victim, True)
+                }
+            )
+        }
+    )
+    positions = tuple((float(slot), 0.0) for slot in range(10))
+
+    def decode(successor_scores: tuple[int, int]) -> tuple[EvaluationEventV1, ...]:
+        return _decode(
+            facts,
+            context=context,
+            start_snapshot=_snapshot(
+                agent_positions=_replace_item(positions, victim, (start_x, 0.0))
+            ),
+            successor_snapshot=_snapshot(
+                agent_positions=_replace_item(positions, victim, (successor_x, 0.0)),
+                team_deathmatch_scores=successor_scores,
+            ),
+        )
+
+    assert [
+        (event.team_index, event.score_increment)
+        for event in decode(increments)
+        if isinstance(event, TeamDeathmatchScoreChangedEventV1)
+    ] == [(team, points) for team, points in enumerate(increments) if points]
+    for points in (0, 1, 2, 3):
+        if points == max(increments):
+            continue
+        wrong = (points, 0) if increments[0] else (0, points)
+        with pytest.raises(
+            ValueError,
+            match="score edges must equal points from newly dead configured opponents",
+        ):
+            decode(wrong)
 
 
 def test_team_deathmatch_score_event_rejects_incoherent_team_or_score_join() -> None:

@@ -1,7 +1,10 @@
 """Build complete artificial tournament records without playing any games.
 
 build_record_bundle writes a format-1 custom config, actual map configurations,
-complete spawn-pair schedules and schema-14 outcome/measurement CSV files. It
+complete spawn-pair schedules and outcome/measurement CSV files in the current
+scalar schema. historical=True instead writes a bundle as it was saved before
+the Team Deathmatch Red Zone rule: schema pins (14, 2, 3) and 12-key depth-0
+configurations under their original identities. It
 uses real frozen Policy registrations but invents outcomes and measurements.
 These files test recording joins and admission machinery; they are not research
 results, qualified controllers or an official release. Full reports are optional
@@ -26,7 +29,8 @@ import numpy as np
 
 from marl_battlegrounds.evaluation.evaluation_conditions import config_record
 from marl_battlegrounds.evaluation.metric_catalog import (
-    FULL_METRIC_NAMES,
+    FULL_METRIC_NAMES_BY_SCHEMA_VERSION,
+    METRIC_SCHEMA_VERSION,
 )
 from marl_battlegrounds.evaluation.policy_execution import (
     Policy,
@@ -54,6 +58,7 @@ from marl_battlegrounds.evaluation.tournament_reuse import (
     record_source_identity,
 )
 from marl_battlegrounds.tasks import (
+    DEFAULT_TDM_RED_ZONE_DEPTH,
     balanced_spawn_configs,
     canonical_tournament_rosters,
     make_standard_team_deathmatch_config,
@@ -61,14 +66,42 @@ from marl_battlegrounds.tasks import (
 
 
 def config_descriptor(
-    *, entrants: int = 2, official: bool = False, root: Path | None = None
+    *,
+    entrants: int = 2,
+    official: bool = False,
+    root: Path | None = None,
+    historical: bool = False,
 ) -> dict[str, Any]:
-    """Build an incomplete artificial descriptor; this function writes no files.
+    """Build an incomplete artificial tournament descriptor; it writes no files.
 
-    entrants selects the field size. official=True supplies structural release
-    fields only and never installs or qualifies a bundle. root names the future
-    asset directory; None uses an intentionally unavailable fixture path. The
-    complete builder replaces every dummy asset before returning a usable config.
+    Parameters
+    ----------
+    entrants : int, default=2
+        Field size: how many fixture participants to list. They are named
+        ``fixture-0``, ``fixture-1`` and so on, and each one is the built-in
+        ``random`` controller. This function does not check the range;
+        ``build_record_bundle`` limits it to 2 to 32.
+    official : bool, default=False
+        False gives a custom descriptor with one map (map 0) and no release,
+        Elo or record source. True supplies structural release fields only:
+        release times, Elo 1200 per participant, the five test maps 47 to 51
+        and one record source. It never installs or qualifies a bundle.
+    root : Path or None, default=None
+        The future asset directory. It is made absolute but is not created or
+        read. None uses ``/fixture``, a path that is meant to be unavailable.
+    historical : bool, default=False
+        False pins the current scalar schema (``METRIC_SCHEMA_VERSION``), run
+        schema 2 and replay schema 4. True pins the schemas saved before the
+        Team Deathmatch Red Zone rule: scalar 14, run 2 and replay 3.
+
+    Returns
+    -------
+    dict
+        A plain JSON tournament config descriptor (format
+        ``marlbg-tournament-config``, version 1) with ``snapshot_id`` already
+        computed. Every asset is a dummy entry with one fake SHA-256 and size
+        0. The complete builder replaces every dummy asset before it returns a
+        usable config.
     """
     base = Path("/fixture") if root is None else root.absolute()
     digest = sha256(b"fixture only").hexdigest()
@@ -191,9 +224,9 @@ def config_descriptor(
             "code_revision": {"package_version": "0.0.0"},
             "environment_id": digest,
             "source_manifest_asset": "source",
-            "scalar_schema": 14,
+            "scalar_schema": 14 if historical else METRIC_SCHEMA_VERSION,
             "run_schema": 2,
-            "replay_schema": 3,
+            "replay_schema": 3 if historical else 4,
             "action_stream_version": "evaluation-systems-v1",
             "initialization_stream_version": "evaluation-systems-v1",
             "dependency_lock_asset": "dependencies",
@@ -341,13 +374,21 @@ def _participants(
 
 
 def _configs(
-    directory: Path, assets: dict[str, Any], count: int, max_steps: int
+    directory: Path,
+    assets: dict[str, Any],
+    count: int,
+    max_steps: int,
+    *,
+    historical: bool,
 ) -> tuple[list[dict[str, Any]], dict[str, Any], dict[int, tuple[str, str]]]:
     """Write count real source configs and resolve both complete spawn choices.
 
-    max_steps is the positive example horizon. Return map declarations, exact
-    serialized source/swapped configs and their IDs. Assets use packaged maps;
-    synthetic outcomes do not become measurements of those maps.
+    max_steps is the positive example horizon. historical=True writes depth-0
+    configurations under their pre-Red-Zone (12-key) identities; False writes
+    current configurations at the default Red Zone depth. Return map
+    declarations, exact serialized source/swapped configs and their IDs. Assets
+    use packaged maps; synthetic outcomes do not become measurements of those
+    maps.
     """
     rosters = canonical_tournament_rosters()
     maps: list[dict[str, Any]] = []
@@ -359,15 +400,18 @@ def _configs(
             team_a_roster=rosters[0],
             team_b_roster=rosters[1],
             max_steps=max_steps,
+            red_zone_depth=0.0 if historical else DEFAULT_TDM_RED_ZONE_DEPTH,
         )
         batch = balanced_spawn_configs(source, num_envs=2)
-        source_id, source_content = config_record(source)
+        source_id, source_content = config_record(source, historical=historical)
 
         def swapped_row(value: jax.Array) -> jax.Array:
             """Select the swapped scalar leaf from the shared two-choice batch."""
             return value[1]
 
-        swapped_id, swapped_content = config_record(jax.tree.map(swapped_row, batch))
+        swapped_id, swapped_content = config_record(
+            jax.tree.map(swapped_row, batch), historical=historical
+        )
         configurations[source_id] = source_content
         configurations[swapped_id] = swapped_content
         choices[map_id] = source_id, swapped_id
@@ -419,6 +463,7 @@ def build_record_bundle(
     maps: int = 5,
     pairs_per_map: int = 1,
     max_steps: int = 16,
+    historical: bool = False,
 ) -> dict[str, Any]:
     """Create a complete artificial local tournament bundle without playing games.
 
@@ -431,14 +476,22 @@ def build_record_bundle(
         Population size from 2 to 32; default 12. Versions are random adapters
         with distinct scalar numerical evidence, not official controllers.
     full : bool
-        False writes outcomes and priority values. True also streams schema-14
-        full rows. All measurements are invented fixture values.
+        False writes outcomes and priority values. True also streams full rows
+        in the bundle's scalar schema: 14 (11,148 metric columns) when
+        historical, otherwise the current METRIC_SCHEMA_VERSION (15, 11,192
+        columns). All measurements are invented fixture values.
     maps : int
         Number of packaged test maps from 1 to 5; default 5.
     pairs_per_map : int
         Positive complete spawn pairs per matchup/map; default 1.
     max_steps : int
         Positive source horizon, default 16. No game is run by this helper.
+    historical : bool
+        False (default) writes a current bundle: current scalar schema, replay
+        schema 4 and configurations at the default Red Zone depth. True writes
+        a bundle as saved before the Red Zone rule: pins (14, 2, 3) and 12-key
+        depth-0 configurations under their original identities. Such a bundle
+        can be reused but cannot run new games.
 
     Returns
     -------
@@ -446,6 +499,13 @@ def build_record_bundle(
         config, config_path, manifest, matches, registrations, games, companion
         and verified local paths. Pass config to the custom tournament route.
         Only an isolated test catalog may pin it as a canonical fixture.
+
+    Raises
+    ------
+    ValueError
+        If entrants is outside 2 to 32, maps is outside 1 to 5, pairs_per_map
+        is below 1, or max_steps is not a positive plain ``int``. This check
+        runs before any file is written.
 
     Notes
     -----
@@ -464,7 +524,9 @@ def build_record_bundle(
     directory = directory.resolve()
     assets: dict[str, Any] = {}
     participants, registrations, systems = _participants(directory, assets, entrants)
-    sources, configurations, choices = _configs(directory, assets, maps, max_steps)
+    sources, configurations, choices = _configs(
+        directory, assets, maps, max_steps, historical=historical
+    )
     names = [row["entrant_id"] for row in participants]
     registration_ids = {value["name"]: key for key, value in systems.items()}
     games: list[dict[str, Any]] = []
@@ -595,10 +657,16 @@ def build_record_bundle(
             passes[json.dumps((phase, pass_id), separators=(",", ":"))] = entry
     tables: dict[str, Any] = {}
     manifest_tables: dict[str, Any] = {}
+    # The manifest and full-report header follow the bundle's pinned schema.
+    scalar = 14 if historical else METRIC_SCHEMA_VERSION
     selected_tables = [("match_results", MATCH_COLUMNS, "outcomes_priority")]
     if full:
         selected_tables.append(
-            ("full_metrics", (*IDENTITY_COLUMNS, *FULL_METRIC_NAMES), "full_report")
+            (
+                "full_metrics",
+                (*IDENTITY_COLUMNS, *FULL_METRIC_NAMES_BY_SCHEMA_VERSION[scalar]),
+                "full_report",
+            )
         )
     for name, columns, role in selected_tables:
         identifier = name + ".csv"
@@ -649,7 +717,7 @@ def build_record_bundle(
     manifest = {
         "run_id": run_id,
         "schema_version": 2,
-        "metric_schema_version": 14,
+        "metric_schema_version": scalar,
         "metric_schema_id": "marlbg.tdm.scalar",
         "systems": systems,
         "configurations": configurations,
@@ -707,7 +775,7 @@ def build_record_bundle(
         inference_dependency_lock(),
         "dependencies",
     )
-    config = config_descriptor(entrants=entrants, root=directory)
+    config = config_descriptor(entrants=entrants, root=directory, historical=historical)
     config.update(assets=assets, participants=participants, record_sources=[source])
     config["conditions"].update(
         map_sources=sources,

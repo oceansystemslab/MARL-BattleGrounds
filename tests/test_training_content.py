@@ -2,7 +2,21 @@
 
 Tests cover scientific layout identity, protected-content rejection, finite
 closure, resource verification, compatibility after harmless repackaging and
-failure before setup/resume effects. No learner or training run is created.
+failure before setup/resume effects. Content binding version 3 records the Red
+Zone depth: bindings prepared at depths 0.0, 5.0 (the default) and 6.0 differ
+in every map configuration identity, source row and scientific projection, all
+hash REQUIRED_SCHEMA_BINDINGS_V4, and a resume uses the saved depth. Version 3
+requires score_thresholds and red_zone_depth and applies Core's scalar depth
+rules; versions 1 and 2 reject a depth field. The version 1 binding captured
+before Red Zone scoring (tests/fixtures/training_content_binding_v1.json)
+still reproduces its exact bytes, and it and a version 2 binding are refused
+by prepare_training_content with the "saved before Red Zone scoring" message
+before any preparation starts. A pinned export whose learner saved a version 1
+or 2 binding under a different protected scenario closure (as after the
+scenario republish) links as a declared export with unknown exposure and all
+eight scenarios familiar, without an error; this holds against today's real
+republished binding as well as a binding whose protected roots alone differ.
+No learner or training run is created.
 """
 
 from __future__ import annotations
@@ -22,9 +36,17 @@ from pydantic import ValidationError
 
 from marl_battlegrounds import _tdm_assets
 from marl_battlegrounds._tdm_assets import MapGeometry
+from marl_battlegrounds.evaluation.catalog import build_resolved_env_config_v2
 from marl_battlegrounds.evaluation.models import (
+    REQUIRED_SCHEMA_BINDINGS_V3,
+    REQUIRED_SCHEMA_BINDINGS_V4,
     canonical_digest_sha256,
     canonical_json_bytes,
+)
+from marl_battlegrounds.evaluation.policy_execution import (
+    System,
+    SystemInput,
+    SystemOutput,
 )
 from marl_battlegrounds.evaluation.recording_identity import (
     ordered_source_bank_identity,
@@ -39,7 +61,15 @@ from marl_battlegrounds.training import (
     PreparedTrainingContent,
     TrainingContentBinding,
     _content,
+    checkpoints,
     prepare_training_content,
+)
+
+_V1_FIXTURE = Path(__file__).parent / "fixtures" / "training_content_binding_v1.json"
+_BEFORE_RED_ZONE = (
+    "This training content was saved before Red Zone scoring (content binding "
+    "version {}, one point per kill). This version cannot rebuild it. Resuming "
+    "that experiment needs the original source environment that created it."
 )
 
 
@@ -53,6 +83,35 @@ def _rehash(payload: dict[str, Any]) -> dict[str, Any]:
         payload, exclude={"canonical_digest"}
     )
     return payload
+
+
+def _validate(payload: dict[str, Any]) -> TrainingContentBinding:
+    # Plain json.dumps keeps -0.0, which canonical JSON would turn into 0.0.
+    return TrainingContentBinding.model_validate_json(json.dumps(payload))
+
+
+def _saved_before_red_zone(version: int) -> dict[str, Any]:
+    payload = json.loads(_V1_FIXTURE.read_bytes())
+    if version == 2:
+        # A valid version 2 record: two winning scores, one 42-row block each.
+        payload["schema_version"] = 2
+        payload["score_thresholds"] = [19, 20]
+        payload["source_configurations"] = payload["source_configurations"] * 2
+        raw = (
+            json.dumps(
+                payload["source_configurations"], sort_keys=True, separators=(",", ":")
+            )
+            + "\n"
+        ).encode()
+        payload["source_bank"]["canonical_digest"] = sha256(raw).hexdigest()
+        _rehash(payload)
+    return payload
+
+
+def _unused_apply(
+    variables: object, memory: object, inputs: SystemInput, keys: object
+) -> SystemOutput:
+    raise AssertionError("pinned_opponent_evidence never runs the method")
 
 
 def test_prepared_bank_matches_verified_maps_and_both_spawn_choices(
@@ -164,8 +223,10 @@ def test_invalid_binding_rejected_before_collection_update_or_writer(
     mutation: str,
 ) -> None:
     payload = prepared.binding.model_dump(mode="json")
-    if mutation in {"schema", "eligibility"}:
-        payload["schema_version" if mutation == "schema" else "eligibility_version"] = 2
+    if mutation == "schema":
+        payload["schema_version"] = 4
+    elif mutation == "eligibility":
+        payload["eligibility_version"] = 2
     elif mutation == "kind":
         payload["protected_scenarios"][0]["kind"] = "shared-definition"
     elif mutation == "split":
@@ -381,3 +442,196 @@ def test_preparation_reads_each_resource_and_validates_each_scenario_once(
     )
     assert validations == 8
     assert actual.binding == prepared.binding
+
+
+def test_version_3_bindings_record_their_depth_and_current_schemas(
+    prepared: PreparedTrainingContent,
+) -> None:
+    team_a, team_b = canonical_tournament_rosters()
+    bindings = {5.0: prepared.binding}
+    for depth in (0.0, 6.0):
+        other = prepare_training_content(red_zone_depth=depth)
+        np.testing.assert_array_equal(
+            other.source_configs.team_deathmatch_red_zone_depth, np.float32(depth)
+        )
+        bindings[depth] = other.binding
+    np.testing.assert_array_equal(
+        prepared.source_configs.team_deathmatch_red_zone_depth, np.float32(5.0)
+    )
+    schemas = canonical_digest_sha256({"bindings": REQUIRED_SCHEMA_BINDINGS_V4})
+    assert schemas != canonical_digest_sha256({"bindings": REQUIRED_SCHEMA_BINDINGS_V3})
+    for depth, binding in bindings.items():
+        assert binding.schema_version == 3
+        assert binding.red_zone_depth == depth
+        assert binding.score_thresholds == (20,)
+        assert binding.shared_definitions[1].identifier == "evaluation-schemas"
+        assert binding.shared_definitions[1].canonical_digest == schemas
+        assert {
+            (row.configuration.identifier, row.configuration.version)
+            for row in binding.maps
+        } == {("resolved-env-config", 2)}
+        config = make_standard_team_deathmatch_config(
+            map_id=47, team_a_roster=team_a, team_b_roster=team_b, red_zone_depth=depth
+        )
+        assert (
+            binding.maps[47].configuration.canonical_digest
+            == build_resolved_env_config_v2(config).canonical_digest_sha256
+        )
+        dumped = binding.model_dump(mode="json")
+        assert dumped["red_zone_depth"] == depth and dumped["score_thresholds"] == [20]
+        assert _validate(dumped) == binding
+    for left, right in ((0.0, 5.0), (0.0, 6.0), (5.0, 6.0)):
+        first, second = bindings[left], bindings[right]
+        assert first.canonical_digest != second.canonical_digest
+        assert first.source_bank != second.source_bank
+        assert all(
+            a.configuration != b.configuration
+            for a, b in zip(first.maps, second.maps, strict=True)
+        )
+        assert not set(first.source_configurations) & set(second.source_configurations)
+        assert first.scientific_projection() != second.scientific_projection()
+        assert [row.layout for row in first.maps] == [row.layout for row in second.maps]
+        assert first.protected_scenarios == second.protected_scenarios
+    assert prepare_training_content(expected=bindings[0.0]).binding == bindings[0.0]
+
+
+def test_version_3_requires_a_valid_depth_and_old_versions_reject_one(
+    prepared: PreparedTrainingContent,
+) -> None:
+    current = prepared.binding.model_dump(mode="json")
+    for name in ("red_zone_depth", "score_thresholds"):
+        payload = dict(current)
+        payload.pop(name)
+        with pytest.raises(ValidationError, match="requires score_thresholds"):
+            _validate(_rehash(payload))
+    for depth in (None, -0.0, -1.0, 1e-40, 1e39):
+        with pytest.raises(ValidationError):
+            _validate(_rehash({**current, "red_zone_depth": depth}))
+    for depth in (True, "5.0", float("nan"), float("inf")):
+        with pytest.raises(ValidationError):
+            _validate({**current, "red_zone_depth": depth})
+    for version in (1, 2):
+        old = _saved_before_red_zone(version)
+        assert _validate(old).red_zone_depth is None
+        for depth in (0.0, 5.0, None):
+            with pytest.raises(ValidationError, match="has no red_zone_depth"):
+                _validate(_rehash({**old, "red_zone_depth": depth}))
+    for depth, error in (
+        (5, TypeError),
+        (-1.0, ValueError),
+        (float("nan"), ValueError),
+    ):
+        with pytest.raises(error):
+            prepare_training_content(red_zone_depth=depth)  # pyright: ignore[reportArgumentType]
+    with pytest.raises(ValueError, match="map_width"):
+        prepare_training_content(red_zone_depth=20.5)
+
+
+def test_bindings_saved_before_red_zone_keep_their_bytes_and_are_refused(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    raw = _V1_FIXTURE.read_bytes()
+    saved = TrainingContentBinding.model_validate_json(raw)
+    assert (saved.schema_version, saved.score_thresholds) == (1, (20,))
+    assert saved.red_zone_depth is None
+    assert (
+        json.dumps(saved.model_dump(mode="json"), sort_keys=True, separators=(",", ":"))
+        + "\n"
+    ).encode() == raw
+    assert saved.shared_definitions[1].canonical_digest == canonical_digest_sha256(
+        {"bindings": REQUIRED_SCHEMA_BINDINGS_V3}
+    )
+    assert {row.configuration.version for row in saved.maps} == {1}
+    version_2 = _validate(_saved_before_red_zone(2))
+    assert "red_zone_depth" not in version_2.model_dump(mode="json")
+    assert version_2.model_dump(mode="json")["score_thresholds"] == [19, 20]
+
+    def no_preparation() -> object:
+        pytest.fail("A binding saved before Red Zone scoring reached preparation")
+
+    monkeypatch.setattr(_content, "asset_manifest", no_preparation)
+    for version, expected in (
+        (1, saved),
+        (1, json.loads(raw)),
+        (2, version_2),
+        (2, _saved_before_red_zone(2)),
+    ):
+        with pytest.raises(ValueError) as error:
+            prepare_training_content(expected=expected)
+        assert str(error.value) == _BEFORE_RED_ZONE.format(version)
+
+
+@pytest.mark.parametrize("version", [1, 2])
+def test_an_export_trained_before_the_republish_links_as_declared(
+    prepared: PreparedTrainingContent,
+    version: int,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    source = _saved_before_red_zone(version)
+    identifier = "c" * 64
+    export = tmp_path / "run" / "actors" / "final"
+    learner = tmp_path / "run" / "checkpoints" / identifier
+    descriptions: dict[Path, dict[str, object]] = {
+        export.resolve(): {
+            "kind": "actor",
+            "actor_digest": "d" * 64,
+            "metadata": {
+                "checkpoint_id": identifier,
+                "run_id": "old-run",
+                "seed": 3,
+                "env_steps": 40,
+                "pinned_opponent": None,
+            },
+        },
+        learner.resolve(): {
+            "kind": "learner",
+            "checkpoint_id": identifier,
+            "actor_digest": "d" * 64,
+            "metadata": {"run_id": "old-run", "config": {"seed": 3}},
+            "counters": {"env_steps": 40},
+            "collection": {"pinned_opponent": None, "content_binding": source},
+        },
+    }
+
+    def read(path: Path) -> dict[str, object]:
+        return descriptions[Path(path).resolve()]
+
+    monkeypatch.setattr(checkpoints, "read_checkpoint_description", read)
+    method = System("Old Export", _unused_apply)
+    # Under the source binding's own protected closure the old record links.
+    same = _validate(source)
+    assert _content._export_origin(same, export) == ("verified", None)
+    linked = _content.pinned_opponent_evidence(same, method, export=export)
+    assert (linked["source"], linked["exposure"]) == ("verified export", "none")
+    declared = {
+        "source": "declared export",
+        "exposure": "unknown",
+        "controllers": [],
+        "familiar_scenarios": list(range(1, 9)),
+    }
+    # Today's real binding (the installed scenarios republished at depth 5.0)
+    # no longer matches the old record's protected closure.
+    assert _content._export_origin(prepared.binding, export) == ("declared", None)
+    assert (
+        _content.pinned_opponent_evidence(prepared.binding, method, export=export)
+        == declared
+    )
+    # The same holds when only the protected roots differ from the source.
+    republished = prepared.binding.model_copy(
+        update={
+            "protected_scenarios": tuple(
+                row.model_copy(
+                    update={
+                        "root": row.root.model_copy(
+                            update={"canonical_digest": "e" * 64}
+                        )
+                    }
+                )
+                for row in prepared.binding.protected_scenarios
+            )
+        }
+    )
+    assert _content._export_origin(republished, export) == ("declared", None)
+    record = _content.pinned_opponent_evidence(republished, method, export=export)
+    assert record == declared

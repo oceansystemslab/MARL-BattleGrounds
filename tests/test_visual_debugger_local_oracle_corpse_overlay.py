@@ -1,4 +1,8 @@
-"""Check which local Oracle corpse details may be displayed."""
+"""Check which local Oracle corpse details may be displayed.
+
+Live DevClient sessions record context V4 with frame V3, and the corpse overlay
+accepts those frames as it does older frame versions.
+"""
 
 # pyright: reportPrivateUsage=false
 
@@ -51,7 +55,7 @@ from marl_battlegrounds.core.env import (
 from marl_battlegrounds.core.geometry import has_clear_line_of_sight
 from marl_battlegrounds.evaluation.capture import (
     capture_initial_evaluation_frame_v1,
-    capture_initial_evaluation_frame_v2,
+    capture_initial_evaluation_frame_v3,
 )
 from marl_battlegrounds.evaluation.models import (
     EvaluationFrameV1,
@@ -258,7 +262,7 @@ def test_no_shared_corpse_projection_respects_static_line_of_sight() -> None:
         authored_state,
         session.config,
     )
-    frame = capture_initial_evaluation_frame_v2(
+    frame = capture_initial_evaluation_frame_v3(
         session.evaluation_context,
         coherent_state,
         coherent_observation,

@@ -26,9 +26,11 @@ from marl_battlegrounds.evaluation.pov import (
     ActorPovAdjacentTransitionSlice,
     ActorPovAdjacentTransitionSliceV1,
     ActorPovAdjacentTransitionSliceV2,
+    ActorPovAdjacentTransitionSliceV3,
     ActorPovAxisMapping,
     ActorPovAxisMappingV1,
     ActorPovAxisMappingV2,
+    ActorPovAxisMappingV3,
     ActorPovEpisodeEndedCueV1,
     ActorPovOwnActionOutcomeCueV1,
     ActorPovOwnCooldownChangedCueV1,
@@ -2641,7 +2643,7 @@ def _body_public_id(
     """Resolve a body cue's relation row through its recorded actor axis.
 
     cue supplies ally/enemy relation and a valid row. axis_mapping is the
-    validated V1 or V2 actor mapping. Return the public ID on that row; the
+    validated V1, V2 or V3 actor mapping. Return the public ID on that row; the
     caller owns row bounds and relation validation.
     """
     if cue.relation == "ally":
@@ -2685,7 +2687,7 @@ def _compose_no_shared_obs_incoming_summary_v1(
     """Enrich an index-owned cue inventory using authorized adjacent endpoints.
 
     start, transition and successor must already come from the same validated
-    POV source; axis_mapping is its exact V1 or V2 actor mapping. Check joins,
+    POV source; axis_mapping is its exact V1, V2 or V3 actor mapping. Check joins,
     then preserve cue order/IDs while attaching only authorized endpoint facts.
     Return NoSharedObsIncomingSummaryV1. Wrong roots raise TypeError; inconsistent
     identities, epochs or cue/endpoint values raise ValueError. The recipient's
@@ -2696,6 +2698,7 @@ def _compose_no_shared_obs_incoming_summary_v1(
     if (
         type(axis_mapping) is not ActorPovAxisMappingV1
         and type(axis_mapping) is not ActorPovAxisMappingV2
+        and type(axis_mapping) is not ActorPovAxisMappingV3
     ):
         raise TypeError("NoSharedObs cue compositor requires exact axis mapping.")
     start_by_public, successor_by_public = _validate_cross_epoch_agent_identity(
@@ -2969,9 +2972,10 @@ def build_live_no_shared_obs_incoming_summary_v1(
 
     Parameters
     ----------
-    source : ActorPovAdjacentTransitionSliceV1 or ActorPovAdjacentTransitionSliceV2
-        Exact carrier with a coherent start frame, recipient transition and
-        successor frame. Its full Python payload is revalidated.
+    source : ActorPovAdjacentTransitionSlice
+        Exact ActorPovAdjacentTransitionSliceV1, V2 or V3 carrier with a
+        coherent start frame, recipient transition and successor frame. Its full
+        Python payload is revalidated.
     public_catalog : StaticMechanicsCatalogV1
         Public mechanic catalog for endpoint decoding.
     authority_session_id : str
@@ -3000,6 +3004,7 @@ def build_live_no_shared_obs_incoming_summary_v1(
     if (
         type(source) is not ActorPovAdjacentTransitionSliceV1
         and type(source) is not ActorPovAdjacentTransitionSliceV2
+        and type(source) is not ActorPovAdjacentTransitionSliceV3
     ):
         raise TypeError(
             "NoSharedObs live incoming requires an exact adjacent POV slice."

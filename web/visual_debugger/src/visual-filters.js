@@ -25,6 +25,7 @@
  *   | "spawn_shield_expiry"
  *   | "scrolling_battle_text"
  *   | "death_announcer"
+ *   | "red_zone_floors"
  * } VisualFilterId
  * @typedef {Readonly<Record<VisualFilterId, boolean>>} VisualFilterState
  * @typedef {Readonly<Record<string, string>>} VisualPaintPart
@@ -34,16 +35,20 @@
  * }>} VisualPaintPartRegistration
  */
 
+// Eleven filters start on: Cooldown Effects and Red Zone Floors joined the
+// original nine defaults with the Red Zone rule.
 const INITIAL_VISUAL_FILTER_IDS = new Set([
   "ultimate_ability_effects",
   "spawn_shield",
   "basic_ability_effects",
   "regeneration_effects",
+  "cooldown_effects",
   "death_effects",
   "resurrection_effects",
   "scrolling_battle_text",
   "respawn_wave",
   "death_announcer",
+  "red_zone_floors",
 ]);
 
 export const VISUAL_FILTER_REGISTRY = Object.freeze(
@@ -67,6 +72,7 @@ export const VISUAL_FILTER_REGISTRY = Object.freeze(
     ["spawn_shield_expiry", "Spawn-Shield Expiry"],
     ["scrolling_battle_text", "Scrolling Battle Text"],
     ["death_announcer", "Death Announcer"],
+    ["red_zone_floors", "Red Zone Floors"],
   ].map(([id, label]) =>
     Object.freeze({
       id: /** @type {VisualFilterId} */ (id),
@@ -128,6 +134,7 @@ export const VISUAL_PAINT_PART_REGISTRY = Object.freeze([
     { surface: "durable", kind: "selected_pair_legality" },
     "target_selection_visuals",
   ),
+  paintPart({ surface: "durable", kind: "red_zone_floor" }, "red_zone_floors"),
   paintPart(
     {
       surface: "transient",
@@ -385,7 +392,7 @@ export function reduceVisualFilterState(state, action) {
 
 /**
  * Validate state and encode its booleans in the fixed registry order. Return
- * a visual-filters-v2 string for local redraw/cache decisions. Invalid state
+ * a visual-filters-v3 string (20 flags) for local redraw/cache decisions. Invalid state
  * throws TypeError. The key describes display preferences, not scientific
  * conditions or information rights, and must not enter result fingerprints.
  *
@@ -393,7 +400,7 @@ export function reduceVisualFilterState(state, action) {
  */
 export function visualFilterPaintKey(state) {
   const normalized = assertVisualFilterState(state);
-  return `visual-filters-v2:${VISUAL_FILTER_IDS.map((id) =>
+  return `visual-filters-v3:${VISUAL_FILTER_IDS.map((id) =>
     normalized[id] ? "1" : "0",
   ).join("")}`;
 }

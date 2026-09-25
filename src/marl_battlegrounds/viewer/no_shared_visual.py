@@ -1,10 +1,11 @@
 """Build actor-safe live views and adapt historical NoSharedObs replays.
 
-Current Context V3 keeps its exact relative flags and self index. Older Context V2
-uses a visual-only compatibility route; its output must not be advertised as an
-exact policy input export. The presentation builders call these helpers with
-validated frames. They return in-memory projections without writing artifacts or
-advancing the simulator.
+Relative-input contexts keep their exact relative flags and self index: context
+V4 (current, 20 context columns with the Red Zone depth) and context V3. Older
+Context V2 uses a visual-only compatibility route; its output must not be
+advertised as an exact policy input export. The presentation builders call these
+helpers with validated frames. They return in-memory projections without writing
+artifacts or advancing the simulator.
 """
 
 from marl_battlegrounds.evaluation.actor_projection import (
@@ -45,15 +46,16 @@ _VISUAL_PROJECTION_V1 = VersionedIdentityV1(
 def _visual_context_v1(
     context: EvaluationEpisodeContext,
 ) -> EvaluationEpisodeContext:
-    """Keep current actor inputs exact and adapt only historical V2 visual identity.
+    """Keep relative actor inputs exact and adapt only historical V2 visual identity.
 
-    Reject other execution modes or unknown actor projections. This compatibility
+    Contexts V3 and V4 (and projection version 1) are returned unchanged. Reject
+    other execution modes or unknown actor projections. This compatibility
     view does not change saved context bytes or claim exact historical input export.
     """
     evaluation_context_type(context)
     if context.execution_information_mode != "no_shared_obs":
         raise ValueError("NoSharedObs visual slices require no_shared_obs execution")
-    if context.schema_version == 3 or context.actor_projection.version == 1:
+    if context.schema_version in (3, 4) or context.actor_projection.version == 1:
         return context
     if (
         context.actor_projection.version != 1
@@ -86,8 +88,9 @@ def build_live_no_shared_obs_visual_current_slice_v1(
     Returns
     -------
     ActorPovCurrentSlice
-        Current actor-safe frame and any authorized incoming transition. Context V3
-        uses the exact current projection; older contexts use visual compatibility.
+        Current actor-safe frame and any authorized incoming transition. Contexts
+        V3 and V4 use their exact relative projection (POV V2 and POV V3 slices);
+        older contexts use visual compatibility.
 
     Raises
     ------
@@ -99,7 +102,7 @@ def build_live_no_shared_obs_visual_current_slice_v1(
     No replay or simulator data is modified. This helper delegates actor authorization
     to the shared POV projection authority.
     """
-    if context.schema_version == 3:
+    if context.schema_version in (3, 4):
         return build_actor_pov_current_slice_v1(
             context,
             frame,
@@ -142,8 +145,9 @@ def build_live_no_shared_obs_visual_adjacent_slice_v1(
     Returns
     -------
     ActorPovAdjacentTransitionSlice
-        Actor-safe start, action/effect evidence, and successor. Context V3 preserves
-        its current projection; historical contexts use the visual compatibility route.
+        Actor-safe start, action/effect evidence, and successor. Contexts V3 and V4
+        preserve their exact relative projection; historical contexts use the visual
+        compatibility route.
 
     Raises
     ------
@@ -154,7 +158,7 @@ def build_live_no_shared_obs_visual_adjacent_slice_v1(
     """
     if type(view) is not EvaluationTransitionViewV1:
         raise TypeError("visual transition requires exact EvaluationTransitionViewV1")
-    if view.context.schema_version == 3:
+    if view.context.schema_version in (3, 4):
         return build_actor_pov_adjacent_transition_slice_v1(
             view, global_slot=global_slot
         )

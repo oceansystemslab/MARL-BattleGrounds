@@ -1,7 +1,10 @@
 """Check scalar metric names, ordering and schema rules.
 
 The catalog tests share the numerical definitions rather than implementing a
-second metric calculator.
+second metric calculator. Scalar schema 15 adds the 44 Red Zone columns in one
+single-view Red Zone topic right after Respawning. Dropping them gives back the
+exact schema-14 order, which FULL_METRIC_NAMES_BY_SCHEMA_VERSION keeps for old
+reports; their roles, directions, search facts and Blank When text are fixed.
 """
 
 import hashlib
@@ -16,6 +19,7 @@ from marl_battlegrounds.evaluation.metric_catalog import (
     DIRECTED_METRICS,
     FAMILY_COLUMN_COUNTS,
     FULL_METRIC_NAMES,
+    FULL_METRIC_NAMES_BY_SCHEMA_VERSION,
     METRIC_COLUMNS,
     METRIC_COLUMNS_BY_NAME,
     METRIC_FAMILIES,
@@ -307,8 +311,19 @@ def test_priority_order_matches_the_public_result_vector() -> None:
 
 
 def test_fixed_catalog_has_unique_names_and_immutable_complete_definitions() -> None:
-    assert len(FULL_METRIC_NAMES) == len(set(FULL_METRIC_NAMES)) == 11148
-    assert METRIC_SCHEMA_VERSION == 14
+    assert len(FULL_METRIC_NAMES) == len(set(FULL_METRIC_NAMES)) == 11192
+    assert METRIC_SCHEMA_VERSION == 15
+    # Schema 15 only inserts the Red Zone columns. Dropping them must give back
+    # the saved schema-14 order exactly, which the historical proofs below use.
+    schema_14 = tuple(name for name in FULL_METRIC_NAMES if "_red_zone_" not in name)
+    assert len(schema_14) == 11148
+    assert hashlib.sha256("\n".join(schema_14).encode()).hexdigest() == (
+        "06d9577876a1dd7eaab80d02ffabe9c6706565409175d3f223ad3292e0e71779"
+    )
+    assert FULL_METRIC_NAMES_BY_SCHEMA_VERSION[14] == schema_14
+    assert FULL_METRIC_NAMES_BY_SCHEMA_VERSION[15] is FULL_METRIC_NAMES
+    assert set(FULL_METRIC_NAMES_BY_SCHEMA_VERSION) == {14, 15}
+    assert isinstance(FULL_METRIC_NAMES_BY_SCHEMA_VERSION, MappingProxyType)
     additions = {
         f"agent_{slot}_{stem}"
         for slot in range(10)
@@ -343,9 +358,9 @@ def test_fixed_catalog_has_unique_names_and_immutable_complete_definitions() -> 
     assert not set(removed_returns) & set(FULL_METRIC_NAMES)
     # Reinsert only the accepted ten removals to keep the historical order proof.
     historical_names = (
-        *FULL_METRIC_NAMES[:9],
+        *schema_14[:9],
         *removed_returns,
-        *FULL_METRIC_NAMES[9:],
+        *schema_14[9:],
     )
     earlier_names = [name for name in historical_names if name not in ability_counts]
     # Every other earlier name and its relative position stays unchanged.
@@ -587,6 +602,7 @@ def test_family_budget_retains_requested_counts_without_duplicate_aliases() -> N
         "priest_rescue": 544,
         "freedom": 36,
         "formation": 44,
+        "red_zone": 44,
     }
     assert sum(FAMILY_COLUMN_COUNTS.values()) == len(FULL_METRIC_NAMES)
     assert not any("burst_activations" in name for name in FULL_METRIC_NAMES)
@@ -773,6 +789,13 @@ def test_every_measure_has_its_reviewed_direction_without_a_default() -> None:
         "freedom_protection_fraction",
     )
     classify("formation", context="ally_distance_mean ally_distance_observations")
+    classify(
+        "red_zone",
+        higher="red_zone_kills",
+        lower="red_zone_deaths",
+        context="red_zone_kill_contributions red_zone_kill_participation "
+        "red_zone_death_fraction",
+    )
 
     observed: dict[str, set[str]] = {}
     for column in METRIC_COLUMNS:
@@ -1510,7 +1533,7 @@ def test_team_recipient_identity_and_source_class_never_become_patient_class() -
     ].requires_ultimate_target
 
 
-def test_dropdown_inventory_has_twenty_nine_distinct_groups() -> None:
+def test_dropdown_inventory_has_thirty_distinct_groups() -> None:
     assert set(METRIC_GROUPS) == {
         "priority",
         "abilities",
@@ -1536,6 +1559,7 @@ def test_dropdown_inventory_has_twenty_nine_distinct_groups() -> None:
         "priest_rescue",
         "freedom",
         "formation",
+        "red_zone",
         "ultimate_mage",
         "ultimate_warrior",
         "ultimate_hunter",
@@ -1767,7 +1791,7 @@ def test_generated_dictionary_and_manuscript_summary_match_catalog() -> None:
     assert Path("docs/evaluation/metric_columns.csv").read_text() == dictionary_csv()
     specification = Path("docs/evaluation/metric_specification.md").read_text()
     assert family_summary_markdown() in specification
-    assert "**11,148**" in family_summary_markdown()
+    assert "**11,192**" in family_summary_markdown()
 
 
 def test_topics_match_the_approved_researcher_questions() -> None:
@@ -1787,6 +1811,7 @@ def test_topics_match_the_approved_researcher_questions() -> None:
         ("controlled_kills", "Kills of Enemies With Harmful Effects", True),
         ("deaths", "Deaths and Time Dead", False),
         ("respawn", "Respawning", False),
+        ("red_zone", "Red Zone", False),
         ("coordination", "Team Coordination", False),
         ("formation", "Team Formation", False),
         ("aura_coverage", "Aura Coverage", True),
@@ -1804,7 +1829,7 @@ def test_topics_match_the_approved_researcher_questions() -> None:
     assert Counter(t.section for t in METRIC_TOPICS) == {
         "Results and Actions": 3,
         "Damage and Healing": 8,
-        "Kills, Deaths and Respawning": 4,
+        "Kills, Deaths and Respawning": 5,
         "Teamwork and Positioning": 4,
         "Status Effects": 3,
         "Ultimates": 5,
@@ -1867,3 +1892,97 @@ def test_primary_homes_and_shared_rows_keep_sources_and_recipients_distinct() ->
                 key=lambda c: metric_order_key(c, topic),
             )
             assert rows.index(fraction) == rows.index(amount) + 1
+
+
+def test_red_zone_columns_have_fixed_names_order_roles_and_search_facts() -> None:
+    # Written out independently of the catalog builder.
+    expected = (
+        "team_a_red_zone_kills",
+        "team_a_red_zone_deaths",
+        "team_b_red_zone_kills",
+        "team_b_red_zone_deaths",
+        *(
+            f"agent_{slot}_red_zone_{stem}"
+            for slot in range(10)
+            for stem in ("kill_contributions", "kill_participation")
+        ),
+        *(
+            f"agent_{slot}_red_zone_{stem}"
+            for slot in range(10)
+            for stem in ("deaths", "death_fraction")
+        ),
+    )
+    assert FULL_METRIC_NAMES[8256:8300] == expected
+    assert FULL_METRIC_NAMES[8255] == "team_b_mean_observed_respawn_wait_steps"
+    assert FULL_METRIC_NAMES[8300] == "team_a_focus_fire_steps"
+    columns = [METRIC_COLUMNS_BY_NAME[name] for name in expected]
+    assert {
+        column.name for column in METRIC_COLUMNS if column.family == "red_zone"
+    } == (set(expected))
+    stems = {
+        "red_zone_kills": ("team", "higher", "count", "Red Zone Kills", "kill"),
+        "red_zone_kill_contributions": (
+            "contributor",
+            "descriptive",
+            "count",
+            "Red Zone Kill Contributions",
+            "kill",
+        ),
+        "red_zone_kill_participation": (
+            "contributor",
+            "descriptive",
+            "fraction",
+            "Share of Team {team} Red Zone Kills",
+            "kill",
+        ),
+        "red_zone_deaths": ("recipient", "lower", "count", "Red Zone Deaths", "death"),
+        "red_zone_death_fraction": (
+            "recipient",
+            "descriptive",
+            "fraction",
+            "Share of Team {team} Red Zone Deaths",
+            "death",
+        ),
+    }
+    for column in columns:
+        role, direction, unit, label, kind = stems[column.stem]
+        team = (
+            column.subjects[0]
+            if column.scope == "team"
+            else column.subjects[0] // 5 + 1
+        )
+        name = "A" if team == 1 else "B"
+        assert column.subject_role == role, column.name
+        assert column.direction == direction, column.name
+        assert column.unit == unit, column.name
+        assert column.label == label.format(team=name), column.name
+        assert column.required_class_id is None and column.status_channel is None
+        assert metric_primary_location(column) == ("red_zone", "single")
+        assert metric_locations(column, (1, 2, 3, 4, 5) * 2) == (
+            ("red_zone", "single"),
+        )
+        facts = metric_search_facts(column)
+        assert facts["kind"] == kind, column.name
+        assert facts["relation"] == "enemy"
+        assert facts["ability"] is None and facts["status"] is None
+        assert "Red Zone rule was not recorded" in column.missing_when
+        assert "Team A Deathmatch" not in column.missing_when
+        assert "Team B Deathmatch" not in column.missing_when
+        # Team kills and deaths name the 2 points; counts never come from them.
+        assert ("2 points" in column.description) == (
+            column.stem in ("red_zone_kills", "red_zone_deaths")
+        ), column.name
+        if unit == "fraction":
+            assert column.numerator and "during the selected period" in column.numerator
+            assert column.denominator and f"Team {name}" in column.denominator
+            assert "is zero" in column.missing_when
+        else:
+            assert column.numerator is None and column.denominator is None
+    kills = METRIC_COLUMNS_BY_NAME["team_b_red_zone_kills"]
+    assert kills.description.startswith("How many enemies Team B killed inside")
+    assert "Each enemy death counts once" in kills.description
+    deaths = METRIC_COLUMNS_BY_NAME["agent_3_red_zone_deaths"]
+    assert "inside Team A's Red Zone" in deaths.description
+    assert metric_search_facts(METRIC_COLUMNS_BY_NAME["agent_7_red_zone_deaths"])[
+        "subject"
+    ] == ("recipient")

@@ -3,12 +3,22 @@
 Store-focused cases replace game evidence preparation with controlled records;
 separate integration cases exercise the real schedule, report and fit authorities.
 No test treats a fixture store as a qualified official release.
+
+A release saved before the Red Zone rule (pins 14, 2, 3 and 12-key depth-0.0
+configurations) is admitted under its original snapshot identity, with its
+real population evidence. Edited source configuration content, even with its
+asset hash and snapshot identity recomputed, is rejected. A Red Zone rule
+mismatch is rejected before any write: the public config route refuses a
+supplied red_zone_depth, and a challenger's admission against the old release,
+which needs new games under the current rule, fails with the reuse-only
+message before any run directory or store change.
 """
 
 # The store tests intentionally exercise private failure boundaries.
 # pyright: reportPrivateUsage=false
 
 import copy
+import json
 from datetime import UTC, datetime
 from hashlib import sha256
 from pathlib import Path
@@ -18,7 +28,9 @@ import pytest
 from tests.canonical_fixtures import config_descriptor
 from tests.canonical_record_fixtures import build_record_bundle
 
+import marl_battlegrounds as marl_bgs
 from marl_battlegrounds.evaluation import admission
+from marl_battlegrounds.evaluation.results import CanonicalTournamentResult
 from marl_battlegrounds.evaluation.tournament_assets import AssetVerifier
 from marl_battlegrounds.evaluation.tournament_config import (
     canonical_json,
@@ -790,3 +802,140 @@ def test_real_admission_retains_refits_and_prepares_next_challenger(
         for item in released["participants"]
     )
     assert not (store / "catalog.json").exists()
+
+
+def _challenger_submission(
+    tmp_path: Path, state: dict[str, Any], challenger: dict[str, Any]
+) -> dict[str, Any]:
+    participant = challenger["config"]["participants"][-1]
+    asset_ids = {participant["registration_asset"]}
+    asset_ids.update(
+        value["asset_id"]
+        for key, value in participant["controller"]["content"].items()
+        if key != "adapter_bindings" and value is not None
+    )
+    descriptor = {
+        "participant": participant,
+        "assets": {key: challenger["config"]["assets"][key] for key in asset_ids},
+    }
+    return {
+        "submission_id": "pre-red-zone-challenger",
+        "controller_id": participant["controller_id"],
+        "descriptor_asset": _asset(
+            tmp_path / "challenger-controller.json", descriptor, "registration"
+        ),
+        "received_at_utc": "2026-10-01T00:00:00+00:00",
+        "complete_at_utc": "2026-10-28T00:00:00+00:00",
+        "qualification_asset": _asset(
+            tmp_path / "challenger-qualification.json",
+            {
+                "controller_id": participant["controller_id"],
+                "rules_approval_id": state["rules_approval_id"],
+                "approved": True,
+                "revises_controller_id": None,
+            },
+            "qualification",
+        ),
+    }
+
+
+def _tree(directory: Path) -> dict[Path, bytes]:
+    return {path: path.read_bytes() for path in directory.rglob("*") if path.is_file()}
+
+
+def _no_new_games(*args: object, **kwargs: object) -> None:
+    raise AssertionError("an old release must be reused, not played again")
+
+
+def test_release_saved_before_red_zone_is_admitted_under_its_original_identity(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    bundle = build_record_bundle(tmp_path / "old", maps=1, max_steps=1, historical=True)
+    config = bundle["config"]
+    assert config["snapshot_id"] == snapshot_identity(config)
+    store = tmp_path / "store"
+    state = admission.initialize_admission_store(store, config, rules=_rules())
+    assert state["published_snapshot_id"] == config["snapshot_id"]
+    stored = admission._snapshot(store, config["snapshot_id"])
+    assert stored["snapshot_id"] == snapshot_identity(stored) == config["snapshot_id"]
+    # The public config route reuses every recorded game under the same identity.
+    from marl_battlegrounds.evaluation import canonical
+
+    monkeypatch.setattr(canonical, "_active_pair", _no_new_games)
+    reused = marl_bgs.run_tournament(config=config, output_dir=tmp_path / "reuse")
+    assert isinstance(reused, CanonicalTournamentResult)
+    assert reused.snapshot_id == config["snapshot_id"]
+    assert reused.planned_games == reused.reused_games == 132
+    assert reused.executed_games == 0
+    # A Red Zone rule never reaches a write: the config owns its rules.
+    for depth in (0.0, 5.0):
+        with pytest.raises(
+            ValueError,
+            match=r"^Config owns scientific settings; omit red_zone_depth$",
+        ):
+            marl_bgs.run_tournament(
+                config=config, red_zone_depth=depth, output_dir=tmp_path / "runs"
+            )
+    assert not (tmp_path / "runs").exists()
+
+
+def test_edited_source_configuration_is_rejected_even_when_rehashed(
+    tmp_path: Path,
+) -> None:
+    bundle = build_record_bundle(
+        tmp_path / "old", entrants=2, maps=1, max_steps=1, historical=True
+    )
+    config = copy.deepcopy(bundle["config"])
+    source = config["conditions"]["map_sources"][0]
+    asset = config["assets"][source["source_config_asset"]]
+    path = Path(asset["path"])
+    content = json.loads(path.read_bytes())
+    assert len(content) == 12
+    # The same one-point rule written as current content is still an edit.
+    edited = canonical_json({**content, "team_deathmatch_red_zone_depth": 0.0})
+    path.write_bytes(edited)
+    asset.update(sha256=sha256(edited).hexdigest(), size_bytes=len(edited))
+    config["snapshot_id"] = snapshot_identity(config)
+    with pytest.raises(ValueError, match="differs from its declared identity"):
+        marl_bgs.run_tournament(config=config, output_dir=tmp_path / "edited")
+    assert not (tmp_path / "edited").exists()
+
+
+def test_challenger_needing_new_games_under_red_zone_stops_before_any_write(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    clock = datetime(2026, 10, 29, tzinfo=UTC)
+    monkeypatch.setattr(admission, "_utc_now", lambda: clock)
+    bundle = build_record_bundle(
+        tmp_path / "old", full=True, max_steps=1, historical=True
+    )
+    evidence = admission._population_evidence(bundle["config"])
+    assert evidence["snapshot_id"] == bundle["config"]["snapshot_id"]
+    assert evidence["games"] == evidence["full_rows"] == 660
+    store = tmp_path / "store"
+    state = admission.initialize_admission_store(
+        store, bundle["config"], rules=_rules()
+    )
+    challenger = build_record_bundle(
+        tmp_path / "challenger", entrants=13, maps=1, max_steps=1
+    )
+    submission = _challenger_submission(tmp_path, state, challenger)
+    admission.register_submission(store, submission)
+    attempt = admission.prepare_admission(
+        store, submission["submission_id"], release_at="2026-11-01T00:00:00+00:00"
+    )
+    before = _tree(store)
+    # The challenger's games would be new games under the current rule, which
+    # a release saved before Red Zone cannot hold.
+    with pytest.raises(
+        ValueError, match=r"^Snapshot configurations were saved before the Red Zone"
+    ):
+        admission.execute_admission(
+            store,
+            attempt["attempt_id"],
+            output_dir=tmp_path / "runs",
+            num_envs=32,
+            chunk_size=1,
+        )
+    assert not (tmp_path / "runs").exists()
+    assert _tree(store) == before

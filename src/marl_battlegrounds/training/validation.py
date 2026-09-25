@@ -4,6 +4,11 @@ New panels retain any valid System or Policy and its normal M8 registration.
 Tasks preserve frozen method identities, paired schedules and durable M8 passes.
 The learner never enters this module. New tasks keep fixed batches and live
 clients in process; historical two-actor panels keep their original protocol.
+Every new task records the Team Deathmatch Red Zone depth its games use (task
+schemas 3, 4 and slot 2) and reports recorded kills beside points; a task
+description built without a depth keeps its original layout and identity, so
+saved tasks from before the Red Zone rule stay valid but are never reused under
+the new rule. load_panel refuses a panel ranked under another depth.
 """
 
 from __future__ import annotations
@@ -18,11 +23,14 @@ import time
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from fractions import Fraction
+from functools import lru_cache
 from hashlib import sha256
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, cast
 
+from marl_battlegrounds.tasks import DEFAULT_TDM_RED_ZONE_DEPTH
 from marl_battlegrounds.training.analysis import (
+    _KILL_COLUMNS,  # pyright: ignore[reportPrivateUsage]
     _atomic_text,  # pyright: ignore[reportPrivateUsage]
     _integer,  # pyright: ignore[reportPrivateUsage]
     summarize_slot_diagnostic,
@@ -51,6 +59,81 @@ def _root_seed(value: object) -> int:
     if seed > 0xFFFFFFFF:
         raise ValueError("root_seed must fit an unsigned 32-bit integer")
     return seed
+
+
+def _checked_depth(value: object) -> float:
+    """Check one Red Zone depth that validation games will use.
+
+    Parameters
+    ----------
+    value : object
+        Red Zone depth in map units; it must be exactly a Python float.
+
+    Returns
+    -------
+    float
+        The same value, unchanged.
+
+    Raises
+    ------
+    TypeError
+        value is not exactly a Python float (None, bool, int and NumPy
+        scalars included).
+    ValueError
+        value breaks Core's scalar rules (not finite, negative or -0.0, or a
+        positive value that is not a normal float32 number), or a positive
+        value is wider than a validation map (float32 width).
+
+    Notes
+    -----
+    Host-only; the training content owner holds the scalar rules. A positive
+    depth is also checked against every validation map (VALIDATION_MAPS) by
+    building each map's config with Core's validation, so a too-wide depth
+    fails before any validation file (such as task.json) is written.
+    """
+    from marl_battlegrounds.training._content import (
+        _validate_red_zone_depth,  # pyright: ignore[reportPrivateUsage]
+    )
+
+    depth = _validate_red_zone_depth(value)
+    if depth > 0.0:
+        _check_depth_fits_validation_maps(depth)
+    return depth
+
+
+@lru_cache(maxsize=8)
+def _check_depth_fits_validation_maps(depth: float) -> None:
+    """Raise ValueError unless a positive depth fits every validation map.
+
+    depth is a positive float that already passed the scalar rules. Build each
+    VALIDATION_MAPS config once through the TDM factory, so Core checks the
+    depth against the map's float32 width. Return None; a passing depth is
+    cached, so repeated validation calls pay this host work once. A failing
+    depth raises every time (errors are not cached).
+    """
+    from marl_battlegrounds.tasks import (
+        canonical_tournament_rosters,
+        make_standard_team_deathmatch_config,
+    )
+
+    team_a, team_b = canonical_tournament_rosters()
+    for map_id in VALIDATION_MAPS:
+        make_standard_team_deathmatch_config(
+            map_id=map_id,
+            team_a_roster=team_a,
+            team_b_roster=team_b,
+            red_zone_depth=depth,
+        )
+
+
+def _task_depth(value: float | None) -> float | None:
+    """Check the optional Red Zone depth a task description records.
+
+    None (a description built with the layout saved before the Red Zone rule,
+    which records no depth) is returned as it is; any other value goes through
+    _checked_depth and raises its TypeError or ValueError. Host-only.
+    """
+    return None if value is None else _checked_depth(value)
 
 
 def _digest(value: object) -> str:
@@ -338,7 +421,10 @@ def create_panel(
     ranking : TournamentResult, str, Path or None, default=None
         Optional complete existing development tournament, or its saved run.
         opponents then supplies its entire current candidate pool. Canonical
-        current maps 42-46, 5v5, K20/H300 and paired ends are required.
+        current maps 42-46, 5v5, K20/H300 and paired ends are required. The
+        tournament's Red Zone depth (read from its recorded configurations) is
+        saved in the ranking evidence; load_panel later refuses the panel for
+        a run or validation at another depth.
     size : int or None, default=None
         Positive selected count, required with ranking and forbidden otherwise.
         Highest saved Elo wins; registration IDs break exact ties.
@@ -497,16 +583,26 @@ def _rank_panel(
     ranking is a TournamentResult or its exact saved run directory. The shared
     tournament evidence owner checks real spawn pairs, coverage and identities.
     Canonical current configurations bind maps 42-46, mirrored 5v5, K20 and H300.
-    Elo is read from existing results, never refitted. Ties use registration IDs.
+    The Red Zone depth is read from the ranking's own recorded configurations
+    (0.0 for configurations recorded before the rule); all five maps must share
+    it, and their identities must equal the canonical configurations at that
+    depth. Elo is read from existing results, never refitted. Ties use
+    registration IDs. The returned evidence has "schema_version": 2 and the
+    ranked "red_zone_depth", which load_panel checks against each use.
     """
-    from marl_battlegrounds.evaluation.evaluate import normalize_episode_specs
-    from marl_battlegrounds.evaluation.evaluation_conditions import config_record
+    from marl_battlegrounds.evaluation.evaluation_conditions import (
+        config_record,
+        restore_recorded_config,
+    )
     from marl_battlegrounds.evaluation.results import TournamentResult, load_results
     from marl_battlegrounds.evaluation.tournament import (
         _prepare_pair_evidence,  # pyright: ignore[reportPrivateUsage]
     )
     from marl_battlegrounds.evaluation.tournament_schedule import TournamentMatch
-    from marl_battlegrounds.tasks import canonical_tournament_rosters
+    from marl_battlegrounds.tasks import (
+        canonical_tournament_rosters,
+        make_standard_team_deathmatch_config,
+    )
 
     count = _integer(size, "size", minimum=1)
     if count > len(records):
@@ -558,13 +654,49 @@ def _rank_panel(
                 "Ranking method descriptions differ from the current candidate pool"
             )
     roster_a, roster_b = canonical_tournament_rosters()
-    specs = normalize_episode_specs(
-        VALIDATION_MAPS, len(VALIDATION_MAPS), roster_a, roster_b, 20, 300
-    )
-    current_ids = {
-        str(spec.map_id): config_record(spec.env_config)[0] for spec in specs
+    saved_ids = details.get("configuration_ids_by_map")
+    contents = metadata.get("configurations")
+    if (
+        not isinstance(saved_ids, dict)
+        or not isinstance(contents, dict)
+        or set(cast(dict[str, Any], saved_ids)) != {str(m) for m in VALIDATION_MAPS}
+        or any(
+            identifier not in cast(dict[str, Any], contents)
+            for identifier in cast(dict[str, Any], saved_ids).values()
+        )
+    ):
+        raise ValueError(
+            "Ranking configurations differ from the current canonical content"
+        )
+    ids = cast(dict[str, str], saved_ids)
+    recorded = [
+        restore_recorded_config(
+            cast(dict[str, Any], contents)[ids[str(map_id)]], ids[str(map_id)]
+        )
+        for map_id in VALIDATION_MAPS
+    ]
+    rules = {
+        (float(config.team_deathmatch_red_zone_depth), historical)
+        for config, historical in recorded
     }
-    if details.get("configuration_ids_by_map") != current_ids:
+    if len(rules) != 1:
+        raise ValueError("Ranking maps use different Red Zone scoring rules")
+    depth, historical = rules.pop()
+    current_ids = {
+        str(map_id): config_record(
+            make_standard_team_deathmatch_config(
+                map_id=map_id,
+                team_a_roster=roster_a,
+                team_b_roster=roster_b,
+                score_threshold=20,
+                max_steps=300,
+                red_zone_depth=depth,
+            ),
+            historical=historical,
+        )[0]
+        for map_id in VALIDATION_MAPS
+    }
+    if ids != current_ids:
         raise ValueError(
             "Ranking configurations differ from the current canonical content"
         )
@@ -619,6 +751,8 @@ def _rank_panel(
         ),
     )[:count]
     return selected, {
+        "schema_version": 2,
+        "red_zone_depth": depth,
         "schedule_digest": details["schedule_digest"],
         "evidence_digest": _digest(evidence),
         "ratings": [
@@ -677,15 +811,63 @@ def _create_system_panel(
     return _load_system_panel(target, content, tuple(item[0] for item in snapshots))
 
 
+def _ranked_depth(evidence: object) -> float | None:
+    """Return the Red Zone depth a System panel's ranking was played under.
+
+    Parameters
+    ----------
+    evidence : object
+        The panel's saved "ranking_evidence": None for opponents frozen
+        directly, an object without "schema_version" for a ranking saved
+        before the Red Zone rule, or a version 2 object with "red_zone_depth".
+
+    Returns
+    -------
+    float or None
+        None when the panel has no ranking; 0.0 for a ranking without a
+        version (one point per death); otherwise the recorded depth.
+
+    Raises
+    ------
+    ValueError
+        The evidence is not an object, has another version, or a version 2
+        record lacks a float red_zone_depth.
+
+    Notes
+    -----
+    Host-only; reads only the given value.
+    """
+    if evidence is None:
+        return None
+    if not isinstance(evidence, dict):
+        raise ValueError("Invalid System panel ranking evidence")
+    record = cast(Record, evidence)
+    if "schema_version" not in record:
+        return 0.0
+    depth = record.get("red_zone_depth")
+    if record["schema_version"] != 2 or type(depth) is not float:
+        raise ValueError("Invalid System panel ranking evidence")
+    return depth
+
+
 def _load_system_panel(
-    target: Path, content: Record, bindings: Sequence[Any] | None
+    target: Path,
+    content: Record,
+    bindings: Sequence[Any] | None,
+    red_zone_depth: float | None = None,
 ) -> FrozenPanel:
     """Verify a new panel and retain its methods instead of reopening them per pass.
 
     Supplied bindings replace reload references only when their normal M8 identity
     matches. Missing live-only methods fail before any writer is opened. Factories
     are called once on load; later validation rechecks these live snapshots.
+    red_zone_depth, when given, must have the same float32 value as the depth
+    the panel's ranking was played under (0.0 for a ranking saved before the
+    Red Zone rule); the check runs before any method is loaded, and a panel
+    without a ranking passes at every depth. Raise ValueError otherwise.
     """
+    from marl_battlegrounds.evaluation.evaluation_conditions import same_float32
+
     entries = content.get("members")
     if (
         content.get("panel_digest") != _panel_digest(content)
@@ -695,6 +877,18 @@ def _load_system_panel(
         or any(not isinstance(row, dict) for row in cast(list[object], entries))
     ):
         raise ValueError("Invalid System panel schema or digest")
+    ranked = _ranked_depth(content.get("ranking_evidence"))
+    if (
+        ranked is not None
+        and red_zone_depth is not None
+        and not same_float32(ranked, red_zone_depth)
+    ):
+        raise ValueError(
+            f"This panel was ranked with red_zone_depth {ranked}, but this use "
+            f"declares red_zone_depth {red_zone_depth}. Rank the candidates "
+            "again under this depth, or freeze the opponents directly without "
+            "a ranking."
+        )
     entries = cast(list[Record], entries)
     roots = _panel_roots(content.get("roots"))
     if roots != content.get("roots"):
@@ -749,12 +943,69 @@ def panel_task_description(
     purpose: str,
     seed_pairs: int,
     root_seed: int | None = None,
+    red_zone_depth: float | None = None,
 ) -> Record:
     """Describe the saved panel's protocol without changing historical task hashes.
 
     New panels use independently derived opponent roots and exact native scores.
     Their root_seed override supports predeclared fresh assessment games. Legacy
-    panels keep their original purpose, roots, members and version-1 task bytes.
+    panels keep their original purpose, roots and members.
+
+    Parameters
+    ----------
+    checkpoint_id : str
+        Nonempty ID of the learner boundary that produced the actor.
+    actor_digest : str
+        Nonempty identity of the actor's frozen weights.
+    env_steps : int
+        Real training transitions behind the actor; a plain integer, 0 or more.
+    panel : FrozenPanel
+        The loaded panel. A legacy (schema 1) panel is handed to
+        validation_task_description unchanged, so its own rules apply.
+    purpose : str
+        For a new panel: "routine", "initialization", "confirmation" or
+        "assessment". For a legacy panel: the purposes that
+        validation_task_description accepts.
+    seed_pairs : int
+        Positive number of paired seeds per map.
+    root_seed : int or None, default=None
+        None uses the panel's saved root for purpose. A plain integer in
+        [0, 2**32 - 1] replaces it for predeclared fresh games and changes the
+        task ID. Assessment needs one, and it must differ from every saved
+        panel root. A confirmation root must differ from the routine and
+        initialization roots.
+    red_zone_depth : float or None, default=None
+        Red Zone depth in map units that the task's games use. None builds the
+        layout saved before the Red Zone rule: schema 2 for new panels, schema 1
+        for legacy panels, with their original bytes and task IDs. A float
+        builds the current layout: schema 4 for new panels (selection schema
+        stays 2) and schema 3 for legacy panels, each recording
+        "red_zone_depth". So tasks under different depths (0.0 included) have
+        different IDs, and a saved task is never reused under another depth.
+
+    Returns
+    -------
+    dict
+        A new JSON-ready description ending with task_id, the hash of every
+        other field. For a new panel it lists each member's name, registration
+        ID and its own opponent root, derived from the task root.
+
+    Raises
+    ------
+    TypeError
+        red_zone_depth is neither None nor a Python float.
+    ValueError
+        red_zone_depth breaks Core's scalar rules (not finite, negative, -0.0,
+        or a positive value that is not a normal float32 number); env_steps or
+        seed_pairs is not a valid integer; purpose is unknown; a root is
+        missing, reused or outside uint32; an identity is empty; or two
+        opponent roots collide.
+
+    Notes
+    -----
+    Host-only. This helper opens no file and runs no game. The caller checks
+    the actor and the panel. Core checks the depth against each map's width
+    later, when a game's config is built.
     """
     if panel.schema_version == 1:
         return validation_task_description(
@@ -768,7 +1019,9 @@ def panel_task_description(
                 (member.name, member.actor_digest) for member in panel.members
             ),
             root_seed=root_seed,
+            red_zone_depth=red_zone_depth,
         )
+    depth = _task_depth(red_zone_depth)
     _integer(env_steps, "env_steps")
     _integer(seed_pairs, "seed_pairs", minimum=1)
     if purpose not in (*panel.roots, "assessment"):
@@ -802,7 +1055,7 @@ def panel_task_description(
     if len({member["root"] for member in members}) != len(members):
         raise ValueError("Opponent roots collided; choose a different panel root")
     result: Record = {
-        "schema_version": 2,
+        "schema_version": 2 if depth is None else 4,
         "selection_schema_version": 2,
         "checkpoint_id": checkpoint_id,
         "actor_digest": actor_digest,
@@ -814,6 +1067,8 @@ def panel_task_description(
         "root": root,
         "members": members,
     }
+    if depth is not None:
+        result["red_zone_depth"] = depth
     return {**result, "task_id": _digest(result)}
 
 
@@ -830,16 +1085,21 @@ def _verify_panel_pass(
     """Bind an existing pass to its exact task before reuse or writer recovery.
 
     actor and opponent are the already loaded frozen methods. task is the checked
-    version-2 task; member_index chooses its ordered opponent/root. num_envs and
-    chunk_size are the intended execution settings. The M8 owner verifies its
-    generated conditions, actual registrations and saved declarations without
-    opening a writer or calling either method. A mismatch raises ValueError.
+    System-panel task (schema 2, or schema 4 with its red_zone_depth);
+    member_index chooses its ordered opponent/root. num_envs and chunk_size are
+    the intended execution settings. A schema 4 task's depth is asserted
+    against the saved pass. The M8 owner verifies its generated conditions,
+    actual registrations and saved declarations without opening a writer or
+    calling either method. A mismatch raises ValueError.
     """
     from marl_battlegrounds.evaluation.evaluate import (
         _verify_evaluation,  # pyright: ignore[reportPrivateUsage]
     )
 
     member = task["members"][member_index]
+    rules: Record = (
+        {"red_zone_depth": task["red_zone_depth"]} if "red_zone_depth" in task else {}
+    )
     _verify_evaluation(
         cast(Any, actor),
         cast(Any, opponent),
@@ -854,6 +1114,7 @@ def _verify_panel_pass(
         pass_id=validation_pass_id(task["task_id"], member["name"]),
         chunk_size=chunk_size,
         resume_from=run_dir,
+        **rules,
     )
 
 
@@ -868,6 +1129,7 @@ def _validate_system_panel(
     chunk_size: int,
     event_callback: EventCallback | None,
     root_seed: int | None,
+    red_zone_depth: float,
 ) -> Record:
     """Run retained methods in stable batches using the ordinary M8 evaluator.
 
@@ -875,7 +1137,9 @@ def _validate_system_panel(
     this process with inactive padding, so opaque clients are never serialized.
     Only complete durable rows feed the shared summary and selection owner. A
     QMIX or PQN-VDN actor's summary also carries method and optimizer_steps
-    from _method_fields; PPO summaries are unchanged.
+    from _method_fields; PPO summaries are unchanged. Every game uses
+    red_zone_depth (map units), which the schema 4 task records; the summary
+    reports points and recorded kills, and mean_kill_difference uses kills.
     """
     import jax
 
@@ -898,6 +1162,7 @@ def _validate_system_panel(
             purpose=purpose,
             seed_pairs=seed_pairs,
             root_seed=root_seed,
+            red_zone_depth=red_zone_depth,
         ),
         event_callback,
     )
@@ -952,6 +1217,7 @@ def _validate_system_panel(
                 phase="validation",
                 pass_id=pass_id,
                 chunk_size=chunk_size,
+                red_zone_depth=red_zone_depth,
                 **options,
             )
             run_dir = result.run_dir
@@ -967,7 +1233,7 @@ def _validate_system_panel(
                 )
         assert run_dir is not None
         paths.append(str(run_dir))
-        rows.extend(_rows(run_dir, pass_id=pass_id, opponent=member.name))
+        rows.extend(_rows(run_dir, pass_id=pass_id, opponent=member.name, kills=True))
     result = {
         **task,
         **summarize_validation(
@@ -976,6 +1242,7 @@ def _validate_system_panel(
             opponents=[member.name for member in panel.members],
             seed_pairs=seed_pairs,
             independent_opponents=True,
+            actual_kills=True,
         ),
         "pass_paths": paths,
         **_method_fields(identity),
@@ -1002,21 +1269,64 @@ def validation_task_description(
     seed_pairs: int,
     members: Sequence[tuple[str, str]],
     root_seed: int | None = None,
+    red_zone_depth: float | None = None,
 ) -> Record:
     """Describe one exact fixed-map validation task without files or numerical work.
 
-    checkpoint_id names the originating learner boundary; actor_digest identifies
-    its frozen weights. env_steps counts real training transitions. panel_digest
-    identifies the frozen panel, and members gives its ordered (name, weight digest)
-    pairs. purpose is routine, initialization, confirmation or random; seed_pairs
-    is positive. root_seed=None keeps the existing purpose-specific root. An
-    explicit uint32 root is supported for Random diagnostics only; changing it
-    changes actual game keys and task identity. Shared constants supply maps
-    and the task schema. Existing calls retain exactly the same task identity.
-    Return a new JSON-ready description including its immutable task_id. Invalid
-    counts, purpose or empty/duplicate identities raise ValueError. The caller
-    verifies artifact contents and the declared panel; this helper opens nothing.
+    Shared constants supply the maps (42-46) and the purpose roots.
+
+    Parameters
+    ----------
+    checkpoint_id : str
+        Nonempty ID of the originating learner boundary.
+    actor_digest : str
+        Nonempty identity of the actor's frozen weights.
+    env_steps : int
+        Real training transitions behind the actor; a plain integer, 0 or more.
+    panel_digest : str
+        Nonempty identity of the frozen panel (or of the Random diagnostic).
+    purpose : str
+        "routine", "initialization", "confirmation" or "random".
+    seed_pairs : int
+        Positive number of paired seeds per map.
+    members : sequence of (str, str)
+        The panel's ordered (name, weight digest) pairs. It must not be empty;
+        names must be distinct and every name and digest nonempty.
+    root_seed : int or None, default=None
+        None keeps the purpose's fixed root. A plain integer in [0, 2**32 - 1]
+        is allowed for purpose "random" only; changing it changes the actual
+        game keys and the task ID.
+    red_zone_depth : float or None, default=None
+        Red Zone depth in map units that the task's games use. None builds the
+        schema 1 layout saved before the Red Zone rule, so existing calls keep
+        exactly the same task ID. A float builds schema 3, which records
+        "red_zone_depth"; tasks under different depths, 0.0 included, have
+        different IDs.
+
+    Returns
+    -------
+    dict
+        A new JSON-ready description ending with its immutable task_id, the
+        hash of every other field.
+
+    Raises
+    ------
+    TypeError
+        red_zone_depth is neither None nor a Python float.
+    ValueError
+        red_zone_depth breaks Core's scalar rules (not finite, negative, -0.0,
+        or a positive value that is not a normal float32 number); a count is
+        invalid; purpose is unknown; root_seed is given for a purpose other
+        than "random" or is outside uint32; an identity is not a nonempty
+        string; or members is empty or repeats a name.
+
+    Notes
+    -----
+    Host-only. This helper opens nothing. The caller verifies artifact
+    contents and the declared panel. Core checks the depth against each map's
+    width later, when a game's config is built.
     """
+    depth = _task_depth(red_zone_depth)
     _integer(env_steps, "env_steps")
     _integer(seed_pairs, "seed_pairs", minimum=1)
     if purpose not in ("routine", "initialization", "confirmation", "random"):
@@ -1042,7 +1352,7 @@ def validation_task_description(
     ):
         raise ValueError("Validation members need distinct names and nonempty digests")
     result: Record = {
-        "schema_version": 1,
+        "schema_version": 1 if depth is None else 3,
         "checkpoint_id": checkpoint_id,
         "actor_digest": actor_digest,
         "env_steps": env_steps,
@@ -1053,6 +1363,8 @@ def validation_task_description(
         "root": root,
         "members": [{"name": name, "actor_digest": digest} for name, digest in members],
     }
+    if depth is not None:
+        result["red_zone_depth"] = depth
     return {**result, "task_id": _digest(result)}
 
 
@@ -1062,9 +1374,14 @@ def _qualify_random(identity: Mapping[str, Any], result: Mapping[str, Any]) -> R
     identity names a checked actor and originating learner checkpoint. result is
     the summary returned by validate_random for exactly 100 games. Verify finite
     W/D/L totals, all five cells, declared seed roots and the immutable task hash.
-    Return its JSON-ready scientific fields without pass storage paths. Missing,
-    conflicting, nonfinite or unsuccessful evidence raises ValueError.
+    The task layout follows the result's own red_zone_depth (none for evidence
+    saved before the Red Zone rule). Return its JSON-ready scientific fields
+    without pass storage paths. Missing, conflicting, nonfinite or unsuccessful
+    evidence raises ValueError.
     """
+    depth = result.get("red_zone_depth")
+    if depth is not None and type(depth) is not float:
+        raise ValueError("Panel usefulness needs the exact complete Random task")
     expected = validation_task_description(
         checkpoint_id=identity["checkpoint_id"],
         actor_digest=identity["actor_digest"],
@@ -1073,6 +1390,7 @@ def _qualify_random(identity: Mapping[str, Any], result: Mapping[str, Any]) -> R
         purpose="random",
         seed_pairs=10,
         members=(("Random", "builtin-random"),),
+        red_zone_depth=depth,
     )
     if (
         any(result.get(key) != value for key, value in expected.items())
@@ -1172,25 +1490,53 @@ def _panel_digest(content: Mapping[str, Any]) -> str:
 
 
 def load_panel(
-    path: str | Path, *, bindings: Sequence[Any] | None = None
+    path: str | Path,
+    *,
+    bindings: Sequence[Any] | None = None,
+    red_zone_depth: float | None = None,
 ) -> FrozenPanel:
     """Load and verify a frozen panel without applying a method.
 
-    path names panel.json or its directory. bindings optionally supplies the
-    existing new-panel methods in saved order; each normal M8 identity must
-    match. Otherwise built-in/export/factory references reload each method once.
-    Live-only members require bindings. Export paths in packaged manifests may
-    be relative to the panel directory; historical paths keep their old rule.
-    Return a FrozenPanel retaining the checked methods for repeated validation.
-    Changed identities, malformed content or missing bindings raise ValueError;
-    import, factory and file errors keep their cause. No client is serialized.
+    Parameters
+    ----------
+    path : str or Path
+        panel.json or its directory. Export paths in packaged manifests may be
+        relative to the panel directory; historical paths keep their old rule.
+    bindings : sequence or None, default=None
+        The existing new-panel methods in saved order; each normal M8 identity
+        must match. None reloads built-in/export/factory references once.
+        Live-only members require bindings. Historical panels take none.
+    red_zone_depth : float or None, default=None
+        The Red Zone depth (map units) the caller will validate under. When
+        given, a System panel chosen from a ranking must have been ranked at
+        the same float32 depth; ranking evidence without a version counts as
+        0.0 (one point per death). None skips this check. Panels frozen
+        directly (no ranking) and historical panels pass at every depth.
+
+    Returns
+    -------
+    FrozenPanel
+        Retains the checked methods for repeated validation.
+
+    Raises
+    ------
+    ValueError
+        Changed identities, malformed content, missing bindings, or a ranking
+        played under another depth (the message suggests ranking again under
+        this depth or freezing the opponents directly). The depth check runs
+        before any method is loaded.
+
+    Notes
+    -----
+    Import, factory and file errors keep their cause. No client is serialized
+    and no file is written. This is the one owner of panel admission.
     """
     target = Path(path).resolve()
     if target.is_dir():
         target /= "panel.json"
     content = _json(target)
     if content.get("schema_version") == 2:
-        return _load_system_panel(target, content, bindings)
+        return _load_system_panel(target, content, bindings, red_zone_depth)
     if bindings is not None:
         raise ValueError("Historical panels use their saved actor paths")
     raw_entries: object = content.get("members", [])
@@ -1340,8 +1686,11 @@ def _execute_request(request: Mapping[str, Any]) -> Path:
     """Load checked frozen actors and execute one exact M8 pass in this process.
 
     request comes from a persisted task or its CPU worker file. It contains actor
-    paths/digests, pass/schedule fields and a task-owned output parent. No learner
-    state is accepted. M8 owns scientific resume validation and all writer recovery.
+    paths/digests, pass/schedule fields, the task's red_zone_depth (map units)
+    and a task-owned output parent. Panel and Random passes give the depth to
+    evaluate; slot passes build their explicit schedule at that depth. No learner
+    state is accepted. M8 owns scientific resume validation and all writer
+    recovery, including refusing a saved pass recorded under another depth.
     """
     from marl_battlegrounds.evaluation.evaluate import evaluate, evaluate_episodes
     from marl_battlegrounds.training.checkpoints import load_system
@@ -1372,7 +1721,9 @@ def _execute_request(request: Mapping[str, Any]) -> Path:
     )
     if request["kind"] == "slot":
         schedule = make_slot_diagnostic_schedule(
-            maps=request["maps"], seed_blocks=request["seed_pairs"]
+            maps=request["maps"],
+            seed_blocks=request["seed_pairs"],
+            red_zone_depth=request["red_zone_depth"],
         )
         team = int(request["focal_team"])
         episodes = schedule[team]
@@ -1389,6 +1740,7 @@ def _execute_request(request: Mapping[str, Any]) -> Path:
             num_episodes=request["total_games"],
             maps=request["maps"],
             spawn_mode="paired",
+            red_zone_depth=request["red_zone_depth"],
             **options,
         )
     assert result.run_dir is not None
@@ -1457,9 +1809,46 @@ def _run_pass(request: Record, *, event_callback: EventCallback | None) -> Path:
 
 
 def _rows(
-    run_dir: Path, *, pass_id: str, opponent: str, focal_team: int | None = None
+    run_dir: Path,
+    *,
+    pass_id: str,
+    opponent: str,
+    focal_team: int | None = None,
+    kills: bool = False,
 ) -> list[Record]:
-    """Join M8's complete saved rows to exact schedule conditions after resume."""
+    """Join M8's complete saved rows to exact schedule conditions after resume.
+
+    Parameters
+    ----------
+    run_dir : Path
+        One complete M8 validation pass.
+    pass_id : str
+        Its exact pass ID.
+    opponent : str
+        Label added to every row.
+    focal_team : int or None, default=None
+        Slot diagnostics add the focal team (0 or 1); None adds nothing.
+    kills : bool, default=False
+        True also joins each game's recorded team_a_kills and team_b_kills
+        from the pass's priority metrics (a missing value becomes None). Use
+        it for tasks with a Red Zone depth, where points and kills differ.
+
+    Returns
+    -------
+    list of dict
+        One plain row per completed game (episode columns, score columns in
+        points, opponent and spawn_locations, and the optional fields above).
+
+    Raises
+    ------
+    ValueError
+        The pass is incomplete, or kills=True and a game has no priority
+        metrics row.
+
+    Notes
+    -----
+    Reads saved files only; opens no writer and runs no game.
+    """
     from marl_battlegrounds.evaluation.results import load_results
 
     result = load_results(run_dir, phase="validation", pass_id=pass_id)
@@ -1468,6 +1857,14 @@ def _rows(
     entries = result.metadata["passes"]
     entry = next(iter(entries.values()))
     declared = entry["episodes"]
+    recorded: dict[int, tuple[float | None, ...]] = {}
+    if kills:
+        for batch in result.iter_table("priority_metrics"):
+            for index in range(len(batch["episode_id"])):
+                values = (float(batch[name][index]) for name in _KILL_COLUMNS)
+                recorded[int(batch["episode_id"][index])] = tuple(
+                    value if math.isfinite(value) else None for value in values
+                )
     rows: list[Record] = []
     for batch in result.iter_table("episodes"):
         for index in range(len(batch["episode_id"])):
@@ -1481,6 +1878,10 @@ def _rows(
             row.update(opponent=opponent, spawn_locations=schedule["spawn_locations"])
             if focal_team is not None:
                 row["focal_team"] = focal_team
+            if kills:
+                if row["episode_id"] not in recorded:
+                    raise ValueError("Validation game has no recorded kills")
+                row.update(zip(_KILL_COLUMNS, recorded[row["episode_id"]], strict=True))
             rows.append(row)
     return rows
 
@@ -1496,12 +1897,15 @@ def _validate(
     num_envs: int,
     chunk_size: int,
     event_callback: EventCallback | None,
+    red_zone_depth: float,
     root_seed: int | None = None,
 ) -> Record:
     """Own one exact checkpoint/panel task and reduce its complete saved M8 rows.
 
     A QMIX or PQN-VDN actor's summary also carries method and optimizer_steps
-    from _method_fields; PPO summaries are unchanged.
+    from _method_fields; PPO summaries are unchanged. Every game uses
+    red_zone_depth (map units), which the schema 3 task records; the summary
+    reports points and recorded kills.
     """
     _integer(seed_pairs, "seed_pairs", minimum=1)
     _integer(num_envs, "num_envs", minimum=1)
@@ -1521,6 +1925,7 @@ def _validate(
             seed_pairs=seed_pairs,
             members=tuple((name, digest) for name, _, digest in members),
             root_seed=root_seed,
+            red_zone_depth=red_zone_depth,
         ),
         event_callback,
     )
@@ -1543,10 +1948,11 @@ def _validate(
             "root": task["root"],
             "num_envs": num_envs,
             "chunk_size": chunk_size,
+            "red_zone_depth": task["red_zone_depth"],
         }
         path = _run_pass(request, event_callback=event_callback)
         paths.append(str(path))
-        rows.extend(_rows(path, pass_id=pass_id, opponent=name))
+        rows.extend(_rows(path, pass_id=pass_id, opponent=name, kills=True))
     result = {
         **task,
         **summarize_validation(
@@ -1554,6 +1960,7 @@ def _validate(
             maps=VALIDATION_MAPS,
             opponents=[name for name, _, _ in members],
             seed_pairs=seed_pairs,
+            actual_kills=True,
         ),
         "pass_paths": paths,
         **_method_fields(identity),
@@ -1581,39 +1988,87 @@ def validate_checkpoint(
     chunk_size: int = 128,
     event_callback: EventCallback | None = None,
     root_seed: int | None = None,
+    red_zone_depth: float = DEFAULT_TDM_RED_ZONE_DEPTH,
 ) -> Record:
     """Evaluate one exact saved actor through the shared M8 evaluator.
 
-    checkpoint names an actor export or complete learner checkpoint. panel is
-    its frozen manifest path or loaded FrozenPanel; the latter retains live
-    clients and avoids reopening factories. Identities are rechecked before
-    work. output_dir belongs to one immutable task; repeat the same call to
-    resume it. purpose is routine, initialization, confirmation, or assessment
-    for new panels. seed_pairs defaults to 10, or 50 for confirmation. Each pair
-    means ten games per opponent across the five development maps.
+    Parameters
+    ----------
+    checkpoint : str or Path
+        An actor export or a complete learner checkpoint.
+    panel : FrozenPanel, str or Path
+        The frozen panel manifest path, or a loaded FrozenPanel. A loaded panel
+        keeps its live clients and avoids reopening factories. Identities are
+        rechecked before any work.
+    output_dir : str or Path
+        Folder owned by one immutable task. Repeat the same call to resume it.
+    purpose : str, default="routine"
+        "routine", "initialization", "confirmation", or "assessment" for new
+        panels.
+    seed_pairs : int or None, default=None
+        Positive paired seeds per map. None means 10, or 50 for confirmation.
+        Each pair means ten games per opponent across the five development
+        maps.
+    num_envs : int, default=32
+        Positive number of games run side by side; GPU requires 32. New panels
+        keep that batch on all tails with inactive padding. Historical small
+        GPU tails keep their CPU recovery route.
+    chunk_size : int, default=128
+        Positive number of ticks per recording block.
+    event_callback : callable or None, default=None
+        Receives task, execution and completion records; None means no calls.
+    root_seed : int or None, default=None
+        None uses the panel's root for purpose. A plain integer in
+        [0, 2**32 - 1] replaces a new panel's purpose root and changes the task
+        ID. Assessment requires this explicit fresh root. Historical panels
+        cannot change their roots.
+    red_zone_depth : float, default=DEFAULT_TDM_RED_ZONE_DEPTH (5.0)
+        Team Deathmatch Red Zone depth in map units for every game; 0.0 keeps
+        one point per death. To score an actor under the rule it trained with,
+        pass that depth, for example 0.0 for the pinned MAPPO search and
+        screen models. The task records it (schema 4 for new panels, 3 for
+        historical panels), so an output_dir saved under another depth, or
+        before the rule, is refused before any game. A panel chosen from a
+        ranking must have been ranked at the same depth (see load_panel).
 
-    num_envs is positive, default 32; GPU requires 32. New panels keep that batch
-    on all tails with inactive padding. Historical small GPU tails retain CPU
-    recovery. chunk_size is a positive recording chunk, default 128. Optional
-    event_callback receives task, execution and completion records. root_seed
-    overrides a new panel's purpose root and changes task identity; assessment
-    requires this explicit fresh uint32 root. Historical roots cannot change.
+    Returns
+    -------
+    dict
+        Complete native score, paired uncertainty, per-cell results and saved
+        M8 paths. Scores are points; cells also carry mean_team_a_kills and
+        mean_team_b_kills from recorded kills. New panels also report
+        mean_kill_difference (kills, not points) for declared selection. A
+        QMIX or PQN-VDN actor's summary also carries its method and its
+        optimizer_steps.
 
-    Return complete native score, paired uncertainty, per-cell results and saved
-    M8 paths. New panels also report mean_kill_difference for declared selection.
-    A QMIX or PQN-VDN actor's summary also carries its method and its
-    optimizer_steps. Incomplete games never select a checkpoint. Invalid
-    settings or conflicting identities raise ValueError; file and method
-    failures keep their cause.
-    The call waits for evaluation to finish on the active backend. It never
-    updates a learner or actor.
+    Raises
+    ------
+    TypeError
+        red_zone_depth is not a Python float.
+    ValueError
+        red_zone_depth breaks Core's scalar rules (not finite, negative, -0.0,
+        or a positive value that is not a normal float32 number) or is wider
+        than a validation map; a panel ranked under another depth; other
+        invalid settings; or identities that conflict with the saved task.
+        File and method failures keep their own cause.
+
+    Notes
+    -----
+    Incomplete games never select a checkpoint. The call waits for evaluation
+    to finish on the active backend. It never updates a learner or actor.
+    Every installed map is 20.0 map units wide. A wider depth raises
+    ValueError before any file is written, so the same output_dir can be
+    reused with a corrected depth.
     """
+    depth = _checked_depth(red_zone_depth)
     frozen = (
         load_panel(
-            panel.path, bindings=panel.methods if panel.schema_version == 2 else None
+            panel.path,
+            bindings=panel.methods if panel.schema_version == 2 else None,
+            red_zone_depth=depth,
         )
         if isinstance(panel, FrozenPanel)
-        else load_panel(panel)
+        else load_panel(panel, red_zone_depth=depth)
     )
     pairs = (
         (50 if purpose == "confirmation" else 10) if seed_pairs is None else seed_pairs
@@ -1629,6 +2084,7 @@ def validate_checkpoint(
             chunk_size=chunk_size,
             event_callback=event_callback,
             root_seed=root_seed,
+            red_zone_depth=depth,
         )
     if root_seed is not None:
         raise ValueError("Historical panels retain their original roots")
@@ -1645,6 +2101,7 @@ def validate_checkpoint(
         num_envs=num_envs,
         chunk_size=chunk_size,
         event_callback=event_callback,
+        red_zone_depth=depth,
     )
 
 
@@ -1657,6 +2114,7 @@ def validate_random(
     num_envs: int = 32,
     chunk_size: int = 128,
     event_callback: EventCallback | None = None,
+    red_zone_depth: float = DEFAULT_TDM_RED_ZONE_DEPTH,
 ) -> Record:
     """Evaluate a frozen actor against Random on the five validation maps.
 
@@ -1683,17 +2141,24 @@ def validate_random(
         verification requires the declared 128-tick block setting.
     event_callback : callable or None, default=None
         Receives task and execution records, or None for no callback.
+    red_zone_depth : float, default=DEFAULT_TDM_RED_ZONE_DEPTH (5.0)
+        Team Deathmatch Red Zone depth in map units for every game; 0.0 keeps
+        one point per death. The schema 3 task records it, so a folder saved
+        under another depth, or before the rule, is refused before any game.
 
     Returns
     -------
     dict
         Complete scientific summary, including actual root, task and actor IDs,
-        native scores, paired-game uncertainty, and saved M8 pass paths. A QMIX
-        or PQN-VDN actor's summary also carries its method and its
-        optimizer_steps.
+        red_zone_depth, native scores (points), recorded kills per cell
+        (mean_team_a_kills and mean_team_b_kills), paired-game uncertainty, and
+        saved M8 pass paths. A QMIX or PQN-VDN actor's summary also carries its
+        method and its optimizer_steps.
 
     Raises
     ------
+    TypeError
+        red_zone_depth is not a Python float.
     ValueError, OSError
         Settings, actor files, saved identity, or output files are invalid.
 
@@ -1701,7 +2166,10 @@ def validate_random(
     -----
     Keeps canonical 5v5, K20/H300, equal map weights, and unshaped task scores.
     Random is diagnostic only and does not become a learned panel member.
-    No learner state or training key is accepted or changed.
+    No learner state or training key is accepted or changed. Every installed
+    map is 20.0 map units wide. A wider depth raises ValueError before any
+    file is written, so the same output_dir can be reused with a corrected
+    depth.
     """
     root_seed = _root_seed(root_seed)
     return _validate(
@@ -1715,6 +2183,7 @@ def validate_random(
         num_envs=num_envs,
         chunk_size=chunk_size,
         event_callback=event_callback,
+        red_zone_depth=_checked_depth(red_zone_depth),
     )
 
 
@@ -1737,17 +2206,46 @@ def read_random_initialization(
     actor_digest: str,
     seed_pairs: int,
     root_seed: int = _ROOTS["random"],
+    red_zone_depth: float | None = DEFAULT_TDM_RED_ZONE_DEPTH,
 ) -> Record:
     """Read one original shared initialization result without changing any file.
 
-    reference names the copied original runner record, with unchanged absolute
-    evidence paths. Relative references use the current working directory.
-    actor_digest is the new learner's initial inference identity; seed_pairs is
-    its declared Random game count per map and spawn pair. root_seed is the
-    expected uint32 game root, default 19043001. Verify all original
-    evidence through verify_random_result and require zero training experience.
-    Return the original record unchanged. Missing, linked, chained or mismatched
-    evidence raises ValueError or OSError before any caller-owned recovery.
+    Parameters
+    ----------
+    reference : str or Path
+        The copied original runner record, whose absolute evidence paths are
+        unchanged. A relative reference is resolved from the current working
+        directory. It must be an existing file reached without symbolic links.
+    actor_digest : str
+        The new learner's initial inference identity.
+    seed_pairs : int
+        Declared positive number of Random seed pairs per map (each pair plays
+        both spawn sides).
+    root_seed : int, default=19043001
+        Expected game root, a plain integer in [0, 2**32 - 1].
+    red_zone_depth : float or None, default=DEFAULT_TDM_RED_ZONE_DEPTH (5.0)
+        The depth in map units that the reusing run plays under. The record
+        must have been recorded at exactly that depth, so a result saved
+        before the Red Zone rule is refused unless red_zone_depth is None.
+
+    Returns
+    -------
+    dict
+        The original record, unchanged.
+
+    Raises
+    ------
+    TypeError
+        red_zone_depth is neither None nor a Python float.
+    ValueError, OSError
+        The reference is missing, follows a link, is itself a reused result,
+        or its evidence is missing or does not match (another depth
+        included). These errors come before any caller-owned recovery.
+
+    Notes
+    -----
+    Read-only host work. All original evidence is checked through
+    verify_random_result, which also requires zero training experience.
     """
     path = Path(reference).absolute()
     if path.resolve() != path or not path.is_file():
@@ -1764,6 +2262,7 @@ def read_random_initialization(
         seed_pairs=seed_pairs,
         root_seed=root_seed,
         env_steps=0,
+        red_zone_depth=red_zone_depth,
     )
     return record
 
@@ -1778,19 +2277,57 @@ def verify_random_result(
     env_steps: int | None = None,
     run_id: str | None = None,
     seed: int | None = None,
+    red_zone_depth: float | None = DEFAULT_TDM_RED_ZONE_DEPTH,
 ) -> Record:
     """Verify one saved Random capture and return its original scientific summary.
 
-    result is the runner record with absolute actor/summary paths and capture
-    times. actor_digest and positive seed_pairs declare the expected inference
-    and paired game count. root_seed is the expected uint32 game root, default
-    19043001; a saved root must match it. Optional checkpoint_id/env_steps require
-    that exact originating boundary. Optional run_id/seed bind the original run.
-    Shared initialization retains its original IDs; its caller instead checks
-    the new initial actor identity and omits a different run's ID/seed.
-    Read and verify actor files, task, native M8 options, games and summary;
-    raise ValueError or OSError for missing/changed evidence. No files, learner
-    state or keys change, and no policy or new evaluation runs.
+    Parameters
+    ----------
+    result : mapping
+        The runner record, with absolute actor and summary paths and capture
+        times.
+    actor_digest : str
+        Expected inference identity.
+    seed_pairs : int
+        Expected positive number of paired seeds per map.
+    root_seed : int, default=19043001
+        Expected game root, a plain integer in [0, 2**32 - 1]. The saved root
+        must match it.
+    checkpoint_id : str or None, default=None
+        When given, the exact originating learner boundary to require.
+    env_steps : int or None, default=None
+        When given, the exact training experience to require.
+    run_id : str or None, default=None
+        When given, the original training run to require.
+    seed : int or None, default=None
+        When given, the original training seed to require. Shared
+        initialization keeps its original IDs; its caller checks the new
+        initial actor identity instead and leaves out a different run's
+        run_id and seed.
+    red_zone_depth : float or None, default=DEFAULT_TDM_RED_ZONE_DEPTH (5.0)
+        Expected Red Zone depth in map units. The task (schema 3), the M8
+        options and the summary, with recorded kills, must all match it. None
+        expects a record saved before the Red Zone rule (schema 1 task, no
+        depth option, kills read from scores).
+
+    Returns
+    -------
+    dict
+        The original scientific summary, without the runner's capture fields.
+
+    Raises
+    ------
+    TypeError
+        red_zone_depth is neither None nor a Python float.
+    ValueError, OSError
+        Missing or changed evidence: actor files, task, native M8 options,
+        games or summary, including a record saved under another depth or
+        before the rule.
+
+    Notes
+    -----
+    Read-only host work. No files, learner state or keys change, and no
+    policy call or new evaluation runs.
     """
     summary, _ = _verified_random_result(
         result,
@@ -1801,6 +2338,7 @@ def verify_random_result(
         env_steps=env_steps,
         run_id=run_id,
         seed=seed,
+        red_zone_depth=red_zone_depth,
     )
     return summary
 
@@ -1815,6 +2353,7 @@ def _verified_random_result(
     env_steps: int | None = None,
     run_id: str | None = None,
     seed: int | None = None,
+    red_zone_depth: float | None = DEFAULT_TDM_RED_ZONE_DEPTH,
 ) -> tuple[Record, list[Record]]:
     """Verify a runner's Random result against its original complete M8 evidence.
 
@@ -1842,19 +2381,28 @@ def _verified_random_result(
         Optional original training-run identity checks. Shared initialization
         keeps its original run and seed; callers bind the new initial inference
         separately instead of passing a different run's identity here.
+    red_zone_depth : float or None, default=DEFAULT_TDM_RED_ZONE_DEPTH (5.0)
+        Expected Red Zone depth in map units. A float expects the schema 3
+        task, a "red_zone_depth" M8 option equal to it, and rows and cells
+        with recorded kills. None expects a record saved before the Red Zone
+        rule: the schema 1 task, no depth option and kills read from scores.
 
     Returns
     -------
     tuple of dict and list of dict
         Original scientific summary without runner capture fields, followed by
-        its verified M8 episode rows. Analysis can reuse these host rows without
-        reading or reducing the same files again.
+        its verified M8 episode rows (with team_a_kills and team_b_kills when a
+        depth is expected). Analysis can reuse these host rows without reading
+        or reducing the same files again.
 
     Raises
     ------
+    TypeError
+        red_zone_depth is neither None nor a Python float.
     ValueError, OSError
         Identity, paths, task, native game settings, completed rows or summary
-        differ. Paths must be absolute and must not traverse symbolic links.
+        differ, including a record saved under another depth or before the
+        rule. Paths must be absolute and must not traverse symbolic links.
 
     Notes
     -----
@@ -1871,6 +2419,7 @@ def _verified_random_result(
 
     _integer(seed_pairs, "seed_pairs", minimum=1)
     root_seed = _root_seed(root_seed)
+    depth = _task_depth(red_zone_depth)
     if not result.keys() >= _RANDOM_CAPTURE_FIELDS:
         raise ValueError("Random result is missing its capture evidence")
     _digest(result)
@@ -1938,6 +2487,7 @@ def _verified_random_result(
             env_steps=0,
             run_id=run_id,
             seed=seed,
+            red_zone_depth=depth,
         )
     actor = _artifact(path(result["actor_path"], "actor_path"))
     if (
@@ -1957,6 +2507,7 @@ def _verified_random_result(
         seed_pairs=seed_pairs,
         members=(("Random", "builtin-random"),),
         root_seed=root_seed,
+        red_zone_depth=depth,
     )
     summary_path = path(result["summary_path"], "summary_path")
     directory = summary_path.parent
@@ -2008,6 +2559,9 @@ def _verified_random_result(
         "full_metrics_episodes": [],
         "replay_episodes": [],
     }
+    if depth is not None:
+        # Passes saved with the Red Zone rule record the depth they used.
+        options["red_zone_depth"] = depth
     if (
         focal["checkpoint"] != actor_digest
         or focal["variables_digest"] != expected_variables
@@ -2030,11 +2584,15 @@ def _verified_random_result(
         or details["chunk_size"] != 128
     ):
         raise ValueError("Random M8 actor or native evaluation settings changed")
-    rows = _rows(run_dir, pass_id=pass_id, opponent="Random")
+    rows = _rows(run_dir, pass_id=pass_id, opponent="Random", kills=depth is not None)
     reduced = {
         **expected,
         **summarize_validation(
-            rows, maps=VALIDATION_MAPS, opponents=("Random",), seed_pairs=seed_pairs
+            rows,
+            maps=VALIDATION_MAPS,
+            opponents=("Random",),
+            seed_pairs=seed_pairs,
+            actual_kills=depth is not None,
         ),
         "pass_paths": paths,
         **_method_fields(actor),
@@ -2049,16 +2607,51 @@ def make_slot_diagnostic_schedule(
     maps: Sequence[int] = VALIDATION_MAPS,
     seed_blocks: int = 160,
     configs: Sequence[EnvConfig] | None = None,
+    red_zone_depth: float | None = None,
 ) -> tuple[tuple[EpisodeSpec, ...], tuple[EpisodeSpec, ...]]:
     """Build four physical-side/assignment conditions per independent seed block.
 
-    maps gives distinct installed map IDs. seed_blocks is positive. configs=None
-    builds canonical 5v5 K20/H300; explicit scalar configs are a test/custom route
-    and must use identical ordered team profiles. Return two schedules: focal actor
-    on Team A, then focal actor on Team B. Each contains paired complete source and
-    exchanged banks. Global episode IDs are unique across schedules; map-distinct
-    seed IDs repeat only across the four conditions. No game is executed. Invalid
-    counts, map duplicates or asymmetric profiles raise ValueError.
+    Parameters
+    ----------
+    maps : sequence of int, default=VALIDATION_MAPS (42-46)
+        Distinct installed map IDs; it must not be empty.
+    seed_blocks : int, default=160
+        Positive number of independent seed blocks per map.
+    configs : sequence of EnvConfig or None, default=None
+        None builds canonical 5v5 K20/H300 for each map. Explicit scalar
+        configs are a test and custom route: one per map, in map order, each
+        with identical ordered team profiles. They keep their own rules.
+    red_zone_depth : float or None, default=None
+        Red Zone depth in map units for the built configs; None uses
+        DEFAULT_TDM_RED_ZONE_DEPTH (5.0). It cannot be given with configs.
+
+    Returns
+    -------
+    tuple of (tuple of EpisodeSpec, tuple of EpisodeSpec)
+        Two schedules: focal actor on Team A, then focal actor on Team B. Each
+        holds, for every map and seed block, the source spawn banks and then
+        the exchanged banks (len(maps) * seed_blocks * 2 games). Global episode
+        IDs are unique across both schedules; map-distinct seed IDs repeat only
+        across the four conditions. Metadata names focal_team, physical_side
+        and seed_block.
+
+    Raises
+    ------
+    TypeError
+        Core's config check refuses the type of red_zone_depth, such as an
+        int.
+    ValueError
+        seed_blocks is not a positive integer; maps is empty or repeats an ID;
+        configs does not match maps; configs and red_zone_depth are given
+        together; the two teams' ordered profiles differ; a map ID is not
+        installed; or red_zone_depth breaks Core's rules (not finite,
+        negative, -0.0, a positive value that is not a normal float32 number,
+        or wider than the map, which is 20.0 map units for every installed
+        map).
+
+    Notes
+    -----
+    Host-only. No game is executed and no file is written.
     """
     import numpy as np
 
@@ -2075,13 +2668,22 @@ def make_slot_diagnostic_schedule(
         raise ValueError("Slot maps must be nonempty and distinct")
     if configs is not None and len(configs) != len(identifiers):
         raise ValueError("Slot configs must match the map sequence")
+    if configs is not None and red_zone_depth is not None:
+        raise ValueError(
+            "red_zone_depth cannot be combined with explicit slot configs; "
+            "each config owns its rules"
+        )
+    depth = DEFAULT_TDM_RED_ZONE_DEPTH if red_zone_depth is None else red_zone_depth
     roster_a, roster_b = canonical_tournament_rosters()
     sources = (
         tuple(configs)
         if configs is not None
         else tuple(
             make_standard_team_deathmatch_config(
-                map_id=map_id, team_a_roster=roster_a, team_b_roster=roster_b
+                map_id=map_id,
+                team_a_roster=roster_a,
+                team_b_roster=roster_b,
+                red_zone_depth=depth,
             )
             for map_id in identifiers
         )
@@ -2133,26 +2735,70 @@ def run_slot_diagnostic(
     num_envs: int = 32,
     chunk_size: int = 128,
     event_callback: EventCallback | None = None,
+    red_zone_depth: float = DEFAULT_TDM_RED_ZONE_DEPTH,
 ) -> Record:
     """Run the predeclared frozen two-model slot comparison through M8.
 
-    checkpoint is the focal final actor and opponent is the fixed development-final
-    actor. output_dir owns this exact task; interrupted matching passes resume.
-    Defaults run 160 blocks on each of five validation maps, four games per block.
-    num_envs/chunk_size and event_callback follow validate_checkpoint. Return the
-    complete raw-pass references, exact identities and qualified-scope statistics.
-    This function does not decide when trained-model execution is authorized or
-    whether either actor learned useful behavior; the runner owns those gates.
+    Parameters
+    ----------
+    checkpoint : str or Path
+        The focal final actor (an export or a complete learner checkpoint).
+    opponent : str or Path
+        The fixed development-final actor.
+    output_dir : str or Path
+        Folder owned by this exact task. Repeat the same call to resume
+        interrupted matching passes.
+    seed_blocks : int, default=160
+        Independent seed blocks per validation map, at least 2. Each block
+        plays four games, so the default is 3,200 games over the five maps.
+    num_envs : int, default=32
+        Positive number of games run side by side, as in validate_checkpoint.
+    chunk_size : int, default=128
+        Positive number of ticks per recording block.
+    event_callback : callable or None, default=None
+        Receives task, execution and completion records; None means no calls.
+    red_zone_depth : float, default=DEFAULT_TDM_RED_ZONE_DEPTH (5.0)
+        Red Zone depth in map units for every game; 0.0 keeps one point per
+        death. To compare actors under the rule they trained with, pass that
+        depth. The slot task (schema 2) records it, so a folder saved under
+        another depth, or before the rule, is refused.
+
+    Returns
+    -------
+    dict
+        The task fields, the complete raw-pass references (pass_paths), exact
+        identities and qualified-scope statistics (W/D/L game scores only).
+
+    Raises
+    ------
+    TypeError
+        red_zone_depth is not a Python float.
+    ValueError
+        red_zone_depth breaks Core's scalar rules (not finite, negative, -0.0,
+        or a positive value that is not a normal float32 number) or is wider
+        than a validation map; a count is invalid; an actor identity is
+        invalid; or output_dir holds a different task. File and method
+        failures keep their own cause.
+
+    Notes
+    -----
+    Writes task.json, one M8 pass folder per focal team and
+    slot_diagnostic.json under output_dir. This function does not decide when
+    trained-model execution is authorized or whether either actor learned
+    useful behavior; the runner owns those gates. Every installed map is 20.0
+    map units wide. A wider depth raises ValueError before any file is
+    written, so the same output_dir can be reused with a corrected depth.
     """
     _integer(seed_blocks, "seed_blocks", minimum=2)
     _integer(num_envs, "num_envs", minimum=1)
     _integer(chunk_size, "chunk_size", minimum=1)
+    depth = _checked_depth(red_zone_depth)
     focal, other = _artifact(checkpoint), _artifact(opponent)
     directory = Path(output_dir).resolve()
     task = _task(
         directory,
         {
-            "schema_version": 1,
+            "schema_version": 2,
             "purpose": "slot",
             "checkpoint_id": focal["checkpoint_id"],
             "actor_digest": focal["actor_digest"],
@@ -2161,6 +2807,7 @@ def run_slot_diagnostic(
             "maps": list(VALIDATION_MAPS),
             "seed_blocks": seed_blocks,
             "root": _ROOTS["slot"],
+            "red_zone_depth": depth,
         },
         event_callback,
     )
@@ -2184,6 +2831,7 @@ def run_slot_diagnostic(
             "root": _ROOTS["slot"],
             "num_envs": num_envs,
             "chunk_size": chunk_size,
+            "red_zone_depth": depth,
         }
         path = _run_pass(request, event_callback=event_callback)
         paths.append(str(path))

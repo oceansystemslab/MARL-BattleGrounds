@@ -59,14 +59,14 @@ from marl_battlegrounds.core.types import (
 )
 from marl_battlegrounds.evaluation import policy_execution
 from marl_battlegrounds.evaluation.capture import (
-    capture_evaluation_transition_unit_v2,
-    capture_initial_evaluation_frame_v2,
+    capture_evaluation_transition_unit_v3,
+    capture_initial_evaluation_frame_v3,
 )
 from marl_battlegrounds.evaluation.metrics import EvaluationTransitionViewV1
 from marl_battlegrounds.evaluation.models import (
     ActionMaskV1,
     CodeRevisionV1,
-    EvaluationEpisodeContextV3,
+    EvaluationEpisodeContextV4,
     ExecutionInformationMode,
 )
 from marl_battlegrounds.evaluation.policy_execution import (
@@ -210,7 +210,7 @@ def make_neutral_joint_action() -> Action:
 
 
 def _validate_active_context_slot(
-    context: EvaluationEpisodeContextV3,
+    context: EvaluationEpisodeContextV4,
     global_slot: int,
     *,
     name: str,
@@ -232,7 +232,7 @@ def _active_context_slots(session: DebuggerSession) -> tuple[int, ...]:
 
 
 def _target_action_from_context(
-    context: EvaluationEpisodeContextV3,
+    context: EvaluationEpisodeContextV4,
     actor_global_slot: int,
     target_global_slot: int | None,
 ) -> int:
@@ -317,7 +317,7 @@ def lane_availability(
 
 
 def _default_pending_actions(
-    context: EvaluationEpisodeContextV3,
+    context: EvaluationEpisodeContextV4,
     action_mask: ActionMask | ActionMaskV1,
 ) -> tuple[PendingAction, ...]:
     """Build one exact fixed-slot draft tuple for a fresh decision epoch."""
@@ -360,7 +360,7 @@ def _replace_controlled_pending_action(
 
 
 def build_interactive_joint_action(
-    context: EvaluationEpisodeContextV3,
+    context: EvaluationEpisodeContextV4,
     pending_actions: tuple[PendingAction, ...],
     *,
     actor_global_slots: tuple[int, ...],
@@ -369,7 +369,7 @@ def build_interactive_joint_action(
 
     Parameters
     ----------
-    context : EvaluationEpisodeContextV3
+    context : EvaluationEpisodeContextV4
         Recorded episode roster and target-action mapping.
     pending_actions : tuple[PendingAction, ...]
         Exactly ten fixed-slot pending rows from the current decision.
@@ -590,14 +590,14 @@ def _build_configured_joint_action(session: DebuggerSession) -> Action:
 
 
 def build_scripted_joint_action(
-    context: EvaluationEpisodeContextV3,
+    context: EvaluationEpisodeContextV4,
     frame: ScenarioFrame,
 ) -> Action:
     """Build a potentially multi-actor scripted request from neutral defaults.
 
     Parameters
     ----------
-    context : EvaluationEpisodeContextV3
+    context : EvaluationEpisodeContextV4
         Recorded episode roster and target-action mapping.
     frame : ScenarioFrame
         One script frame containing distinct actor commands; omitted actors
@@ -832,7 +832,7 @@ def create_session(
         config,
         execution_information_mode,
     )
-    initial_frame = capture_initial_evaluation_frame_v2(
+    initial_frame = capture_initial_evaluation_frame_v3(
         evaluation_context,
         state,
         observation,
@@ -1310,7 +1310,7 @@ def submit_joint_action(
             error,
         ) from error
     try:
-        transition, successor_frame = capture_evaluation_transition_unit_v2(
+        transition, successor_frame = capture_evaluation_transition_unit_v3(
             session.evaluation_context,
             session.current_evaluation_frame,
             next_state,
@@ -1617,7 +1617,7 @@ def _restart_session(
         config,
         next_information_mode,
     )
-    initial_frame = capture_initial_evaluation_frame_v2(
+    initial_frame = capture_initial_evaluation_frame_v3(
         evaluation_context,
         state,
         observation,

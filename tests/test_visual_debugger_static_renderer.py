@@ -1,4 +1,8 @@
-"""Check one-shot debugger images built from scene records."""
+"""Check one-shot debugger images built from scene records.
+
+The static replay renderer opens a current replay V4 file (which records the
+Red Zone rule) without a metric sidecar.
+"""
 
 from pathlib import Path
 
@@ -72,10 +76,10 @@ def test_static_renderer_opens_current_replay_without_a_metric_sidecar(
 
     import marl_battlegrounds.viewer.static as static_renderer
     from marl_battlegrounds.evaluation.replay_io import save_replay
-    from marl_battlegrounds.evaluation.replay_v3 import build_replay_v3
+    from marl_battlegrounds.evaluation.replay_v4 import build_replay_v4
 
     trajectory = current_captured_evaluation_trajectory(transition_count=1)
-    replay = build_replay_v3(
+    replay = build_replay_v4(
         trajectory.context,
         trajectory.frames,
         trajectory.transitions,

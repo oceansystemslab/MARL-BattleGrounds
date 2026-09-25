@@ -47,14 +47,16 @@ from marl_battlegrounds.evaluation.evaluation_conditions import (
     OMITTED,
     Omitted,
     capture_ids,
-    config_record,
     default_maps,
     option,
     prepare_schedule,
     prepare_source_choices,
     read_saved_pass,
-    restore_config,
+    red_zone_depth_option,
+    refuse_pass_saved_before_red_zone,
+    restore_recorded_config,
     roster_default,
+    same_float32,
     saved_specs,
 )
 from marl_battlegrounds.evaluation.metric_catalog import (
@@ -63,7 +65,7 @@ from marl_battlegrounds.evaluation.metric_catalog import (
     METRIC_SCHEMA_VERSION,
     PRIORITY_METRIC_NAMES,
 )
-from marl_battlegrounds.evaluation.models import EvaluationEpisodeContextV3
+from marl_battlegrounds.evaluation.models import EvaluationEpisodeContextV4
 from marl_battlegrounds.evaluation.policy_execution import (
     Policy,
     PolicyApply,
@@ -93,7 +95,7 @@ from marl_battlegrounds.evaluation.recording_types import validate_recording_err
 from marl_battlegrounds.evaluation.replay import RuntimeProvenanceV1
 from marl_battlegrounds.evaluation.replay_capture import ReplayPackets
 from marl_battlegrounds.evaluation.replay_recording import ReplayCollector
-from marl_battlegrounds.evaluation.replay_v3 import ReplayArtifactV3
+from marl_battlegrounds.evaluation.replay_v4 import ReplayArtifactV4
 from marl_battlegrounds.evaluation.results import EpisodeResult, EvaluationResult
 from marl_battlegrounds.evaluation.run_writer import (
     IDENTITY_COLUMNS,
@@ -724,6 +726,8 @@ def normalize_episode_specs(
     team_b_roster: Sequence[AgentClassName],
     score_threshold: int,
     max_steps: int,
+    *,
+    red_zone_depth: float,
 ) -> tuple[EpisodeSpec, ...]:
     """Resolve map choices into an exact cyclic episode schedule.
 
@@ -742,6 +746,11 @@ def normalize_episode_specs(
         Score target for map-built configs.
     max_steps : int
         Horizon in ticks for map-built configs.
+    red_zone_depth : float
+        Required keyword: Red Zone depth in map units for map-built configs
+        (a Python float; 0.0 keeps one point per death). There is no default,
+        so every caller states the rule it means; pass
+        tasks.DEFAULT_TDM_RED_ZONE_DEPTH (5.0) for today's default.
 
     Returns
     -------
@@ -753,15 +762,19 @@ def normalize_episode_specs(
     Raises
     ------
     TypeError
-        A choice is neither EnvConfig, TDMMapInfo nor an integer ID.
+        A choice is neither EnvConfig, TDMMapInfo nor an integer ID, or
+        red_zone_depth is not a Python float (Core's check on a map-built
+        config).
     ValueError
-        Choices are empty or a map-built config is invalid.
+        Choices are empty or a map-built config is invalid, including a
+        red_zone_depth that Core rejects.
 
     Notes
     -----
         Host setup only. Explicit configs ignore the roster/rule arguments and are
-        validated later by evaluate_episodes. No bank exchange, phase-based map
-        selection or random episode sampling occurs.
+        validated later by evaluate_episodes; evaluate checks supplied rules
+        against them separately. No bank exchange, phase-based map selection or
+        random episode sampling occurs.
     """
     choices = tuple(CANONICAL_TDM_EVALUATION_MAP_IDS if maps is None else maps)
     if not choices:
@@ -785,6 +798,7 @@ def normalize_episode_specs(
                 team_b_roster=team_b_roster,
                 score_threshold=score_threshold,
                 max_steps=max_steps,
+                red_zone_depth=red_zone_depth,
             )
         resolved.append((map_id, cache[map_id]))
     return tuple(
@@ -1209,12 +1223,14 @@ def _run_evaluation(
                 identifier = cast(str, choice["source_config_id"])
                 if identifier not in configuration_contents:
                     content = old_contents.get(identifier)
-                    if (
-                        content is None
-                        or config_record(restore_config(content, validate=False))[0]
-                        != identifier
-                    ):
+                    if content is None:
                         raise ValueError("saved source choice lacks matching content")
+                    try:
+                        restore_recorded_config(content, identifier, validate=False)
+                    except ValueError as error:
+                        raise ValueError(
+                            "saved source choice lacks matching content"
+                        ) from error
                     configuration_contents[identifier] = content
         metadata["configurations"] = configuration_contents
         metadata["schedule_digest"] = sha256(
@@ -1351,13 +1367,13 @@ def _run_evaluation(
         full = _MetricTable.create(
             FULL_METRIC_NAMES, full_ids if writer is None else ()
         )
-        replays: list[ReplayArtifactV3] = []
+        replays: list[ReplayArtifactV4] = []
         collector = None
         if replay_selection and writer is None:
 
             def context(
                 packet: ReplayPackets,
-            ) -> tuple[EvaluationEpisodeContextV3, RuntimeProvenanceV1]:
+            ) -> tuple[EvaluationEpisodeContextV4, RuntimeProvenanceV1]:
                 """Build known context for the first packet of one selected in-memory
                 replay.
                 """
@@ -1856,6 +1872,7 @@ def evaluate(
     writer: RunWriter | None = None,
     score_threshold: int | Omitted = OMITTED,
     max_steps: int | Omitted = OMITTED,
+    red_zone_depth: float | Omitted = OMITTED,
     phase: str = "evaluation",
     pass_id: str = "1",
     chunk_size: int = 16,
@@ -1915,6 +1932,24 @@ def evaluate(
     score_threshold, max_steps : int, default=20 / 300
         Rules for map-built configurations. Explicit custom configurations retain
         exact values; conflicting nondefault overrides are errors.
+    red_zone_depth : float, default=5.0 (DEFAULT_TDM_RED_ZONE_DEPTH)
+        Red Zone depth in map units for map-built configurations. When an
+        agent dies inside its own team's Red Zone (the strip this deep at its
+        own spawn edge), the enemy team gets 2 points instead of 1; it is
+        still one kill and one death. 0.0 keeps one point per death. Must be
+        a Python float (6.0, not 6). Omit it for the default; on resume an
+        omitted depth inherits the saved pass. A supplied value, even 5.0, is
+        never ignored: it must have the same float32 value as every exact
+        EnvConfig in maps and as the saved pass, or the call raises before
+        any game or file change. The pass records the resolved value as
+        options["red_zone_depth"], and that value describes map-built games
+        only: an exact EnvConfig plays at its own
+        team_deathmatch_red_zone_depth, which its saved configuration holds.
+        For example, a pass whose only map is an exact config at depth 0.0
+        records 5.0 when this is omitted. Resume such a pass with this
+        omitted: 0.0 differs from the saved pass and 5.0 conflicts with the
+        source. A pass saved before the Red Zone rule cannot be resumed at
+        all, whatever maps and red_zone_depth are; its results stay readable.
     phase, pass_id : str, default='evaluation' / '1'
         Nonempty saved pass identity. Exact phase names govern new automatic map
         selection. Use distinct pass IDs for repeated validation checkpoints.
@@ -1932,8 +1967,12 @@ def evaluate(
     Raises
     ------
     ValueError, TypeError
-        Conditions, methods, captures or saved assertions conflict. Scientific
-        validation occurs before new files, writer recovery or pass changes.
+        Conditions, methods, captures or saved assertions conflict, including a
+        red_zone_depth that is not a Python float (TypeError) or that differs
+        from an exact source or the saved pass (ValueError), and a resume of
+        a pass saved before the Red Zone rule (ValueError "This pass was saved
+        before the Red Zone rule. ..."). Scientific validation occurs before
+        new files, writer recovery or pass changes.
     RuntimeError, OSError
         Execution, provider or recording fails. Earlier durable chunks remain
         valid; no fake actions, retry or provider rollback is performed.
@@ -1947,6 +1986,20 @@ def evaluate(
     cross their documented input boundary. This host helper never trains or edits
     the caller's training state, RNG or memory. Use evaluate_episodes for exact
     authored starts, including a single condition without any comparison claim.
+    The Red Zone depth is an ordinary config value, so changing it reuses the
+    same compiled chunk program.
+
+    Examples
+    --------
+    A short CPU-sized pass on one test map with a deeper Red Zone:
+
+    >>> import marl_battlegrounds as marl_bgs
+    >>> result = marl_bgs.evaluate(
+    ...     "random", "tdm-alpha", num_episodes=2, maps=[47],
+    ...     num_envs=2, max_steps=16, red_zone_depth=6.0,
+    ... )
+    >>> result.metadata["evaluation_contract"]["options"]["red_zone_depth"]
+    6.0
     """
     request = _generated_evaluation_request(
         system=system,
@@ -1968,6 +2021,7 @@ def evaluate(
         writer=writer,
         score_threshold=score_threshold,
         max_steps=max_steps,
+        red_zone_depth=red_zone_depth,
         phase=phase,
         pass_id=pass_id,
         chunk_size=chunk_size,
@@ -2001,6 +2055,7 @@ def _generated_evaluation_request(
     writer: RunWriter | None = None,
     score_threshold: int | Omitted = OMITTED,
     max_steps: int | Omitted = OMITTED,
+    red_zone_depth: float | Omitted = OMITTED,
     phase: str = "evaluation",
     pass_id: str = "1",
     chunk_size: int = 16,
@@ -2010,11 +2065,18 @@ def _generated_evaluation_request(
     Arguments, defaults and validation errors match evaluate. Return keyword
     arguments for the shared executor, including the exact saved pass when
     resuming. The same resolver serves normal execution and read-only checks.
+    The resolved depth is recorded as options["red_zone_depth"] in the pass
+    contract. A supplied red_zone_depth (not OMITTED) is also checked against
+    every exact source config: new ones from maps and, on resume, saved ones.
+    A saved pass from before the Red Zone rule is refused first, before any
+    option, map or source is resolved.
     """
     count = positive_int(num_episodes, "num_episodes")
     if count > np.iinfo(np.int32).max:
         raise ValueError("num_episodes must fit positive int32 IDs")
     saved = read_saved_pass(resume_from, writer, phase, pass_id)
+    if saved is not None:
+        refuse_pass_saved_before_red_zone(saved)
     details = None if saved is None else saved[1]["details"]
     old_contract = None if details is None else details.get("evaluation_contract")
     old = (
@@ -2054,6 +2116,10 @@ def _generated_evaluation_request(
         name: option(value, old, name, defaults[name])
         for name, value in supplied.items()
     }
+    # The depth has its own resolver: a pass saved before the Red Zone rule
+    # reads as 0.0, and below a supplied value (even the default 5.0) is also
+    # checked against every exact source config.
+    options["red_zone_depth"] = red_zone_depth_option(red_zone_depth, old)
     legacy = saved is not None and old_contract is None
     mode = (
         "default"
@@ -2069,6 +2135,9 @@ def _generated_evaluation_request(
     sources = None
     if saved is not None and maps is None:
         specs = saved_specs(saved)
+        for spec in specs:
+            if spec.map_id is None:
+                _check_source_red_zone_depth(spec.env_config, red_zone_depth)
     else:
         choices = tuple(default_maps(phase) if maps is None else maps)
         if not choices:
@@ -2080,10 +2149,13 @@ def _generated_evaluation_request(
             roster_default(options["opponent_roster"], 1),
             options["score_threshold"],
             options["max_steps"],
+            red_zone_depth=options["red_zone_depth"],
         )
         for source in sources:
             if source.map_id is None:
-                _check_source_overrides(source.env_config, options)
+                _check_source_overrides(
+                    source.env_config, options, red_zone_depth=red_zone_depth
+                )
         exchanged: dict[int, EnvConfig] = {}
         schedule_rows: list[EpisodeSpec] = []
         for index in range(count):
@@ -2180,8 +2252,37 @@ def _verify_evaluation(  # pyright: ignore[reportUnusedFunction] - Shared privat
     _run_evaluation(**request, _verify_only=True)
 
 
-def _check_source_overrides(config: EnvConfig, options: Mapping[str, object]) -> None:
-    """Reject explicit roster/nondefault rule conflicts with an exact source."""
+def _check_source_overrides(
+    config: EnvConfig,
+    options: Mapping[str, object],
+    *,
+    red_zone_depth: float | Omitted,
+) -> None:
+    """Reject explicit roster, rule and Red Zone conflicts with an exact source.
+
+    Parameters
+    ----------
+    config : EnvConfig
+        One exact scalar source config taken from evaluate's maps.
+    options : Mapping[str, object]
+        Resolved evaluate options. A non-None roster must equal the config's
+        class order; a score_threshold or max_steps other than its default
+        (20 or 300) must equal the config's value.
+    red_zone_depth : float or Omitted
+        The caller's own red_zone_depth, before saved or default values are
+        applied. Unlike the rules above, a supplied value is checked even
+        when it equals the default 5.0; OMITTED checks nothing.
+
+    Raises
+    ------
+    ValueError
+        "<name> conflicts with the exact source configuration", naming the
+        first conflicting option.
+
+    Notes
+    -----
+    Host setup only; nothing is executed or written.
+    """
     for team, name in enumerate(("system_roster", "opponent_roster")):
         roster = options[name]
         if roster is not None:
@@ -2204,3 +2305,23 @@ def _check_source_overrides(config: EnvConfig, options: Mapping[str, object]) ->
             raise ValueError(
                 f"{option_name} conflicts with the exact source configuration"
             )
+    _check_source_red_zone_depth(config, red_zone_depth)
+
+
+def _check_source_red_zone_depth(
+    config: EnvConfig, red_zone_depth: float | Omitted
+) -> None:
+    """Reject a supplied Red Zone depth that differs from an exact source config.
+
+    config is one exact scalar source config, new or restored from a saved
+    pass. red_zone_depth is the caller's own value: OMITTED checks nothing;
+    a supplied float must have the same float32 value as the config's
+    team_deathmatch_red_zone_depth (evaluation_conditions.same_float32), or
+    ValueError "red_zone_depth conflicts with the exact source configuration"
+    is raised. An equal value, such as 5.0 against a 5.0 source, is accepted.
+    Host setup only; nothing is executed or written.
+    """
+    if not isinstance(red_zone_depth, Omitted) and not same_float32(
+        red_zone_depth, float(config.team_deathmatch_red_zone_depth)
+    ):
+        raise ValueError("red_zone_depth conflicts with the exact source configuration")

@@ -4,7 +4,8 @@ Capture transfers the complete input bundle with one jax.device_get call, then
 checks exact NumPy shapes/dtypes before building strict models. This is a host
 recording boundary, outside JIT; one bundled call is not a claim about physical
 transfer count. Reconstruction reads recorded values without running physics.
-Current context V3 uses frame V2; historical contexts keep frame V1.
+Current context V4 uses frame V3 (20 context columns); context V3 uses frame V2
+and older contexts keep frame V1.
 """
 
 from __future__ import annotations
@@ -17,7 +18,6 @@ import numpy as np
 from numpy.typing import DTypeLike, NDArray
 
 from marl_battlegrounds.core.types import (
-    CONTEXT_FEATURES,
     ENVIRONMENT_DIMENSIONS,
     MAX_AGENT_SLOTS,
     MAX_AGENTS_PER_TEAM,
@@ -63,14 +63,17 @@ from marl_battlegrounds.evaluation.models import (
     AuraTransitionFactsV1,
     BaseObservationV1,
     BaseObservationV2,
+    BaseObservationV3,
     CombatTransitionFactsV1,
     DeathTransitionFactsV1,
     EvaluationEpisodeContext,
     EvaluationEpisodeContextV1,
     EvaluationEpisodeContextV3,
+    EvaluationEpisodeContextV4,
     EvaluationFrame,
     EvaluationFrameV1,
     EvaluationFrameV2,
+    EvaluationFrameV3,
     EvaluationTransitionV1,
     GlobalAnalysisSnapshotV1,
     JointActionV1,
@@ -85,12 +88,17 @@ from marl_battlegrounds.evaluation.models import (
     TransitionFactsV1,
     evaluation_context_type,
     evaluation_frame_type,
+    evaluation_frame_type_for_context,
 )
 from marl_battlegrounds.evaluation.validation import (
     _derive_and_validate_team_deathmatch_authority_v1,  # pyright: ignore[reportPrivateUsage]
     _validate_frame_information_regime,  # pyright: ignore[reportPrivateUsage]
     validate_evaluation_transition_unit_v1,
     validate_initial_evaluation_frame_v1,
+)
+from marl_battlegrounds.evaluation.wire_shapes import (
+    CONTEXT_FEATURES_V1,
+    CONTEXT_FEATURES_V2,
 )
 
 _BOOL_DTYPE = np.dtype(np.bool_)
@@ -475,15 +483,24 @@ def _normalize_spawn_lifecycle_observation_v1(
 def _normalize_base_observation(
     source: Observation,
     context: EvaluationEpisodeContext,
-) -> BaseObservationV1 | BaseObservationV2:
+) -> BaseObservationV1 | BaseObservationV2 | BaseObservationV3:
     """Freeze one host observation using the context's declared wire version.
 
     Check exact shapes, bool masks, finite float32 features, previous-action rows,
-    and spawn data. Context V3 records int32 self_ally_index in BaseObservationV2.
-    Legacy capture requires historical Team ID self features and returns V1;
-    current identity-blind observations cannot be relabeled as legacy data.
+    and spawn data. Context V4 records 20 context columns (column 19 is the Red
+    Zone depth) and int32 self_ally_index in BaseObservationV3; context V3 the
+    same with 19 columns in BaseObservationV2. The context width comes from the
+    recorded wire version, not from the live simulator, so a live 20-column
+    observation cannot be captured under a historical context. Legacy capture
+    requires historical Team ID self features and returns V1; current
+    identity-blind observations cannot be relabeled as legacy data.
     """
     _require_exact_type(source, Observation, name="observation")
+    context_width = (
+        CONTEXT_FEATURES_V2
+        if type(context) is EvaluationEpisodeContextV4
+        else CONTEXT_FEATURES_V1
+    )
     specs = (
         ("self_features", (MAX_AGENT_SLOTS, SELF_FEATURES), _FLOAT32_DTYPE, True),
         (
@@ -512,7 +529,7 @@ def _normalize_base_observation(
         ),
         (
             "context_features",
-            (MAX_AGENT_SLOTS, CONTEXT_FEATURES),
+            (MAX_AGENT_SLOTS, context_width),
             _FLOAT32_DTYPE,
             True,
         ),
@@ -546,7 +563,7 @@ def _normalize_base_observation(
         source.spawn_lifecycle,
         context,
     )
-    if type(context) is EvaluationEpisodeContextV3:
+    if type(context) in (EvaluationEpisodeContextV3, EvaluationEpisodeContextV4):
         payload["self_ally_index"] = _array_payload(
             source.self_ally_index,
             name="observation.self_ally_index",
@@ -554,6 +571,8 @@ def _normalize_base_observation(
             dtype=_INT32_DTYPE,
             category_count=MAX_AGENTS_PER_TEAM,
         )
+        if type(context) is EvaluationEpisodeContextV4:
+            return BaseObservationV3.model_validate(payload)
         return BaseObservationV2.model_validate(payload)
     for slot, row in enumerate(context.roster):
         if source.self_features[slot, 3] != float(row.configured_team_id):
@@ -1034,9 +1053,11 @@ def _build_evaluation_frame_from_host(
 ) -> EvaluationFrame:
     """Build a canonical indexed frame from a bundle already copied to NumPy.
 
-    Require a nonnegative exact Python frame_index. Choose frame V2 for context V3,
-    otherwise V1; normalize snapshot, observation, masks, and optional (10, 10)
-    SharedObs availability, then check information sharing. No second transfer
+    Require a nonnegative exact Python frame_index. Choose the frame version that
+    pairs with the context (evaluation_frame_type_for_context: V3 for context V4,
+    V2 for V3, otherwise V1); normalize snapshot, observation, masks, and
+    optional (10, 10) SharedObs availability, then check information sharing.
+    No second transfer
     occurs. Full cross-record validation is owned by replay admission.
     """
     evaluation_context_type(context)
@@ -1053,11 +1074,7 @@ def _build_evaluation_frame_from_host(
         )
 
     episode_id = context.identity.episode_id
-    frame_model = (
-        EvaluationFrameV2
-        if type(context) is EvaluationEpisodeContextV3
-        else EvaluationFrameV1
-    )
+    frame_model = evaluation_frame_type_for_context(context)
     frame = frame_model.model_validate(
         {
             "episode_id": episode_id,
@@ -1564,8 +1581,10 @@ reconstruct_transition_facts_v1 = _reconstruct_transition_facts
 __all__ = [
     "capture_evaluation_transition_unit_v1",
     "capture_evaluation_transition_unit_v2",
+    "capture_evaluation_transition_unit_v3",
     "capture_initial_evaluation_frame_v1",
     "capture_initial_evaluation_frame_v2",
+    "capture_initial_evaluation_frame_v3",
     "normalize_transition_facts_v1",
     "reconstruct_env_state_v1",
     "reconstruct_transition_facts_v1",
@@ -1616,9 +1635,9 @@ def capture_initial_evaluation_frame_v1(
     -----
     Runs outside JIT and synchronizes a complete bundle through one device_get
     call. It does not step or reset the environment. Legacy observations retain
-    historical Team ID features; current observations must use V2 capture.
+    historical Team ID features; current observations must use V3 capture.
     """
-    if type(context) is EvaluationEpisodeContextV3:
+    if type(context) in (EvaluationEpisodeContextV3, EvaluationEpisodeContextV4):
         raise ValueError("capture V1 requires matching episode context")
     return cast(
         EvaluationFrameV1,
@@ -1641,12 +1660,13 @@ def capture_initial_evaluation_frame_v2(
         object | None
     ) = None,
 ) -> EvaluationFrameV2:
-    """Capture current artifact frame zero from simulator outputs.
+    """Capture frame zero of a pre-Red-Zone (context V3) recording from outputs.
 
     Parameters
     ----------
     context : EvaluationEpisodeContext
-        Exact context V3 for current frame V2.
+        Exact context V3 for frame V2 (before the Red Zone rule; context V4
+        uses capture_initial_evaluation_frame_v3).
     state : EnvState
         Unbatched EnvState at the captured decision epoch. Its simulator tick
         may be nonzero.
@@ -1682,6 +1702,67 @@ def capture_initial_evaluation_frame_v2(
         raise ValueError("capture V2 requires matching episode context")
     return cast(
         EvaluationFrameV2,
+        _capture_initial_evaluation_frame(
+            context,
+            state,
+            observation,
+            action_mask,
+            shared_obs_information_availability_by_recipient_and_sensor_source,
+        ),
+    )
+
+
+def capture_initial_evaluation_frame_v3(
+    context: EvaluationEpisodeContext,
+    state: EnvState,
+    observation: Observation,
+    action_mask: ActionMask,
+    shared_obs_information_availability_by_recipient_and_sensor_source: (
+        object | None
+    ) = None,
+) -> EvaluationFrameV3:
+    """Capture current 20-column artifact frame zero from simulator outputs.
+
+    Parameters
+    ----------
+    context : EvaluationEpisodeContext
+        Exact context V4 for current frame V3.
+    state : EnvState
+        Unbatched EnvState at the captured decision epoch. Its simulator tick
+        may be nonzero.
+    observation : Observation
+        Matching unbatched Core Observation for all ten global slots.
+    action_mask : ActionMask
+        Matching unbatched Core ActionMask with boolean leaves.
+    shared_obs_information_availability_by_recipient_and_sensor_source : object | None
+        Optional
+        bool array shaped (10, 10), recipient then sensor source. Required for
+        SharedObs and omitted for NoSharedObs. Defaults to None.
+
+    Returns
+    -------
+    EvaluationFrameV3
+        Immutable frame V3 with artifact index zero and canonical episode/frame ID.
+        Context column 19 on every active row is the configured Red Zone depth.
+
+    Raises
+    ------
+    TypeError
+        Core records or leaf dtypes are wrong after host transfer.
+    ValueError
+        Context version, shapes, feature values, class/roster mapping,
+        or information availability is inconsistent.
+
+    Notes
+    -----
+    Runs outside JIT and synchronizes a complete bundle through one device_get
+    call. It does not step or reset the environment. Full initial-frame/context
+    revalidation is performed by replay admission.
+    """
+    if type(context) is not EvaluationEpisodeContextV4:
+        raise ValueError("capture V3 requires matching episode context")
+    return cast(
+        EvaluationFrameV3,
         _capture_initial_evaluation_frame(
             context,
             state,
@@ -1753,7 +1834,7 @@ def capture_evaluation_transition_unit_v1(
     reading the complete replay; capture alone is not an artifact integrity audit.
     """
     if (
-        type(context) is EvaluationEpisodeContextV3
+        type(context) in (EvaluationEpisodeContextV3, EvaluationEpisodeContextV4)
         or type(start_frame) is not EvaluationFrameV1
     ):
         raise ValueError("capture V1 requires matching episode context and frame")
@@ -1787,7 +1868,7 @@ def capture_evaluation_transition_unit_v2(
         object | None
     ) = None,
 ) -> tuple[EvaluationTransitionV1, EvaluationFrameV2]:
-    """Capture a transition and current successor frame from simulator outputs.
+    """Capture a transition and its V2 successor frame (context V3) from outputs.
 
     Parameters
     ----------
@@ -1840,6 +1921,87 @@ def capture_evaluation_transition_unit_v2(
         raise ValueError("capture V2 requires matching episode context and frame")
     return cast(
         tuple[EvaluationTransitionV1, EvaluationFrameV2],
+        _capture_evaluation_transition_unit(
+            context,
+            start_frame,
+            successor_state,
+            successor_observation,
+            successor_action_mask,
+            transition_facts,
+            canonical_reward,
+            done_flags,
+            successor_shared_obs_information_availability_by_recipient_and_sensor_source=successor_shared_obs_information_availability_by_recipient_and_sensor_source,
+        ),
+    )
+
+
+def capture_evaluation_transition_unit_v3(
+    context: EvaluationEpisodeContext,
+    start_frame: EvaluationFrameV3,
+    successor_state: EnvState,
+    successor_observation: Observation,
+    successor_action_mask: ActionMask,
+    transition_facts: TransitionFacts,
+    canonical_reward: Reward,
+    done_flags: DoneFlags,
+    *,
+    successor_shared_obs_information_availability_by_recipient_and_sensor_source: (
+        object | None
+    ) = None,
+) -> tuple[EvaluationTransitionV1, EvaluationFrameV3]:
+    """Capture a transition and current 20-column successor frame from Core outputs.
+
+    Parameters
+    ----------
+    context : EvaluationEpisodeContext
+        Exact context V4 for frame V3.
+    start_frame : EvaluationFrameV3
+        Matching frame V3 already captured for the transition's decision epoch.
+    successor_state : EnvState
+        Unbatched EnvState after exactly one simulator tick.
+    successor_observation : Observation
+        Matching successor Core Observation for ten global slots.
+    successor_action_mask : ActionMask
+        Matching successor Core ActionMask.
+    transition_facts : TransitionFacts
+        Actual unbatched Core TransitionFacts from this step;
+        initialization facts are rejected.
+    canonical_reward : Reward
+        Unbatched Reward with ten finite float32 task rewards.
+    done_flags : DoneFlags
+        Scalar bool terminated and truncated flags from this same step.
+    successor_shared_obs_information_availability_by_recipient_and_sensor_source : Array
+        Optional successor bool array shaped (10, 10), recipient then sensor
+        source. Required for SharedObs, omitted for NoSharedObs; defaults to None.
+
+    Returns
+    -------
+    tuple[EvaluationTransitionV1, EvaluationFrameV3]
+        Pair of EvaluationTransitionV1 and EvaluationFrameV3. The transition uses
+        start_frame's artifact index and the successor uses the next index.
+
+    Raises
+    ------
+    TypeError
+        Core record types or leaf dtypes are wrong after host transfer.
+    ValueError
+        Versions, adjacency, facts, rewards, completion, event joins,
+        or successor information availability are inconsistent.
+
+    Notes
+    -----
+    One host device_get call handles the complete supplied output bundle.
+    start_frame is reused without transfer or mutation. This does not step the
+    simulator. Full strict-tree admission is also performed when building or
+    reading the complete replay; capture alone is not an artifact integrity audit.
+    """
+    if (
+        type(context) is not EvaluationEpisodeContextV4
+        or type(start_frame) is not EvaluationFrameV3
+    ):
+        raise ValueError("capture V3 requires matching episode context and frame")
+    return cast(
+        tuple[EvaluationTransitionV1, EvaluationFrameV3],
         _capture_evaluation_transition_unit(
             context,
             start_frame,

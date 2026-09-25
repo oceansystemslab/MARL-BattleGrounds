@@ -2,7 +2,10 @@
 
 The runner, CLI and researchers share selection, paired uncertainty and report
 generation here. M8 remains the owner of recorded game scores and metrics.
-Reports read committed trainer records and never rewrite original evidence.
+Score fields are points and kill fields are kills: under the Red Zone rule a
+death can give 2 points but is still one kill, so _kill_columns names where each
+result's kills live. Reports read committed trainer records and never rewrite
+original evidence.
 analyze_screen also reports an unfinished configuration screen, retaining shared
 Random checks as one statistical task while plotting each case's own timing.
 """
@@ -23,6 +26,39 @@ from typing import Any, cast
 import numpy as np
 
 Record = dict[str, Any]
+# Row columns that hold each team's recorded kills (priority metrics) and each
+# team's points (episode scores). With a positive Red Zone depth a Red Zone
+# death gives 2 points but is still one kill, so the two can differ.
+_KILL_COLUMNS = ("team_a_kills", "team_b_kills")
+_SCORE_COLUMNS = ("team_a_score", "team_b_score")
+
+
+def _kill_columns(record: Mapping[str, Any]) -> tuple[str, str]:
+    """Name the row columns that hold Team A and Team B kills for one result.
+
+    Parameters
+    ----------
+    record : mapping
+        One validation or Random result: its task description plus summary,
+        as validate_checkpoint, validate_random or a runner record returns it.
+
+    Returns
+    -------
+    tuple of str
+        ("team_a_kills", "team_b_kills") when the record carries a
+        red_zone_depth (its task was built with the Red Zone rule, and its
+        rows and cells hold recorded kills); otherwise ("team_a_score",
+        "team_b_score"), because older records scored one point per death, so
+        their scores were their kills. Cell means use the same names with a
+        "mean_" prefix, for example "mean_team_a_kills".
+
+    Notes
+    -----
+    The one owner of "which fields hold kills" for training reports
+    (runner._random_progress, _screen_statistics and analyze_screen). Reads
+    only the mapping's keys; no file or device work.
+    """
+    return _KILL_COLUMNS if "red_zone_depth" in record else _SCORE_COLUMNS
 
 
 def _integer(value: object, name: str, *, minimum: int = 0) -> int:
@@ -75,6 +111,7 @@ def summarize_validation(
     bootstrap_draws: int = 2000,
     bootstrap_seed: int = 19_044_001,
     independent_opponents: bool = False,
+    actual_kills: bool = False,
 ) -> Record:
     """Reduce complete frozen-panel games with their shared random seeds intact.
 
@@ -83,8 +120,8 @@ def summarize_validation(
     rows : sequence of mappings
         Saved M8 rows augmented with opponent and spawn_locations. Required fields
         are map_id, seed_id, opponent, spawn_locations and system_game_score. Each
-        map/seed/opponent has exactly two ends. Optional scores and lengths are
-        reported only when every game in that cell supplies them.
+        map/seed/opponent has exactly two ends. Optional scores (points), kills
+        and lengths are reported only when every game in that cell supplies them.
     maps, opponents : sequences
         Nonempty distinct map IDs and frozen opponent labels in declared order.
     seed_pairs : int
@@ -95,14 +132,24 @@ def summarize_validation(
 
     independent_opponents : bool, default=False
         True uses new-panel independent opponent roots. Spawn ends remain paired;
-        native Team A/B scores are required for mean kill difference. False keeps
-        the historical shared-seed uncertainty and result fields unchanged.
+        every game must supply finite kills for mean kill difference (see
+        actual_kills). False keeps the historical shared-seed uncertainty and
+        result fields unchanged.
+    actual_kills : bool, default=False
+        True means the rows also carry recorded kills (team_a_kills and
+        team_b_kills from M8's priority metrics). Each cell then also reports
+        mean_team_a_kills and mean_team_b_kills, and mean_kill_difference uses
+        these kills. Use it for every result built with a Red Zone depth,
+        because a Red Zone death gives 2 points but is still one kill. False
+        keeps the historical rule and bytes: kills are read from the Team A
+        and Team B scores, which were equal to kills before the rule.
 
     Returns
     -------
     dict
         Equal-weight score, descriptive paired interval, W/D/L cells and complete
         counts. The interval concerns these fixed actors, not training-seed variation.
+        Score fields are always points; kill fields are kills.
 
     Raises
     ------
@@ -122,6 +169,7 @@ def summarize_validation(
             seed_pairs=seed_pairs,
             bootstrap_draws=bootstrap_draws,
             bootstrap_seed=bootstrap_seed,
+            actual_kills=actual_kills,
         )
     _integer(seed_pairs, "seed_pairs", minimum=1)
     map_ids, names = tuple(maps), tuple(opponents)
@@ -181,7 +229,11 @@ def summarize_validation(
                 "draws": int(np.count_nonzero(scores == 0.5)),
                 "losses": int(np.count_nonzero(scores == 0)),
             }
-            for column in ("episode_length", "team_a_score", "team_b_score"):
+            for column in (
+                "episode_length",
+                *_SCORE_COLUMNS,
+                *(_KILL_COLUMNS if actual_kills else ()),
+            ):
                 present = [row.get(column) for row in cell_rows]
                 cell[f"mean_{column}"] = (
                     float(np.mean(np.asarray(present, np.float64)))
@@ -216,17 +268,22 @@ def _independent_validation_summary(
     seed_pairs: int,
     bootstrap_draws: int,
     bootstrap_seed: int,
+    actual_kills: bool = False,
 ) -> Record:
     """Keep spawn pairs together while resampling independent opponents separately.
 
-    Native Team A minus Team B scores are kill differences in the fixed TDM
-    validation task. Every game must supply finite values. Maps and opponents
-    have equal weights. The interval concerns these fixed actors only.
+    mean_kill_difference is Team A kills minus Team B kills per game. With
+    actual_kills=True the kills are the recorded team_a_kills/team_b_kills
+    columns; with False they are the native Team A and Team B scores, which
+    equal kills only under one point per death (results saved before the Red
+    Zone rule). Every game must supply finite values. Maps and opponents have
+    equal weights. The interval concerns these fixed actors only.
     """
     if not opponents or len(set(opponents)) != len(opponents):
         raise ValueError("Validation needs distinct nonempty opponents")
     if any(row.get("opponent") not in opponents for row in rows):
         raise ValueError("Validation contains an undeclared opponent")
+    team_a, team_b = _KILL_COLUMNS if actual_kills else _SCORE_COLUMNS
     cells: list[Record] = []
     opponent_summaries: list[Record] = []
     blocks: list[np.ndarray[Any, np.dtype[np.float64]]] = []
@@ -239,13 +296,14 @@ def _independent_validation_summary(
             seed_pairs=seed_pairs,
             bootstrap_draws=bootstrap_draws,
             bootstrap_seed=bootstrap_seed,
+            actual_kills=actual_kills,
         )
         for cell in checked["cells"]:
             map_rows = [row for row in selected if row["map_id"] == cell["map_id"]]
             differences: list[float] = []
             pairs: dict[int, list[float]] = {}
             for row in map_rows:
-                values = [row.get("team_a_score"), row.get("team_b_score")]
+                values = [row.get(team_a), row.get(team_b)]
                 if any(
                     isinstance(value, bool)
                     or not isinstance(value, (int, float))
@@ -253,7 +311,10 @@ def _independent_validation_summary(
                     for value in values
                 ):
                     raise ValueError(
-                        "New validation needs finite native Team A and Team B scores"
+                        "New validation needs finite recorded Team A and Team B kills"
+                        if actual_kills
+                        else "New validation needs finite native Team A and Team B "
+                        "scores"
                     )
                 differences.append(
                     float(cast(float, values[0])) - float(cast(float, values[1]))
@@ -329,7 +390,10 @@ def _candidates(results: Sequence[Mapping[str, Any]]) -> dict[str, Record]:
     (missing, negative or Boolean values raise ValueError) and is dropped at
     zero, so QMIX warmup and PQN-VDN initial-collection actors that never
     learned are never selected. Compatible PPO, QMIX and PQN-VDN rows (same
-    frozen panel and scoring protocol) may be selected together.
+    frozen panel and scoring protocol) may be selected together. Rows must also
+    share one scoring rule: the same recorded red_zone_depth, or none (results
+    saved before the Red Zone rule); mixing them raises ValueError, because
+    their points and kill differences are not comparable.
     """
     selected: dict[str, Record] = {}
     for result in results:
@@ -356,6 +420,8 @@ def _candidates(results: Sequence[Mapping[str, Any]]) -> dict[str, Record]:
         raise ValueError("Selection cannot mix frozen panels")
     if len({row.get("selection_schema_version", 1) for row in selected.values()}) != 1:
         raise ValueError("Selection cannot mix scoring protocols")
+    if len({row.get("red_zone_depth") for row in selected.values()}) != 1:
+        raise ValueError("Selection cannot mix Red Zone scoring rules")
     for row in selected.values():
         _selection_key(row)
     return selected
@@ -1627,6 +1693,8 @@ def _screen_evidence(
     result is a runner random_diagnostics entry, including original task and
     artifact identities. run_id and seed bind a fresh capture to its own run;
     both are None only for the explicitly shared original initialization.
+    The result's own red_zone_depth (None when it was saved before the Red Zone
+    rule) selects the task layout and whether rows carry recorded kills.
     Existing validation owns task and score verification;
     M8 owns CSV loading. No actor is applied and no game or file is changed.
     """
@@ -1642,6 +1710,7 @@ def _screen_evidence(
         env_steps=result["env_steps"],
         run_id=run_id,
         seed=seed,
+        red_zone_depth=result.get("red_zone_depth"),
     )
 
 
@@ -1654,15 +1723,19 @@ def _screen_statistics(
     A supplied summary must be its verified result for these same rows; reuse it
     to avoid reducing scores twice after the saved-evidence integrity check.
     All points use the same private bootstrap seed, so matching blocks receive
-    matching resamples across cases. Optional kill scores must be finite and
-    nonnegative when present; absent scores leave that diagnostic unavailable.
+    matching resamples across cases. Kills come from the columns _kill_columns
+    names for this result (recorded kills when it carries a Red Zone depth,
+    otherwise its scores). Optional kills must be finite and nonnegative when
+    present; absent kills leave that diagnostic unavailable.
     """
+    team_a, team_b = _kill_columns(result)
     if summary is None:
         summary = summarize_validation(
             rows,
             maps=result["maps"],
             opponents=("Random",),
             seed_pairs=result["seed_pairs"],
+            actual_kills=(team_a, team_b) == _KILL_COLUMNS,
         )
     if summary["score"] != result.get("score") or summary["cells"] != result.get(
         "cells"
@@ -1678,7 +1751,7 @@ def _screen_statistics(
         for seed, pair in sorted(grouped.items()):
             margins: list[float] = []
             for row in pair:
-                first, second = row.get("team_a_score"), row.get("team_b_score")
+                first, second = row.get(team_a), row.get(team_b)
                 if any(
                     value is not None and _screen_seconds(value) is None
                     for value in (first, second)
@@ -1714,8 +1787,8 @@ def _screen_statistics(
                 else None
             )
             for name, column in (
-                ("mean_kills_for", "mean_team_a_score"),
-                ("mean_kills_against", "mean_team_b_score"),
+                ("mean_kills_for", f"mean_{team_a}"),
+                ("mean_kills_against", f"mean_{team_b}"),
             )
         },
         **{
@@ -1981,7 +2054,10 @@ def analyze_screen(
     keep both spawn ends together. Changes from initialization use matching blocks.
     Intervals describe game sampling for fixed actors, not training-seed variation.
     Combat change against Random over wall time is the short-screen comparison;
-    native outcomes remain separate. All draws do not establish absent learning.
+    native outcomes remain separate. Kills and deaths are recorded kills for
+    results that carry a Red Zone depth and the native scores for older
+    results, where they were equal (_kill_columns). All draws do not
+    establish absent learning.
     The secondary training axis excludes each attempt's
     first complete block, including its useful work; that block is not pure compile
     time. Missing timings remain missing. Original evidence is never changed.
@@ -2343,6 +2419,8 @@ def analyze_screen(
     cells: list[Record] = []
     for task_id, task in tasks.items():
         result = task["result"]
+        # Kills, not points: a Red Zone death gives 2 points but one kill.
+        kills_for, kills_against = (f"mean_{name}" for name in _kill_columns(result))
         for cell in task["statistics"]["cells"]:
             cells.append(
                 {
@@ -2354,9 +2432,9 @@ def analyze_screen(
                     "summary_path": result.get("summary_path"),
                     **cell,
                     "mean_kill_margin": (
-                        cell["mean_team_a_score"] - cell["mean_team_b_score"]
-                        if cell.get("mean_team_a_score") is not None
-                        and cell.get("mean_team_b_score") is not None
+                        cell[kills_for] - cell[kills_against]
+                        if cell.get(kills_for) is not None
+                        and cell.get(kills_against) is not None
                         else None
                     ),
                 }

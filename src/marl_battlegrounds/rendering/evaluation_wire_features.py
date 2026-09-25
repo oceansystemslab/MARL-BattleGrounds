@@ -1,9 +1,13 @@
 """Decode versioned evaluation feature rows for offline presentation.
 
 The column constants describe the published 58-column wire schema independently
-of live Core imports. decode_agent_feature_row_v1 reads historical physical-team
-identity; decode_agent_feature_row also handles V2 relation flags with separately
-authorized display ownership. A new wire meaning needs an explicit version change.
+of live Core imports. CONTEXT_FEATURE_* name the context columns that scenes
+read; CONTEXT_FEATURE_TDM_RED_ZONE_DEPTH_V2 is column 19, which exists only in
+the 20-column context of frame V3. decode_agent_feature_row_v1 reads historical
+physical-team identity; decode_agent_feature_row also handles V2 relation flags
+with separately authorized display ownership. Version 3 (frame V3, which only
+adds a context column) reads agent rows exactly as V2 does. A new wire meaning
+needs an explicit version change.
 
 Decoders preserve the fields needed for authorized presentation and check exact
 Python wire values. They do not infer visibility, hidden state, status sources
@@ -132,6 +136,9 @@ AGENT_STATUS_CAPABILITY_MAGNITUDE_COLUMN_BY_CHANNEL_V1: Final = (
 
 CONTEXT_FEATURE_MAP_WIDTH_V1: Final = 2
 CONTEXT_FEATURE_MAP_HEIGHT_V1: Final = 3
+# Frame V3 (context V4) appends the Team Deathmatch Red Zone depth, in map units,
+# as context column 19; 19-column contexts (frames V1 and V2) have no such column.
+CONTEXT_FEATURE_TDM_RED_ZONE_DEPTH_V2: Final = 19
 OBSTACLE_FEATURE_TYPE_V1: Final = 0
 OBSTACLE_FEATURE_X_V1: Final = 1
 OBSTACLE_FEATURE_Y_V1: Final = 2
@@ -318,30 +325,32 @@ def decode_agent_feature_row(
     ----------
     row : tuple of float
         Exact 58-value tuple of finite Python floats. In V1 column three stores
-        team ID; in V2 it stores the exact zero/one enemy-relation flag.
+        team ID; in V2 and V3 it stores the exact zero/one enemy-relation flag.
     schema_version : int
-        Version 1 or 2. Version 1 delegates to the historical decoder.
+        Version 1, 2 or 3. Version 1 delegates to the historical decoder.
+        Version 3 has exactly V2's row meaning (its frames only add context
+        column 19, the Red Zone depth, which is not part of an agent row).
     team_id : int
-        Authorized display owner, 1 Team A or 2 Team B, required for V2.
+        Authorized display owner, 1 Team A or 2 Team B, required for V2 and V3.
         V1 ignores this argument and uses the recorded physical team ID.
     is_enemy : bool
-        Expected V2 observation relation. Column three must equal float(is_enemy).
-        V1 ignores this argument.
+        Expected V2/V3 observation relation. Column three must equal
+        float(is_enemy). V1 ignores this argument.
 
     Returns
     -------
     DecodedAgentFeatureRowV1
-        Common immutable presentation fields. For V2, team ownership comes from
-        team_id rather than treating the enemy flag as a physical identity.
+        Common immutable presentation fields. For V2 and V3, team ownership comes
+        from team_id rather than treating the enemy flag as a physical identity.
 
     Raises
     ------
     ValueError
-        The version/display team is unsupported, the V2 relation flag differs,
-        or an underlying row type, value, length or health check fails.
+        The version/display team is unsupported, the V2/V3 relation flag
+        differs, or an underlying row type, value, length or health check fails.
     TypeError
-        Malformed V2 input cannot support the preliminary length/index check or
-        conversion of is_enemy to float.
+        Malformed V2/V3 input cannot support the preliminary length/index check
+        or conversion of is_enemy to float.
 
     Notes
     -----
@@ -351,7 +360,12 @@ def decode_agent_feature_row(
     """
     if schema_version == 1:
         return decode_agent_feature_row_v1(row)
-    if schema_version != 2 or type(team_id) is not int or team_id not in (1, 2):
+    if (
+        type(schema_version) is not int
+        or schema_version not in (2, 3)
+        or type(team_id) is not int
+        or team_id not in (1, 2)
+    ):
         raise ValueError("agent row requires a supported schema and display team")
     if len(row) != SELF_FEATURES_V1 or row[3] != float(is_enemy):
         raise ValueError("agent is_enemy flag must match its observation relation")
@@ -620,6 +634,7 @@ __all__ = [
     "AGENT_STATUS_REMAINING_DURATION_COLUMN_BY_CHANNEL_V1",
     "CONTEXT_FEATURE_MAP_HEIGHT_V1",
     "CONTEXT_FEATURE_MAP_WIDTH_V1",
+    "CONTEXT_FEATURE_TDM_RED_ZONE_DEPTH_V2",
     "OBSTACLE_FEATURE_ACTIVE_V1",
     "OBSTACLE_FEATURE_HEIGHT_V1",
     "OBSTACLE_FEATURE_RADIUS_V1",

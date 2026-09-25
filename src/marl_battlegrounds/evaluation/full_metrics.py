@@ -4,7 +4,8 @@ initialize_full creates compact totals; update_full consumes authoritative
 Core facts; full_values packs the current metric catalog. Live evaluation and
 replay prefix analysis share these functions. Keys are static tree structure,
 values are arrays, and no host report, callback or replay buffer is retained.
-Optional collection is selected by the environment wrapper.
+Optional collection is selected by the environment wrapper. Red Zone counts use
+Core's red_zone_death_mask, the same classifier that scores points.
 """
 
 from functools import cache
@@ -22,9 +23,11 @@ from marl_battlegrounds.core.combat import (
 )
 from marl_battlegrounds.core.env import (
     _aggregate_health_effects_and_basic_passives_by_global_slot,  # pyright: ignore[reportPrivateUsage]
+    red_zone_death_mask,
 )
 from marl_battlegrounds.core.types import (
     PRIEST_CLASS_ID,
+    TASK_MODE_TDM,
     ActionMask,
     EnvConfig,
     EnvState,
@@ -89,6 +92,8 @@ _COUNTER_SHAPES = {
     "freedom_protected": (10,),
     "freedom_eligible": (10,),
     "distance_count": (10, 10),
+    "red_zone_deaths": (10,),
+    "red_zone_kill_contributions": (10,),
 }
 _AMOUNT_SHAPES = {
     "damage": (10, 10),
@@ -160,7 +165,10 @@ def initialize_full(config: EnvConfig, state: EnvState) -> FullTotals:
         FullTotals, a dict with fixed keys and JAX leaves. Counts are int32,
         amounts float32, and initial_dead is bool (10,). Shapes are fixed by the
         private counter/amount declarations: global agent/team vectors, directed
-        matrices, compact relation pairs and status-channel axes.
+        matrices, compact relation pairs and status-channel axes. The two Red
+        Zone counters are int32 (10,) in global slot order and start at zero:
+        red_zone_deaths by victim and red_zone_kill_contributions by helper
+        (80 bytes per environment).
 
     Notes
     -----
@@ -249,6 +257,12 @@ def update_full(
     hypothetical healing/aura/speed comparisons reuse existing Core helpers.
     Inputs are unchanged. Named counters are sufficient statistics only:
     no episode-length arrays, host callbacks or CSV serialization occur.
+
+    Red Zone deaths come from Core's red_zone_death_mask with state's body
+    centres, the positions combat resolves at, so they match Core's 2-point
+    scoring exactly. Each helper in combat_quantities' kill_contributions
+    (damage or useful Priest healing on the death tick) counts once per Red
+    Zone victim. A depth of 0.0 adds nothing.
     """
     facts = info.transition_facts
     combat = facts.combat_transition_facts
@@ -383,6 +397,7 @@ def update_full(
             axis=-1,
         ),
     )
+    red_zone_deaths = red_zone_death_mask(config, state.agent_positions, deaths)
     delta: FullTotals = {
         "damage": damage,
         "healing": healing,
@@ -475,6 +490,10 @@ def update_full(
         "freedom_eligible": freedom_eligible,
         "distance_sum": jnp.where(ally_pairs, distances, 0),
         "distance_count": ally_pairs,
+        "red_zone_deaths": red_zone_deaths,
+        "red_zone_kill_contributions": (contributions & red_zone_deaths[None, :]).sum(
+            axis=1, dtype=jnp.int32
+        ),
     }
     for name, class_id, coverage in (
         (
@@ -546,6 +565,12 @@ def full_values(
     callbacks. Class/roster/target applicability and denominator availability
     are enforced while packing. Local expanded views are temporary; totals
     are not edited and no additional episode history is retained.
+
+    The 44 Red Zone columns are unavailable when config.task_mode is not Team
+    Deathmatch. In Team Deathmatch at depth 0.0 their counts are valid zeros
+    and their shares are unavailable (zero denominator). This function cannot
+    tell a record saved before the Red Zone rule; replay analysis marks those
+    columns unavailable itself.
     """
     stored = totals
     expanded = {
@@ -919,6 +944,33 @@ def full_values(
         "ally_distance_observations",
         pair=_available(distance_count),
         team=_available(_team_sum(distance_count.sum(axis=1))),
+    )
+    team_mode = jnp.asarray(config.task_mode) == TASK_MODE_TDM
+
+    def red_zone(measurement: MetricValues) -> MetricValues:
+        """Mark a Red Zone view unavailable unless the game is Team Deathmatch."""
+        return MetricValues(measurement.values, measurement.valid & team_mode)
+
+    # Team kills are the other team's Red Zone deaths; shares divide by the
+    # agent's own team total for the same period, never by score points.
+    red_zone_deaths = stored["red_zone_deaths"]
+    red_zone_helpers = stored["red_zone_kill_contributions"]
+    team_red_zone_deaths = _team_sum(red_zone_deaths)
+    team_red_zone_kills = team_red_zone_deaths[::-1]
+    add("red_zone_kills", team=red_zone(_available(team_red_zone_kills)))
+    add("red_zone_kill_contributions", agent=red_zone(_available(red_zone_helpers)))
+    add(
+        "red_zone_kill_participation",
+        agent=red_zone(_ratio(red_zone_helpers, jnp.repeat(team_red_zone_kills, 5))),
+    )
+    add(
+        "red_zone_deaths",
+        agent=red_zone(_available(red_zone_deaths)),
+        team=red_zone(_available(team_red_zone_deaths)),
+    )
+    add(
+        "red_zone_death_fraction",
+        agent=red_zone(_ratio(red_zone_deaths, jnp.repeat(team_red_zone_deaths, 5))),
     )
 
     _directed_values(data, stored, expanded, config)

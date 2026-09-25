@@ -23,7 +23,7 @@ from pydantic import Field, StringConstraints
 from marl_battlegrounds.evaluation.models import (
     EvaluationModel,
     GlobalAnalysisSnapshotV1,
-    ResolvedEnvConfigV1,
+    ResolvedEnvConfigV2,
 )
 
 type _Digest = Annotated[str, StringConstraints(pattern=r"^[0-9a-f]{64}$")]
@@ -275,8 +275,9 @@ class ScenarioContent(EvaluationModel):
 
     Attributes
     ----------
-    configuration : ResolvedEnvConfigV1
-        Full resolved configuration recorded for the scenario.
+    configuration : ResolvedEnvConfigV2
+        Full resolved configuration recorded for the scenario, including its
+        Team Deathmatch Red Zone depth.
     initial_snapshot : GlobalAnalysisSnapshotV1
         Authored state fields under the snapshot's versioned storage format.
     step_count : int
@@ -290,7 +291,7 @@ class ScenarioContent(EvaluationModel):
     remaining horizon. Deserializing this record alone does not run that check.
     """
 
-    configuration: ResolvedEnvConfigV1
+    configuration: ResolvedEnvConfigV2
     initial_snapshot: GlobalAnalysisSnapshotV1
     step_count: int
     notes: str

@@ -6,12 +6,15 @@ feature/action axes describe the recorded wire layout, not a mutable runtime
 configuration. Amendment A18 allowed the pre-alpha obstacle axis to grow from
 16 to 32; later incompatible dimensions need an explicit schema migration.
 Changing these values would change historical validation, so documentation
-work must preserve them.
+work must preserve them. CONTEXT_FEATURES_V2 is the 20-column context width
+of frame V3 (the Team Deathmatch Red Zone depth appended as column 19); the
+19-column CONTEXT_FEATURES_V1 still describes frames V1 and V2.
 """
 
 from typing import Final
 
 CONTEXT_FEATURES_V1: Final = 19
+CONTEXT_FEATURES_V2: Final = 20
 ENVIRONMENT_DIMENSIONS_V1: Final = 2
 MAX_AGENT_SLOTS_V1: Final = 10
 MAX_AGENTS_PER_TEAM_V1: Final = 5
@@ -31,6 +34,7 @@ UNIT_FEATURES_V1: Final = 58
 
 __all__ = [
     "CONTEXT_FEATURES_V1",
+    "CONTEXT_FEATURES_V2",
     "ENVIRONMENT_DIMENSIONS_V1",
     "MAX_AGENTS_PER_TEAM_V1",
     "MAX_AGENT_SLOTS_V1",

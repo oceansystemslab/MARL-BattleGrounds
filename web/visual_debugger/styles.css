@@ -50,6 +50,7 @@
   --basic: #2dd4bf;
   --ultimate: #a78bfa;
   --unavailable: #64748b;
+  --red-zone-floor: rgb(127 29 29 / 22%);
   --radius: 0.75rem;
   --shadow: 0 18px 40px rgb(0 0 0 / 28%);
 }
@@ -931,6 +932,11 @@ select {
   pointer-events: none;
 }
 
+.authoring-svg-red-zone {
+  fill: var(--red-zone-floor);
+  pointer-events: none;
+}
+
 .authoring-svg-grid-line {
   fill: none;
   stroke: rgb(148 163 184 / 18%);
@@ -1225,6 +1231,18 @@ select {
   stroke: rgb(148 163 184 / 16%);
   stroke-width: 1;
   vector-effect: non-scaling-stroke;
+  pointer-events: none;
+}
+
+/* Each team's Red Zone floor: a subtle deep-red tint under obstacles and bodies. */
+.red-zone-floor-clip {
+  overflow: hidden;
+  pointer-events: none;
+}
+
+.red-zone-floor {
+  fill: var(--red-zone-floor);
+  stroke: none;
   pointer-events: none;
 }
 

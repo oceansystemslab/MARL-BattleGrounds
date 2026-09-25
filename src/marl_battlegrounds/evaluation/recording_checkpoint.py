@@ -307,10 +307,10 @@ def _restore_replays(
     runtime remain unchanged. The caller checks every file before this call.
     """
     from marl_battlegrounds.evaluation.catalog import (
-        build_resolved_env_config_v1,
+        _build_resolved_env_config_for,  # pyright: ignore[reportPrivateUsage]
         reconstruct_env_config_v1,
     )
-    from marl_battlegrounds.evaluation.models import EvaluationEpisodeContextV3
+    from marl_battlegrounds.evaluation.models import EvaluationEpisodeContextV4
     from marl_battlegrounds.evaluation.recording_context import restore_recording_config
     from marl_battlegrounds.evaluation.replay import RuntimeProvenanceV1
     from marl_battlegrounds.evaluation.run_writer import configuration_identity
@@ -330,7 +330,7 @@ def _restore_replays(
             expected_path = f"open_replays/{episode_id}.npylog"
             if record.get("path") != expected_path:
                 raise ValueError("open replay path differs from its episode ID")
-            context = EvaluationEpisodeContextV3.model_validate_json(
+            context = EvaluationEpisodeContextV4.model_validate_json(
                 json.dumps(record.get("context"))
             )
             runtime = RuntimeProvenanceV1.model_validate_json(
@@ -384,8 +384,9 @@ def _restore_replays(
                                 "open replay config differs from its saved identity"
                             )
                         if (
-                            build_resolved_env_config_v1(
-                                restore_recording_config(packet.config)
+                            _build_resolved_env_config_for(
+                                restore_recording_config(packet.config),
+                                context.resolved_env_config,
                             )
                             != context.resolved_env_config
                         ):

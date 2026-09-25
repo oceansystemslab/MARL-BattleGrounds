@@ -37,12 +37,24 @@ A rejected PQN-VDN block writes one learner_update_rejected event whose
 finite values are kept and whose NaN and infinite values are null with a
 named marker, then attempt_failed with the same reason, and stops without a
 second update or any change to the host counts.
+red_zone_depth defaults to 5.0 (also from an empty JSON config), round-trips at
+0.0, 6.0 and 20.0 in config version 1, reads a JSON integer 6 as 6.0, and
+refuses negative, -0.0, NaN, infinite, subnormal, integer and Boolean values;
+a saved config without it reads as 0.0 while a new run from such a file takes
+5.0. A depth wider than a map is refused before any file, even a validation
+panel, is written. A panel-backed run at 6.0 records the depth in its config,
+content binding, validation tasks (schema 4 for a System panel, 3 for a
+historical panel) and every saved game configuration. On resume, a config
+declaring another depth, and a checkpoint re-signed with the pre-Red-Zone
+schemas (with or without a config), are refused before any file or array is
+touched and leave no recovery marker.
 """
 
 # Failure injection inspects the private host coordinator, not a public API.
 # pyright: reportPrivateUsage=false
 
 import json
+import shutil
 from dataclasses import replace
 from pathlib import Path
 from typing import Any, Literal
@@ -54,6 +66,25 @@ from marl_battlegrounds.training.runner import (
     config_from_dict,
     config_to_dict,
 )
+
+
+def _schema_1_copy(checkpoint: Path) -> Path:
+    # Copy a learner checkpoint with the pre-Red-Zone schemas, re-signed.
+    import hashlib
+
+    from marl_battlegrounds.training import checkpoints
+
+    details = checkpoints.read_checkpoint_details(checkpoint)
+    method = details["metadata"]["config"]["method"]
+    details["schemas"] = dict(checkpoints._ACTOR_INPUT_1_SCHEMAS[method])
+    del details["checkpoint_id"]
+    details["checkpoint_id"] = hashlib.sha256(
+        checkpoints._json_bytes(details)
+    ).hexdigest()
+    historical = checkpoint.with_name(details["checkpoint_id"])
+    shutil.copytree(checkpoint, historical)
+    (historical / "checkpoint_details.json").write_text(json.dumps(details))
+    return historical
 
 
 @pytest.mark.parametrize(
@@ -143,6 +174,38 @@ def test_public_run_resume_and_final_pending_work(
         path: path.read_bytes() for path in destination.rglob("*") if path.is_file()
     }
     assert not (destination / "checkpoint_recovery.json").exists()
+    if (method, recording, input_scale) == ("mappo", False, 1.0):
+        # Red Zone resume refusals happen before any file or array is touched.
+        with monkeypatch.context() as refused:
+            refused.setattr(checkpoints, "_restore_arrays", forbidden_restore)
+            with pytest.raises(
+                ValueError,
+                match=r"declares red_zone_depth 6\.0, but the saved run uses 5\.0",
+            ):
+                runner.train(
+                    replace(config, red_zone_depth=6.0), resume_from=checkpoint
+                )
+            assert saved_bytes == {
+                path: path.read_bytes()
+                for path in destination.rglob("*")
+                if path.is_file()
+            }
+            historical = _schema_1_copy(checkpoint)
+            forged = {
+                path: path.read_bytes()
+                for path in destination.rglob("*")
+                if path.is_file()
+            }
+            for supplied in (None, config):
+                with pytest.raises(ValueError, match="saved before Red Zone"):
+                    runner.train(supplied, resume_from=historical)
+            assert forged == {
+                path: path.read_bytes()
+                for path in destination.rglob("*")
+                if path.is_file()
+            }
+            shutil.rmtree(historical)
+        assert not (destination / "checkpoint_recovery.json").exists()
     if input_scale != 1.0 or method != "mappo":
         import hashlib
 
@@ -324,10 +387,14 @@ def test_panel_backed_public_run_resume_selection_and_validation_isolation(
         confirmation_seed_pairs=1,
         metrics="none",
         verbose=False,
+        red_zone_depth=6.0,
     )
     baseline = training.train(config, output_dir=tmp_path / "without-panel")
     details = json.loads((baseline.run_dir / "run_details.json").read_text())
     assert details["schemas"] == checkpoints.checkpoint_schemas()
+    # The run's depth reaches its saved config and its content binding.
+    assert details["config"]["red_zone_depth"] == 6.0
+    assert details["content_binding"]["red_zone_depth"] == 6.0
     from marl_battlegrounds.training._compilation import execution_identity
 
     assert details["execution"] == execution_identity()
@@ -409,11 +476,18 @@ def test_panel_backed_public_run_resume_selection_and_validation_isolation(
     for result in results:
         assert result["panel_digest"] == panel.digest
         assert result["score"] == 0.5
+        # Validation tasks record the run's depth: schema 4 (System panel) or 3.
+        assert result["red_zone_depth"] == 6.0
+        assert result["schema_version"] == (4 if system_panel else 3)
         for path in result["pass_paths"]:
             assert path not in pass_paths
             pass_paths.add(path)
             saved = load_results(path, phase="validation")
             assert saved.status == "complete"
+            assert {
+                content["team_deathmatch_red_zone_depth"]
+                for content in saved.metadata["configurations"].values()
+            } == {6.0}
             episode_ids = [
                 int(value)
                 for batch in saved.iter_table("episodes")
@@ -486,6 +560,10 @@ def test_panel_backed_public_run_resume_selection_and_validation_isolation(
             for value in ("actor", ".", "..", "relative/actor")
         ),
         {"pinned_opponent": 3, "pinned_opponent_share": 0.1},
+        *(
+            {"red_zone_depth": value}
+            for value in (-1.0, -0.0, float("nan"), float("inf"), 1e-40, 5, True)
+        ),
     ],
 )
 def test_invalid_config_rejected(change: dict[str, Any]) -> None:
@@ -737,6 +815,54 @@ def test_config_roundtrip_and_unknown_keys() -> None:
         config_from_dict({"typo": 1})
     with pytest.raises(ValueError, match="schema_version"):
         config_from_dict({"schema_version": 2})
+
+
+def test_red_zone_depth_roundtrips_and_saved_configs_without_it_read_zero() -> None:
+    from marl_battlegrounds.training import checkpoints
+
+    assert TrainConfig().red_zone_depth == config_from_dict({}).red_zone_depth == 5.0
+    for depth in (0.0, 6.0, 20.0):
+        config = TrainConfig(red_zone_depth=depth)
+        saved = config_to_dict(config)
+        assert saved["schema_version"] == 1 and saved["red_zone_depth"] == depth
+        assert config_from_dict(json.loads(json.dumps(saved))) == config
+        assert checkpoints._config_red_zone_depth(saved) == depth
+    # JSON has one number type: a hand-written 6 is the depth 6.0.
+    assert config_from_dict({"red_zone_depth": 6}).red_zone_depth == 6.0
+    with pytest.raises(TypeError):
+        config_from_dict({"red_zone_depth": True})
+    with pytest.raises(ValueError, match="finite"):
+        config_from_dict({"red_zone_depth": 10**400})
+    older = {
+        key: value
+        for key, value in config_to_dict(TrainConfig()).items()
+        if key != "red_zone_depth"
+    }
+    # A new run from an older file takes the default; a saved run keeps 0.0.
+    assert config_from_dict(older).red_zone_depth == 5.0
+    saved_older = checkpoints.saved_training_config({"metadata": {"config": older}})
+    assert saved_older["red_zone_depth"] == 0.0
+    assert checkpoints._config_red_zone_depth(older) is None
+
+
+def test_a_depth_wider_than_a_map_is_refused_before_any_file(tmp_path: Path) -> None:
+    from marl_battlegrounds.baselines.ppo import PPOConfig
+    from marl_battlegrounds.training import runner
+
+    config = TrainConfig(
+        num_envs=4,
+        total_env_steps=32,
+        ppo=PPOConfig(rollout_length=4, epochs=1),
+        red_zone_depth=1000.0,
+        validation_opponents=("random",),
+        verbose=False,
+    )
+    output = tmp_path / "run"
+    output.mkdir()
+    # Content preparation checks every map width before a panel is published.
+    with pytest.raises(ValueError, match="map_width"):
+        runner.train(config, output_dir=output)
+    assert not any(output.iterdir())
 
 
 @pytest.mark.parametrize("method", ("mappo", "ippo", "ff_mappo", "ff_ippo"))

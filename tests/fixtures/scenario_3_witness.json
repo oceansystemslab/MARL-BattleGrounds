@@ -1,15 +1,15 @@
 {
-  "description": "Scenario 3 r26, approved r24 setup. User-approved solution verified on GPU with R28 geometry on 2026-09-15. The first five move, select_target and use_ultimate values are declared Team A inputs; the opponent's last five values are expected outputs only. Other fields record the transition or its successor state. Floating values use 1e-5 tolerance; discrete values are exact.",
+  "description": "Scenario 3 r27, approved r27 setup at Red Zone depth 5.0. User-approved solution verified on GPU with R28 geometry on 2026-09-15; the setup was re-verified on GPU (RTX 5090, batch 32) on 2026-09-24. The first five move, select_target and use_ultimate values are declared Team A inputs; the opponent's last five values are expected outputs only. Other fields record the transition or its successor state. Floating values use 1e-5 tolerance; discrete values are exact.",
   "scenario_id": 3,
-  "approved_revision": 24,
-  "source_revision": 26,
-  "semantic_digest": "c5c409e4f64deacc5e54b7c09ee62c59667342138786303b2fc52103a5dc3459",
-  "configuration_digest": "d67b37814456019f8f9c062e07d894e0b6ce1bf84c834c8af7e267aca7096a69",
+  "approved_revision": 27,
+  "source_revision": 27,
+  "semantic_digest": "9d9fe8e94353911ab9fa232784de54767c841fa630aab4e9cb65f931bf5be9bb",
+  "configuration_digest": "faaa0bdf5baae690e67c3d166d3309684be3e9dc93e75b0e44643ae7eaa26568",
   "initial_state_digest": "43bf4bbe5b6f70ff14d85533b9aaec4d626580a55ac6b1cf665e70ded33fea8a",
   "opponent": "tdm-beta",
   "opponent_version": 5,
   "key_schedule": "turn_index",
-  "reference_trace_sha256": "423c196950dd372aa087567042b46484fae548bb110ea621a25bc689a2659aa3",
+  "reference_trace_sha256": "cde8796643fabe0dbd6f3b35e3eb52d371db96618fd6299ffce2b4f2fae183c4",
   "ticks": [
     {
       "tick": 1,

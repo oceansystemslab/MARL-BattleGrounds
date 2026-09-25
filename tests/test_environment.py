@@ -1,7 +1,9 @@
 """Check the public environment against Core trajectories.
 
 The tests cover configuration ownership, metric selection, batched execution
-and episode bookkeeping.
+and episode bookkeeping. make refuses any supplied Red Zone depth, even the
+default 5.0 or 0.0, when an exact env_config owns the rules, and refuses one
+with neither map_id nor env_config.
 """
 
 from collections.abc import Callable
@@ -364,6 +366,22 @@ def test_concrete_reset_rejects_invalid_ids_and_retained_lane_collisions() -> No
             state=state,
             reset_mask=jnp.asarray((True, False)),
         )
+
+
+@pytest.mark.parametrize("red_zone_depth", (5.0, 0.0, 6.0))
+def test_make_refuses_a_supplied_red_zone_depth_without_a_map_or_with_env_config(
+    red_zone_depth: float,
+) -> None:
+    config = _config()
+    # An exact config owns its rules, so even the default value is refused.
+    with pytest.raises(
+        ValueError,
+        match=r"^env_config cannot be combined with map, roster or rule inputs$",
+    ):
+        make("tdm", env_config=config, red_zone_depth=red_zone_depth)
+    with pytest.raises(ValueError, match=r"^roster and rule inputs require map_id$"):
+        make("tdm", red_zone_depth=red_zone_depth)
+    make("tdm", env_config=config)
 
 
 def test_terminal_win_counts_observed_kills_separately_from_initialized_score(

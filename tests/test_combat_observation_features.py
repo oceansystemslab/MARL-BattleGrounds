@@ -192,6 +192,7 @@ def _config(
     return EnvConfig(
         task_mode=0,
         team_deathmatch_score_threshold=0,
+        team_deathmatch_red_zone_depth=0.0,
         max_steps=1000,
         map_width=20.0,
         map_height=12.0,

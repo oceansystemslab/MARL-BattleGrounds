@@ -1,10 +1,11 @@
 {
   "configuration": {
     "schema_id": "marl_battlegrounds.evaluation.resolved_env_config",
-    "schema_version": 1,
-    "canonical_digest_sha256": "f2fc5c57e38356e4f1c9f5e702062746b43573ad9009fa8300156e27d3651a31",
+    "schema_version": 2,
+    "canonical_digest_sha256": "51f3c10066e628e624cc61458cebe90cad2f3e3d49945c4a3c60339183335306",
     "task_mode": 1,
     "team_deathmatch_score_threshold": 20,
+    "team_deathmatch_red_zone_depth": 5.0,
     "maximum_episode_steps": 300,
     "map_width": 20.0,
     "map_height": 10.0,
@@ -12,7 +13,7 @@
       {
         "obstacle_slot": 0,
         "obstacle_type_id": 1,
-        "x": 7.0,
+        "x": 5.375,
         "y": 5.5,
         "radius": 0.75,
         "width": 0.0,
@@ -23,7 +24,7 @@
       {
         "obstacle_slot": 1,
         "obstacle_type_id": 2,
-        "x": 7.0,
+        "x": 5.375,
         "y": 3.0,
         "radius": 0.0,
         "width": 1.0,
@@ -34,7 +35,7 @@
       {
         "obstacle_slot": 2,
         "obstacle_type_id": 1,
-        "x": 9.0,
+        "x": 7.375,
         "y": 2.5,
         "radius": 0.5,
         "width": 0.0,
@@ -45,7 +46,7 @@
       {
         "obstacle_slot": 3,
         "obstacle_type_id": 2,
-        "x": 10.5,
+        "x": 8.875,
         "y": 3.5,
         "radius": 0.0,
         "width": 1.0,
@@ -56,7 +57,7 @@
       {
         "obstacle_slot": 4,
         "obstacle_type_id": 1,
-        "x": 10.0,
+        "x": 8.375,
         "y": 7.0,
         "radius": 0.75,
         "width": 0.0,
@@ -67,7 +68,7 @@
       {
         "obstacle_slot": 5,
         "obstacle_type_id": 1,
-        "x": 14.0,
+        "x": 12.375,
         "y": 4.0,
         "radius": 0.75,
         "width": 0.0,
@@ -549,43 +550,43 @@
     ],
     "agent_positions": [
       [
-        8.0,
+        6.375,
         2.0
       ],
       [
-        16.5,
+        14.875,
         8.5
       ],
       [
-        11.5,
+        9.875,
         2.0
       ],
       [
-        16.5,
+        14.875,
         9.5
       ],
       [
-        10.0,
+        8.375,
         2.0
       ],
       [
-        9.5,
+        7.875,
         5.0
       ],
       [
-        15.5,
+        13.875,
         7.5
       ],
       [
-        17.5,
+        15.875,
         8.5
       ],
       [
-        12.5,
+        10.875,
         2.0
       ],
       [
-        17.5,
+        15.875,
         9.5
       ]
     ],
@@ -820,5 +821,5 @@
     "has_previous_timestep_joint_action": false
   },
   "step_count": 295,
-  "notes": "Scenario 6 — Keep the trap, prepare the ambush\nMage/Hunter/Priest (Team A) versus Mage/Warrior/Rogue (Team B)\n\nTHE CHALLENGE\nTeam A trails 17–19; the first team to reach 20 wins unless both reach it together. Five ticks remain, from step 295 to 300. Team A needs three kills without losing an agent for this SUCCESS. Use the terminal Team A reward: +1 SUCCESS, 0 DRAW, −1 FAIL. A simultaneous threshold tie is a draw. Reaching the winning score on the final tick still counts as SUCCESS.\n\nTeam A starts with Mage at 23 HP, Hunter at 7 HP and Priest at just 1 HP. Team B has Mage at 20 HP, Warrior at 19 HP and Rogue at 20 HP. HP means health points. The 20 × 10 battlefield has two angled walls and four pillars. Other configured classes start dead and receive no decision before the final respawn wave.\n\nTHE TEAM PROBLEM\nAttacking whenever possible is not enough. Hunter must first disable Rogue, then leave it trapped while the team prepares for a newly revealed Warrior. Priest spends every heal on Hunter, not itself. Mage uses cover to become the hidden finisher. The vulnerable-looking Hunter is bait only because its teammates can keep it alive and punish the Charge.\n\nTHE FEW RULES YOU NEED\nA tick is one simultaneous decision. Each agent chooses a move plus a Basic attack/heal, an Ultimate special ability, or no combat. Ultimate replaces Basic. All choices use the same starting information; nobody reacts to another action halfway through the tick. Damage and healing resolve together, so a lethal-sized hit can be survived with a heal committed on that same tick.\n\nHunter's Trap damages and disables its target for later decisions; it does not cancel an attack already accepted on the application tick. Damaging an already trapped enemy releases it for a later decision. Mage's Burst spends a turn preparing stronger future Basic attacks rather than dealing immediate damage. A cooldown counts the wait before an Ultimate is available again.\n\nSharedObs shares current teammate sightings, not hidden enemies or future actions. Cover blocks sight and legal attacks. Bodies obstruct movement, not sight. Movement directions are intentions: obstacles, bodies and Charge can change the actual endpoint, even when an agent chooses Stay. Priest's Basic heal reaches a teammate within distance 3, subject to the current legal-action mask.\n\nTHE OPPONENT\nSelect SharedObs and Reactive TDM ALPHA for Team B. Its deterministic rules are reactive, not a response tape. Warrior approaches the nearest observed enemy and prefers Charge on the lowest-health legal Ultimate target below 40 HP. It does not calculate a guaranteed kill. In the verified tick-4 position, Hunter is its only legal Charge target; Mage and Priest are protected from that choice.\n\nONE VERIFIED WINNING SEQUENCE\nAll actions in a row are chosen together. Dead Team A slots Stay/no-combat. \"No combat\" means holding an attack, unless a status or legal-action mask requires it, as with Hunter's tick-5 stun.\n\nTick | Mage-A | Hunter-A | Priest-A\n1 | Northwest; Burst | Northwest; Trap Rogue-B | Southwest; Basic-heal Hunter-A\n2 | Southeast; Basic Mage-B | Southwest; no combat | Southwest; Basic-heal Hunter-A\n3 | Stay; Basic Rogue-B | Stay; no combat | Stay; Basic-heal Hunter-A\n4 | Stay; no combat | Stay; no combat | Stay; Basic-heal Hunter-A\n5 | Stay; Basic Warrior-B | Stay; no combat while stunned | Stay; Basic-heal Hunter-A\n\nWHY THE CHOICES WORK TOGETHER\nTick 1: Trap prevents Rogue's next Ultimate, but Rogue still lands its already chosen Basic on Hunter. Priest's heal keeps Hunter alive at 3 HP despite Priest itself having only 1 HP. Hunter and Priest move toward cover; Mage prepares Burst and uses its collision-adjusted Northwest position to meet Mage-B's approach. Cover changes future targeting, not an attack already accepted now.\n\nTick 2: At the start of this decision, Warrior-B appears in Team A's shared information; it was unseen by all living allies on tick 1. Mage's Burst-amplified Basic kills Mage-B, while Mage takes the enemy's simultaneous Basic and survives at about 8.05 HP. Mage moves Southeast behind the pillar, Priest moves Southwest to preserve space and cover, and Hunter moves Southwest into the bait position. Hunter deliberately leaves Rogue trapped. Priest raises Hunter to 11 HP.\n\nTick 3: Mage now finishes the still-trapped Rogue. Hunter waits while Priest raises it to 19 HP. Warrior continues approaching; Mage and Priest keep their protected positions. The team has two kills, but needs Warrior as the third.\n\nTick 4: Warrior Charges Hunter. Hunter begins at 19 HP, takes 20 damage, and receives Priest's 8-point heal in the same resolution, surviving at 7 HP. Mage waits in the ambush position. This is coordinated survival, not Priest reacting after seeing the Charge.\n\nTick 5: Mage's amplified Basic kills the arriving Warrior. Hunter is stunned, while Priest heals it again: the heal offsets Warrior's simultaneously accepted Basic, leaving Hunter at 7 HP. The final-wave respawns do not undo earlier kills or the terminal result.\n\nWHAT THIS SCENARIO IS DESIGNED TO TEST\n- Teammate Modeling: commit to exposed bait because a teammate can heal it and another can finish.\n- Opponent Modeling: anticipate Rogue's readying Ultimate and Warrior's legal low-health Charge choice.\n- Crowd Control Prioritization: Trap the immediate Rogue threat and preserve that control until the finishing attack.\n- Basic Healing Target Prioritization: keep healing Hunter despite Priest's own 1 HP.\n- Basic Damage Target Timing: hold Hunter's tick-2 attack; let Mage finish Rogue on tick 3.\n- Ultimate Timing (Burst): spend the opening decision enabling Mage's three later finishing Basics.\n- Tactical Obstacle Exploitation: use cover to deny enemy targets while preserving friendly healing and attacks.\n- Tactical Positioning (Baiting, Ambushing): expose Hunter while sheltering Mage and Priest.\n- Plan Adaptation: respond to Warrior entering shared sight after the opening decision.\n\nMulti-Step Team-Level Planning: preserve Trap until Mage can finish Rogue, heal the exposed Hunter in advance, and complete the ambush when Warrior arrives. This describes the coordinated sequence, not proof that a policy contains an explicit planner.\n\nRESULT AND LIMITS\nThe verified scores after each tick are 17–19, 18–19, 19–19, 19–19, then 20–19. Team A wins at step 300; both terminated and truncated are true, and reward is +1. No Team A agent dies. Mage, Hunter and Priest finish at approximately 8.05, 7 and 1 HP.\n\nTwo matched counterfactuals explain the timing: adding Hunter's Basic on tick 2 breaks Trap and lets Rogue kill Hunter on tick 3; omitting Priest's tick-4 heal lets Charge kill Hunter on tick 4. Both lose with the remaining stated choices held fixed. This does not prove every alternative fails.\n\nThe primary research question is coordinated bait-and-punish with carefully timed crowd control. The listed behaviors describe its ingredients, not independently proven abilities or a learned policy's private reasoning. Use frozen matched ablations to test a proposed mechanism. This is a verified example, not an official suite release, an Elo result, or permission to train or tune on official evaluation scenarios.\n\nCurrent source: scenario_6 r16, preserving r15 physical content. The original score-corrected r10 witness and both interventions are reproduced under ALPHA v2.\n\nLoad the latest saved Scenario 6 explicitly, keep Team A Manual, choose SharedObs, and select Reactive TDM ALPHA for Team B. Reset repeats the loaded snapshot; it does not automatically load a newer saved revision."
+  "notes": "Scenario 6 — Keep the trap, prepare the ambush\nMage/Hunter/Priest (Team A) versus Mage/Warrior/Rogue (Team B)\n\nTHE CHALLENGE\nTeam A trails 17–19; the first team to reach 20 wins unless both reach it together. Five ticks remain, from step 295 to 300. Team A needs three kills without losing an agent for this SUCCESS. Use the terminal Team A reward: +1 SUCCESS, 0 DRAW, −1 FAIL. A simultaneous threshold tie is a draw. Reaching the winning score on the final tick still counts as SUCCESS.\n\nTeam A starts with Mage at 23 HP, Hunter at 7 HP and Priest at just 1 HP. Team B has Mage at 20 HP, Warrior at 19 HP and Rogue at 20 HP. HP means health points. The 20 × 10 battlefield has two angled walls and four pillars. Other configured classes start dead and receive no decision before the final respawn wave.\n\nTHE TEAM PROBLEM\nAttacking whenever possible is not enough. Hunter must first disable Rogue, then leave it trapped while the team prepares for a newly revealed Warrior. Priest spends every heal on Hunter, not itself. Mage uses cover to become the hidden finisher. The vulnerable-looking Hunter is bait only because its teammates can keep it alive and punish the Charge.\n\nTHE FEW RULES YOU NEED\nA tick is one simultaneous decision. Each agent chooses a move plus a Basic attack/heal, an Ultimate special ability, or no combat. Ultimate replaces Basic. All choices use the same starting information; nobody reacts to another action halfway through the tick. Damage and healing resolve together, so a lethal-sized hit can be survived with a heal committed on that same tick.\n\nHunter's Trap damages and disables its target for later decisions; it does not cancel an attack already accepted on the application tick. Damaging an already trapped enemy releases it for a later decision. Mage's Burst spends a turn preparing stronger future Basic attacks rather than dealing immediate damage. A cooldown counts the wait before an Ultimate is available again.\n\nSharedObs shares current teammate sightings, not hidden enemies or future actions. Cover blocks sight and legal attacks. Bodies obstruct movement, not sight. Movement directions are intentions: obstacles, bodies and Charge can change the actual endpoint, even when an agent chooses Stay. Priest's Basic heal reaches a teammate within distance 3, subject to the current legal-action mask.\n\nTHE OPPONENT\nSelect SharedObs and Reactive TDM ALPHA for Team B. Its deterministic rules are reactive, not a response tape. Warrior approaches the nearest observed enemy and prefers Charge on the lowest-health legal Ultimate target below 40 HP. It does not calculate a guaranteed kill. In the verified tick-4 position, Hunter is its only legal Charge target; Mage and Priest are protected from that choice.\n\nONE VERIFIED WINNING SEQUENCE\nAll actions in a row are chosen together. Dead Team A slots Stay/no-combat. \"No combat\" means holding an attack, unless a status or legal-action mask requires it, as with Hunter's tick-5 stun.\n\nTick | Mage-A | Hunter-A | Priest-A\n1 | Northwest; Burst | Northwest; Trap Rogue-B | Southwest; Basic-heal Hunter-A\n2 | Southeast; Basic Mage-B | Southwest; no combat | Southwest; Basic-heal Hunter-A\n3 | Stay; Basic Rogue-B | Stay; no combat | Stay; Basic-heal Hunter-A\n4 | Stay; no combat | Stay; no combat | Stay; Basic-heal Hunter-A\n5 | Stay; Basic Warrior-B | Stay; no combat while stunned | Stay; Basic-heal Hunter-A\n\nWHY THE CHOICES WORK TOGETHER\nTick 1: Trap prevents Rogue's next Ultimate, but Rogue still lands its already chosen Basic on Hunter. Priest's heal keeps Hunter alive at 3 HP despite Priest itself having only 1 HP. Hunter and Priest move toward cover; Mage prepares Burst and uses its collision-adjusted Northwest position to meet Mage-B's approach. Cover changes future targeting, not an attack already accepted now.\n\nTick 2: At the start of this decision, Warrior-B appears in Team A's shared information; it was unseen by all living allies on tick 1. Mage's Burst-amplified Basic kills Mage-B, while Mage takes the enemy's simultaneous Basic and survives at about 8.05 HP. Mage moves Southeast behind the pillar, Priest moves Southwest to preserve space and cover, and Hunter moves Southwest into the bait position. Hunter deliberately leaves Rogue trapped. Priest raises Hunter to 11 HP.\n\nTick 3: Mage now finishes the still-trapped Rogue. Hunter waits while Priest raises it to 19 HP. Warrior continues approaching; Mage and Priest keep their protected positions. The team has two kills, but needs Warrior as the third.\n\nTick 4: Warrior Charges Hunter. Hunter begins at 19 HP, takes 20 damage, and receives Priest's 8-point heal in the same resolution, surviving at 7 HP. Mage waits in the ambush position. This is coordinated survival, not Priest reacting after seeing the Charge.\n\nTick 5: Mage's amplified Basic kills the arriving Warrior. Hunter is stunned, while Priest heals it again: the heal offsets Warrior's simultaneously accepted Basic, leaving Hunter at 7 HP. The final-wave respawns do not undo earlier kills or the terminal result.\n\nWHAT THIS SCENARIO IS DESIGNED TO TEST\n- Teammate Modeling: commit to exposed bait because a teammate can heal it and another can finish.\n- Opponent Modeling: anticipate Rogue's readying Ultimate and Warrior's legal low-health Charge choice.\n- Crowd Control Prioritization: Trap the immediate Rogue threat and preserve that control until the finishing attack.\n- Basic Healing Target Prioritization: keep healing Hunter despite Priest's own 1 HP.\n- Basic Damage Target Timing: hold Hunter's tick-2 attack; let Mage finish Rogue on tick 3.\n- Ultimate Timing (Burst): spend the opening decision enabling Mage's three later finishing Basics.\n- Tactical Obstacle Exploitation: use cover to deny enemy targets while preserving friendly healing and attacks.\n- Tactical Positioning (Baiting, Ambushing): expose Hunter while sheltering Mage and Priest.\n- Plan Adaptation: respond to Warrior entering shared sight after the opening decision.\n\nMulti-Step Team-Level Planning: preserve Trap until Mage can finish Rogue, heal the exposed Hunter in advance, and complete the ambush when Warrior arrives. This describes the coordinated sequence, not proof that a policy contains an explicit planner.\n\nRESULT AND LIMITS\nThe verified scores after each tick are 17–19, 18–19, 19–19, 19–19, then 20–19. Team A wins at step 300; both terminated and truncated are true, and reward is +1. No Team A agent dies. Mage, Hunter and Priest finish at approximately 8.05, 7 and 1 HP.\n\nTwo matched counterfactuals explain the timing: adding Hunter's Basic on tick 2 breaks Trap and lets Rogue kill Hunter on tick 3; omitting Priest's tick-4 heal lets Charge kill Hunter on tick 4. Both lose with the remaining stated choices held fixed. This does not prove every alternative fails.\n\nThe primary research question is coordinated bait-and-punish with carefully timed crowd control. The listed behaviors describe its ingredients, not independently proven abilities or a learned policy's private reasoning. Use frozen matched ablations to test a proposed mechanism. This is a verified example, not an official suite release, an Elo result, or permission to train or tune on official evaluation scenarios.\n\nCurrent source: scenario_6 r17 is r16 (r15 physical content) moved 1.625 map units left so that no player enters a Red Zone at depth 5.0. The original score-corrected r10 witness and both interventions are reproduced under ALPHA v2.\n\nLoad the latest saved Scenario 6 explicitly, keep Team A Manual, choose SharedObs, and select Reactive TDM ALPHA for Team B. Reset repeats the loaded snapshot; it does not automatically load a newer saved revision."
 }

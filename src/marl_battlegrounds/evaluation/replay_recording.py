@@ -22,12 +22,12 @@ import numpy as np
 from marl_battlegrounds.evaluation.replay_capture import ReplayPackets
 
 if TYPE_CHECKING:
-    from marl_battlegrounds.evaluation.models import EvaluationEpisodeContextV3
+    from marl_battlegrounds.evaluation.models import EvaluationEpisodeContextV4
     from marl_battlegrounds.evaluation.replay import RuntimeProvenanceV1
-    from marl_battlegrounds.evaluation.replay_v3 import ReplayArtifactV3
+    from marl_battlegrounds.evaluation.replay_v4 import ReplayArtifactV4
 
 type ContextFactory = Callable[
-    [ReplayPackets], tuple[EvaluationEpisodeContextV3, RuntimeProvenanceV1]
+    [ReplayPackets], tuple[EvaluationEpisodeContextV4, RuntimeProvenanceV1]
 ]
 
 
@@ -60,7 +60,7 @@ def validate_packet_epoch(
 class _Episode:
     """Ordered host packets and an optional owned spool for one episode."""
 
-    context: EvaluationEpisodeContextV3
+    context: EvaluationEpisodeContextV4
     runtime: RuntimeProvenanceV1
     tree: Any  # JAX exposes PyTreeDef as a runtime alias, without a public type stub.
     stream: BinaryIO | None
@@ -224,18 +224,44 @@ class ReplayCollector:
         self,
         packet: ReplayPackets,
         *,
-        context: EvaluationEpisodeContextV3,
+        context: EvaluationEpisodeContextV4,
         runtime: RuntimeProvenanceV1,
         stream: BinaryIO,
         count: int,
     ) -> None:
         """Adopt one already validated replay prefix without calling its factory.
 
-        ``packet`` is its first scalar row and supplies the installed tree layout.
-        ``stream`` must be a caller-owned anonymous binary file at its append end;
-        ``count`` is its positive validated row count. This collector takes stream
-        ownership on success. It rejects duplicate/completed IDs or closed state.
-        The checkpoint reader owns full content, context and order validation.
+        Parameters
+        ----------
+        packet : ReplayPackets
+            The prefix's first scalar row. It supplies the episode ID and the
+            installed tree layout for later rows.
+        context : EvaluationEpisodeContextV4
+            The episode context saved with the checkpoint, adopted as given.
+            This current context records the game's Red Zone depth (0.0 when the
+            rule is off).
+        runtime : RuntimeProvenanceV1
+            The runtime provenance saved with the checkpoint, adopted as given.
+        stream : BinaryIO
+            A caller-owned anonymous binary file at its append end, holding the
+            prefix's rows.
+        count : int
+            The prefix's positive validated row count.
+
+        Raises
+        ------
+        ValueError
+            "cannot restore this replay episode into the collector" when the
+            collector is closed or the episode ID is already open or completed;
+            "an open replay prefix must contain a real transition" when count is
+            below 1.
+
+        Notes
+        -----
+        Host-only. This collector takes stream ownership on success: close
+        releases it with the other unfinished spools. On failure the caller
+        still owns stream. The checkpoint reader owns full content, context and
+        order validation; this method checks only the conditions above.
         """
         episode_id = int(packet.episode_id)
         if (
@@ -368,7 +394,7 @@ class ReplayCollector:
                 )
         return host
 
-    def write(self, packets: ReplayPackets) -> Iterator[ReplayArtifactV3]:
+    def write(self, packets: ReplayPackets) -> Iterator[ReplayArtifactV4]:
         """Consume selected packets and yield each replay as soon as it completes.
 
         Parameters
@@ -379,8 +405,8 @@ class ReplayCollector:
 
         Yields
         ------
-        ReplayArtifactV3
-            One ReplayArtifactV3 per completed selected episode. Consume the iterator
+        ReplayArtifactV4
+            One ReplayArtifactV4 per completed selected episode. Consume the iterator
             fully: transfers, validation and collection occur during iteration.
 
         Raises
@@ -402,7 +428,7 @@ class ReplayCollector:
         It keeps unfinished episodes for later chunks. Completion closes that
         episode's spool; the returned artifact owns its materialized replay data.
         """
-        from marl_battlegrounds.evaluation.replay_v3 import replay_from_packets
+        from marl_battlegrounds.evaluation.replay_v4 import replay_from_packets
 
         host = self.preflight(packets)
         valid = np.asarray(host.valid)

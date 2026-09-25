@@ -160,8 +160,8 @@ class PQNRow(NamedTuple):
 
     Notes
     -----
-    One row is 25,988 bytes with the current encoder: QMIX's compact row
-    without its 919-value physical state. No Team B row, opposite-team
+    One row is 26,008 bytes with the current encoder: QMIX's compact row
+    without its 920-value physical state. No Team B row, opposite-team
     permission, Q value or expanded feature is stored. Padding rows have
     identities -1, neutral-only masks and finite zeros. Layout version:
     ``baselines.pqn.PQN_RECENT_WINDOW_SCHEMA_VERSION``.
@@ -205,7 +205,7 @@ class PQNRecent(NamedTuple):
 
     Notes
     -----
-    4,637,184 bytes plus the size scalar at B=32 and H=4. Only this suffix is
+    4,639,744 bytes plus the size scalar at B=32 and H=4. Only this suffix is
     kept between blocks; the full learning window is rebuilt from it and the
     new block.
     """
@@ -496,7 +496,7 @@ def _expand_minibatch(rows: PQNRow, initial_memory: Array, pqn: PQNConfig) -> PQ
     ``build_team_actor_input`` for Team A, the same builder as live action
     selection. In the "left" frame, flagged rows' views, masks and stored
     world actions are reflected. Rewards are task plus shaping. Returns float32
-    (C,D,5,5164) features among the PQNBatch leaves: 27,265,920 bytes for
+    (C,D,5,5165) features among the PQNBatch leaves: 27,271,200 bytes for
     C=132 and D=2. Pure JAX.
     """
     steps, games = rows.valid.shape
@@ -655,7 +655,7 @@ def init_pqn_learner(
     Notes
     -----
     Host setup: content checks, network initialization, reset and the kept
-    rows (4,637,184 bytes at B=32, H=4). No actor decision, collection,
+    rows (4,639,744 bytes at B=32, H=4). No actor decision, collection,
     optimizer step, writer or file write happens; the caller makes every real
     collection call, starting with the initial random chunks.
     """
@@ -1085,7 +1085,7 @@ def learn_window(
     Notes
     -----
     Uses :func:`run_epochs`. Only each minibatch's selected games are
-    expanded to network inputs (27,265,920 bytes at the defaults), never the
+    expanded to network inputs (27,271,200 bytes at the defaults), never the
     whole window. Pure JAX.
     """
     start = memory[0]

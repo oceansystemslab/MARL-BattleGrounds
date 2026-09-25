@@ -2,7 +2,13 @@
  * @file Check exact Python presentation shapes, immutable normalization, authority
  * joins and rejection of forged or inconsistent data. A live transport join keeps
  * the BETA (scenario_5) and GAMMA (tdm_gamma) controllers for either team under
- * SharedObs and rejects them under NoSharedObs.
+ * SharedObs and rejects them under NoSharedObs. Red Zone scene records: every
+ * Python-sealed presentation with an AuthorizedMapV2 (replay V4 games at depth 5 and
+ * resealed live Oracle maps, including a null red_zone) normalizes with its exact
+ * strips, and the shared numeric contract table from Python accepts exactly the rows
+ * Python accepts: accepted rows pass the schema and Red Zone checks (only the
+ * unchanged endpoint seal then fails), refused rows stop at the schema or the Red
+ * Zone check.
  */
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
@@ -2322,7 +2328,7 @@ test("every coherent raw identity tuple mismatch is a retryable race before endp
   assert.equal(readCount(), 0, "replay_oracle: choreography generation");
 
   const wrongReplaySchema = clone(replayOracle.transport);
-  wrongReplaySchema.artifact_summary.replay_reference.replay_schema_version = 4;
+  wrongReplaySchema.artifact_summary.replay_reference.replay_schema_version = 5;
   await assertProtocolPoisonBeforeEndpoint(
     replayOracle,
     wrongReplaySchema,
@@ -2775,4 +2781,63 @@ test("presentation unavailable error accepts only the exact 422 payload root", (
   ]) {
     assert.throws(() => normalizePresentationApiErrorV1(poisoned), TypeError);
   }
+});
+
+test("Python-sealed Red Zone presentations normalize with their exact strips", async () => {
+  const names = Object.keys(fixture.red_zone_cases).sort();
+  assert.ok(names.includes("replay_oracle_depth_5"));
+  assert.ok(names.includes("live_oracle_depth_0"));
+  for (const name of names) {
+    const source = fixture.red_zone_cases[name];
+    const normalized = await normalizeAuthorizedPresentationFrameV1(source);
+    const sourceMap = presentationScene(source).map;
+    assert.equal(sourceMap.map_version, 2, name);
+    assert.deepEqual(normalized.scene.map, sourceMap, name);
+    assertRecursivelyFrozen(normalized.scene.map);
+    if (name.startsWith("replay_oracle")) {
+      assert.equal(normalized.source.source_replay_schema_version, 4, name);
+    }
+  }
+  assert.equal(
+    presentationScene(fixture.red_zone_cases.live_oracle_depth_0).map.red_zone,
+    null,
+  );
+});
+
+test("the shared Red Zone contract table accepts exactly Python's rows", async () => {
+  const base = fixture.red_zone_cases.live_oracle_depth_6;
+  const baseMap = presentationScene(base).map;
+  const digestMismatch = /Authorized endpoint digest does not match/u;
+  let accepted = 0;
+  for (const row of fixture.red_zone_contract_cases) {
+    const candidate = clone(base);
+    presentationScene(candidate).map = {
+      width: row.width,
+      height: baseMap.height,
+      obstacles: clone(baseMap.obstacles),
+      map_version: 2,
+      red_zone: clone(row.red_zone),
+    };
+    await assert.rejects(
+      normalizeAuthorizedPresentationFrameV1(candidate),
+      (/** @type {unknown} */ error) => {
+        assert.ok(error instanceof TypeError, row.label);
+        if (row.accepted) {
+          // Every schema and Red Zone check passed; only the original seal no
+          // longer matches the changed map.
+          assert.match(error.message, digestMismatch, row.label);
+        } else {
+          assert.doesNotMatch(error.message, digestMismatch, row.label);
+          assert.match(
+            error.message,
+            /Red Zone|does not match any allowed strict variant/u,
+            row.label,
+          );
+        }
+        return true;
+      },
+    );
+    if (row.accepted) accepted += 1;
+  }
+  assert.ok(accepted > 0 && accepted < fixture.red_zone_contract_cases.length);
 });

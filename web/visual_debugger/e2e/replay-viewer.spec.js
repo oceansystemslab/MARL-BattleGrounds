@@ -1,8 +1,12 @@
 /**
  * @file Exercise artifact loading, replay endpoints, playback controls, reconnect
- * boundaries and exported views in a real browser. Exit must flush its replay
- * response and end the server with exit code 0 and no signal, checked strictly by
- * expectServerShutdown.
+ * boundaries and exported views in a real browser. Exported PNGs carry version 2
+ * provenance, which records all 20 visual filters, and Default Configuration
+ * restores the eleven default filters with Ranges off. Metric checks use scalar
+ * schema 15 (11,192 measurements in 28 topics and 44 tables); a historical
+ * recording shows every Red Zone row as a dash explaining that the rule was not
+ * recorded. Exit must flush its replay response and end the server with exit
+ * code 0 and no signal, checked strictly by expectServerShutdown.
  */
 import { createHash } from "node:crypto";
 import { readFileSync } from "node:fs";
@@ -54,6 +58,7 @@ const EXPECTED_METRIC_TOPICS = Object.freeze([
   ["controlled_kills", "Kills of Enemies With Harmful Effects"],
   ["deaths", "Deaths and Time Dead"],
   ["respawn", "Respawning"],
+  ["red_zone", "Red Zone"],
   ["coordination", "Team Coordination"],
   ["formation", "Team Formation"],
   ["aura_coverage", "Aura Coverage"],
@@ -763,7 +768,7 @@ function expectedReplayPngProvenance(snapshot) {
       };
   return {
     schema_id: "marl_battlegrounds.replay_battlefield_png_provenance",
-    schema_version: 1,
+    schema_version: 2,
     product_kind: "replay_viewer",
     presentation_kind: presentation.presentation_kind,
     authority,
@@ -2055,8 +2060,8 @@ test("SharedObs TDM metrics and numeric identities remain visible across POV cha
     const catalogResult = await catalogResponse;
     expect(catalogResult.status()).toBe(200);
     const catalog = await catalogLoaded;
-    expect(catalog.metric_schema_version).toBe(14);
-    expect(catalog.measurements).toHaveLength(11148);
+    expect(catalog.metric_schema_version).toBe(15);
+    expect(catalog.measurements).toHaveLength(11192);
     expect(
       catalog.measurements.some((/** @type {Record<string, any>} */ row) =>
         /^agent_\d_return$/u.test(row.name),
@@ -2213,9 +2218,32 @@ test("SharedObs TDM metrics and numeric identities remain visible across POV cha
           renderedTables += 1;
         }
       }
-      expect(renderedTables).toBe(43);
+      expect(renderedTables).toBe(44);
     }
     expect(requests).toHaveLength(initialRequests);
+    // This historical recording has no Red Zone rule: every Red Zone row is a
+    // dash that says why, never an invented zero.
+    await selectMetricTable(page, "red_zone");
+    await expect(page.locator("#metric-description")).toContainText(
+      "0 of 24 measurements available.",
+    );
+    const redZoneValues = page.locator("#metric-rows tr[data-metric] .metric-value");
+    await expect(redZoneValues).toHaveCount(24);
+    for (const value of await redZoneValues.all()) {
+      await expect(value).toHaveText("—");
+      await expect(value).toHaveAttribute(
+        "aria-label",
+        /Red Zone rule was not recorded/u,
+      );
+    }
+    await page
+      .locator('#metric-rows [data-metric="team_a_red_zone_kills"] .metric-measure')
+      .focus();
+    await expect(page.locator("#visual-tooltip")).toContainText("Blank When");
+    await expect(page.locator("#visual-tooltip")).toContainText(
+      "Red Zone rule was not recorded",
+    );
+    await page.keyboard.press("Escape");
     await selectMetricTable(page, "abilities");
     for (const team of ["a", "b"]) {
       for (const ability of ["basic", "ultimate"]) {
@@ -3177,6 +3205,9 @@ test("SharedObs TDM metrics and numeric identities remain visible across POV cha
       true,
     );
     await expect(page.locator("#visual-filter-death-announcer")).toBeChecked();
+    await expect(page.locator("#visual-filter-cooldown-effects")).toBeChecked();
+    await expect(page.locator("#visual-filter-red-zone-floors")).toBeChecked();
+    await expect(page.locator("#visual-filter-count")).toHaveText("11 enabled");
     await expect(page.locator("#replay-ranges-button")).toHaveAttribute(
       "aria-pressed",
       "false",
@@ -3714,7 +3745,7 @@ test("TDM scores and offline metric exports follow the cursor across POV changes
       );
       if (heldCsv !== null) await page.locator("#evaluation-metrics > summary").click();
       expect(download.suggestedFilename()).toBe(
-        `tdm-metrics__episode-episode-001__schema-14__${scope}__frame-${frameIndex}.csv`,
+        `tdm-metrics__episode-episode-001__schema-15__${scope}__frame-${frameIndex}.csv`,
       );
       const path = await download.path();
       if (path === null) throw new Error("Metric CSV has no local path.");
@@ -3728,7 +3759,7 @@ test("TDM scores and offline metric exports follow the cursor across POV changes
       const cells = rows[0].split(",");
       expect(names).toContain("agent_9_class_id");
       // Replay exports retain their 49 replay/agent identity fields. The run
-      // writer's separate CSV uses 30; both expose the same 11,148 measurements.
+      // writer's separate CSV uses 30; both expose the same 11,192 measurements.
       const replayIdentity = [
         "episode_id",
         "scope",
@@ -3746,9 +3777,9 @@ test("TDM scores and offline metric exports follow the cursor across POV changes
         ).flat(),
       ];
       expect(names.slice(0, 49)).toEqual(replayIdentity);
-      expect(names.slice(49)).toHaveLength(11148);
-      expect(new Set(names).size).toBe(11197);
-      expect(cells[names.indexOf("metric_schema_version")]).toBe("14");
+      expect(names.slice(49)).toHaveLength(11192);
+      expect(new Set(names).size).toBe(11241);
+      expect(cells[names.indexOf("metric_schema_version")]).toBe("15");
       expect(names.some((name) => /^agent_\d_return$/u.test(name))).toBe(false);
       const selectedTopic = await page.locator("#metric-selection").inputValue();
       const selectedView = await page.locator("#metric-view").inputValue();
@@ -3777,7 +3808,7 @@ test("TDM scores and offline metric exports follow the cursor across POV changes
           checkedTables += 1;
         }
       }
-      expect(checkedTables).toBe(43);
+      expect(checkedTables).toBe(44);
       await selectMetricTable(page, selectedTopic, selectedView);
 
       expect(new Set(rows.map((row) => row.split(",").slice(1, 3).join(",")))).toEqual(

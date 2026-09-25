@@ -1,4 +1,13 @@
-"""Check the deterministic bundled sample replays."""
+"""Check the deterministic bundled sample replays.
+
+Fresh samples are current records: manifest schema 3 holds complete version-4
+replays (context V4 with resolved config V2, frame V3 with a 20th context
+column). These debugger scenes are neutral, so the recorded Red Zone depth and
+column 19 are 0.0. The V2 config is also the layout identity, so every
+identifier derived from it is new. Apart from that renaming and the named
+schema changes, fresh samples equal the bundled historical samples: the same
+transitions, completion, frames and summary statistics.
+"""
 
 from __future__ import annotations
 
@@ -11,11 +20,12 @@ import sys
 from collections.abc import Callable
 from dataclasses import replace
 from pathlib import Path
-from typing import cast
+from typing import Any, cast
 
 import pytest
 import scripts.dev.generate_visual_debugger_sample_replays as generator_module
 import scripts.dev.visual_debugger.sample_replays as sample_replays_module
+from pydantic import BaseModel
 from scripts.dev.generate_visual_debugger_sample_replays import (
     generate_sample_replays,
     verify_sample_replays,
@@ -35,7 +45,11 @@ from scripts.dev.visual_debugger.sample_replays import (
 
 import marl_battlegrounds.evaluation.replay_io as replay_io_module
 from marl_battlegrounds.evaluation.analysis import analyze_replay
-from marl_battlegrounds.evaluation.models import CodeRevisionV1, CodeRevisionV2
+from marl_battlegrounds.evaluation.models import (
+    CodeRevisionV1,
+    CodeRevisionV2,
+    canonical_digest_sha256,
+)
 from marl_battlegrounds.evaluation.replay import ReplayArtifactV1, RuntimeProvenanceV1
 
 _REPOSITORY_ROOT = Path(__file__).resolve().parents[1]
@@ -88,7 +102,7 @@ output_directory = Path(sys.argv[2])
 manifest, _rows = read_sample_replay_manifest(historical_directory)
 provenance = manifest["demo_provenance"]
 code_payload = dict(provenance["code_revision"])
-if manifest["schema_version"] == 2:
+if manifest["schema_version"] != 1:
     if code_payload.pop("schema_version") != 2:
         raise SystemExit("current source schema marker is invalid")
 runtime_payload = provenance["runtime_provenance"]
@@ -355,7 +369,7 @@ def test_real_generator_is_byte_stable_and_publicly_reloadable(
         loaded = load_verified_sample_replay(sample.name, directory=first)
         assert loaded.status == "not_recorded"
         assert loaded.metric_report_artifact is None
-        assert loaded.replay.schema_version == 3
+        assert loaded.replay.schema_version == 4
         assert loaded.replay.completion.completion_state == "complete"
         assert len(loaded.replay.transitions) > 0
         assert len(loaded.replay.frames) == len(loaded.replay.transitions) + 1
@@ -393,6 +407,31 @@ def test_fresh_samples_use_exact_researcher_geometry_and_event_union(
     assert observed_event_kinds == _PRE_M7_EVENT_KIND_UNION
 
 
+def _rename(value: object, renamed: dict[str, str]) -> object:
+    # Replace each old identifier with its new one inside dumped records.
+    if isinstance(value, dict):
+        return {
+            key: _rename(item, renamed)
+            for key, item in cast(dict[str, object], value).items()
+        }
+    if isinstance(value, tuple | list):
+        items = cast(tuple[object, ...], value)
+        return tuple(_rename(item, renamed) for item in items)
+    if isinstance(value, str):
+        for old, new in renamed.items():
+            value = value.replace(old, new)
+    return value
+
+
+def _renamed(
+    record: BaseModel | dict[str, Any], renamed: dict[str, str]
+) -> dict[str, Any]:
+    dumped = (
+        record.model_dump(mode="python") if isinstance(record, BaseModel) else record
+    )
+    return cast(dict[str, Any], _rename(dumped, renamed))
+
+
 def test_checked_samples_match_fresh_cpu_generation_scientific_truth(
     tmp_path: Path,
 ) -> None:
@@ -405,8 +444,8 @@ def test_checked_samples_match_fresh_cpu_generation_scientific_truth(
         historical_provenance_directory=SAMPLE_REPLAY_DIRECTORY,
     )
     fresh_manifest = verify_sample_replays(fresh)
-    assert fresh_manifest["schema_version"] == 2
-    assert fresh_manifest["generator_id"] == "visual-debugger-sample-replays-v2"
+    assert fresh_manifest["schema_version"] == 3
+    assert fresh_manifest["generator_id"] == "visual-debugger-sample-replays-v3"
     assert len(_file_bytes_by_name(fresh)) == 4
     for sample in SAMPLE_REPLAYS:
         historical = load_verified_sample_replay(sample.name)
@@ -415,25 +454,66 @@ def test_checked_samples_match_fresh_cpu_generation_scientific_truth(
         assert historical.metric_report_artifact is not None
         assert historical.metric_report_artifact.report.statistics == ()
         assert current.metric_report_artifact is None
-        assert current.replay.schema_version == 3
-        assert current.replay.transitions == historical.replay.transitions
-        assert current.replay.completion == historical.replay.completion
+        assert current.replay.schema_version == 4
 
         old_context = historical.replay.header.context.model_dump(mode="python")
         expected_context = historical.replay.header.context.model_dump(mode="python")
-        expected_context["schema_version"] = 3
+        # The resolved config becomes V2 at depth 0.0 and is the layout identity.
+        resolved = expected_context["resolved_env_config"]
+        resolved.update(schema_version=2, team_deathmatch_red_zone_depth=0.0)
+        resolved["canonical_digest_sha256"] = canonical_digest_sha256(
+            resolved, exclude={"canonical_digest_sha256"}
+        )
+        old_identity = historical.replay.header.context.identity
+        new_identity = current.replay.header.context.identity
+        assert (
+            old_identity.layout.canonical_digest
+            == (old_context["resolved_env_config"]["canonical_digest_sha256"])
+        )
+        assert (
+            new_identity.layout.canonical_digest
+            == (resolved["canonical_digest_sha256"])
+        )
+        renamed = {
+            old.rsplit(":", 1)[-1]: new.rsplit(":", 1)[-1]
+            for old, new in (
+                (
+                    old_identity.layout.canonical_digest,
+                    new_identity.layout.canonical_digest,
+                ),
+                (old_identity.episode_id, new_identity.episode_id),
+                (old_identity.evaluation_id, new_identity.evaluation_id),
+                (old_identity.matchup_id, new_identity.matchup_id),
+            )
+        }
+        assert all(old != new for old, new in renamed.items())
+        assert _renamed(historical.replay.completion, renamed) == (
+            current.replay.completion.model_dump(mode="python")
+        )
+        assert tuple(
+            _renamed(transition, renamed)
+            for transition in historical.replay.transitions
+        ) == tuple(
+            transition.model_dump(mode="python")
+            for transition in current.replay.transitions
+        )
+        expected_context = _renamed(expected_context, renamed)
+        expected_context["resolved_env_config"] = resolved
+        expected_context["schema_version"] = 4
         expected_context["scenario_name"] = sample.source_scenario
-        expected_context["actor_projection"]["version"] = 3
+        expected_context["actor_projection"]["version"] = 4
         for binding in expected_context["schema_versions"]:
             if binding["schema_id"].endswith("episode_context"):
-                binding["schema_version"] = 3
+                binding["schema_version"] = 4
             elif binding["schema_id"].endswith(".frame"):
+                binding["schema_version"] = 3
+            elif binding["schema_id"].endswith("resolved_env_config"):
                 binding["schema_version"] = 2
         for assignment in expected_context["policy_assignments"]:
             if assignment["assignment_status"] == "assigned":
                 assignment["callable_name"] = None
                 assignment["lifecycle"] = "frozen"
-                assignment["preprocessing"]["version"] = 3
+                assignment["preprocessing"]["version"] = 4
         assert (
             current.replay.header.context.model_dump(mode="python") == expected_context
         )
@@ -441,9 +521,13 @@ def test_checked_samples_match_fresh_cpu_generation_scientific_truth(
         for old_frame, new_frame in zip(
             historical.replay.frames, current.replay.frames, strict=True
         ):
-            expected_frame = old_frame.model_dump(mode="python")
-            expected_frame["schema_version"] = 2
+            expected_frame = _renamed(old_frame, renamed)
+            expected_frame["schema_version"] = 3
             observation = expected_frame["base_observation"]
+            # Column 19 is the Red Zone depth, 0.0 in these neutral scenes.
+            observation["context_features"] = tuple(
+                (*row, 0.0) for row in observation["context_features"]
+            )
             observation["self_ally_index"] = tuple(
                 row.team_local_slot if row.configured_active else 0
                 for row in historical.replay.header.context.roster
@@ -1434,7 +1518,7 @@ def test_current_sample_rejects_rehashed_event_fact_disagreement(
         canonical_digest_sha256,
         canonical_json_bytes,
     )
-    from marl_battlegrounds.evaluation.replay_v3 import ReplayArtifactV3
+    from marl_battlegrounds.evaluation.replay_v4 import ReplayArtifactV4
 
     first, _second = generated_sample_directories
     copied = tmp_path / "event-disagreement"
@@ -1457,7 +1541,7 @@ def test_current_sample_rejects_rehashed_event_fact_disagreement(
     payload["canonical_digest_sha256"] = canonical_digest_sha256(
         payload, exclude={"canonical_digest_sha256"}
     )
-    forged = ReplayArtifactV3.model_validate(payload)
+    forged = ReplayArtifactV4.model_validate(payload)
     raw = canonical_json_bytes(forged)
     sample.replay_path(copied).write_bytes(raw)
     manifest = _manifest_object(copied)
@@ -1496,7 +1580,7 @@ def test_current_sample_rejects_rehashed_root_seed_disagreement(
         canonical_digest_sha256,
         canonical_json_bytes,
     )
-    from marl_battlegrounds.evaluation.replay_v3 import ReplayArtifactV3
+    from marl_battlegrounds.evaluation.replay_v4 import ReplayArtifactV4
 
     first, _second = generated_sample_directories
     copied = tmp_path / "seed-disagreement"
@@ -1518,7 +1602,7 @@ def test_current_sample_rejects_rehashed_root_seed_disagreement(
     payload["canonical_digest_sha256"] = canonical_digest_sha256(
         payload, exclude={"canonical_digest_sha256"}
     )
-    forged = ReplayArtifactV3.model_validate(payload)
+    forged = ReplayArtifactV4.model_validate(payload)
     raw = canonical_json_bytes(forged)
     sample.replay_path(copied).write_bytes(raw)
     manifest = _manifest_object(copied)
@@ -1542,7 +1626,7 @@ def test_current_sample_rejects_rehashed_completion_reason(
         canonical_digest_sha256,
         canonical_json_bytes,
     )
-    from marl_battlegrounds.evaluation.replay_v3 import ReplayArtifactV3
+    from marl_battlegrounds.evaluation.replay_v4 import ReplayArtifactV4
 
     first, _second = generated_sample_directories
     copied = tmp_path / "completion-disagreement"
@@ -1594,7 +1678,7 @@ def test_current_sample_rejects_rehashed_completion_reason(
     payload["canonical_digest_sha256"] = canonical_digest_sha256(
         payload, exclude={"canonical_digest_sha256"}
     )
-    forged = ReplayArtifactV3.model_validate(payload)
+    forged = ReplayArtifactV4.model_validate(payload)
     raw = canonical_json_bytes(forged)
     sample.replay_path(copied).write_bytes(raw)
     member = cast(dict[str, object], row["replay"])

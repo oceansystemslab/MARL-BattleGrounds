@@ -8,15 +8,20 @@ These helpers do not run the simulator or perform HTTP, file, JAX, or NumPy
 work. Callers own authorization and the outer session/epoch envelope. Oracle
 outgoing action anchors come from the displayed scene, never a future frame.
 Spatial values use world units, health uses hit points, and durations use
-transition ticks unless a field states otherwise. Class docstrings also feed
-Pydantic schema descriptions; the compact browser schema strips that prose.
+transition ticks unless a field states otherwise. Scenes from recordings that
+record the Team Deathmatch Red Zone rule carry AuthorizedMapV2, whose
+AuthorizedRedZoneV1 row holds each team's exact float32 strip;
+build_authorized_map_v2 builds it for the Oracle and Agent POV scenes alike.
+Class docstrings also feed Pydantic schema descriptions; the compact browser
+schema strips that prose.
 """
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from dataclasses import dataclass, fields, is_dataclass, replace
 from hashlib import sha256
-from math import isclose, isfinite
+from math import copysign, isclose, isfinite
 from struct import pack, unpack
 from typing import Annotated, ClassVar, Literal, cast
 
@@ -24,10 +29,15 @@ from pydantic import BaseModel, ConfigDict, Field, TypeAdapter
 from pydantic_core import PydanticSerializationError
 
 from marl_battlegrounds.evaluation.models import (
+    FLOAT32_SMALLEST_NORMAL,
     EvaluationEpisodeContext,
     EvaluationTransitionV1,
+    ResolvedEnvConfigV2,
     StaticMechanicsCatalogV1,
     evaluation_context_type,
+    float32_value,
+    red_zone_team_on_right,
+    red_zone_x_range,
 )
 from marl_battlegrounds.evaluation.wire_shapes import (
     NUM_MOVE_ACTIONS_V1,
@@ -639,6 +649,231 @@ class AuthorizedMapV1:
         obstacle_ids = tuple(row.obstacle_id for row in self.obstacles)
         if len(obstacle_ids) != len(set(obstacle_ids)):
             raise ValueError("authorized obstacle IDs must be unique.")
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class AuthorizedRedZoneV1:
+    """Store both teams' recorded Red Zone strips on one map.
+    Each team's Red Zone is a full-height strip at its own spawn side. When an
+    agent dies with its centre inside its own team's strip, the enemy team gets
+    2 points instead of 1. Values are float32 numbers exactly as Core scores
+    with them. This row checks only types and shapes; AuthorizedMapV2 checks
+    the numbers against its map width.
+    All constructor fields are required keyword arguments; instances are frozen.
+    Attributes
+    ----------
+    depth : float
+        Strip depth in map units: the float32 value of the configured depth.
+    team_a_x_range : tuple[float, float]
+        Team A strip as inclusive (x_min, x_max) world x bounds: (0.0, depth)
+        on the left, or (float32(width - depth), float32 width) on the right.
+        The strip covers the full map height. A collapsed range (x_min equal to
+        x_max) is legal.
+    team_b_x_range : tuple[float, float]
+        Team B strip, with the same meaning and rules as team_a_x_range.
+    Raises
+    ------
+    ValueError
+        The depth is not a finite Python float, or a range is not a tuple of
+        two finite Python floats.
+    """
+
+    __pydantic_config__: ClassVar[ConfigDict] = _STRICT_WIRE_DATACLASS_CONFIG
+    """Strict Pydantic wire settings: forbid extra fields, nonfinite numbers, and
+    coercion."""
+
+    depth: float
+    """Strip depth in map units: the float32 value of the configured depth."""
+    team_a_x_range: tuple[float, float]
+    """Team A strip as inclusive (x_min, x_max) world x bounds, full map height."""
+    team_b_x_range: tuple[float, float]
+    """Team B strip as inclusive (x_min, x_max) world x bounds, full map height."""
+
+    def __post_init__(self) -> None:
+        """Validate this row after construction.
+        The depth is a finite Python float and each range is a tuple of two
+        finite Python floats. Width-dependent rules live in AuthorizedMapV2.
+        Raises
+        ------
+        ValueError
+            A required type or value is invalid.
+        """
+        _require_finite(self.depth, name="red zone depth")
+        _require_point(self.team_a_x_range, name="team_a_x_range")
+        _require_point(self.team_b_x_range, name="team_b_x_range")
+
+
+def _validate_authorized_red_zone(
+    map_width: float,
+    red_zone: AuthorizedRedZoneV1,
+) -> None:
+    """Check that recorded strips are exactly the strips Core scores with.
+    Use the same float32 numbers as Core and the browser check
+    (validateAuthorizedRedZone). With w32 the float32 map width, the depth must
+    be exactly a float32 value, at least the smallest normal float32 (2**-126)
+    and at most w32. The only permitted ranges are the left strip (0.0, depth)
+    and the right strip (float32(w32 - depth), w32), built by
+    models.red_zone_x_range. Each team's range must equal one of them exactly;
+    both teams on one side is legal, and a collapsed range is legal. Display
+    clipping belongs to the renderer and never changes this record.
+    Parameters
+    ----------
+    map_width : float
+        Recorded map width in world units; only its float32 value is used.
+    red_zone : AuthorizedRedZoneV1
+        Row whose types were already checked by its constructor.
+    Returns
+    -------
+    None
+        The strips are the exact scoring strips for this width and depth.
+    Raises
+    ------
+    ValueError
+        The depth is not a float32 value, is below the smallest normal float32
+        or above w32, or a range is not one of the two permitted strips (for
+        example (0, 1) and (19, 20) at width 20 and depth 5).
+    """
+    depth = red_zone.depth
+    if float32_value(depth) != depth:
+        raise ValueError("red zone depth must be an exact float32 value.")
+    if depth < FLOAT32_SMALLEST_NORMAL or depth > float32_value(map_width):
+        raise ValueError(
+            "red zone depth must be a normal float32 value no larger than the map "
+            "width."
+        )
+    permitted = (
+        red_zone_x_range(map_width, depth, False),
+        red_zone_x_range(map_width, depth, True),
+    )
+    for name, x_range in (
+        ("team_a_x_range", red_zone.team_a_x_range),
+        ("team_b_x_range", red_zone.team_b_x_range),
+    ):
+        if x_range not in permitted:
+            raise ValueError(f"{name} must be one team's exact Red Zone strip.")
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class AuthorizedMapV2(AuthorizedMapV1):
+    """Store map bounds, obstacles and the recorded Red Zone strips.
+    Used for recordings that record the Red Zone rule (resolved config V2,
+    20-column context). Inherits AuthorizedMapV1's width, height and obstacle
+    rules. A separate version, so older scenes keep AuthorizedMapV1 unchanged.
+    All constructor fields are required keyword arguments; instances are frozen.
+    Attributes
+    ----------
+    map_version : Literal[2]
+        Exact integer 2; tells this record apart from AuthorizedMapV1.
+    red_zone : AuthorizedRedZoneV1 | None
+        Both teams' strips, or None when the rule is recorded with depth 0
+        (one point per death). Required; there is no default.
+    Raises
+    ------
+    ValueError
+        An inherited map rule fails, map_version is not the integer 2, red_zone
+        is not an exact AuthorizedRedZoneV1 or None, or its numbers break the
+        rules in _validate_authorized_red_zone.
+    Notes
+    -----
+    The strips use float32 numbers exactly as Core scores, so an Oracle scene
+    (raw config width) and an Agent POV scene (float32 context width) record
+    the same strips.
+    """
+
+    map_version: Literal[2]
+    """Exact integer 2; tells this record apart from AuthorizedMapV1."""
+    red_zone: AuthorizedRedZoneV1 | None
+    """Both teams' strips, or None when the rule is recorded with depth 0."""
+
+    def __post_init__(self) -> None:
+        """Validate this row after construction.
+        Apply the inherited map checks, then the version and Red Zone checks.
+        Raises
+        ------
+        ValueError
+            A required type, value, identity, or relationship is invalid.
+        """
+        super(AuthorizedMapV2, self).__post_init__()
+        if type(self.map_version) is not int or self.map_version != 2:
+            raise ValueError("map_version must be the exact integer 2.")
+        if self.red_zone is None:
+            return
+        if type(self.red_zone) is not AuthorizedRedZoneV1:
+            raise ValueError("red_zone must be the exact AuthorizedRedZoneV1 row.")
+        _validate_authorized_red_zone(self.width, self.red_zone)
+
+
+type AuthorizedMap = AuthorizedMapV1 | AuthorizedMapV2
+
+
+def build_authorized_map_v2(
+    base: AuthorizedMapV1,
+    *,
+    red_zone_depth: float,
+    team_spawn_pad_x: Sequence[Sequence[float]],
+) -> AuthorizedMapV2:
+    """Add the recorded Red Zone strips to an authorized V1 map.
+    Keep the base map's width, height and obstacles. Decide each team's side
+    with models.red_zone_team_on_right (the exact host copy of Core's side
+    rule: right when the mean pad x is past the centre) and build each strip
+    with models.red_zone_x_range, both on the float32 width.
+    Parameters
+    ----------
+    base : AuthorizedMapV1
+        Exact V1 map from the calling module's own map conversion.
+    red_zone_depth : float
+        Recorded depth in map units: a resolved config's depth or a
+        recipient's context column 19. 0.0 gives red_zone=None; a positive
+        value is stored as its float32 value.
+    team_spawn_pad_x : Sequence[Sequence[float]]
+        Pad x values shaped (2, 5): Team A's five pads, then Team B's five, in
+        any order within a team and including unused pads.
+    Returns
+    -------
+    AuthorizedMapV2
+        New map record with map_version 2.
+    Raises
+    ------
+    TypeError
+        base is not an exact AuthorizedMapV1.
+    ValueError
+        The depth is not a finite nonnegative float, a positive depth is not a
+        normal float32 value at most the float32 width, or the pads do not have
+        shape (2, 5).
+    """
+    if type(base) is not AuthorizedMapV1:
+        raise TypeError("base must be the exact AuthorizedMapV1 row.")
+    if (
+        type(red_zone_depth) is not float
+        or not isfinite(red_zone_depth)
+        or copysign(1.0, red_zone_depth) < 0.0
+    ):
+        raise ValueError("red_zone_depth must be a finite nonnegative float.")
+    if len(team_spawn_pad_x) != 2 or any(len(team) != 5 for team in team_spawn_pad_x):
+        raise ValueError("team_spawn_pad_x must have shape (2, 5).")
+    red_zone: AuthorizedRedZoneV1 | None = None
+    if red_zone_depth != 0.0:
+        depth = float32_value(red_zone_depth)
+        team_a_range, team_b_range = (
+            red_zone_x_range(
+                base.width,
+                depth,
+                red_zone_team_on_right(base.width, team_pads),
+            )
+            for team_pads in team_spawn_pad_x
+        )
+        red_zone = AuthorizedRedZoneV1(
+            depth=depth,
+            team_a_x_range=team_a_range,
+            team_b_x_range=team_b_range,
+        )
+    return AuthorizedMapV2(
+        width=base.width,
+        height=base.height,
+        obstacles=base.obstacles,
+        map_version=2,
+        red_zone=red_zone,
+    )
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
@@ -2236,8 +2471,10 @@ class AuthorizedBattlefieldSceneV1:
     ----------
     schema_version : Literal[1]
         Wire version discriminator; this model requires 1.
-    map : AuthorizedMapV1
-        Finite map bounds and ordered static obstacles.
+    map : AuthorizedMap
+        Exact AuthorizedMapV1 (no Red Zone record) or AuthorizedMapV2 (with the
+        recorded Red Zone strips): finite map bounds and ordered static
+        obstacles.
     agents : tuple[AuthorizedAgentV1, ...]
         Ordered authorized durable agents with unique keys and public IDs.
     aura_fields : tuple[AuthorizedAuraFieldV1, ...]
@@ -2264,8 +2501,8 @@ class AuthorizedBattlefieldSceneV1:
 
     schema_version: Literal[1]
     """Wire version discriminator; this model requires 1."""
-    map: AuthorizedMapV1
-    """Finite map bounds and ordered static obstacles."""
+    map: AuthorizedMap
+    """Exact AuthorizedMapV1 or AuthorizedMapV2 (with Red Zone strips)."""
     agents: tuple[AuthorizedAgentV1, ...]
     """Ordered authorized durable agents with unique keys and public IDs."""
     aura_fields: tuple[AuthorizedAuraFieldV1, ...]
@@ -2293,7 +2530,7 @@ class AuthorizedBattlefieldSceneV1:
         """
         if self.schema_version != AUTHORIZED_PRESENTATION_SCHEMA_VERSION:
             raise ValueError("unknown authorized battlefield schema version.")
-        if type(self.map) is not AuthorizedMapV1:
+        if type(self.map) not in (AuthorizedMapV1, AuthorizedMapV2):
             raise ValueError("map must be the exact authorized map root.")
         _require_exact_tuple(self.agents, name="agents", item_type=AuthorizedAgentV1)
         _require_exact_tuple(
@@ -6107,7 +6344,10 @@ def _authorized_scene(
     """Build an Oracle presentation scene and its internal-to-public key lookup.
     Require configured-active roster order and complete source class/status/aura
     axes. Project only represented classes, join aura emitters and pads, and
-    attach configured Spawn Shield facts and checked guide availability.
+    attach configured Spawn Shield facts and checked guide availability. A
+    context whose resolved config is V2 (it records the Red Zone depth) gives an
+    AuthorizedMapV2 built from the config's depth and spawn pads; a V1 config
+    gives the unchanged AuthorizedMapV1.
     Parameters
     ----------
     context : EvaluationEpisodeContext
@@ -6229,10 +6469,21 @@ def _authorized_scene(
                 spawn_shield_remaining=assigned_agent.spawn_shield_remaining,
             )
         )
+    scene_map: AuthorizedMap = _authorized_map(scene.map)
+    config = context.resolved_env_config
+    if type(config) is ResolvedEnvConfigV2:
+        scene_map = build_authorized_map_v2(
+            scene_map,
+            red_zone_depth=config.team_deathmatch_red_zone_depth,
+            team_spawn_pad_x=tuple(
+                tuple(pad[0] for pad in team)
+                for team in config.team_spawn_pad_positions
+            ),
+        )
     return (
         AuthorizedBattlefieldSceneV1(
             schema_version=AUTHORIZED_PRESENTATION_SCHEMA_VERSION,
-            map=_authorized_map(scene.map),
+            map=scene_map,
             agents=agents,
             aura_fields=tuple(aura_fields),
             class_mechanics=tuple(
@@ -7989,8 +8240,11 @@ __all__ = [
     "AuthorizedClassMechanicsV1",
     "AuthorizedClassMechanicsV2",
     "AuthorizedClassStatusMechanicV1",
+    "AuthorizedMap",
     "AuthorizedMapV1",
+    "AuthorizedMapV2",
     "AuthorizedObstacleV1",
+    "AuthorizedRedZoneV1",
     "AuthorizedRespawnWaveV1",
     "AuthorizedSpawnPadV1",
     "AuthorizedSpawnShieldMechanics",
@@ -8042,6 +8296,7 @@ __all__ = [
     "SubmittedActionTupleV1",
     "authorized_class_documentation_profile_v1",
     "build_agent_pov_visual_incoming_summary_v1",
+    "build_authorized_map_v2",
     "build_oracle_authorized_scene_v1",
     "build_replay_oracle_presentation_parts_v1",
     "oracle_presentation_key_v1",

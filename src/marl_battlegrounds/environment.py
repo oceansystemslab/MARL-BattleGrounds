@@ -43,6 +43,7 @@ from marl_battlegrounds.evaluation.episode_metrics import (
     priority_values,
     update_priority,
 )
+from marl_battlegrounds.evaluation.evaluation_conditions import OMITTED, Omitted
 from marl_battlegrounds.evaluation.full_metrics import (
     FullTotals,
     full_values,
@@ -71,6 +72,7 @@ from marl_battlegrounds.spaces import (
     observation_space as describe_observation_space,
 )
 from marl_battlegrounds.tasks import (
+    DEFAULT_TDM_RED_ZONE_DEPTH,
     AgentClassName,
     TDMScenario,
     balanced_spawn_configs,
@@ -1445,6 +1447,7 @@ def make(
     team_b_roster: Sequence[AgentClassName] | None = None,
     score_threshold: int = 20,
     max_steps: int = 300,
+    red_zone_depth: float | Omitted = OMITTED,
     num_envs: int | None = None,
     balance_spawn_locations: bool = True,
     metrics: MetricMode = "priority",
@@ -1471,11 +1474,20 @@ def make(
     team_b_roster : Sequence[AgentClassName] | None, default=None
         Same rule for Team B; defaults to the second canonical entry.
     score_threshold : int, default=20
-        Map-based TDM winning score. Exact Python int in 1..16,777,212;
-        default 20.
+        Map-based TDM winning score. Exact Python int in 1..16,777,212 at
+        red_zone_depth 0.0, or 1..16,777,207 at a positive depth (so also at
+        the default 5.0); default 20.
     max_steps : int, default=300
         Map-based episode limit in transitions. Exact Python int in
         1..16,777,216; default 300.
+    red_zone_depth : float, default=5.0 (DEFAULT_TDM_RED_ZONE_DEPTH)
+        Map-based Red Zone depth in map units. Each team's Red Zone is the
+        full-height strip this far in from its own spawn edge. When an agent
+        dies with its centre inside its own team's Red Zone, the enemy team
+        gets 2 points instead of 1; it is still one kill and one death. 0.0
+        keeps one point per death. Omit it for the default. Supplying any
+        value, including 5.0, together with env_config raises ValueError,
+        because an exact config owns its rules.
     num_envs : int | None, default=None
         Exact Python int B in 1..2,147,483,647, or None for scalar execution.
         This integer bound is not a memory-capacity promise. Batch size is
@@ -1543,6 +1555,7 @@ def make(
         or team_b_roster is not None
         or score_threshold != 20
         or max_steps != 300
+        or not isinstance(red_zone_depth, Omitted)
     )
     if env_config is not None and (map_id is not None or has_rules):
         raise ValueError(
@@ -1560,6 +1573,11 @@ def make(
             team_b_roster=rosters[1] if team_b_roster is None else team_b_roster,
             score_threshold=score_threshold,
             max_steps=max_steps,
+            red_zone_depth=(
+                DEFAULT_TDM_RED_ZONE_DEPTH
+                if isinstance(red_zone_depth, Omitted)
+                else red_zone_depth
+            ),
         )
         if balance_spawn_locations:
             if num_envs is None:

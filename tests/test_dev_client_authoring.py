@@ -2,6 +2,26 @@
 that a saved map equal to an approved TDM map previews in the live debugger under
 that map's registered identity and its approved source label.
 
+Authored Red Zone depth: version 2 scenario drafts declare task.red_zone_depth and
+version 1 drafts mean 0.0. Each schema tag accepts only its own rule, so a version
+1 draft with a depth and a version 2 draft without one are rejected; booleans,
+strings, NaN and infinity are rejected, and a JSON integer 5 reads as 5.0. The
+compiler checks the raw depth before float32 rounding and links each problem to
+task.red_zone_depth (negative, -0.0 included; underflow; float32 overflow; wider
+than the map); passing values such as 1e-8 and 12.1 on a 12.1-wide map are stored
+as float32. Core's depth and threshold-maximum messages link to their task fields.
+New, map-copy and preview drafts use the 5.0 default with preview profile
+default-tdm-map-preview@2, and Duplicate keeps the source depth. A version 1
+source and its version 2 copy at 0.0 share semantic, map, configuration and state
+digests; the seven version 1 fixtures keep their semantic digests; depths 0, 5
+and 6 give distinct digests. The store never rewrites version 1 bytes: Open gives
+version 2 at 0.0 with the same revision, Save writes the next revision as version
+2, Save As keeps a version 1 payload as version 1, Combat loads a saved version 1
+revision at 0.0, and a version 1 file carrying a depth fails strict parsing. All
+sixteen debugger scenes stay neutral at depth 0.0. A valid scenario's validation
+reply carries both teams' host-computed Red Zone strips (exact float32 bounds);
+map drafts, invalid drafts and depth 0 carry none.
+
 The threaded-command check fails at once if its held worker finishes before it
 enters the blocked call. It releases that worker inside the executor block, so
 a failed assertion cannot leave the test waiting forever.
@@ -9,6 +29,7 @@ a failed assertion cannot leave the test waiting forever.
 
 from __future__ import annotations
 
+import copy
 import json
 import time
 from concurrent.futures import Future, ThreadPoolExecutor
@@ -18,6 +39,7 @@ from typing import Any
 
 import numpy as np
 import pytest
+import scripts.dev.visual_debugger.authoring_compiler as authoring_compiler
 import scripts.dev.visual_debugger.authoring_store as authoring_store
 from pydantic import ValidationError
 from scripts.dev.visual_debugger.authoring_compiler import (
@@ -38,13 +60,17 @@ from scripts.dev.visual_debugger.authoring_models import (
     DevMapDraftV1,
     DevPillarV1,
     DevPointV1,
+    DevScenarioContentV2,
     DevScenarioDraftV1,
+    DevScenarioDraftV2,
     DevScenarioGlobalStateV1,
     DevSourceMapProvenanceV1,
     DevWallV1,
+    declared_red_zone_depth,
     default_spawn_pads,
     new_map_draft,
     new_scenario_draft,
+    upgrade_scenario_draft,
 )
 from scripts.dev.visual_debugger.authoring_service import (
     DevAuthoringCommandRequestV1,
@@ -52,6 +78,8 @@ from scripts.dev.visual_debugger.authoring_service import (
     DevCurrentBufferSourceV1,
     DevSavedDraftSourceV1,
     DevScenarioLoadService,
+    DevValidateCommandV1,
+    DevValidationSummaryV1,
     LoadedDevScenarioSnapshotV1,
     debugger_scenario_from_snapshot,
 )
@@ -67,8 +95,19 @@ from scripts.dev.visual_debugger.protocol import (
     ResetCommandV1,
     SetCombatConfigurationCommandV1,
 )
-from scripts.dev.visual_debugger.scenarios import get_scenario
+from scripts.dev.visual_debugger.scenarios import get_scenario, list_scenarios
 from scripts.dev.visual_debugger.service import DebuggerService
+from tests.scenario_controller_fixtures import (
+    SCENARIO_1_FIXTURE_PATH,
+    SCENARIO_1_MAP_DIGEST,
+    SCENARIO_1_SEMANTIC_DIGEST,
+    SCENARIO_1_STATE_DIGEST,
+    SCENARIO_3_SEMANTIC_DIGEST,
+    SCENARIO_5_SEMANTIC_DIGEST,
+    SCENARIO_6_SEMANTIC_DIGEST,
+    SCENARIO_7_SEMANTIC_DIGEST,
+    SCENARIO_8_SEMANTIC_DIGEST,
+)
 from tests.visual_debugger_fixtures import (
     approved_map_draft,
     debugger_test_launch_specification,
@@ -76,8 +115,11 @@ from tests.visual_debugger_fixtures import (
 
 from marl_battlegrounds.core.types import MAX_OBSTACLE_SLOTS
 from marl_battlegrounds.evaluation.map_identity import RecordedMap, recorded_map
-from marl_battlegrounds.evaluation.models import ContentAddressedIdentityV1
-from marl_battlegrounds.tasks import list_tdm_maps
+from marl_battlegrounds.evaluation.models import (
+    ContentAddressedIdentityV1,
+    float32_value,
+)
+from marl_battlegrounds.tasks import DEFAULT_TDM_RED_ZONE_DEPTH, list_tdm_maps
 from marl_battlegrounds.viewer.presentation_protocol import (
     LiveOracleAuthorizedPresentationFrameV1,
 )
@@ -110,7 +152,9 @@ def test_strict_models_reject_extra_fields_and_preserve_wire_schema_alias() -> N
     with pytest.raises(ValidationError, match="at most 64 characters"):
         DevMapDraftV1.model_validate_json(json.dumps(bounded_id_payload))
 
-    scenario_payload = new_scenario_draft().model_dump(mode="json", by_alias=True)
+    scenario_payload = new_scenario_draft(
+        red_zone_depth=DEFAULT_TDM_RED_ZONE_DEPTH
+    ).model_dump(mode="json", by_alias=True)
     scenario_payload["content"]["embedded_map"]["obstacles"] = [
         {
             "kind": "pillar",
@@ -121,17 +165,21 @@ def test_strict_models_reject_extra_fields_and_preserve_wire_schema_alias() -> N
         }
     ]
     with pytest.raises(ValidationError, match="unique across map and agent objects"):
-        DevScenarioDraftV1.model_validate_json(json.dumps(scenario_payload))
+        DevScenarioDraftV2.model_validate_json(json.dumps(scenario_payload))
 
-    obsolete_role_payload = new_scenario_draft().model_dump(mode="json", by_alias=True)
+    obsolete_role_payload = new_scenario_draft(
+        red_zone_depth=DEFAULT_TDM_RED_ZONE_DEPTH
+    ).model_dump(mode="json", by_alias=True)
     obsolete_role_payload["content"]["roster"][0]["role"] = "focal"
     with pytest.raises(ValidationError, match="Extra inputs are not permitted"):
-        DevScenarioDraftV1.model_validate_json(json.dumps(obsolete_role_payload))
+        DevScenarioDraftV2.model_validate_json(json.dumps(obsolete_role_payload))
 
-    obsolete_study_payload = new_scenario_draft().model_dump(mode="json", by_alias=True)
+    obsolete_study_payload = new_scenario_draft(
+        red_zone_depth=DEFAULT_TDM_RED_ZONE_DEPTH
+    ).model_dump(mode="json", by_alias=True)
     obsolete_study_payload["content"]["study"] = {}
     with pytest.raises(ValidationError, match="Extra inputs are not permitted"):
-        DevScenarioDraftV1.model_validate_json(json.dumps(obsolete_study_payload))
+        DevScenarioDraftV2.model_validate_json(json.dumps(obsolete_study_payload))
 
     oversized_revision = draft.model_dump(mode="json", by_alias=True)
     oversized_revision["revision"] = MAX_DEV_ASSET_SEQUENCE + 1
@@ -160,7 +208,10 @@ def test_asset_ids_are_strict_lowercase_snake_case(asset_id: str) -> None:
 
 def test_authoring_defaults_use_snake_case_asset_ids() -> None:
     assert new_map_draft().asset_id == "untitled_map"
-    assert new_scenario_draft().asset_id == "untitled_scenario"
+    assert (
+        new_scenario_draft(red_zone_depth=DEFAULT_TDM_RED_ZONE_DEPTH).asset_id
+        == "untitled_scenario"
+    )
     assert new_map_draft("tdm_map_id_22_kawaii_training").asset_id == (
         "tdm_map_id_22_kawaii_training"
     )
@@ -168,7 +219,11 @@ def test_authoring_defaults_use_snake_case_asset_ids() -> None:
 
 def test_blank_defaults_are_exact_and_map_copy_is_independent() -> None:
     map_draft = new_map_draft("source_map")
-    scenario = new_scenario_draft("copied_scenario", source_map=map_draft)
+    scenario = new_scenario_draft(
+        "copied_scenario",
+        source_map=map_draft,
+        red_zone_depth=DEFAULT_TDM_RED_ZONE_DEPTH,
+    )
 
     assert map_draft.content.width == 20.0
     assert map_draft.content.height == 10.0
@@ -216,7 +271,11 @@ def test_blank_defaults_are_exact_and_map_copy_is_independent() -> None:
             )
         }
     )
-    remapped = new_scenario_draft("collision_safe", source_map=colliding_map)
+    remapped = new_scenario_draft(
+        "collision_safe",
+        source_map=colliding_map,
+        red_zone_depth=DEFAULT_TDM_RED_ZONE_DEPTH,
+    )
     assert remapped.content.embedded_map == colliding_map.content
     assert remapped.content.roster[0].object_id == "agent-a1-2"
     assert (
@@ -292,8 +351,16 @@ def test_map_normalization_padding_order_and_semantic_digest_contract() -> None:
     )
     source_a = new_map_draft("identity_a").model_copy(update={"content": map_a})
     source_b = new_map_draft("identity_b").model_copy(update={"content": map_b})
-    scenario_a = compile_dev_scenario(new_scenario_draft(source_map=source_a))
-    scenario_b = compile_dev_scenario(new_scenario_draft(source_map=source_b))
+    scenario_a = compile_dev_scenario(
+        new_scenario_draft(
+            source_map=source_a, red_zone_depth=DEFAULT_TDM_RED_ZONE_DEPTH
+        )
+    )
+    scenario_b = compile_dev_scenario(
+        new_scenario_draft(
+            source_map=source_b, red_zone_depth=DEFAULT_TDM_RED_ZONE_DEPTH
+        )
+    )
     assert scenario_a.semantic_digest == scenario_b.semantic_digest
     assert (
         scenario_a.resolved_configuration_digest
@@ -352,7 +419,9 @@ def test_obstacle_ids_survive_independent_map_copy_and_obsolete_names_fail() -> 
         "center-pillar",
         "flanking-wall",
     )
-    copied = new_scenario_draft("named_copy", source_map=source)
+    copied = new_scenario_draft(
+        "named_copy", source_map=source, red_zone_depth=DEFAULT_TDM_RED_ZONE_DEPTH
+    )
     assert copied.content.embedded_map.obstacles == source.content.obstacles
     assert copied.content.embedded_map.obstacles is not source.content.obstacles
 
@@ -366,7 +435,7 @@ def test_obstacle_ids_survive_independent_map_copy_and_obsolete_names_fail() -> 
         "obsolete display name"
     )
     with pytest.raises(ValidationError, match="Extra inputs are not permitted"):
-        DevScenarioDraftV1.model_validate_json(json.dumps(obsolete_scenario))
+        DevScenarioDraftV2.model_validate_json(json.dumps(obsolete_scenario))
 
 
 def test_map_validation_links_pad_errors_and_keeps_permitted_geometry_as_warning() -> (
@@ -397,7 +466,7 @@ def test_map_validation_links_pad_errors_and_keeps_permitted_geometry_as_warning
 
 
 def test_scenario_compiler_uses_reset_overlay_and_neutral_history() -> None:
-    draft = new_scenario_draft()
+    draft = new_scenario_draft(red_zone_depth=DEFAULT_TDM_RED_ZONE_DEPTH)
     states = list(draft.content.agent_states)
     states[0] = states[0].model_copy(
         update={
@@ -439,7 +508,7 @@ def test_scenario_compiler_uses_reset_overlay_and_neutral_history() -> None:
 
 
 def test_every_authorable_timer_family_reaches_the_exact_state_leaf() -> None:
-    draft = new_scenario_draft()
+    draft = new_scenario_draft(red_zone_depth=DEFAULT_TDM_RED_ZONE_DEPTH)
     states = list(draft.content.agent_states)
     states[0] = states[0].model_copy(
         update={
@@ -489,7 +558,7 @@ def test_every_authorable_timer_family_reaches_the_exact_state_leaf() -> None:
 
 
 def test_asymmetric_rosters_compile_with_canonical_inactive_padding() -> None:
-    draft = new_scenario_draft()
+    draft = new_scenario_draft(red_zone_depth=DEFAULT_TDM_RED_ZONE_DEPTH)
     content = draft.content.model_copy(update={"team_a_size": 2, "team_b_size": 1})
     content = canonicalize_inactive_rows(content)
     compiled = compile_dev_scenario(content)
@@ -518,7 +587,7 @@ def test_asymmetric_rosters_compile_with_canonical_inactive_padding() -> None:
 
 
 def test_invalid_edits_remain_representable_and_return_linked_problems() -> None:
-    draft = new_scenario_draft()
+    draft = new_scenario_draft(red_zone_depth=DEFAULT_TDM_RED_ZONE_DEPTH)
     invalid_global = draft.content.global_state.model_copy(
         update={"step_count": 300, "team_a_score": 5}
     )
@@ -542,9 +611,9 @@ def test_invalid_numeric_draft_saves_reopens_and_stays_out_of_debug_discovery(
 ) -> None:
     store = _store(tmp_path)
     binding = DevClientAuthoringBinding(store)
-    payload = new_scenario_draft("invalid_numeric").model_dump(
-        mode="json", by_alias=True
-    )
+    payload = new_scenario_draft(
+        "invalid_numeric", red_zone_depth=DEFAULT_TDM_RED_ZONE_DEPTH
+    ).model_dump(mode="json", by_alias=True)
     payload["content"]["episode"]["max_steps"] = 0
     payload["content"]["agent_states"][0]["current_health"] = -1.0
 
@@ -586,7 +655,7 @@ def test_invalid_numeric_draft_saves_reopens_and_stays_out_of_debug_discovery(
         )
     )
     assert reopened.ok
-    assert isinstance(reopened.draft, DevScenarioDraftV1)
+    assert isinstance(reopened.draft, DevScenarioDraftV2)
     assert reopened.draft.content.episode.max_steps == 0
     listed = binding.apply_command(
         _request({"command_type": "list", "asset_kind": "scenario"})
@@ -598,7 +667,9 @@ def test_invalid_numeric_draft_saves_reopens_and_stays_out_of_debug_discovery(
 
 
 def test_core_state_failure_links_the_exact_agent_inspector_field() -> None:
-    draft = new_scenario_draft("linked_core_state")
+    draft = new_scenario_draft(
+        "linked_core_state", red_zone_depth=DEFAULT_TDM_RED_ZONE_DEPTH
+    )
     states = list(draft.content.agent_states)
     states[0] = states[0].model_copy(update={"current_health": 81.0})
     invalid = draft.model_copy(
@@ -633,14 +704,14 @@ def test_compile_map_wraps_float32_normalization_as_a_linked_problem() -> None:
 
 
 def test_execution_valid_scenario_has_one_validation_level() -> None:
-    draft = new_scenario_draft()
+    draft = new_scenario_draft(red_zone_depth=DEFAULT_TDM_RED_ZONE_DEPTH)
 
     assert validate_dev_scenario(draft) == ()
     assert not hasattr(compile_dev_scenario(draft), "freeze_qualified")
 
 
 def test_scenario_digest_excludes_display_prose_provenance_and_browser_ids() -> None:
-    draft = new_scenario_draft()
+    draft = new_scenario_draft(red_zone_depth=DEFAULT_TDM_RED_ZONE_DEPTH)
     roster = tuple(
         slot.model_copy(update={"object_id": f"replacement-agent-{index}"})
         for index, slot in enumerate(draft.content.roster)
@@ -667,20 +738,22 @@ def test_scenario_digest_excludes_display_prose_provenance_and_browser_ids() -> 
 
 
 def test_scenario_notes_are_optional_and_bounded() -> None:
-    payload = new_scenario_draft().model_dump(mode="json", by_alias=True)
+    payload = new_scenario_draft(red_zone_depth=DEFAULT_TDM_RED_ZONE_DEPTH).model_dump(
+        mode="json", by_alias=True
+    )
 
     assert payload["content"]["notes"] == ""
     payload["content"]["notes"] = "x" * 8_000
-    parsed = DevScenarioDraftV1.model_validate_json(json.dumps(payload))
+    parsed = DevScenarioDraftV2.model_validate_json(json.dumps(payload))
     assert len(parsed.content.notes) == 8_000
 
     payload["content"]["notes"] = "x" * 8_001
     with pytest.raises(ValidationError, match="at most 8000 characters"):
-        DevScenarioDraftV1.model_validate_json(json.dumps(payload))
+        DevScenarioDraftV2.model_validate_json(json.dumps(payload))
 
 
 def test_scenario_normalization_matches_float32_runtime_storage() -> None:
-    draft = new_scenario_draft()
+    draft = new_scenario_draft(red_zone_depth=DEFAULT_TDM_RED_ZONE_DEPTH)
     first = draft.content.agent_states[0].model_copy(
         update={
             "position": DevPointV1(x=1.50000001, y=1.50000001),
@@ -796,7 +869,10 @@ def test_store_restart_discovers_every_latest_map_and_scenario(
     for asset_id in expected_map_ids:
         store.save_draft(new_map_draft(asset_id), expected_revision=0)
     for asset_id in expected_scenario_ids:
-        store.save_draft(new_scenario_draft(asset_id), expected_revision=0)
+        store.save_draft(
+            new_scenario_draft(asset_id, red_zone_depth=DEFAULT_TDM_RED_ZONE_DEPTH),
+            expected_revision=0,
+        )
 
     restarted = _store(tmp_path)
     map_references = restarted.iter_draft_references("map", latest_only=True)
@@ -870,7 +946,10 @@ def test_store_delete_failures_leave_every_saved_byte_untouched(
 ) -> None:
     store = _store(tmp_path)
     revision_one = store.save_draft(
-        new_scenario_draft("guarded_scenario"), expected_revision=0
+        new_scenario_draft(
+            "guarded_scenario", red_zone_depth=DEFAULT_TDM_RED_ZONE_DEPTH
+        ),
+        expected_revision=0,
     )
     revision_two = store.save_draft(
         revision_one,
@@ -1113,7 +1192,10 @@ def test_saved_scenario_discovery_and_restart_load_exact_revision(
     tmp_path: Path,
 ) -> None:
     store = _store(tmp_path)
-    saved = store.save_draft(new_scenario_draft("later_load"), expected_revision=0)
+    saved = store.save_draft(
+        new_scenario_draft("later_load", red_zone_depth=DEFAULT_TDM_RED_ZONE_DEPTH),
+        expected_revision=0,
+    )
 
     first_process = DevScenarioLoadService(store)
     assert first_process.current_snapshot is None
@@ -1145,9 +1227,13 @@ def test_loaded_combat_snapshot_and_embedded_map_survive_source_deletion(
     store = _store(tmp_path)
     saved_map = store.save_draft(new_map_draft("source_arena"), expected_revision=0)
     assert isinstance(saved_map, DevMapDraftV1)
-    scenario = new_scenario_draft("embedded_arena", source_map=saved_map)
+    scenario = new_scenario_draft(
+        "embedded_arena",
+        source_map=saved_map,
+        red_zone_depth=DEFAULT_TDM_RED_ZONE_DEPTH,
+    )
     saved_scenario = store.save_draft(scenario, expected_revision=0)
-    assert isinstance(saved_scenario, DevScenarioDraftV1)
+    assert isinstance(saved_scenario, DevScenarioDraftV2)
     loader = DevScenarioLoadService(store)
     source = DevSavedDraftSourceV1(
         asset_kind="scenario",
@@ -1226,7 +1312,11 @@ def test_current_and_saved_maps_use_the_exact_default_preview_path(
     )
     for source, exact_map in sources_and_maps:
         expected = compile_dev_scenario(
-            new_scenario_draft("explicit_map_copy", source_map=exact_map)
+            new_scenario_draft(
+                "explicit_map_copy",
+                source_map=exact_map,
+                red_zone_depth=DEFAULT_TDM_RED_ZONE_DEPTH,
+            )
         )
         response = binding.apply_command(
             _request({"command_type": "open_in_debug", "source": source})
@@ -1247,12 +1337,15 @@ def test_current_and_saved_maps_use_the_exact_default_preview_path(
 
     snapshot = binding.scenario_loader.current_snapshot
     assert snapshot is not None
+    assert isinstance(snapshot.compiled.content, DevScenarioContentV2)
+    assert snapshot.compiled.content.task.red_zone_depth == 5.0
+    assert snapshot.compiled.config.team_deathmatch_red_zone_depth == 5.0
     scenario = debugger_scenario_from_snapshot(snapshot)
     assert scenario.title == "Default TDM map preview"
     assert scenario.default_controlled_slot == 0
     assert scenario.provenance is not None
     assert scenario.provenance.source_identity == (
-        "map:saved_draft:preview_map:revision:1:profile:default-tdm-map-preview@1"
+        "map:saved_draft:preview_map:revision:1:profile:default-tdm-map-preview@2"
     )
     files_after = {
         path.relative_to(tmp_path): path.read_bytes()
@@ -1288,7 +1381,9 @@ def test_current_and_saved_maps_use_the_exact_default_preview_path(
 
 def test_failed_map_preview_preserves_current_debug_snapshot(tmp_path: Path) -> None:
     binding = DevClientAuthoringBinding(_store(tmp_path))
-    valid_scenario = new_scenario_draft("existing_debug_session")
+    valid_scenario = new_scenario_draft(
+        "existing_debug_session", red_zone_depth=DEFAULT_TDM_RED_ZONE_DEPTH
+    )
     installed = binding.apply_command(
         _request(
             {
@@ -1335,8 +1430,11 @@ def test_failed_map_preview_preserves_current_debug_snapshot(tmp_path: Path) -> 
 
 def test_failed_revalidation_preserves_current_debug_snapshot(tmp_path: Path) -> None:
     store = _store(tmp_path)
-    valid = store.save_draft(new_scenario_draft("load_guard"), expected_revision=0)
-    assert isinstance(valid, DevScenarioDraftV1)
+    valid = store.save_draft(
+        new_scenario_draft("load_guard", red_zone_depth=DEFAULT_TDM_RED_ZONE_DEPTH),
+        expected_revision=0,
+    )
+    assert isinstance(valid, DevScenarioDraftV2)
     loader = DevScenarioLoadService(store)
     first = loader.load(
         DevSavedDraftSourceV1(
@@ -1374,7 +1472,9 @@ def test_failed_revalidation_preserves_current_debug_snapshot(tmp_path: Path) ->
 
 def test_current_buffer_and_saved_loader_use_one_snapshot_path(tmp_path: Path) -> None:
     loader = DevScenarioLoadService(_store(tmp_path))
-    draft = new_scenario_draft("current_buffer")
+    draft = new_scenario_draft(
+        "current_buffer", red_zone_depth=DEFAULT_TDM_RED_ZONE_DEPTH
+    )
     with pytest.raises(ValidationError, match="asset_kind must match"):
         DevCurrentBufferSourceV1(asset_kind="map", draft=draft)
     attempt = loader.load(DevCurrentBufferSourceV1(asset_kind="scenario", draft=draft))
@@ -1390,7 +1490,9 @@ def test_loaded_snapshot_replaces_and_resets_the_exact_debugger_scenario(
     tmp_path: Path,
 ) -> None:
     store = _store(tmp_path)
-    draft = new_scenario_draft("debugger_load")
+    draft = new_scenario_draft(
+        "debugger_load", red_zone_depth=DEFAULT_TDM_RED_ZONE_DEPTH
+    )
     global_state = draft.content.global_state.model_copy(update={"step_count": 7})
     saved = store.save_draft(
         draft.model_copy(
@@ -1533,7 +1635,7 @@ def test_saved_map_equal_to_an_approved_map_previews_with_its_registered_identit
     assert aggregation["map_split"] == "training"
     assert aggregation["scenario_source"] == (
         "map:saved_draft:tdm_map_id_41_sai_training:revision:1"
-        ":profile:default-tdm-map-preview@1"
+        ":profile:default-tdm-map-preview@2"
     )
     expected_map = RecordedMap(
         map_id=41,
@@ -1567,8 +1669,12 @@ def test_single_authoring_binding_parses_whole_commands_and_shares_loader(
     assert created.draft is not None
     assert created.catalog.maximum_obstacle_slots == MAX_OBSTACLE_SLOTS
     assert len(created.catalog.class_mechanics) == 5
+    assert isinstance(created.draft, DevScenarioDraftV2)
+    assert created.draft.content.task.red_zone_depth == DEFAULT_TDM_RED_ZONE_DEPTH
+    assert DEFAULT_TDM_RED_ZONE_DEPTH == 5.0
     serialized_created = json.loads(created.model_dump_json())
-    assert serialized_created["draft"]["schema"] == "dev-scenario-draft@1"
+    assert serialized_created["draft"]["schema"] == "dev-scenario-draft@2"
+    assert serialized_created["draft"]["content"]["schema"] == "dev-scenario-content@2"
     assert "schema_id" not in serialized_created["draft"]
     assert "freeze_qualified" not in serialized_created["validation"]
     assert "candidate" not in serialized_created
@@ -1690,7 +1796,9 @@ def test_validate_returns_linked_capacity_and_float32_problems(tmp_path: Path) -
         )
     )
 
-    scenario_draft = new_scenario_draft("float32_overflow")
+    scenario_draft = new_scenario_draft(
+        "float32_overflow", red_zone_depth=DEFAULT_TDM_RED_ZONE_DEPTH
+    )
     first_state = scenario_draft.content.agent_states[0].model_copy(
         update={
             "position": scenario_draft.content.agent_states[0].position.model_copy(
@@ -1717,7 +1825,9 @@ def test_validate_returns_linked_capacity_and_float32_problems(tmp_path: Path) -
             }
         )
     )
-    huge_integer_draft = new_scenario_draft("int32_overflow")
+    huge_integer_draft = new_scenario_draft(
+        "int32_overflow", red_zone_depth=DEFAULT_TDM_RED_ZONE_DEPTH
+    )
     huge_integer_response = binding.apply_command(
         _request(
             {
@@ -1738,7 +1848,9 @@ def test_validate_returns_linked_capacity_and_float32_problems(tmp_path: Path) -
             }
         )
     )
-    nested_capacity_draft = new_scenario_draft("nested_capacity")
+    nested_capacity_draft = new_scenario_draft(
+        "nested_capacity", red_zone_depth=DEFAULT_TDM_RED_ZONE_DEPTH
+    )
     nested_capacity_response = binding.apply_command(
         _request(
             {
@@ -1795,7 +1907,8 @@ def test_binding_copies_saved_map_and_duplicates_saved_scenario(tmp_path: Path) 
     binding = DevClientAuthoringBinding(store)
     saved_map = store.save_draft(new_map_draft("source_map"), expected_revision=0)
     saved_scenario = store.save_draft(
-        new_scenario_draft("source_scenario"), expected_revision=0
+        new_scenario_draft("source_scenario", red_zone_depth=6.0),
+        expected_revision=0,
     )
 
     copied = binding.apply_command(
@@ -1814,7 +1927,8 @@ def test_binding_copies_saved_map_and_duplicates_saved_scenario(tmp_path: Path) 
         )
     )
     assert copied.ok
-    assert isinstance(copied.draft, DevScenarioDraftV1)
+    assert isinstance(copied.draft, DevScenarioDraftV2)
+    assert copied.draft.content.task.red_zone_depth == DEFAULT_TDM_RED_ZONE_DEPTH
     assert copied.draft.content.embedded_map == saved_map.content
     assert copied.draft.content.embedded_map is not saved_map.content
     assert copied.draft.content.source_map_provenance is not None
@@ -1839,10 +1953,11 @@ def test_binding_copies_saved_map_and_duplicates_saved_scenario(tmp_path: Path) 
         )
     )
     assert duplicated.ok
-    assert isinstance(duplicated.draft, DevScenarioDraftV1)
+    assert isinstance(duplicated.draft, DevScenarioDraftV2)
     assert duplicated.draft.asset_id == "scenario_copy"
     assert duplicated.draft.revision == 0
     assert duplicated.draft.content == saved_scenario.content
+    assert duplicated.draft.content.task.red_zone_depth == 6.0
 
 
 def test_authoring_command_request_rejects_unknown_fields() -> None:
@@ -1854,3 +1969,353 @@ def test_authoring_command_request_rejects_unknown_fields() -> None:
                 "filesystem_path": "/tmp/escape",
             }
         )
+
+
+def _parsed_payload(draft: dict[str, Any]) -> DevScenarioDraftV1 | DevScenarioDraftV2:
+    command = _request({"command_type": "validate", "draft": draft}).root
+    assert isinstance(command, DevValidateCommandV1)
+    assert not isinstance(command.draft, DevMapDraftV1)
+    return command.draft
+
+
+def test_scenario_draft_versions_parse_only_with_their_own_depth_rule() -> None:
+    payload = new_scenario_draft(
+        "versioned", red_zone_depth=DEFAULT_TDM_RED_ZONE_DEPTH
+    ).model_dump(mode="json", by_alias=True)
+    assert payload["schema"] == "dev-scenario-draft@2"
+    assert payload["content"]["schema"] == "dev-scenario-content@2"
+    assert payload["content"]["task"]["red_zone_depth"] == 5.0
+
+    integer_depth = copy.deepcopy(payload)
+    integer_depth["content"]["task"]["red_zone_depth"] = 5
+    parsed = _parsed_payload(integer_depth)
+    assert isinstance(parsed, DevScenarioDraftV2)
+    assert type(parsed.content.task.red_zone_depth) is float
+    assert parsed.content.task.red_zone_depth == 5.0
+
+    v1_with_depth = copy.deepcopy(payload)
+    v1_with_depth["schema"] = "dev-scenario-draft@1"
+    v1_with_depth["content"]["schema"] = "dev-scenario-content@1"
+    v2_without_depth = copy.deepcopy(payload)
+    del v2_without_depth["content"]["task"]["red_zone_depth"]
+    wrong_types: list[dict[str, Any]] = []
+    for value in (True, "5.0"):
+        wrong_type = copy.deepcopy(payload)
+        wrong_type["content"]["task"]["red_zone_depth"] = value
+        wrong_types.append(wrong_type)
+    for rejected in (v1_with_depth, v2_without_depth, *wrong_types):
+        with pytest.raises(ValidationError):
+            _parsed_payload(rejected)
+    encoded = json.dumps({"command_type": "validate", "draft": payload})
+    assert encoded.count('"red_zone_depth": 5.0') == 1
+    for literal in ("NaN", "Infinity", "-Infinity"):
+        with pytest.raises(ValidationError):
+            DevAuthoringCommandRequestV1.model_validate_json(
+                encoded.replace('"red_zone_depth": 5.0', f'"red_zone_depth": {literal}')
+            )
+
+
+def test_saved_v1_fixtures_read_as_depth_zero_with_their_semantic_digests() -> None:
+    fixtures = Path(__file__).parent / "fixtures"
+    expected_digests = {
+        "scenario_1_r34.json": SCENARIO_1_SEMANTIC_DIGEST,
+        "scenario_2_r12.json": None,
+        "scenario_3_r9.json": SCENARIO_3_SEMANTIC_DIGEST,
+        "scenario_5_r9.json": SCENARIO_5_SEMANTIC_DIGEST,
+        "scenario_6_r10_score_17_19.json": SCENARIO_6_SEMANTIC_DIGEST,
+        "scenario_7_r25.json": SCENARIO_7_SEMANTIC_DIGEST,
+        "scenario_8_r14.json": SCENARIO_8_SEMANTIC_DIGEST,
+    }
+    for name, expected_digest in expected_digests.items():
+        draft = _parsed_payload(json.loads((fixtures / name).read_text("utf-8")))
+        assert isinstance(draft, DevScenarioDraftV1), name
+        assert declared_red_zone_depth(draft.content) == 0.0
+        upgraded = upgrade_scenario_draft(draft)
+        assert upgraded.revision == draft.revision
+        assert upgraded.content.task.red_zone_depth == 0.0
+        digest = scenario_semantic_digest(draft.content)
+        assert scenario_semantic_digest(upgraded.content) == digest
+        if expected_digest is not None:
+            assert digest == expected_digest, name
+
+
+def test_v1_source_and_v2_copy_share_digests_and_positive_depths_differ() -> None:
+    source = DevScenarioDraftV1.model_validate_json(
+        SCENARIO_1_FIXTURE_PATH.read_text(encoding="utf-8")
+    )
+    original = compile_dev_scenario(source)
+    upgraded = compile_dev_scenario(upgrade_scenario_draft(source))
+    assert original.config.team_deathmatch_red_zone_depth == 0.0
+    for compiled in (original, upgraded):
+        assert compiled.semantic_digest == SCENARIO_1_SEMANTIC_DIGEST
+        assert compiled.map_semantic_digest == SCENARIO_1_MAP_DIGEST
+        assert compiled.resolved_initial_state_digest == SCENARIO_1_STATE_DIGEST
+    assert (
+        upgraded.resolved_configuration_digest == original.resolved_configuration_digest
+    )
+
+    by_depth = {
+        depth: compile_dev_scenario(
+            upgrade_scenario_draft(source).model_copy(
+                update={
+                    "content": _content_at_depth(
+                        upgrade_scenario_draft(source).content, depth
+                    )
+                }
+            )
+        )
+        for depth in (0.0, 5.0, 6.0)
+    }
+    assert by_depth[0.0].semantic_digest == SCENARIO_1_SEMANTIC_DIGEST
+    assert len({compiled.semantic_digest for compiled in by_depth.values()}) == 3
+    assert (
+        len({compiled.resolved_configuration_digest for compiled in by_depth.values()})
+        == 3
+    )
+    assert {compiled.map_semantic_digest for compiled in by_depth.values()} == {
+        SCENARIO_1_MAP_DIGEST
+    }
+    assert {
+        compiled.resolved_initial_state_digest for compiled in by_depth.values()
+    } == {SCENARIO_1_STATE_DIGEST}
+    assert (
+        authoring_compiler.scenario_semantic_payload(by_depth[0.0].content)["schema"]
+        == "dev-scenario-semantics@1"
+    )
+    positive_payload = authoring_compiler.scenario_semantic_payload(
+        by_depth[5.0].content
+    )
+    assert positive_payload["schema"] == "dev-scenario-semantics@2"
+    assert positive_payload["task"] == {
+        "task": "team_deathmatch",
+        "score_threshold": source.content.task.score_threshold,
+        "red_zone_depth": 5.0,
+    }
+
+
+def _content_at_depth(
+    content: DevScenarioContentV2, red_zone_depth: float
+) -> DevScenarioContentV2:
+    return content.model_copy(
+        update={
+            "task": content.task.model_copy(update={"red_zone_depth": red_zone_depth})
+        }
+    )
+
+
+def _narrow_scenario(red_zone_depth: float) -> DevScenarioDraftV2:
+    narrow_map = DevMapDraftV1(
+        asset_id="narrow_map",
+        content=DevMapContentV1(
+            name="Narrow map",
+            width=12.1,
+            height=10.0,
+            spawn_pads=default_spawn_pads(width=12.1, height=10.0),
+        ),
+    )
+    return new_scenario_draft(
+        "narrow_scenario", source_map=narrow_map, red_zone_depth=red_zone_depth
+    )
+
+
+def test_validation_reply_carries_host_red_zone_strips(tmp_path: Path) -> None:
+    binding = DevClientAuthoringBinding(_store(tmp_path))
+
+    def validation(draft: DevMapDraftV1 | DevScenarioDraftV2) -> DevValidationSummaryV1:
+        response = binding.apply_command(
+            _request(
+                {
+                    "command_type": "validate",
+                    "draft": draft.model_dump(mode="json", by_alias=True),
+                }
+            )
+        )
+        assert response.validation is not None
+        return response.validation
+
+    scenario = new_scenario_draft("strips", red_zone_depth=DEFAULT_TDM_RED_ZONE_DEPTH)
+    strips = validation(scenario).red_zone
+    assert strips is not None
+    assert strips.team_a_x_range == (0.0, 5.0)
+    assert strips.team_b_x_range == (15.0, 20.0)
+
+    off = scenario.model_copy(
+        update={"content": _content_at_depth(scenario.content, 0.0)}
+    )
+    assert validation(off).execution_valid
+    assert validation(off).red_zone is None
+    negative = scenario.model_copy(
+        update={"content": _content_at_depth(scenario.content, -1.0)}
+    )
+    assert not validation(negative).execution_valid
+    assert validation(negative).red_zone is None
+    assert validation(new_map_draft("plain_map")).red_zone is None
+
+    # Depth equal to the float32 width of a 12.1-wide map: both strips cover the
+    # whole floor, ending at float32(12.1), just past the raw width.
+    narrow = validation(_narrow_scenario(12.1)).red_zone
+    width32 = float(np.float32(12.1))
+    assert narrow is not None
+    assert narrow.team_a_x_range == (0.0, width32)
+    assert narrow.team_b_x_range == (0.0, width32)
+
+
+@pytest.mark.parametrize(
+    ("authored_depth", "stable_code"),
+    [
+        (-1e-50, "scenario-red-zone-depth-negative"),
+        (-0.0, "scenario-red-zone-depth-negative"),
+        (1e-50, "scenario-red-zone-depth-underflow"),
+        (1e-40, "scenario-red-zone-depth-underflow"),
+        (1e39, "scenario-red-zone-depth-not-finite"),
+        (12.2, "scenario-red-zone-depth-exceeds-map-width"),
+        (1e-8, None),
+        (12.1, None),
+    ],
+)
+def test_raw_red_zone_depth_is_checked_before_float32_rounding(
+    authored_depth: float, stable_code: str | None
+) -> None:
+    draft = _narrow_scenario(authored_depth)
+    if stable_code is None:
+        compiled = compile_dev_scenario(draft)
+        stored = float32_value(authored_depth)
+        assert stored != authored_depth
+        assert isinstance(compiled.content, DevScenarioContentV2)
+        assert compiled.content.task.red_zone_depth == stored
+        assert compiled.config.team_deathmatch_red_zone_depth == stored
+        return
+    with pytest.raises(DevAuthoringValidationError) as raised:
+        compile_dev_scenario(draft)
+    linked = [
+        (problem.severity, problem.stable_code)
+        for problem in raised.value.problems
+        if problem.field_path == "task.red_zone_depth"
+    ]
+    assert linked == [("error", stable_code)]
+    assert validate_dev_scenario(draft) == raised.value.problems
+
+
+def test_core_depth_and_threshold_messages_link_to_their_task_fields() -> None:
+    draft = new_scenario_draft("core_links", red_zone_depth=DEFAULT_TDM_RED_ZONE_DEPTH)
+    oversized = draft.model_copy(
+        update={
+            "content": draft.content.model_copy(
+                update={
+                    "task": draft.content.task.model_copy(
+                        update={"score_threshold": 2**24}
+                    )
+                }
+            )
+        }
+    )
+    problems = validate_dev_scenario(oversized)
+    assert [
+        (problem.stable_code, problem.field_path)
+        for problem in problems
+        if problem.severity == "error"
+    ] == [("scenario-core-config-invalid", "task.score_threshold")]
+    depth_problem = authoring_compiler._core_problem(  # pyright: ignore[reportPrivateUsage]
+        ValueError("team_deathmatch_red_zone_depth must be finite, not nan."),
+        phase="config",
+        content=draft.content,
+    )
+    assert depth_problem.field_path == "task.red_zone_depth"
+
+
+def test_v1_scenario_opens_as_v2_and_saves_the_next_revision_as_v2(
+    tmp_path: Path,
+) -> None:
+    store = _store(tmp_path)
+    binding = DevClientAuthoringBinding(store)
+    fixture = json.loads(SCENARIO_1_FIXTURE_PATH.read_text(encoding="utf-8"))
+    saved_as = binding.apply_command(
+        _request(
+            {"command_type": "save_as", "draft": fixture, "asset_id": "legacy_scenario"}
+        )
+    )
+    assert saved_as.ok
+    assert isinstance(saved_as.draft, DevScenarioDraftV1)
+    assert saved_as.draft.revision == 1
+    directory = store.artifact_root / "drafts" / "scenarios" / "legacy_scenario"
+    first_bytes = (directory / "r1.json").read_bytes()
+    assert json.loads(first_bytes)["schema"] == "dev-scenario-draft@1"
+    saved_source = {
+        "source_kind": "saved_draft",
+        "asset_kind": "scenario",
+        "asset_id": "legacy_scenario",
+        "revision": 1,
+    }
+
+    opened = binding.apply_command(
+        _request({"command_type": "open", "source": saved_source})
+    )
+    assert opened.ok
+    assert isinstance(opened.draft, DevScenarioDraftV2)
+    assert opened.draft.revision == 1
+    assert opened.draft.content.task.red_zone_depth == 0.0
+    assert opened.validation is not None
+    assert opened.validation.semantic_digest == SCENARIO_1_SEMANTIC_DIGEST
+
+    saved = binding.apply_command(
+        _request(
+            {
+                "command_type": "save",
+                "draft": opened.draft.model_dump(mode="json", by_alias=True),
+                "expected_revision": 1,
+            }
+        )
+    )
+    assert saved.ok
+    assert isinstance(saved.draft, DevScenarioDraftV2)
+    assert saved.draft.revision == 2
+    assert json.loads((directory / "r2.json").read_bytes())["schema"] == (
+        "dev-scenario-draft@2"
+    )
+    assert (directory / "r1.json").read_bytes() == first_bytes
+    assert isinstance(
+        store.load_draft("scenario", "legacy_scenario", revision=1),
+        DevScenarioDraftV1,
+    )
+
+    loaded = binding.apply_command(
+        _request({"command_type": "open_in_debug", "source": saved_source})
+    )
+    assert loaded.ok
+    assert loaded.debug_load is not None
+    assert loaded.debug_load.scenario_semantic_digest == SCENARIO_1_SEMANTIC_DIGEST
+    snapshot = binding.scenario_loader.current_snapshot
+    assert snapshot is not None
+    assert snapshot.compiled.config.team_deathmatch_red_zone_depth == 0.0
+
+    duplicated = binding.apply_command(
+        _request(
+            {
+                "command_type": "new_scenario",
+                "asset_id": "legacy_copy",
+                "creation_mode": "duplicate_saved_scenario",
+                "source": saved_source,
+            }
+        )
+    )
+    assert duplicated.ok
+    assert isinstance(duplicated.draft, DevScenarioDraftV2)
+    assert duplicated.draft.content.task.red_zone_depth == 0.0
+
+    tampered = json.loads(first_bytes)
+    tampered["asset_id"] = "tampered_scenario"
+    tampered["content"]["task"]["red_zone_depth"] = 5.0
+    tampered_path = store.artifact_root / "drafts" / "scenarios" / "tampered_scenario"
+    tampered_path.mkdir()
+    (tampered_path / "r1.json").write_text(json.dumps(tampered), encoding="utf-8")
+    with pytest.raises(DevAssetIntegrityError, match="failed strict parsing"):
+        store.load_draft("scenario", "tampered_scenario", revision=1)
+
+
+def test_every_debugger_scene_stays_neutral_at_depth_zero() -> None:
+    scenes = list_scenarios(include_stress=True)
+    assert len(scenes) == 16
+    for scene in scenes:
+        config, _ = scene.build_scenario()
+        assert config.task_mode == 0, scene.name
+        assert config.team_deathmatch_red_zone_depth == 0.0, scene.name

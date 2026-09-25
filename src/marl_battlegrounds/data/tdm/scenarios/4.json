@@ -1,10 +1,11 @@
 {
   "configuration": {
     "schema_id": "marl_battlegrounds.evaluation.resolved_env_config",
-    "schema_version": 1,
-    "canonical_digest_sha256": "5f8d39d6a4abc00158030b31d076c8bf1520d63147a66a207d35d1fde2185188",
+    "schema_version": 2,
+    "canonical_digest_sha256": "2c6969da243a6dedf013d0d73798ef12be00653e229e15c69af30a056f117307",
     "task_mode": 1,
     "team_deathmatch_score_threshold": 20,
+    "team_deathmatch_red_zone_depth": 5.0,
     "maximum_episode_steps": 300,
     "map_width": 20.0,
     "map_height": 10.0,

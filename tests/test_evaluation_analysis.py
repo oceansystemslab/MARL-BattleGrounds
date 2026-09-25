@@ -1,7 +1,14 @@
 """Check replay metric analysis and its read-only result boundaries.
 
 Analysis must use the shared numerical metric definitions and preserve missing
-values instead of inventing measurements.
+values instead of inventing measurements. The roster and targeting checks use
+historical V1 contexts, so their map configs set Red Zone depth 0.0 (the V1
+record has no depth field). The roster checks also cover the Red Zone columns:
+an agent's Red Zone kill contributions and kill participation show exactly when
+its kill contributions do (its team has an agent who can deal damage), its Red
+Zone deaths and death share always show while it is active, and a team's Red
+Zone kills show exactly when the team has an agent who can deal damage while
+its Red Zone deaths always show.
 """
 
 import csv
@@ -71,7 +78,10 @@ def test_search_catalog_uses_recorded_rosters_without_numerical_analysis() -> No
     for team_a, team_b in zip(rosters, reversed(rosters), strict=True):
         context = evaluation_context(
             config=make_standard_team_deathmatch_config(
-                map_id=48, team_a_roster=team_a, team_b_roster=team_b
+                map_id=48,
+                team_a_roster=team_a,
+                team_b_roster=team_b,
+                red_zone_depth=0.0,
             )
         )
         completion = EvaluationEpisodeCompletionV1(
@@ -144,7 +154,10 @@ def test_replay_class_filters_keep_helpers_and_recipients_distinct() -> None:
     for team_a, team_b in zip(teams, reversed(teams), strict=True):
         context = evaluation_context(
             config=make_standard_team_deathmatch_config(
-                map_id=48, team_a_roster=team_a, team_b_roster=team_b
+                map_id=48,
+                team_a_roster=team_a,
+                team_b_roster=team_b,
+                red_zone_depth=0.0,
             )
         )
         analysis = object.__new__(ReplayAnalysis)
@@ -214,6 +227,12 @@ def test_replay_class_filters_keep_helpers_and_recipients_distinct() -> None:
                 agent.class_id in (2, 3, 4) or (agent.class_id == 5 and ally_damage)
             )
             assert shown(f"agent_{slot}_kill_contributions") == ally_damage
+            # Red Zone kill help follows ordinary kill help; Red Zone deaths
+            # belong to their victims.
+            for stem in ("red_zone_kill_contributions", "red_zone_kill_participation"):
+                assert shown(f"agent_{slot}_{stem}") == ally_damage
+            for stem in ("red_zone_deaths", "red_zone_death_fraction"):
+                assert shown(f"agent_{slot}_{stem}")
             assert shown(f"agent_{slot}_burst_damage_received") == any(
                 a.class_id == 1 for a in enemies
             )
@@ -267,6 +286,8 @@ def test_replay_class_filters_keep_helpers_and_recipients_distinct() -> None:
             assert shown(f"team_{team}_ally_distance_mean") == (len(members) >= 2)
             assert shown(f"team_{team}_trap_intervals")
             assert shown(f"team_{team}_trap_breaks") == bool(damagers)
+            assert shown(f"team_{team}_red_zone_kills") == bool(damagers)
+            assert shown(f"team_{team}_red_zone_deaths")
             # Match results stay available even when an event cannot happen.
             for measure in ("kills", "deaths", "score", "return"):
                 assert shown(f"team_{team}_{measure}")
@@ -278,6 +299,8 @@ def test_replay_class_filters_keep_helpers_and_recipients_distinct() -> None:
                     "trap_break_rate",
                     "trap_mean_remaining_steps_at_break",
                     "rescue_opportunities",
+                    "red_zone_kill_contributions",
+                    "red_zone_deaths",
                 ):
                     assert not shown(f"agent_{agent.global_slot}_{stem}")
 
@@ -301,6 +324,7 @@ def test_replay_ultimate_targets_follow_recorded_classes_not_slot_numbers(
         team_a_roster=team_a,
         team_b_roster=team_b,
         max_steps=1,
+        red_zone_depth=0.0,
     )
     trajectory = captured_evaluation_trajectory(
         config=config, transition_count=1, expected_horizon=1
@@ -373,8 +397,8 @@ def test_replay_ultimate_targets_follow_recorded_classes_not_slot_numbers(
         )
         catalog = metadata_analysis.catalog()
         topics = cast(tuple[dict[str, object], ...], catalog["topics"])
-        assert len(topics) == 27
-        assert sum(len(cast(list[object], topic["views"])) for topic in topics) == 43
+        assert len(topics) == 28
+        assert sum(len(cast(list[object], topic["views"])) for topic in topics) == 44
         assert any(topic["name"] == "ultimate_priest" for topic in topics)
         definitions = {
             row["name"]: row

@@ -1,4 +1,12 @@
-"""Check that reading evaluation artifacts does not import simulator execution."""
+"""Check that reading evaluation artifacts does not import simulator execution.
+
+The frozen wire widths must match Core's current shapes. The context width is
+the one exception with history: frames V1 and V2 keep 19 context columns
+(CONTEXT_FEATURES_V1), while Core and frame V3 use 20 (CONTEXT_FEATURES_V2;
+column 19 is the Red Zone depth). The host copies of the Team Deathmatch point
+values (1 per death, 2 per Red Zone death) and of the largest score threshold
+at depths 0.0 and 5.0 must equal Core's.
+"""
 
 from __future__ import annotations
 
@@ -7,11 +15,12 @@ import sys
 
 import pytest
 
+from marl_battlegrounds.core import config as core_config
 from marl_battlegrounds.core import types as core_types
-from marl_battlegrounds.evaluation import wire_shapes
+from marl_battlegrounds.evaluation import models, wire_shapes
 
 _WIRE_SHAPE_PARITY = (
-    (wire_shapes.CONTEXT_FEATURES_V1, core_types.CONTEXT_FEATURES),
+    (wire_shapes.CONTEXT_FEATURES_V2, core_types.CONTEXT_FEATURES),
     (wire_shapes.ENVIRONMENT_DIMENSIONS_V1, core_types.ENVIRONMENT_DIMENSIONS),
     (wire_shapes.MAX_AGENT_SLOTS_V1, core_types.MAX_AGENT_SLOTS),
     (wire_shapes.MAX_AGENTS_PER_TEAM_V1, core_types.MAX_AGENTS_PER_TEAM),
@@ -42,6 +51,38 @@ def test_evaluation_v1_wire_shapes_match_current_core_contract() -> None:
     assert all(
         wire_value == core_value for wire_value, core_value in _WIRE_SHAPE_PARITY
     )
+    # Historical frames keep their recorded 19-column context layout.
+    assert wire_shapes.CONTEXT_FEATURES_V1 == 19
+
+
+_TEAM_DEATHMATCH_POINT_PARITY = (
+    (
+        models.TEAM_DEATHMATCH_POINTS_PER_DEATH,
+        core_types.TEAM_DEATHMATCH_POINTS_PER_DEATH,
+        1,
+    ),
+    (
+        models.TEAM_DEATHMATCH_POINTS_PER_RED_ZONE_DEATH,
+        core_types.TEAM_DEATHMATCH_POINTS_PER_RED_ZONE_DEATH,
+        2,
+    ),
+    (
+        models._maximum_team_deathmatch_score_threshold(0.0),  # pyright: ignore[reportPrivateUsage]
+        core_config.maximum_team_deathmatch_score_threshold(0.0),
+        16_777_212,
+    ),
+    (
+        models._maximum_team_deathmatch_score_threshold(5.0),  # pyright: ignore[reportPrivateUsage]
+        core_config.maximum_team_deathmatch_score_threshold(5.0),
+        16_777_207,
+    ),
+)
+
+
+def test_host_team_deathmatch_points_and_bound_match_core() -> None:
+    # Rows: (host copy, Core owner, expected value).
+    for host_value, core_value, expected in _TEAM_DEATHMATCH_POINT_PARITY:
+        assert host_value == core_value == expected
 
 
 @pytest.mark.parametrize(

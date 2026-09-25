@@ -2,7 +2,9 @@
 
 Full original identities prevent reused episode collisions. Required outcomes,
 optional coverage and exact source files are checked without model imports or
-copying foreign reports into the new run.
+copying foreign reports into the new run. The snapshot's pinned scalar schema
+(current when the config has no compatibility section) picks the full-report
+header and the scalar version every record source must have.
 """
 
 import csv
@@ -15,7 +17,11 @@ from typing import Any
 
 import pytest
 
-from marl_battlegrounds.evaluation.metric_catalog import PRIORITY_METRIC_NAMES
+from marl_battlegrounds.evaluation.metric_catalog import (
+    FULL_METRIC_NAMES_BY_SCHEMA_VERSION,
+    METRIC_SCHEMA_VERSION,
+    PRIORITY_METRIC_NAMES,
+)
 from marl_battlegrounds.evaluation.run_writer import MATCH_COLUMNS
 from marl_battlegrounds.evaluation.tournament_assets import AssetVerifier
 from marl_battlegrounds.evaluation.tournament_records import TournamentRecords
@@ -32,7 +38,9 @@ def _asset(path: Path, role: str) -> dict[str, Any]:
     }
 
 
-def _records(tmp_path: Path) -> tuple[TournamentRecords, dict[str, Any]]:
+def _records(
+    tmp_path: Path, *, scalar: int = METRIC_SCHEMA_VERSION, pin: int | None = None
+) -> tuple[TournamentRecords, dict[str, Any]]:
     assets: dict[str, Any] = {}
     sources: list[dict[str, Any]] = []
     games: list[dict[str, Any]] = []
@@ -71,7 +79,7 @@ def _records(tmp_path: Path) -> tuple[TournamentRecords, dict[str, Any]]:
         manifest: dict[str, Any] = {
             "run_id": run_id,
             "schema_version": 2,
-            "metric_schema_version": 14,
+            "metric_schema_version": scalar,
             "metric_schema_id": "marlbg.tdm.scalar",
             "passes": {"p": entry},
             "configurations": {"config": {}},
@@ -110,7 +118,9 @@ def _records(tmp_path: Path) -> tuple[TournamentRecords, dict[str, Any]]:
                 },
             }
         )
-    config = {"assets": assets, "record_sources": sources}
+    config: dict[str, Any] = {"assets": assets, "record_sources": sources}
+    if pin is not None:
+        config["compatibility"] = {"scalar_schema": pin}
     records = TournamentRecords(
         config,
         games,
@@ -325,3 +335,31 @@ def test_preflight_verifies_each_asset_at_both_boundaries(
         "table-0": 2,
         "table-1": 2,
     }
+
+
+def test_snapshot_pin_picks_full_header_and_required_source_version(
+    tmp_path: Path,
+) -> None:
+    for name in ("old", "mixed"):
+        (tmp_path / name).mkdir()
+    records, config = _records(tmp_path / "old", scalar=14, pin=14)
+    assert records.scalar_schema == 14
+    header = records.headers["full_metrics.csv"]
+    assert header[len(header) - 11148 :] == FULL_METRIC_NAMES_BY_SCHEMA_VERSION[14]
+    assert not any("red_zone" in column for column in header)
+    assert len(next(records.iter_rows("match_results.csv"))) == 2
+    current, _ = _records(tmp_path / "mixed", scalar=14, pin=METRIC_SCHEMA_VERSION)
+    assert (
+        current.headers["full_metrics.csv"][-11192:]
+        == (FULL_METRIC_NAMES_BY_SCHEMA_VERSION[METRIC_SCHEMA_VERSION])
+    )
+    with pytest.raises(ValueError, match="schema"):
+        next(current.iter_rows("match_results.csv"))
+    with pytest.raises(ValueError, match="scalar_schema"):
+        TournamentRecords(
+            {**config, "compatibility": {"scalar_schema": 16}},
+            records.games,
+            (),
+            AssetVerifier(config),
+            manifest={"run_id": "new", "passes": {}},
+        )

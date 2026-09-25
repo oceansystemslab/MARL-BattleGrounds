@@ -1,6 +1,7 @@
 /**
  * @file Check PNG/export provenance, audience-specific source facts and rejection of
- * forged or extra fields.
+ * forged or extra fields. New exports write provenance version 2 with all 20 filters;
+ * version-1 provenance with its 19 filters still reads; mixed forms are rejected.
  */
 import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
@@ -368,6 +369,48 @@ test("canonical provenance recursively sorts keys and preserves exact UTF-8", ()
   const nonfinite = structuredClone(original);
   nonfinite.presentation.css_width = Number.NaN;
   assert.throws(() => canonicalReplayPngProvenanceV1(nonfinite), /safe integer/u);
+});
+
+test("new exports write provenance 2 while version-1 PNG provenance stays readable", () => {
+  const current = projectReplayPngProvenanceV1(
+    projectionOptions(presentations.replay_oracle),
+  );
+  assert.equal(current.schema_version, 2);
+  assert.equal(Object.keys(current.presentation.visual_filters).length, 20);
+  assert.equal(current.presentation.visual_filters.red_zone_floors, true);
+
+  const historical = /** @type {Record<string, any>} */ (structuredClone(current));
+  historical.schema_version = 1;
+  delete historical.presentation.visual_filters.red_zone_floors;
+  const readBack = canonicalReplayPngProvenanceV1(historical).provenance;
+  assert.equal(readBack.schema_version, 1);
+  assert.deepEqual(
+    Object.keys(readBack.presentation.visual_filters),
+    VISUAL_FILTER_IDS.filter((id) => id !== "red_zone_floors"),
+  );
+
+  const oldVersionNewFilters = /** @type {Record<string, any>} */ (
+    structuredClone(current)
+  );
+  oldVersionNewFilters.schema_version = 1;
+  assert.throws(
+    () => canonicalReplayPngProvenanceV1(oldVersionNewFilters),
+    /unknown or missing fields/u,
+  );
+  const newVersionOldFilters = /** @type {Record<string, any>} */ (
+    structuredClone(historical)
+  );
+  newVersionOldFilters.schema_version = 2;
+  assert.throws(
+    () => canonicalReplayPngProvenanceV1(newVersionOldFilters),
+    /unknown or missing fields/u,
+  );
+  const futureVersion = /** @type {Record<string, any>} */ (structuredClone(current));
+  futureVersion.schema_version = 3;
+  assert.throws(
+    () => canonicalReplayPngProvenanceV1(futureVersion),
+    /root identity is invalid/u,
+  );
 });
 
 test("safe PNG filenames are bounded ASCII and authority-disjoint", () => {

@@ -17,7 +17,7 @@ import marl_battlegrounds as marl_bgs
 from marl_battlegrounds.core.types import Action, DoneFlags
 from marl_battlegrounds.evaluation.models import (
     CodeRevisionV2,
-    EvaluationEpisodeContextV3,
+    EvaluationEpisodeContextV4,
 )
 from marl_battlegrounds.evaluation.recording_context import build_recording_context
 from marl_battlegrounds.evaluation.replay import RuntimeProvenanceV1
@@ -46,7 +46,7 @@ def terminal() -> ReplayPackets:
 
 def _context(
     packet: ReplayPackets,
-) -> tuple[EvaluationEpisodeContextV3, RuntimeProvenanceV1]:
+) -> tuple[EvaluationEpisodeContextV4, RuntimeProvenanceV1]:
     return build_recording_context(
         packet.config,
         run_id="test",
@@ -94,7 +94,7 @@ def test_later_bad_row_never_calls_factory_or_writes_spools(
 
     def context(
         packet: ReplayPackets,
-    ) -> tuple[EvaluationEpisodeContextV3, RuntimeProvenanceV1]:
+    ) -> tuple[EvaluationEpisodeContextV4, RuntimeProvenanceV1]:
         calls.append(int(packet.episode_id))
         return _context(packet)
 
@@ -117,7 +117,7 @@ def test_pending_completion_blocks_another_terminal_before_any_mutation(
 
     def context(
         packet: ReplayPackets,
-    ) -> tuple[EvaluationEpisodeContextV3, RuntimeProvenanceV1]:
+    ) -> tuple[EvaluationEpisodeContextV4, RuntimeProvenanceV1]:
         calls.append(int(packet.episode_id))
         return _context(packet)
 
@@ -161,7 +161,7 @@ def test_padding_performs_no_recording_and_closed_preflight_fails(
 
     def never_context(
         packet: ReplayPackets,
-    ) -> tuple[EvaluationEpisodeContextV3, RuntimeProvenanceV1]:
+    ) -> tuple[EvaluationEpisodeContextV4, RuntimeProvenanceV1]:
         calls.append(packet)
         raise AssertionError("padding called context factory")
 

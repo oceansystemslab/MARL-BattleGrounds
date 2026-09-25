@@ -4,6 +4,8 @@ Results keep the older convenience fields and add bounded NumPy table access.
 Saved views use one committed manifest snapshot. They never recover a writer,
 load JAX, recompute old measurements or fit tournament ratings. Whole-table
 allocation is explicit through ``table``; ``iter_table`` bounds raw row batches.
+Each saved run reads with the full-report header of its own recorded scalar
+schema (14 before the Red Zone columns, 15 now).
 """
 
 from __future__ import annotations
@@ -20,6 +22,7 @@ from numpy.typing import NDArray
 
 from marl_battlegrounds.evaluation.metric_catalog import (
     FULL_METRIC_NAMES,
+    FULL_METRIC_NAMES_BY_SCHEMA_VERSION,
     METRIC_SCHEMA_ID,
     METRIC_SCHEMA_VERSION,
     PRIORITY_METRIC_NAMES,
@@ -35,7 +38,7 @@ from marl_battlegrounds.evaluation.scalar_reports import (
 )
 
 if TYPE_CHECKING:
-    from marl_battlegrounds.evaluation.replay_v3 import ReplayArtifactV3
+    from marl_battlegrounds.evaluation.replay_v4 import ReplayArtifactV4
     from marl_battlegrounds.evaluation.tournament_records import TournamentRecords
 
 Columns = dict[str, NDArray[np.generic]]
@@ -144,18 +147,42 @@ def _stamp(path: Path) -> tuple[int, int, int, int]:
 
 
 def _schema(manifest: Mapping[str, Any]) -> None:
-    """Reject unsupported host/scalar pairs before opening any table."""
+    """Reject unsupported host/scalar pairs before opening any table.
+
+    Host schema 1 accepts scalar schemas 1 to 13. Host schema 2 accepts each
+    scalar schema that FULL_METRIC_NAMES_BY_SCHEMA_VERSION lists (14 and 15).
+    Raises ValueError for any other pair, a different metric schema ID or a
+    pending recording restore.
+    """
     host, scalar = manifest.get("schema_version"), manifest.get("metric_schema_version")
     if manifest.get("metric_schema_id") != METRIC_SCHEMA_ID or not (
         type(host) is int
         and type(scalar) is int
-        and ((host == 2 and scalar == 14) or (host == 1 and 1 <= scalar <= 13))
+        and (
+            (host == 2 and scalar in FULL_METRIC_NAMES_BY_SCHEMA_VERSION)
+            or (host == 1 and 1 <= scalar <= 13)
+        )
     ):
         raise ValueError("unsupported result host/scalar schema pair")
     if "recording_restore" in manifest:
         raise ValueError(
             "recording restore is pending; complete the explicit restore first"
         )
+
+
+def _headers(manifest: Mapping[str, Any]) -> dict[str, tuple[str, ...]]:
+    """Return the raw table headers that a checked manifest's version expects.
+
+    A host-schema-2 manifest gets the full-report header of its own scalar
+    schema from FULL_METRIC_NAMES_BY_SCHEMA_VERSION, so a saved schema-14 table
+    reads with its 11,148 original columns. Host schema 1 keeps the current
+    headers; its tables are always read by their stored headers. Call only
+    after _schema has accepted the manifest.
+    """
+    if manifest["schema_version"] != 2:
+        return _HEADERS
+    names = FULL_METRIC_NAMES_BY_SCHEMA_VERSION[manifest["metric_schema_version"]]
+    return {**_HEADERS, "full_metrics.csv": (*IDENTITY_COLUMNS, *names)}
 
 
 def _read_manifest(run_dir: Path) -> dict[str, Any]:
@@ -401,8 +428,12 @@ class _View:
         pass_id: str | None = None,
         memory: Mapping[str, object] | None = None,
     ) -> None:
-        """Resolve one immutable manifest snapshot and describe available tables."""
+        """Resolve one immutable manifest snapshot and describe available tables.
+
+        The raw table headers follow the manifest's own scalar schema version.
+        """
         _schema(manifest)
+        self._headers = _headers(manifest)
         self.manifest = manifest
         self.run_dir = run_dir
         self._file_inodes: dict[str, int] = {}
@@ -479,17 +510,21 @@ class _View:
         self.metadata["spawn_balance"] = self._spawn_balance()
 
     def _header(self, filename: str) -> tuple[str, ...]:
-        """Read only a stored header, or use the current schema for an empty table."""
+        """Read only a stored header, or use the manifest's schema for an empty table.
+
+        A current (host schema 2) stored header must equal the header of the
+        manifest's own scalar schema; otherwise ValueError is raised.
+        """
         if self.run_dir is None:
             value = self.memory.get(filename.removesuffix(".csv"))
             if isinstance(value, dict):
                 return tuple(cast(dict[str, Any], value))
             if isinstance(value, (tuple, list)) and value:
                 return tuple(cast(Sequence[Row], value)[0])
-            return _HEADERS.get(filename, ())
+            return self._headers.get(filename, ())
         boundary = _mapping(self.manifest.get("tables")).get(filename)
         if boundary is None or not boundary.get("durable_bytes"):
-            return _HEADERS.get(filename, ())
+            return self._headers.get(filename, ())
         path = self.run_dir / filename
         if (
             path.is_symlink()
@@ -516,8 +551,8 @@ class _View:
             raise ValueError(f"invalid result table header: {filename}")
         if (
             self.manifest["schema_version"] == 2
-            and filename in _HEADERS
-            and names != _HEADERS[filename]
+            and filename in self._headers
+            and names != self._headers[filename]
         ):
             raise ValueError(f"incompatible current result table header: {filename}")
         return names
@@ -768,7 +803,7 @@ class _View:
                 iterator = _row_arrays(cast(Columns, data), order)
             else:
                 sequence = cast(Sequence[Row], data)
-                if filename in _HEADERS and "completion_order" in self.memory:
+                if filename in self._headers and "completion_order" in self.memory:
                     indexed = {int(row["episode_id"]): row for row in sequence}
                     iterator = (
                         indexed[value]
@@ -781,17 +816,17 @@ class _View:
                     iterator = iter(sequence)
             for row in iterator:
                 if (
-                    filename not in _HEADERS
+                    filename not in self._headers
                     or (row.get("phase"), row.get("pass_id")) in self.identities
                 ):
                     yield dict(row)
             return
-        summary = filename not in _HEADERS
+        summary = filename not in self._headers
         reader = iter_summary_rows if summary else iter_scalar_rows
         for batch in reader(
             self.run_dir / filename,
             manifest=self.manifest,
-            expected_header=_HEADERS.get(filename),
+            expected_header=self._headers.get(filename),
             batch_size=rows,
         ):
             self._check_snapshot(filename)
@@ -1264,6 +1299,40 @@ class EvaluationResult(_ResultAccess):
     include the whole selected saved pass, including earlier resumed games.
     ``metadata`` records table availability, status, scope and spawn coverage.
     Memory arrays are borrowed, not copied into a second wide report.
+
+    Attributes
+    ----------
+    priority_metrics, full_metrics : dict of str to numpy.ndarray
+        Without a writer: column name to one-dimensional NumPy array, one row
+        per selected game, in episode ID order. priority_metrics has every
+        game, except with metrics="none", when it has only the
+        full_metrics_episodes games. full_metrics has only the
+        full_metrics_episodes games, except with metrics="full", when it has
+        every game. Each dict starts with the IDENTITY_COLUMNS: run_id, phase,
+        pass_id, episode_id (int32), seed_id (uint32), map_id, config_id,
+        team_a_policy, team_b_policy, checkpoint_id, and each slot's
+        agent_<slot>_class_id and agent_<slot>_active. The float32 metric
+        columns follow, where NaN means unavailable. A table with no selected
+        game is an empty dict. With a writer both are empty; the values stay
+        in its files.
+    episodes : tuple of EpisodeResult
+        Compact required outcomes of the games completed by this call, in
+        episode ID order.
+    metadata : dict
+        The actual schedule, systems, settings and run identity. Creating the
+        result adds table availability, status, scope and spawn coverage to
+        this same dictionary. A generated pass records its resolved Red Zone
+        depth, in map units, as "red_zone_depth" in the options of
+        ``metadata["evaluation_contract"]`` (0.0 means the rule is off).
+    completed_episode_ids : tuple of int, default=()
+        Every durably completed episode ID in this pass, earlier resumed
+        games included, in ascending order. Empty means this call's
+        ``episodes`` are the whole pass.
+    paths : dict of str to Path or None, default=None
+        The writer's files, by name. None for in-memory results.
+    replays : tuple of ReplayArtifactV4, default=()
+        Current (version 4) replays captured in memory by this call. Empty
+        with a writer, which saves them as files instead.
     """
 
     priority_metrics: Columns
@@ -1272,7 +1341,7 @@ class EvaluationResult(_ResultAccess):
     metadata: Row
     completed_episode_ids: tuple[int, ...] = ()
     paths: dict[str, Path] | None = None
-    replays: tuple[ReplayArtifactV3, ...] = ()
+    replays: tuple[ReplayArtifactV4, ...] = ()
     _view: _View = field(init=False, repr=False, compare=False)
 
     def __post_init__(self) -> None:
@@ -1354,6 +1423,41 @@ class TournamentResult(_ResultAccess):
     an optional keyword-only table computed by the runner once. No accessor fits
     Elo or reconstructs missing measurements. Saved views use committed files;
     in-memory views borrow the supplied rows and wide full-metric arrays.
+
+    Attributes
+    ----------
+    matches : tuple of dict
+        One row per completed game: the match_results table with its outcome,
+        scores and priority values.
+    tournament_results : tuple of dict
+        One row per entrant: centered rating, rates, interval availability and
+        weighted worst-20-percent expected score.
+    matchup_results : tuple of dict
+        Directed policy/opponent rows with rates and score intervals.
+    map_results : tuple of dict
+        Policy/map rows with opponent-weighted rates and match counts.
+    full_metrics : dict of str to numpy.ndarray
+        Selected full metric columns captured in memory by this call. Empty
+        with file output or when full metrics are off.
+    replays : tuple of ReplayArtifactV4
+        Current (version 4) replays captured in memory by this call. Empty with
+        file output, which saves them as files instead.
+    metadata : dict
+        Method details, systems, participants, passes, configurations and the
+        run's settings. Creating the result adds table availability, status,
+        scope and spawn coverage to this same dictionary. A new run from
+        run_tournament's policies route records "red_zone_depth" here (the Red
+        Zone depth in map units; 0.0 means the rule is off); such a run saved
+        before the rule has no such key and played at 0.0. Configured and
+        canonical results (CanonicalTournamentResult) never carry this key, so
+        a missing key says nothing about their depth. For every result, each
+        game's depth is team_deathmatch_red_zone_depth in its configuration
+        under "configurations"; content saved before the rule lacks that field
+        and played at 0.0.
+    paths : dict of str to Path or None
+        Produced files by name, or None for in-memory results.
+    headline_metrics : tuple of dict, default=()
+        Optional keyword-only headline table, computed by the runner once.
     """
 
     matches: tuple[Row, ...]
@@ -1361,7 +1465,7 @@ class TournamentResult(_ResultAccess):
     matchup_results: tuple[Row, ...]
     map_results: tuple[Row, ...]
     full_metrics: Columns
-    replays: tuple[ReplayArtifactV3, ...]
+    replays: tuple[ReplayArtifactV4, ...]
     metadata: Row
     paths: dict[str, Path] | None
     headline_metrics: tuple[Row, ...] = field(default=(), kw_only=True)

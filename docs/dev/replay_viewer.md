@@ -17,12 +17,14 @@ A normal workflow is:
 5. Use Exit Replay Viewer or stop its terminal process when finished.
 
 Use [Combat Debugger](combat_debugger.md) for live play and map/scenario
-editing. New recordings use Replay V3. Historical V1 and V2 files retain their
-original meanings. Current policy rows store ally/enemy flags and a local self
+editing. New recordings use Replay V4, which records the Team Deathmatch Red
+Zone depth in its configuration and in context column 19. Historical V1, V2 and
+V3 files retain their original meanings (V3 and older scored one point per
+death). Current policy rows store ally/enemy flags and a local self
 index; the Viewer gets Team A/Team B labels from the recorded roster. Changing
 the view or frame never changes observations, policy assignments, or saved
-bytes. Current NoSharedObs actor exports use POV V2; historical POV V1 is still
-readable.
+bytes. Current NoSharedObs actor exports use POV V3 (from Replay V4);
+historical POV V1 and V2 are still readable.
 
 ## Open An Installed Replay
 
@@ -102,7 +104,7 @@ List and record a scripted demonstration for viewing:
 
 The public browser options are `--frame-index`, `--pov-slot`, `--view
 oracle|pov`, `--ranges`/`--no-ranges`, `--port`, and `--no-open`. Ranges start
-hidden; `--ranges` opts in without changing the nine default effects. `--seed`
+hidden; `--ranges` opts in without changing the eleven default effects. `--seed`
 applies only when recording a scripted scenario; its default is `0`. Browser
 frame index defaults to `0`, view to `oracle`, and port to `0` (a free port
 chosen by the operating system). `--pov-slot` selects an active global slot for
@@ -132,7 +134,7 @@ and cannot be used with local replays or checked samples.
 
 The launcher records the scripted demonstration in a temporary child process
 with `JAX_PLATFORMS=cpu`. The child executes the registered commands and
-publishes one V3 replay containing the captured frames, facts and episode
+publishes one V4 replay containing the captured frames, facts and episode
 provenance. No metric sidecar or full metric computation is required. The parent
 opens those bytes through the public loader before starting the Replay Viewer.
 The read-only viewer process does not import or run simulator control. Only the
@@ -179,7 +181,8 @@ JAX_PLATFORMS=cpu uv run python \
   --check --output-directory examples/replays/v1
 ```
 
-New generation writes manifest V2 and three self-contained Replay V3 files. It
+New generation writes manifest schema 3 and three self-contained Replay V4
+files. Manifest schema 2 sets (Replay V3) still verify. It
 does not write metric sidecars or run metric reducers. The Viewer computes
 metrics later from the recorded facts. The checked V1 pairs stay unchanged and
 keep their original strict verification. Both versions bound file reads, hold
@@ -192,10 +195,10 @@ JAX_PLATFORMS=cpu uv run python \
   scripts/dev/generate_visual_debugger_sample_replays.py --generate
 JAX_PLATFORMS=cpu uv run python \
   scripts/dev/generate_visual_debugger_sample_replays.py \
-  --check --output-directory artifacts/visual-debugger-samples/v3
+  --check --output-directory artifacts/visual-debugger-samples/v4
 ```
 
-Generation defaults to `artifacts/visual-debugger-samples/v3`. Verification and
+Generation defaults to `artifacts/visual-debugger-samples/v4`. Verification and
 sample launch defaults still use `examples/replays/v1`. Current generation
 writes four files instead of seven. Each replay stores ten local self indices
 per frame and keeps the existing 58-column unit rows. Its semantic verification
@@ -354,12 +357,13 @@ resume references are unchanged.
 
 ## Visual Filters
 
-Visual Filters contains 19 browser-local controls plus Ranges. Initially enable
+Visual Filters contains 20 browser-local controls plus Ranges. Initially enable
 Ultimate Ability Effects, Spawn Shield, Basic Ability Effects, Regeneration
-Effects, Death Effects, Resurrection Effects, Scrolling Battle Text, Respawn
-Wave and Death Announcer. Ranges start off, so the initial count is `9 enabled`.
-Visual Filters and Roster start open. **Default Configuration** restores these
-nine effects with Ranges off. The complete filter inventory is:
+Effects, Cooldown Effects, Death Effects, Resurrection Effects, Scrolling Battle
+Text, Respawn Wave, Death Announcer and Red Zone Floors. Ranges start off, so
+the initial count is `11 enabled`. Visual Filters and Roster start open.
+**Default Configuration** restores these eleven effects with Ranges off. The
+complete filter inventory is:
 
 1. Aura Fields
 2. Aura Modifier Badges
@@ -380,6 +384,16 @@ nine effects with Ranges off. The complete filter inventory is:
 17. Spawn-Shield Expiry
 18. Scrolling Battle Text
 19. Death Announcer
+20. Red Zone Floors
+
+Red Zone Floors tints each team's Red Zone a subtle deep red. The Red Zone is a
+full-height strip on the team's own spawn side. When an agent dies inside its
+own team's Red Zone, the enemy team gets 2 points instead of 1
+([A44](../design/specification_amendments.md#a44-team-deathmatch-red-zone-scoring)).
+The tint sits on the floor, under obstacles, bodies and effects, and shows with
+or without grid lines. The strips come from the recorded depth and spawn sides;
+the browser does not work out the rule itself. Replays recorded before the rule,
+or with depth 0, show no tint. Turning the filter off only hides the tint.
 
 Death Announcer names the killing team and shows a compact list of victims using
 numeric agent identities and classes. Hover or focus a victim to see its
@@ -410,8 +424,8 @@ color rather than by separate filters.
 A filter change pauses playback and reinstalls the current settled summary after
 filtering, so disabled paint never consumes layout space. Filters and Ranges do
 not change authorized data or authorized event data used by battlefield
-choreography. **Enable All** enables all 19 controls plus Ranges; **Disable
-All** disables all 20 visible controls.
+choreography. **Enable All** enables all 20 controls plus Ranges; **Disable
+All** disables all 21 visible controls.
 
 ## PNG Export and Metrics
 
@@ -421,8 +435,10 @@ exports only the battlefield at twice its displayed pixel dimensions. The
 toolbar, timeline, and inspectors are outside the image. The result uses the
 bundled fonts and locked battlefield background, reflects the current audience,
 selection, Ranges, and visual-filter states, and embeds one standard
-`MARL-BattleGrounds Replay Provenance` iTXt record. Export does not navigate the
-replay or request another replay frame.
+`MARL-BattleGrounds Replay Provenance` iTXt record. New exports write provenance
+version 2, which records all 20 filter states; PNGs saved with version 1 and its
+19 filters still read. Export does not navigate the replay or request another
+replay frame.
 
 The scoreboard derives the task, participant identities, current scores and
 configured target from the captured episode. Victory, draw and defeat appear
@@ -439,11 +455,17 @@ results. An indeterminate progress indicator appears while metrics are prepared.
 Longer replays can take longer; the indicator makes no fixed-duration promise.
 Playback, seeking and POV changes remain available while analysis prepares. CSV
 preparation also shows an indicator when the metrics panel is closed. The
-**Topic** selector starts with **Episode Results**. It has 27 topics under six
+**Topic** selector starts with **Episode Results**. It has 28 topics under six
 headings, including five named Ultimates and **Team Formation**. Sixteen topics
-have separate **Totals** and **By Recipient** views; eleven have one table.
+have separate **Totals** and **By Recipient** views; twelve have one table.
 **Respawning** shows each team's wave count, mean agents returned per wave, and
-mean waiting ticks seen in the recording. **Deaths and Time Dead** keeps death
+mean waiting ticks seen in the recording. **Red Zone**, right after it, shows
+each team's kills and deaths inside a team's own Red Zone, then the agents who
+helped with those kills and their shares, then the agents who died there and
+their shares. Each such death counts once but gave the enemy team 2 points, so
+compare it with the kills and scores in **Episode Results**. A recording made
+before the Red Zone rule shows a dash in every Red Zone row, and its **Blank
+When** help says the rule was not recorded. **Deaths and Time Dead** keeps death
 counts and dead time. Totals hold team-wide and acting-agent measurements. By
 Recipient holds affected-agent totals and team-to-agent or agent-to-agent
 details. Related views share no rows. Different topics can reuse an existing
@@ -467,7 +489,7 @@ existing team application columns. Earlier CSV files stay untouched. See the
 [schema-13 column
 contract](../evaluation/metric_specification.md#schema-13-team-ability-application-columns).
 
-**Find a Measurement** searches all 11,148 numerical columns. An exact CSV name
+**Find a Measurement** searches all 11,192 numerical columns. An exact CSV name
 is checked first and returns that column, including one that does not apply to
 the recorded roster. Other searches use measurement names, topics, related words
 and recorded agent identities. The start of a word works too: `regen` finds
@@ -516,7 +538,7 @@ strategic reasoning.
 
 **Download Metrics CSV** exports one wide row for the selected boundary, using
 the same scalar names, order and values as the run tables; unavailable cells are
-empty. Schema 14 exports 11,197 columns: 49 identity fields and 11,148 numerical
+empty. Schema 15 exports 11,241 columns: 49 identity fields and 11,192 numerical
 measurements. The export identifies its scope, local frame index, actual
 simulator tick, and captured roster/policy identities. **Episode Details**
 downloads the recorded episode, policy, completion and runtime metadata as JSON
@@ -558,7 +580,7 @@ scene-native Matplotlib adapter.
 Local replays, checked samples, and newly recorded demonstrations are validated
 as complete artifacts before the server opens a port or launches a browser.
 Historical V1 companions are checked when present or required by the
-checked-sample contract; current V3 replays are self-contained. The loader
+checked-sample contract; V2, V3 and current V4 replays are self-contained. The loader
 rejects invalid schemas, noncanonical bytes, hash mismatches, broken event/frame
 links, invalid frame indices or POV recipients, and unsupported paths. Its file
 checks also reject prohibited symlink paths.
@@ -588,7 +610,7 @@ Closing the tab does not stop Python; use **Exit Replay Viewer** or `Ctrl-C`.
   actions wait for a settled frame.
 - **Metrics unavailable:** inspect the analysis panel's error. A missing V1
   metrics sidecar does not prevent analysis from recorded facts or the Episode
-  Details download; current V3 recordings do not need a sidecar.
+  Details download; V2, V3 and current V4 recordings do not need a sidecar.
 - **PNG export disabled:** pause playback and wait for the exact-frame summary
   to settle in a visible connected tab.
 - **Static Matplotlib import failed:** run `uv sync --extra viz`.

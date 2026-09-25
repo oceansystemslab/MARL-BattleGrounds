@@ -25,20 +25,20 @@ from marl_battlegrounds.core.types import (
     EnvConfig,
 )
 from marl_battlegrounds.evaluation.actor_projection import (
-    NO_SHARED_OBS_ACTOR_PROJECTION_V3,
-    SHARED_OBS_ACTOR_PROJECTION_V2,
+    NO_SHARED_OBS_ACTOR_PROJECTION_V4,
+    SHARED_OBS_ACTOR_PROJECTION_V3,
 )
 from marl_battlegrounds.evaluation.catalog import (
-    build_evaluation_episode_context_v3,
+    build_evaluation_episode_context_v4,
     build_evaluation_seed_protocol_v1,
-    build_resolved_env_config_v1,
+    build_resolved_env_config_v2,
 )
 from marl_battlegrounds.evaluation.models import (
     AggregationKeyV1,
     AssignedPolicySlotV2,
     CodeRevisionV1,
     ContentAddressedIdentityV1,
-    EvaluationEpisodeContextV3,
+    EvaluationEpisodeContextV4,
     EvaluationEpisodeIdentityV1,
     EvaluationModel,
     EvaluationRole,
@@ -481,7 +481,7 @@ def build_debugger_evaluation_context_v1(
     team_b_controller: TeamBController,
     execution_information_mode: ExecutionInformationMode,
     expected_horizon: int | None = None,
-) -> EvaluationEpisodeContextV3:
+) -> EvaluationEpisodeContextV4:
     """Build the recorded custom-evaluation context for one live debugger episode.
 
     Parameters
@@ -509,7 +509,7 @@ def build_debugger_evaluation_context_v1(
 
     Returns
     -------
-    EvaluationEpisodeContextV3
+    EvaluationEpisodeContextV4
         Matching roster, config, task/scenario identity, controller assignments,
         named seed streams, capture choices and custom/nonofficial metadata.
         When the scenario provenance names an approved map ID, the layout
@@ -600,7 +600,7 @@ def build_debugger_evaluation_context_v1(
             "action_source_kind must match scenario mode and team controllers"
         )
     validate_env_config(config)
-    resolved_config = build_resolved_env_config_v1(config)
+    resolved_config = build_resolved_env_config_v2(config)
     horizon = config.max_steps if expected_horizon is None else expected_horizon
     if type(horizon) is not int or not 0 < horizon <= config.max_steps:
         raise ValueError("expected_horizon must be an exact positive config bound")
@@ -641,9 +641,9 @@ def build_debugger_evaluation_context_v1(
         layout_identifier = "resolved-debugger-environment"
         layout_version = 1
     actor_projection = (
-        SHARED_OBS_ACTOR_PROJECTION_V2
+        SHARED_OBS_ACTOR_PROJECTION_V3
         if execution_information_mode == "shared_obs"
-        else NO_SHARED_OBS_ACTOR_PROJECTION_V3
+        else NO_SHARED_OBS_ACTOR_PROJECTION_V4
     )
 
     def controller_identity(
@@ -914,7 +914,7 @@ def build_debugger_evaluation_context_v1(
         )
     aggregation_keys.sort(key=lambda row: row.name)
 
-    return build_evaluation_episode_context_v3(
+    return build_evaluation_episode_context_v4(
         identity=identity,
         scenario_name=scenario.name,
         aggregation_keys=tuple(aggregation_keys),

@@ -17,6 +17,11 @@ Every run uses shared recurrent actors, a separate centralized critic, width
 limits stay unchanged. Training uses native reward plus `score_delta` shaping
 at 0.01. Curriculum and recording are off. Gamma is 0.999, GAE lambda is 0.95,
 input scale is 0.01, and the existing current/history opponent rules remain.
+The declaration pins `red_zone_depth=0.0`, the one-point-per-death scoring the
+study was designed under, so the newer 5.0 default does not change it. Every
+training run and every Alpha or Beta assessment request carries that 0.0, and
+an assessment summary recorded at another depth is refused. A Red Zone study
+would be a new declaration.
 
 The reference uses actor and critic learning rates 0.00025, four epochs, two
 minibatches, two gradient groups, clipping 0.2, entropy 0.01, 32-step rollouts

@@ -359,6 +359,9 @@ const ORACLE_EVENT_NONNEGATIVE_FIELDS = Object.freeze([
 ]);
 const NORMALIZED_PRESENTATION_ROOTS = new WeakSet();
 const JOINED_PRESENTATION_ROOTS = new WeakSet();
+// The smallest positive normal float32. A smaller positive Red Zone depth would
+// underflow in Core, so no recorded strip may use one.
+const FLOAT32_SMALLEST_NORMAL = 2 ** -126;
 
 /**
  * Identify a coherent transport/presentation pair fetched from different refreshes.
@@ -2614,6 +2617,59 @@ function joinsCatalogFloat(recorded, catalog) {
 }
 
 /**
+ * Check that a map's recorded Red Zone strips are exactly the strips Core scores with.
+ *
+ * `width` is the schema-checked map width in world units; only its float32 value
+ * `w = Math.fround(width)` is used. `redZone` is the schema-checked
+ * `{depth, team_a_x_range, team_b_x_range}` record of an AuthorizedMapV2. The stored
+ * depth must be finite, exactly a float32 value (`Math.fround(depth) === depth`), at
+ * least the smallest normal float32 (2 ** -126) and at most `w`. The only permitted
+ * inclusive `[x_min, x_max]` strips are the left strip `[0, depth]` and the right
+ * strip `[Math.fround(w - depth), w]`; each team's range must equal one of them
+ * element for element. This is the same rule as Python's AuthorizedMapV2:
+ * `Math.fround(w - depth)` rounds one subtraction of two float32 values through a
+ * double, which equals Core's float32 `width - depth`. Both teams on one side is
+ * legal, and a collapsed range (`x_min === x_max`) is legal. Clipping for display
+ * belongs to the renderer and never changes this record.
+ *
+ * Returns undefined or throws TypeError naming the broken rule. It does not decide
+ * which side a team spawns on; the trusted Python producer records that.
+ *
+ * @param {number} width @param {Record<string, any>} redZone
+ */
+function validateAuthorizedRedZone(width, redZone) {
+  const w = Math.fround(width);
+  const depth = redZone.depth;
+  if (
+    typeof depth !== "number" ||
+    !Number.isFinite(depth) ||
+    Math.fround(depth) !== depth ||
+    depth < FLOAT32_SMALLEST_NORMAL ||
+    depth > w
+  ) {
+    invalid(
+      "Scene Red Zone depth must be a normal float32 value within the map width.",
+    );
+  }
+  const permitted = [
+    [0, depth],
+    [Math.fround(w - depth), w],
+  ];
+  for (const [label, range] of [
+    ["Team A", redZone.team_a_x_range],
+    ["Team B", redZone.team_b_x_range],
+  ]) {
+    if (
+      !Array.isArray(range) ||
+      range.length !== 2 ||
+      !permitted.some(([low, high]) => range[0] === low && range[1] === high)
+    ) {
+      invalid(`Scene ${label} Red Zone range must be one exact scoring strip.`);
+    }
+  }
+}
+
+/**
  * Check the class mechanics needed by a scene and index their declarations.
  *
  * `classMechanics` contains schema-checked profiles in the exact order given by
@@ -2884,7 +2940,9 @@ function validateResearcherRosterFacts(roster, classMechanics, scope) {
  * auras, spawn pads, shield settings, and two ordered team wave clocks. This
  * checks body identities and bounds, class/effect joins, aura source anchors,
  * spawn assignments, and timer limits. Oracle-only static facts must also agree
- * with their declared profiles.
+ * with their declared profiles. A version-2 map with a recorded Red Zone must hold
+ * the exact scoring strips (validateAuthorizedRedZone); `red_zone: null` means the
+ * rule was recorded with depth 0.
  *
  * Returns undefined or throws TypeError. The trusted producer decides which
  * bodies may appear; this helper does not recompute geometry, visibility, or the
@@ -2900,6 +2958,9 @@ function validateAuthorizedScene(scene) {
   const respawnWaves = /** @type {any[]} */ (scene.respawn_waves);
   if (scene.map.width <= 0 || scene.map.height <= 0) {
     invalid("Scene map dimensions must be positive.");
+  }
+  if (scene.map.map_version === 2 && scene.map.red_zone !== null) {
+    validateAuthorizedRedZone(scene.map.width, scene.map.red_zone);
   }
   const agentsByKey = new Map(agents.map((agent) => [agent.presentation_key, agent]));
   const representedClassIds = [...new Set(agents.map((agent) => agent.class_id))].sort(
@@ -6422,7 +6483,7 @@ function preflightTransportPresentationIdentity(rawValue, presentationValue) {
       "replay_reference.replay_schema_version",
     );
     if (
-      ![1, 2, 3].includes(reference.replay_schema_version) ||
+      ![1, 2, 3, 4].includes(reference.replay_schema_version) ||
       !/^[0-9a-f]{64}$/u.test(reference.context_digest_sha256) ||
       !/^[0-9a-f]{64}$/u.test(reference.trajectory_content_digest_sha256) ||
       !/^[0-9a-f]{64}$/u.test(reference.canonical_digest_sha256) ||

@@ -1,4 +1,11 @@
-"""Check SharedObs scene composition and private-information limits."""
+"""Check SharedObs scene composition and private-information limits.
+
+Red Zone scene records: SharedObs recipients on Team A and Team B whose frames
+carry 20 context columns (source material V3) record exactly the Oracle's
+AuthorizedMapV2 red_zone for the shared geometry cases, built only from the
+recipient's own column 19 and public spawn pads; 19-column source material
+keeps AuthorizedMapV1.
+"""
 
 from __future__ import annotations
 
@@ -17,6 +24,12 @@ from pydantic import TypeAdapter, ValidationError
 from tests.evaluation_fixtures import (
     CapturedEvaluationTrajectory,
     captured_evaluation_trajectory,
+    current_captured_evaluation_trajectory,
+)
+from tests.red_zone_scene_cases import (
+    RED_ZONE_GEOMETRY_CASES,
+    RedZoneGeometryCase,
+    red_zone_env_config,
 )
 
 from marl_battlegrounds.evaluation.models import (
@@ -40,9 +53,14 @@ from marl_battlegrounds.rendering.authorized_pov_scene import (
 from marl_battlegrounds.rendering.authorized_presentation import (
     AuthorizedClassDocumentationProfileAvailableV1,
     AuthorizedClassMechanicsV2,
+    AuthorizedMapV1,
+    AuthorizedMapV2,
+    build_oracle_authorized_scene_v1,
 )
 from marl_battlegrounds.rendering.evaluation_adapter import (
     SharedObsSourceMaterialProjectionV1,
+    SharedObsSourceMaterialProjectionV3,
+    build_evaluation_battlefield_scene_v2,
     build_shared_obs_source_material_projection_v1,
 )
 from marl_battlegrounds.rendering.evaluation_wire_features import (
@@ -1543,3 +1561,63 @@ def test_shared_public_exports_are_exact() -> None:
     assert rendering.build_shared_obs_authorized_scene_v1 is (
         build_shared_obs_authorized_scene_v1
     )
+
+
+@pytest.mark.parametrize(
+    "geometry",
+    tuple(
+        case
+        for case in RED_ZONE_GEOMETRY_CASES
+        if case.label
+        in ("depth 0", "depth 5", "depth 5.5 swapped banks", "depth 0.1 on width 17.3")
+    ),
+    ids=lambda case: case.label,
+)
+def test_shared_recipients_record_the_oracle_red_zone(
+    geometry: RedZoneGeometryCase,
+) -> None:
+    trajectory = current_captured_evaluation_trajectory(
+        transition_count=1,
+        execution_information_mode="shared_obs",
+        config=red_zone_env_config(geometry),
+    )
+    context = trajectory.context
+    frame = trajectory.frames[0]
+    oracle = build_oracle_authorized_scene_v1(
+        context,
+        build_evaluation_battlefield_scene_v2(context, frame),
+        authority_session_id="red-zone-oracle",
+    )
+    assert type(oracle.map) is AuthorizedMapV2
+    projection_by_slot = {
+        row.global_slot: build_shared_obs_source_material_projection_v1(
+            context, frame, selected_global_slot=row.global_slot
+        )
+        for row in context.roster
+        if row.configured_active
+    }
+    for slot in (0, 5):
+        recipient = projection_by_slot[slot]
+        assert type(recipient) is SharedObsSourceMaterialProjectionV3
+        parts = build_shared_obs_authorized_scene_v1(
+            recipient,
+            all_active_nonrecipient_source_material=tuple(
+                projection
+                for source_slot, projection in sorted(projection_by_slot.items())
+                if source_slot != slot
+            ),
+            public_catalog=context.static_mechanics_catalog,
+            authority_session_id="red-zone-shared",
+        )
+        assert type(parts.scene.map) is AuthorizedMapV2
+        assert parts.scene.map.red_zone == oracle.map.red_zone
+
+
+def test_nineteen_column_shared_source_material_keeps_the_v1_map(
+    shared_case: _SharedCase,
+) -> None:
+    parts = _build(shared_case, 0)
+    assert (
+        len(shared_case.projection_by_slot[0].base_sensor_frame.context_features) == 19
+    )
+    assert type(parts.scene.map) is AuthorizedMapV1

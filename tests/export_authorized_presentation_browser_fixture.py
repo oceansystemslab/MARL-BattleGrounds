@@ -2,6 +2,19 @@
 
 The output lets browser tests compare their decoding with the Python-owned
 record format. This is test infrastructure, not a researcher command.
+
+red_zone_cases hold sealed presentations whose map is AuthorizedMapV2: real
+Replay Oracle, NoSharedObs and SharedObs presentations from replay V4 games at
+Red Zone depth 5, and real live Oracle presentations from DevClient sessions
+on each other shared geometry case of tests.red_zone_scene_cases (depths 6,
+5.5 with swapped banks, 12 and 20 on width 20, both banks on the left, depth 0
+as null, depth 0.1 on width 17.3, a 12 x 12 map, and the edge depths
+float32(1e-8) on widths 20 and 12.1 and float32(12.1) on width 12.1), with every
+agent and pad inside its map. One more live Oracle case repeats depth 6 with a
+wall across Team A's strip edge (x = 6) and a pillar across Team B's (x = 14),
+so the browser can check that obstacles stay on top of the tint.
+red_zone_contract_cases copy the shared numeric contract table. The legacy V1
+compatibility case keeps AuthorizedMapV1.
 """
 
 # pyright: reportPrivateUsage=false
@@ -17,7 +30,10 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 from typing import Protocol, cast
 
+import jax
+import jax.numpy as jnp
 from scripts.dev.visual_debugger.control import create_session
+from scripts.dev.visual_debugger.model import DebuggerScenario
 from scripts.dev.visual_debugger.presentation_protocol import (
     LiveNoSharedObsAuthorizedPresentationFrameV1,
     LiveOracleAuthorizedPresentationFrameV1,
@@ -29,7 +45,15 @@ from scripts.dev.visual_debugger.protocol import CommandRequestV1, KeyboardComma
 from scripts.dev.visual_debugger.replay_service import ReplayViewerService
 from scripts.dev.visual_debugger.scenarios import get_scenario
 from scripts.dev.visual_debugger.service import DebuggerService
+from tests.evaluation_fixtures import current_captured_evaluation_trajectory
 from tests.export_visual_debugger_replay_artifacts import build_corpse_overlay_bundle
+from tests.red_zone_scene_cases import (
+    RED_ZONE_CONTRACT_CASES,
+    RED_ZONE_GEOMETRY_CASES,
+    RedZoneGeometryCase,
+    red_zone_env_config,
+)
+from tests.test_evaluation_pov import _runtime_provenance
 from tests.test_rendering_authorized_inspection import (
     _InspectionCases,
     inspection_cases,
@@ -51,19 +75,32 @@ from tests.test_visual_debugger_replay_service import (
 from tests.test_visual_debugger_service import _service
 from tests.visual_debugger_fixtures import debugger_test_launch_specification
 
-from marl_battlegrounds.core.env import initialize_scenario_state
-from marl_battlegrounds.evaluation.capture import capture_initial_evaluation_frame_v2
+from marl_battlegrounds.core.env import initialize_scenario_state, reset
+from marl_battlegrounds.core.types import (
+    MAX_OBSTACLE_SLOTS,
+    OBSTACLE_FEATURES,
+    OBSTACLE_TYPE_PILLAR,
+    OBSTACLE_TYPE_WALL,
+    EnvConfig,
+    EnvState,
+)
+from marl_battlegrounds.evaluation.capture import capture_initial_evaluation_frame_v3
+from marl_battlegrounds.evaluation.models import ExecutionInformationMode
 from marl_battlegrounds.evaluation.replay_io import (
     REPLAY_FILE_SUFFIX_V1,
+    load_replay,
     load_replay_bundle_v1,
+    save_replay,
     save_replay_bundle_v1,
 )
+from marl_battlegrounds.evaluation.replay_v4 import build_replay_v4
 from marl_battlegrounds.rendering.authorized_pov_scene import pov_presentation_key_v1
 from marl_battlegrounds.rendering.authorized_presentation import (
     AgentPovVisualIncomingAgentPhaseTrajectoryV1,
     AuthorizedBattlefieldSceneV1,
     AuthorizedClassMechanicsV1,
     AuthorizedClassMechanicsV2,
+    AuthorizedMapV1,
     AuthorizedSpawnShieldMechanicsAvailableV1,
     AuthorizedSpawnShieldMechanicsAvailableV2,
     ReplayIncomingAbilityActivatedEventV1,
@@ -146,7 +183,7 @@ def _live_corpse_overlay_frame() -> LiveNoSharedObsAuthorizedPresentationFrameV1
         authored_state,
         session.config,
     )
-    frame = capture_initial_evaluation_frame_v2(
+    frame = capture_initial_evaluation_frame_v3(
         session.evaluation_context,
         state,
         observation,
@@ -345,6 +382,11 @@ def _legacy_v1_scene(
         )
     return replace(
         scene,
+        map=AuthorizedMapV1(
+            width=scene.map.width,
+            height=scene.map.height,
+            obstacles=scene.map.obstacles,
+        ),
         class_mechanics=tuple(legacy_class_rows),
         spawn_shield_mechanics=AuthorizedSpawnShieldMechanicsAvailableV1(
             availability_kind="available",
@@ -354,16 +396,17 @@ def _legacy_v1_scene(
     )
 
 
-def _legacy_v1_compatibility_presentation(
+def _resealed_live_oracle(
     frame: LiveOracleAuthorizedPresentationFrameV1,
+    scene: AuthorizedBattlefieldSceneV1,
 ) -> LiveOracleAuthorizedPresentationFrameV1:
     endpoint = frame.current_endpoint
-    legacy_endpoint = _seal_oracle_authorized_current_endpoint_v1(
+    sealed_endpoint = _seal_oracle_authorized_current_endpoint_v1(
         episode_id=endpoint.episode_id,
         frame_index=endpoint.frame_index,
         frame_id=endpoint.frame_id,
         simulator_step_count=endpoint.simulator_step_count,
-        scene=_legacy_v1_scene(endpoint.scene),
+        scene=scene,
         identity_directory=endpoint.identity_directory,
         action_axis=endpoint.action_axis,
     )
@@ -372,16 +415,128 @@ def _legacy_v1_compatibility_presentation(
         for name in LiveOraclePresentationSourceIdentityV1.model_fields
     }
     source_values["source_authorized_endpoint_digest_sha256"] = (
-        legacy_endpoint.authorized_endpoint_digest_sha256
+        sealed_endpoint.authorized_endpoint_digest_sha256
     )
-    legacy_source = LiveOraclePresentationSourceIdentityV1(**source_values)
     frame_values = {
         name: getattr(frame, name)
         for name in LiveOracleAuthorizedPresentationFrameV1.model_fields
     }
-    frame_values["source"] = legacy_source
-    frame_values["current_endpoint"] = legacy_endpoint
+    frame_values["source"] = LiveOraclePresentationSourceIdentityV1(**source_values)
+    frame_values["current_endpoint"] = sealed_endpoint
     return LiveOracleAuthorizedPresentationFrameV1(**frame_values)
+
+
+def _legacy_v1_compatibility_presentation(
+    frame: LiveOracleAuthorizedPresentationFrameV1,
+) -> LiveOracleAuthorizedPresentationFrameV1:
+    return _resealed_live_oracle(frame, _legacy_v1_scene(frame.current_endpoint.scene))
+
+
+# A 2 x 1 wall across x = 6 and a radius-0.75 pillar across x = 14, as obstacle
+# rows (type, x, y, radius, width, height, theta, active).
+_STRIP_EDGE_OBSTACLES = (
+    jnp.zeros((MAX_OBSTACLE_SLOTS, OBSTACLE_FEATURES), dtype=jnp.float32)
+    .at[0]
+    .set(jnp.asarray((OBSTACLE_TYPE_WALL, 6.0, 6.0, 0.0, 2.0, 1.0, 0.0, 1.0)))
+    .at[1]
+    .set(jnp.asarray((OBSTACLE_TYPE_PILLAR, 14.0, 3.0, 0.75, 0.0, 0.0, 0.0, 1.0)))
+)
+
+
+def _live_oracle_red_zone_presentation(
+    geometry: RedZoneGeometryCase,
+    *,
+    with_edge_obstacles: bool = False,
+) -> LiveOracleAuthorizedPresentationFrameV1:
+    config = red_zone_env_config(geometry)
+    if with_edge_obstacles:
+        config = config._replace(obstacles=_STRIP_EDGE_OBSTACLES)
+
+    def build_scenario() -> tuple[EnvConfig, EnvState]:
+        state, _, _, _ = reset(config, jax.random.PRNGKey(0))
+        return config, state
+
+    session = create_session(
+        DebuggerScenario(
+            name="red_zone_fixture",
+            title="Red Zone Fixture",
+            description=f"Red Zone map: {geometry.label}.",
+            mode="interactive",
+            build_scenario=build_scenario,
+            frames=(),
+            default_controlled_slot=0,
+        ),
+        seed=0,
+        evaluation_launch_specification=debugger_test_launch_specification(),
+        controlled_global_slot=None,
+        show_ranges=True,
+        verbose_logging=False,
+    )
+    result = DebuggerService(
+        session,
+        view_mode="researcher",
+        preset="analysis",
+        include_stress=False,
+        session_id="browser-red-zone-live-oracle",
+    ).current_presentation()
+    if (
+        result.outcome != "response"
+        or type(result.payload) is not LiveOracleAuthorizedPresentationFrameV1
+    ):
+        raise RuntimeError("Red Zone live fixture has no Oracle presentation")
+    return result.payload
+
+
+def _red_zone_browser_cases() -> dict[str, dict[str, object]]:
+    depth_5 = next(case for case in RED_ZONE_GEOMETRY_CASES if case.label == "depth 5")
+    cases: dict[str, dict[str, object]] = {}
+    with TemporaryDirectory(prefix="marl-red-zone-fixture-") as directory:
+        recordings: tuple[tuple[ExecutionInformationMode, tuple[str, ...]], ...] = (
+            ("no_shared_obs", ("replay_oracle", "replay_no_shared_obs_agent_pov")),
+            ("shared_obs", ("replay_shared_obs_agent_pov",)),
+        )
+        for mode, audiences in recordings:
+            trajectory = current_captured_evaluation_trajectory(
+                transition_count=2,
+                execution_information_mode=mode,
+                config=red_zone_env_config(depth_5)._replace(max_steps=2),
+            )
+            replay = build_replay_v4(
+                trajectory.context,
+                trajectory.frames,
+                trajectory.transitions,
+                runtime_provenance=_runtime_provenance(),
+            )
+            path = Path(directory) / f"red-zone-{mode}{REPLAY_FILE_SUFFIX_V1}"
+            save_replay(replay, path)
+            loaded = load_replay(path)
+            for audience in audiences:
+                service = ReplayViewerService(
+                    loaded,
+                    initial_frame_index=1,
+                    view_mode="researcher" if audience == "replay_oracle" else "pov",
+                    pov_global_slot=0,
+                    viewer_session_id=f"browser-red-zone-{audience}",
+                    show_ranges=True,
+                )
+                result = service.current_presentation()
+                if result.outcome != "response":
+                    raise RuntimeError("Red Zone replay fixture has no presentation")
+                cases[f"{audience}_depth_5"] = result.payload.model_dump(mode="json")
+    for geometry in RED_ZONE_GEOMETRY_CASES:
+        if geometry is depth_5:
+            continue
+        name = "live_oracle_" + geometry.label.replace(" ", "_").replace(".", "_")
+        cases[name] = _live_oracle_red_zone_presentation(geometry).model_dump(
+            mode="json"
+        )
+    depth_6 = next(case for case in RED_ZONE_GEOMETRY_CASES if case.label == "depth 6")
+    cases["live_oracle_depth_6_obstacles_on_strip_edges"] = (
+        _live_oracle_red_zone_presentation(
+            depth_6, with_edge_obstacles=True
+        ).model_dump(mode="json")
+    )
+    return cases
 
 
 def _with_visual_events(
@@ -528,6 +683,7 @@ def render_fixture() -> str:
         ),
     }
     pairs = {kind: _pair(service) for kind, service in pair_services.items()}
+    red_zone_cases = _red_zone_browser_cases()
     continuity_session = "cp2-7-replay-audience-switch-fixture"
     continuity_pairs = {
         "oracle": _pair(
@@ -630,6 +786,8 @@ def render_fixture() -> str:
             ).model_dump(mode="json")
         },
         "corpse_overlay_negative_digests": corpse_overlay_negative_digests,
+        "red_zone_cases": red_zone_cases,
+        "red_zone_contract_cases": list(RED_ZONE_CONTRACT_CASES),
     }
     return json.dumps(payload, ensure_ascii=True, indent=2, sort_keys=True) + "\n"
 

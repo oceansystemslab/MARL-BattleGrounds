@@ -46,6 +46,7 @@ are listed separately in the data dictionary.
 | Ability use and action acceptance | 754 | How often abilities were used, who they targeted, and which actions the game rejected. |
 | Deaths and respawning | 48 | Who died, how long agents were dead, and when they returned. |
 | Kills and coordination | 746 | Who helped kill each enemy, who killed alone, and whether attackers chose the same target. |
+| Red Zone kills and deaths | 44 | Kills and deaths inside each team's own Red Zone near its spawn, who helped with those kills, and each agent's share. Each such death counts once but gives the enemy team 2 points. |
 | Damage | 538 | Who dealt damage, who took it, which ability dealt it, and each agent's share. |
 | Healing and excess | 2,028 | Who healed whom, which ability was used, how much healing was useful or excess, and automatic health recovery. |
 | Effects on controlled recipients | 3,592 | Damage, healing, and kill credit when the affected agent already had a named harmful status. |
@@ -56,7 +57,7 @@ are listed separately in the data dictionary.
 | Poison healing prevention | 12 | Priest healing prevented on affected agents and teams. |
 | Lethal-damage rescues | 544 | Who could be saved from lethal damage, who survived, and which healers and abilities helped. |
 | Formation | 44 | Distances between living teammates and how many times each pair was measured. |
-| **Total** | **11,148** | **Unique numerical columns; shared viewer appearances are counted once.** |
+| **Total** | **11,192** | **Unique numerical columns; shared viewer appearances are counted once.** |
 <!-- metric-family-summary:end -->
 
 Allocation asks where an agent's output went. Contribution asks how much that
@@ -97,9 +98,9 @@ question you want to answer; the tables provide the counts for both.
 
 ### Schema and compatibility
 
-New scalar runs use `marlbg.tdm.scalar@14`: **16 priority numeric columns** or
-**11,148 full numeric columns**, including those 16 priority values. The Viewer
-has 27 topics and 43 tables. Several topics may show the same exported column.
+New scalar runs use `marlbg.tdm.scalar@15`: **16 priority numeric columns** or
+**11,192 full numeric columns**, including those 16 priority values. The Viewer
+has 28 topics and 44 tables. Several topics may show the same exported column.
 The names and order stay fixed for valid one-through-five-agent, asymmetric,
 permuted-class, and repeated-class rosters. This schema supersedes the historical
 46-ID report catalog for new computation. It contains no KOTH or CTF metrics.
@@ -143,7 +144,10 @@ other topics keep the shared column names. A wording change or another appearanc
 in a topic does not add a measurement. Neither addition needs new per-tick counters.
 The full CSV is ordered by primary topic, then view, team, agent, recipient,
 and source-to-recipient detail. Schema 14 keeps the relative order of the 16
-retained priority measurements.
+retained priority measurements. Schema 15 adds the 44 Red Zone columns described
+below. Every schema-14 column keeps its name, meaning and relative order; the
+2,892 columns after Respawning move 44 places later. Saved schema-14 reports
+keep their own 11,148-column header and stay readable.
 Within each subject, All abilities come before Basic and then Ultimate. Each
 amount is followed by its fractions, with allocation before contribution.
 The Viewer uses the same order and the same exported measurements.
@@ -155,11 +159,11 @@ recovery, truncation, or writing; start a new run when the schema changes.
 Choose a **Topic**, then **Totals** or **By Recipient** when the topic has both.
 Totals show team-wide and acting-agent measurements. By Recipient shows totals
 for affected agents, then team-to-agent and agent-to-agent details. The two
-tables for one topic share no rows. Team Formation and ten other focused topics
+tables for one topic share no rows. Team Formation and eleven other focused topics
 need only one table. Six headings keep the Topic dropdown easy to scan.
 
 Use **Find a Measurement** to search a plain name or an exact CSV column. Search
-covers all 11,148 numerical measurements, even ones that do not apply to this
+covers all 11,192 numerical measurements, even ones that do not apply to this
 replay. An inapplicable result explains why and keeps its definition and CSV
 name available. It does not insert an impossible row into the table. A zero
 denominator is different: the measurement applies, but its fraction is blank.
@@ -240,6 +244,7 @@ counts concepts separately from these navigation locations.
 | Kills of Enemies With Harmful Effects | 154 | 1120 | — |
 | Deaths and Time Dead | — | — | 42 |
 | Respawning | — | — | 6 |
+| Red Zone | — | — | 44 |
 | Team Coordination | — | — | 4 |
 | Team Formation | — | — | 44 |
 | Aura Coverage | 72 | 480 | — |
@@ -252,19 +257,58 @@ counts concepts separately from these navigation locations.
 | Freezing Trap (Hunter Ultimate) | 28 | 190 | — |
 | Crippling Poison (Rogue Ultimate) | 4 | 10 | — |
 | Holy Word: Salvation (Priest Ultimate) | 2 | 0 | — |
-| **Total** | | | **11,148 unique measurements** |
+| **Total** | | | **11,192 unique measurements** |
 <!-- metric-navigation:end -->
 
 Schema 8 preserved all schema-7 names, definitions, calculations and blank-value
 rules. Schema 9 changed the excess-healing names only. Schema 10 removed 46 wait
 measurements, schema 11 added 40 recipient measurements, schema 12 added 12
 Basic healing-save shares, and schema 13 adds six team ability application
-counts. Schema 14 then removes ten repeated agent-return columns. The full-run
-table has 30 identity fields plus 11,148 measurements: 11,178 columns in total.
-Replay exports keep their 49 identity fields, giving 11,197 columns.
+counts. Schema 14 then removes ten repeated agent-return columns, and schema 15
+adds 44 Red Zone columns. The full-run table has 30 identity fields plus 11,192
+measurements: 11,222 columns in total. Replay exports keep their 49 identity
+fields, giving 11,241 columns.
 Historical files stay untouched;
 the writer rejects older schemas before recovery or writing. Use names rather
 than old column positions when comparing exports across these versions.
+
+### Schema 15 Red Zone kills and deaths
+
+A Team Deathmatch game can declare a Red Zone depth: each team's Red Zone is
+the full-height strip that many map units deep at its own spawn side. When an
+agent newly dies with its centre inside its own team's strip, the enemy team
+gets 2 points instead of 1. It is still one kill and one death. Location is
+checked when combat resolves, before movement. Schema 15 adds 44 full-only
+columns in one single-view **Red Zone** topic under **Kills, Deaths and
+Respawning**, right after **Respawning**:
+
+- **Red Zone Kills** (`team_{a,b}_red_zone_kills`, 2 columns): enemies this
+  team killed inside the enemy team's Red Zone. Each death counts once.
+- **Red Zone Kill Contributions** (`agent_{0..9}_red_zone_kill_contributions`,
+  10 columns): Red Zone kills this agent helped with, using the existing kill
+  help rule (damage, or useful Priest healing of an attacker, on the death tick).
+- **Share of Team Red Zone Kills** (`agent_{0..9}_red_zone_kill_participation`,
+  10 columns): this agent's Red Zone kill contributions divided by its team's
+  Red Zone kills in the same period. Each share is at most 1; teammates' shares
+  can add up to more than 1 because several agents can help with one kill.
+- **Red Zone Deaths** (`team_{a,b}_red_zone_deaths` and
+  `agent_{0..9}_red_zone_deaths`, 12 columns): deaths inside the victim's own
+  team's Red Zone. Team A's Red Zone kills always equal Team B's Red Zone deaths.
+- **Share of Team Red Zone Deaths** (`agent_{0..9}_red_zone_death_fraction`, 10
+  columns): this agent's Red Zone deaths divided by its team's Red Zone deaths.
+  Teammates' shares add up to 1 when that total is above zero.
+
+Counts never come from score changes, and no share divides by points. Two
+int32 counters of shape (10,) hold the evidence: Red Zone deaths by victim and
+Red Zone kill help by helper, 80 raw bytes per game. Both use Core's own
+classifier, `red_zone_death_mask`, the one that scores the points. A zero
+denominator leaves a share blank. At depth 0.0 the counts are valid zeros and
+the shares are blank. The neutral task leaves all 44 blank. A recording saved
+before the Red Zone rule (without `ResolvedEnvConfigV2`) shows all 44 as blank
+in replay analysis, never as invented zeros; every older column keeps its value.
+Full output now occupies 55,960 logical bytes per game (11,192 float32 values
+plus 11,192 availability flags), up from 55,740. This is an array-size
+calculation, not a speed or peak-memory measurement.
 
 ### Schema 14 shared team returns
 
@@ -278,10 +322,12 @@ rule. Core rewards, learner rewards, replay transition reward vectors and the
 internal per-agent reward accumulator are unchanged. Older sufficient-statistic
 report formats are unchanged too. Historical CSV readers use the stored header;
 they do not create removed columns or rewrite values. Replay analysis computes
-current schema 14 from captured facts and does not relabel historical reports.
+the current schema (now 15) from captured facts and does not relabel historical
+reports.
 
 The priority values and availability flags occupy 80 logical bytes per game,
-down from 130. Full output occupies 55,740 logical bytes, down from 55,790.
+down from 130. Schema-14 full output occupied 55,740 logical bytes, down from
+55,790; schema 15 raises it to 55,960.
 These are array-size calculations, not speed or peak-memory measurements.
 Existing schema-13 audit results below describe the historical schema-13 output.
 
@@ -621,8 +667,8 @@ though the team improved. Participation and target-allocation fractions are cont
 Aura coverage and activation frequency are also context dependent: more coverage
 can limit positioning, and more casts can give only excess healing.
 
-[The column data dictionary](metric_columns.csv) lists all **11,178 full-table
-columns**: 30 identity columns followed by 11,148 numerical measurements. Priority
+[The column data dictionary](metric_columns.csv) lists all **11,222 full-table
+columns**: 30 identity columns followed by 11,192 numerical measurements. Priority
 tables have **46 columns**. The dictionary includes meaning, units, scope,
 subjects, subject/recipient roles, numerators, denominators, missingness, priority/full
 membership, GUI labels, relevant views, family and defensible direction.
@@ -759,6 +805,11 @@ future recording/tracking APIs are not implied by this description.
   time seen in waits already open at the start or still open at the selected
   tick. Each wait counts equally.
   Dead time remains in Deaths and Time Dead.
+- Red Zone: new configured deaths whose victim started the tick inside its own
+  team's Red Zone (Core's `red_zone_death_mask`). Team Red Zone kills and
+  deaths, agent Red Zone kill contributions under the existing kill-help rule,
+  agent Red Zone deaths, and two shares. Each such death still counts once as a
+  kill and a death, but gives the enemy team 2 points.
 - Burst: Mage damage while active, fraction of Mage damage, lethal-tick Burst
   damage, and kill contributions during Burst. Amounts include all damage during
   Burst, not only its extra damage. A source's lethal-tick allocation denominator
@@ -892,8 +943,8 @@ there is no second running status-application accumulator. Poison duration reuse
 status steps. Both scores/difference and useful count/fraction complements remain.
 Full rows copy priority values so each row is independently usable.
 
-The Viewer offers **27 topics**, including the five named Ultimates. Sixteen
-topics have separate Totals and By Recipient tables; eleven have one table.
+The Viewer offers **28 topics**, including the five named Ultimates. Sixteen
+topics have separate Totals and By Recipient tables; twelve have one table.
 Shared context references the same exported columns once per view. Paired views
 share no rows. Totals show teams before acting agents; recipient views show
 affected agents before source-to-recipient details. Tooltips identify the exact
@@ -1116,9 +1167,11 @@ cell weights, or leaderboard directions.
 Historical V1 episodes used `EvaluationEpisodeContextV1`, mode `shared_obs`,
 and projection `base-observation-plus-authorized-sensor-source-bank@1`.
 Preserve that exact projection when reading those artifacts. Current recordings
-use episode context V3, base observation/frame V2, SharedObs projection
-`base-observation-plus-authorized-sensor-source-bank@2`, NoSharedObs projection
-V3, and replay V3 under
+use episode context V4, evaluation frame V3, SharedObs projection
+`base-observation-plus-authorized-sensor-source-bank@3`, NoSharedObs projection
+V4, and replay V4, which record the Red Zone depth. Context V3, frame V2,
+SharedObs projection @2, NoSharedObs projection V3 and replay V3 remain readable
+historical records under
 [A37](../design/specification_amendments.md#a37-relative-policy-identity-and-versioned-recordings).
 Do not relabel an old record or resume a run with a different input contract.
 
@@ -1384,11 +1437,15 @@ the separate team-wipe candidate below is still inactive.
 
 TDM does not create individual killer ownership, agent K/D, or generic teamfight
 victories. A36 separately permits a descriptive pooled team K/D ladder column:
-sum authoritative team score increments and opposing score increments across
-matches, accounting for nonzero initial scores, and divide only when total deaths
-are positive. This creates no individual kill attribution or rating input.
-Elimination differential is omitted because official TDM scoring makes it
-mathematically identical to terminal score differential. Team-wipe count stays
+sum the team's recorded kills and recorded deaths across matches (the
+`team_{a,b}_kills` and `team_{a,b}_deaths` columns, which exclude initial
+scores), and divide only when total deaths are positive. Score increments equal
+kills only at Red Zone depth 0.0; a death inside the victim's own Red Zone gives
+2 points but is still one kill. This creates no individual kill attribution or
+rating input.
+Elimination differential is omitted: at Red Zone depth 0.0 it is identical to
+terminal score differential, and at any depth it is the difference of the
+existing kill and death columns. Team-wipe count stays
 inactive until a separate research need justifies exact interval semantics.
 
 TDM is threshold-victory: reaching the configured threshold is the only route

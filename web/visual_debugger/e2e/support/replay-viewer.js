@@ -103,6 +103,29 @@ export async function exportReplayAcceptanceArtifacts() {
   };
 }
 
+/**
+ * Export the one-tick Red Zone metric replay and return its path.
+ *
+ * The Python exporter (`--red-zone`) writes a current version-4 DevClient capture
+ * at Red Zone depth 5.0: Team A kills agents 5 and 6 inside Team B's Red Zone and
+ * Team B kills agent 3 outside Team A's Red Zone, so the scores are 4 and 1. It
+ * fails before writing a manifest unless those deaths and scores happen. The
+ * caller owns the returned temporary directory and removes it with
+ * `removeReplayArtifacts`. The export waits with no time limit.
+ *
+ * @returns {Promise<{ outputDirectory: string, redZone: string }>}
+ * @throws {TypeError} When the exporter's manifest has no `red_zone` path; the
+ *   temporary directory is removed first.
+ */
+export async function exportRedZoneReplayArtifacts() {
+  const { outputDirectory, payload } = await exportReplayPaths(["--red-zone"]);
+  if (typeof payload.red_zone !== "string") {
+    await removeReplayArtifacts(outputDirectory);
+    throw new TypeError("Red Zone replay exporter returned an invalid manifest.");
+  }
+  return { outputDirectory, redZone: payload.red_zone };
+}
+
 /** @param {string[]} args */
 async function exportReplayPaths(args = []) {
   const outputDirectory = await mkdtemp(

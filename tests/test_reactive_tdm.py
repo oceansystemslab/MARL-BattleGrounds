@@ -2,7 +2,8 @@
 
 The Hunter distance band holds still only while the nearest enemy is a legal
 Basic target in the exact mask; with no legal shot at that enemy the Hunter
-approaches it, even when a farther enemy is a legal target.
+approaches it, even when a farther enemy is a legal target. Scenario 2 is the
+installed revision 20, republished at Red Zone depth 5.0 with the same play.
 """
 
 from collections.abc import Callable
@@ -821,7 +822,7 @@ def test_rules_continue_to_final_wave_with_dead_class_noops(
 
 def test_reactive_controller_reproduces_scenario_2_cover_and_healing_witness() -> None:
     scenario = load_tdm_scenario(2)
-    assert scenario.info.approved_source.revision == 19
+    assert scenario.info.approved_source.revision == 20
     state, obs, mask, _ = initialize_scenario_state(
         scenario.initial_state, scenario.config
     )

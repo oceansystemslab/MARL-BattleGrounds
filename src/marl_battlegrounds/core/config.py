@@ -1,6 +1,8 @@
 """Resolve fixed-slot profiles and validate concrete Core inputs on the host.
 
 resolve_agent_profile performs a pure JAX catalog lookup with team padding.
+maximum_team_deathmatch_score_increment and maximum_team_deathmatch_score_threshold
+own the Team Deathmatch score bounds, which depend on the Red Zone depth.
 The validators check complete configurations, product movement calibration,
 runtime states and authored starts. Runtime states allow the geometry solver's
 remaining body overlap; authored living starts require strict clearance.
@@ -75,6 +77,8 @@ from marl_battlegrounds.core.types import (
     TASK_MODE_TDM,
     TEAM_A_ID,
     TEAM_B_ID,
+    TEAM_DEATHMATCH_POINTS_PER_DEATH,
+    TEAM_DEATHMATCH_POINTS_PER_RED_ZONE_DEATH,
     EnvConfig,
     EnvState,
     ResolvedAgentProfile,
@@ -82,16 +86,68 @@ from marl_battlegrounds.core.types import (
 
 _INT32_MAX = int(np.iinfo(np.int32).max)
 _FLOAT32_MAX = float(np.finfo(np.float32).max)
+_FLOAT32_SMALLEST_NORMAL = np.finfo(np.float32).tiny
 _MAX_EXACT_FLOAT32_INTEGER = 2**24
-_MAX_TEAM_DEATHMATCH_SCORE_THRESHOLD = _MAX_EXACT_FLOAT32_INTEGER - (
-    MAX_AGENTS_PER_TEAM - 1
-)
 
 # Product sessions use one movement calibration so researchers cannot change
 # policy-relevant dynamics from a presentation surface. Generic ``EnvConfig``
 # construction deliberately retains the full validated ``(0.0, 1.0]`` domain
 # for tests and explicitly experimental callers.
 CANONICAL_PRODUCT_MOVEMENT_SCALE: Final = 1.0
+
+
+def maximum_team_deathmatch_score_increment(red_zone_depth: float) -> int:
+    """Return the most Team Deathmatch points one team can gain in one step.
+
+    Parameters
+    ----------
+    red_zone_depth : float
+        A validated Python float depth (EnvConfig.team_deathmatch_red_zone_depth),
+        never a traced JAX value.
+
+    Returns
+    -------
+    int
+        5 at depth 0.0 (five enemies die, one point each). 10 at a positive
+        depth (five enemies die inside their own Red Zone, two points each).
+
+    Notes
+    -----
+    Host only. The one owner of this bound; the score threshold and state
+    checks derive from it.
+    """
+    points = (
+        TEAM_DEATHMATCH_POINTS_PER_RED_ZONE_DEATH
+        if red_zone_depth > 0.0
+        else TEAM_DEATHMATCH_POINTS_PER_DEATH
+    )
+    return MAX_AGENTS_PER_TEAM * points
+
+
+def maximum_team_deathmatch_score_threshold(red_zone_depth: float) -> int:
+    """Return the largest valid Team Deathmatch score threshold for a depth.
+
+    Parameters
+    ----------
+    red_zone_depth : float
+        A validated Python float depth, never a traced JAX value.
+
+    Returns
+    -------
+    int
+        2**24 - (increment - 1), where increment is
+        maximum_team_deathmatch_score_increment(red_zone_depth): 16,777,212 at
+        depth 0.0 and 16,777,207 at a positive depth. A score can pass the
+        threshold by at most increment - 1 in its final step, so every reachable
+        score stays at most 2**24 and exact in float32 context features.
+
+    Notes
+    -----
+    Host only.
+    """
+    return _MAX_EXACT_FLOAT32_INTEGER - (
+        maximum_team_deathmatch_score_increment(red_zone_depth) - 1
+    )
 
 
 def resolve_agent_profile(
@@ -656,6 +712,79 @@ def _validate_team_spawn_pad_positions(
                 )
 
 
+def _validate_red_zone_depth(config: EnvConfig) -> None:
+    """Check team_deathmatch_red_zone_depth against the task and map width.
+
+    Parameters
+    ----------
+    config : EnvConfig
+        One scalar configuration whose task_mode and map_width have already
+        passed their own checks.
+
+    Returns
+    -------
+    None
+        The depth is a Python float that is 0.0, or a positive value whose
+        float32 value Core can use exactly as scored.
+
+    Raises
+    ------
+    TypeError
+        The depth is not exactly a Python float. Booleans, ints and NumPy
+        scalars are rejected, as for map_width.
+    ValueError
+        The depth is not finite; has a negative sign (including -0.0, so
+        "off" has one encoding); is not 0.0 in neutral mode; or, when
+        positive, its float32 value is not finite, is below the smallest
+        normal float32 (JAX treats smaller values as zero, which would
+        silently switch the rule off) or exceeds the float32 map_width.
+
+    Notes
+    -----
+    Host-only scalar checks; no arrays are read. The comparisons use the
+    float32 values that reset, step and scoring use, so a Python value such
+    as 12.000000000000002 on a width-12 map is accepted because it becomes
+    12.0 in float32.
+    """
+    depth = config.team_deathmatch_red_zone_depth
+    if type(depth) is not float:
+        raise TypeError(
+            "team_deathmatch_red_zone_depth must be a float, not "
+            f"{type(depth).__name__}."
+        )
+    if not math.isfinite(depth):
+        raise ValueError(f"team_deathmatch_red_zone_depth must be finite, not {depth}.")
+    if math.copysign(1.0, depth) < 0.0:
+        raise ValueError(
+            f"team_deathmatch_red_zone_depth must be nonnegative, not {depth}."
+        )
+    if config.task_mode == TASK_MODE_NEUTRAL and depth != 0.0:
+        raise ValueError(
+            f"team_deathmatch_red_zone_depth must be 0.0 in neutral mode, not {depth}."
+        )
+    if depth == 0.0:
+        return
+    with np.errstate(over="ignore", under="ignore", invalid="ignore"):
+        execution_depth = np.float32(depth)
+        execution_width = np.float32(config.map_width)
+    if not bool(np.isfinite(execution_depth)):
+        raise ValueError(
+            "team_deathmatch_red_zone_depth must remain finite after conversion "
+            "to float32."
+        )
+    if execution_depth < _FLOAT32_SMALLEST_NORMAL:
+        raise ValueError(
+            "team_deathmatch_red_zone_depth must remain at least "
+            f"{float(_FLOAT32_SMALLEST_NORMAL)} after conversion to float32; "
+            f"smaller positive values underflow, not {depth}."
+        )
+    if execution_depth > execution_width:
+        raise ValueError(
+            "team_deathmatch_red_zone_depth must not exceed map_width after "
+            f"conversion to float32, not {depth} with map_width {config.map_width}."
+        )
+
+
 def validate_env_config(config: EnvConfig) -> None:
     """Validate one resolved episode configuration on the host before reset.
 
@@ -686,7 +815,10 @@ def validate_env_config(config: EnvConfig) -> None:
     This reads array values on the host and may synchronize device work. Call
     it in builders before jit, vmap or scan, never inside a rollout. Generic
     scientific configurations may use a validated movement scale in (0, 1];
-    validate_product_env_config adds the product's fixed calibration.
+    validate_product_env_config adds the product's fixed calibration. The Red
+    Zone depth is checked after the map size and before the Team Deathmatch
+    threshold range, so a config with several faults reports the first in
+    that order.
     """
     if type(config) is not EnvConfig:
         raise TypeError(f"config must be an EnvConfig, not {type(config).__name__}.")
@@ -711,20 +843,12 @@ def validate_env_config(config: EnvConfig) -> None:
             "team_deathmatch_score_threshold must be an int, not "
             f"{type(config.team_deathmatch_score_threshold).__name__}."
         )
-    if config.task_mode == TASK_MODE_NEUTRAL:
-        if config.team_deathmatch_score_threshold != 0:
-            raise ValueError(
-                "team_deathmatch_score_threshold must be zero in neutral mode, "
-                f"not {config.team_deathmatch_score_threshold}."
-            )
-    elif not (
-        1
-        <= config.team_deathmatch_score_threshold
-        <= _MAX_TEAM_DEATHMATCH_SCORE_THRESHOLD
+    if (
+        config.task_mode == TASK_MODE_NEUTRAL
+        and config.team_deathmatch_score_threshold != 0
     ):
         raise ValueError(
-            "team_deathmatch_score_threshold must be in "
-            f"[1, {_MAX_TEAM_DEATHMATCH_SCORE_THRESHOLD}] in Team Deathmatch, "
+            "team_deathmatch_score_threshold must be zero in neutral mode, "
             f"not {config.team_deathmatch_score_threshold}."
         )
 
@@ -756,6 +880,21 @@ def validate_env_config(config: EnvConfig) -> None:
             raise ValueError(
                 f"{field_name} must be at most {_FLOAT32_MAX}, not {dimension}."
             )
+
+    _validate_red_zone_depth(config)
+    # The Team Deathmatch threshold range is checked after the depth because
+    # the largest safe threshold depends on it.
+    maximum_threshold = maximum_team_deathmatch_score_threshold(
+        config.team_deathmatch_red_zone_depth
+    )
+    if config.task_mode == TASK_MODE_TDM and not (
+        1 <= config.team_deathmatch_score_threshold <= maximum_threshold
+    ):
+        raise ValueError(
+            "team_deathmatch_score_threshold must be in "
+            f"[1, {maximum_threshold}] in Team Deathmatch, "
+            f"not {config.team_deathmatch_score_threshold}."
+        )
 
     if type(config.ordinary_movement_distance_scale) is not float:
         raise TypeError(
@@ -1048,6 +1187,9 @@ def validate_env_state(config: EnvConfig, state: EnvState) -> None:
     so living-body residuals from the fixed-pass solver are allowed. Authored
     starts also need validate_scenario_initial_state. This check does not rebuild
     an old action mask or prove that submitted external mask history was correct.
+    Team Deathmatch scores may reach the threshold plus
+    maximum_team_deathmatch_score_increment(depth) - 1 (K + 4 at depth 0,
+    K + 9 at a positive Red Zone depth).
     """
     if type(config) is not EnvConfig:
         raise TypeError(f"config must be an EnvConfig, not {type(config).__name__}.")
@@ -1179,7 +1321,11 @@ def validate_env_state(config: EnvConfig, state: EnvState) -> None:
             )
     else:
         maximum_reachable_score = (
-            config.team_deathmatch_score_threshold + MAX_AGENTS_PER_TEAM - 1
+            config.team_deathmatch_score_threshold
+            + maximum_team_deathmatch_score_increment(
+                config.team_deathmatch_red_zone_depth
+            )
+            - 1
         )
         if bool(np.any(host_team_deathmatch_scores > maximum_reachable_score)):
             raise ValueError(

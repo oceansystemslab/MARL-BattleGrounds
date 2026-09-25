@@ -1,7 +1,9 @@
 /**
  * @file Check eight nonempty browser profiles, exact disjoint test coverage and safe
- * deterministic profile environments. The pinned layout keeps profile 5 as the
- * recording, renderer, resize and TDM-GAMMA specs.
+ * deterministic profile environments. The pinned layout keeps profile 4 as the
+ * DevClient authoring and Red Zone metrics specs, profile 5 as the recording,
+ * renderer, resize and TDM-GAMMA specs, and profile 6 as twelve selected Replay
+ * Viewer tests.
  */
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
@@ -92,7 +94,10 @@ test("CI browser manifest is nonempty, exact, and eight-way", () => {
     ],
     env: { MARL_CP5_SLICE_5_ONLY: "1" },
   });
-  assert.deepEqual(manifest.shards[3].files, ["dev-client-authoring.spec.js"]);
+  assert.deepEqual(manifest.shards[3].files, [
+    "dev-client-authoring.spec.js",
+    "red-zone-metrics.spec.js",
+  ]);
   assert.deepEqual(manifest.shards[4].files, [
     "recording-handoff.spec.js",
     "authorized-presentation-renderer.spec.js",

@@ -35,6 +35,7 @@ import {
   createViewportTransform,
   layoutRequiredDocks,
   layoutStatusDocks,
+  redZoneFloorIntervals,
 } from "./layout.js";
 import { createRouteGeometry, routeMarkerPose } from "./routes.js";
 import { registerTooltipOwner } from "./tooltip.js";
@@ -50,6 +51,8 @@ import {
 } from "./vocabulary.js";
 
 const SVG_NAMESPACE = "http://www.w3.org/2000/svg";
+// Corner radius, in CSS pixels, shared by the floor boundary and the Red Zone tint.
+const MAP_FLOOR_CORNER_RADIUS = 8;
 const STATUS_DOCK_DIMENSIONS = Object.freeze({
   cellWidth: 28,
   cellHeight: 18,
@@ -97,6 +100,7 @@ const DURABLE_VISUAL_PAINT_PARTS = Object.freeze({
     surface: "durable",
     kind: "selected_pair_legality",
   }),
+  redZoneFloors: Object.freeze({ surface: "durable", kind: "red_zone_floor" }),
 });
 
 export const BATTLEFIELD_LAYER_ORDER = Object.freeze([
@@ -186,6 +190,7 @@ export const BATTLEFIELD_LAYER_ORDER = Object.freeze([
  *   showCooldownBadges: boolean,
  *   showSelectionReticle: boolean,
  *   showSelectedPairLegality: boolean,
+ *   showRedZoneFloors: boolean,
  * }} DurableVisualPolicy
  */
 
@@ -340,11 +345,11 @@ function samePublicStatusFacts(rawLocal, rawResearcher) {
 }
 
 /**
- * Resolve local filter state into the eight durable paint switches.
+ * Resolve local filter state into the nine durable paint switches.
  *
  * state is validated/classified by the visual-filter authority. Return a frozen
- * policy for aura, badges, shield, selection and pair-legality rendering. No accepted
- * scene facts or input filter object are changed.
+ * policy for aura, badges, shield, selection, pair-legality and Red Zone floor
+ * rendering. No accepted scene facts or input filter object are changed.
  *
  * @param {unknown} state
  * @returns {Readonly<DurableVisualPolicy>}
@@ -382,6 +387,10 @@ function durableVisualPolicy(state) {
     showSelectedPairLegality: isVisualPaintPartEnabled(
       state,
       DURABLE_VISUAL_PAINT_PARTS.selectedPairLegality,
+    ),
+    showRedZoneFloors: isVisualPaintPartEnabled(
+      state,
+      DURABLE_VISUAL_PAINT_PARTS.redZoneFloors,
     ),
   });
 }
@@ -952,6 +961,11 @@ export class BattlefieldRenderer {
       width,
       height,
       isRecord(frame) && frame.product_kind === "combat_debugger",
+      visualPolicy.showRedZoneFloors && isRecord(map?.red_zone)
+        ? /** @type {Readonly<{team_a_x_range: number[], team_b_x_range: number[]}>} */ (
+            map.red_zone
+          )
+        : null,
     );
     const classByIdentity = new Map(
       asArray(scene.agents)
@@ -1214,19 +1228,51 @@ export class BattlefieldRenderer {
   }
 
   /**
-   * Replace the map boundary and optional one-world-unit grid.
+   * Replace the map boundary, the optional Red Zone floor tint and the optional grid.
    *
    * transform supplies screen bounds; width/height are world dimensions. showUnitGrid
-   * adds internal lines only when both dimensions are integers. Return undefined;
-   * this draws a display aid and does not generate map geometry or obstacles.
+   * adds internal lines only when both dimensions are integers. redZone is the
+   * recorded, already-validated `map.red_zone` record when the Red Zone Floors
+   * filter is on, otherwise null (filter off, depth 0, or a map recorded before the
+   * rule). Each strip from redZoneFloorIntervals becomes a nested `<svg
+   * class="red-zone-floor-clip">` window holding one floor-sized `<rect
+   * class="red-zone-floor">` with the floor's corner radius, so the tint follows the
+   * rounded floor corners without `<clipPath>` ids (PNG export strips ids). Paint
+   * order is boundary, tint, grid; the whole map layer stays below obstacles, bodies
+   * and effects. Return undefined; this draws a display aid and does not generate
+   * map geometry, obstacles, scores or Red Zone facts.
    *
    * @param {ViewportTransform} transform
    * @param {number} width
    * @param {number} height
    * @param {boolean} showUnitGrid
+   * @param {Readonly<{team_a_x_range: readonly number[], team_b_x_range: readonly number[]}> | null} redZone
    */
-  #renderMap(transform, width, height, showUnitGrid) {
+  #renderMap(transform, width, height, showUnitGrid, redZone) {
     const bounds = transform.mapBounds;
+    const redZoneFloors = redZoneFloorIntervals(width, redZone).map((interval) => {
+      const left = screenPoint([interval.start, 0], transform).x;
+      const right = screenPoint([interval.end, 0], transform).x;
+      const clipLeft = Math.min(left, right);
+      const clip = svgElement("svg", {
+        class: "red-zone-floor-clip",
+        x: clipLeft,
+        y: bounds.top,
+        width: Math.abs(right - left),
+        height: bounds.height,
+      });
+      clip.append(
+        svgElement("rect", {
+          class: "red-zone-floor",
+          x: bounds.left - clipLeft,
+          y: 0,
+          width: bounds.width,
+          height: bounds.height,
+          rx: MAP_FLOOR_CORNER_RADIUS,
+        }),
+      );
+      return clip;
+    });
     const gridLines = [];
     if (showUnitGrid && Number.isInteger(width) && Number.isInteger(height)) {
       for (let x = 1; x < width; x += 1) {
@@ -1263,8 +1309,9 @@ export class BattlefieldRenderer {
         y: bounds.top,
         width: bounds.width,
         height: bounds.height,
-        rx: 8,
+        rx: MAP_FLOOR_CORNER_RADIUS,
       }),
+      ...redZoneFloors,
       ...gridLines,
     );
   }

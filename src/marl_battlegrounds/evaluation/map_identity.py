@@ -29,6 +29,7 @@ from marl_battlegrounds.evaluation.models import (
     EvaluationEpisodeContext,
     EvaluationModel,
     ResolvedEnvConfigV1,
+    ResolvedEnvConfigV2,
 )
 
 
@@ -174,7 +175,9 @@ def _authored_map(
     return None
 
 
-def _geometry_matches(config: ResolvedEnvConfigV1, geometry: MapGeometry) -> bool:
+def _geometry_matches(
+    config: ResolvedEnvConfigV1 | ResolvedEnvConfigV2, geometry: MapGeometry
+) -> bool:
     """Compare a recorded config with one exact packaged geometry on the host.
 
     Check TDM mode, dimensions, every ordered float32 obstacle row and both
@@ -210,7 +213,7 @@ def _geometry_matches(config: ResolvedEnvConfigV1, geometry: MapGeometry) -> boo
 
 @lru_cache(maxsize=128)
 def registered_map_metadata(
-    map_id: int, config: ResolvedEnvConfigV1
+    map_id: int, config: ResolvedEnvConfigV1 | ResolvedEnvConfigV2
 ) -> tuple[AggregationKeyV1, ...]:
     """Verify a declared map's geometry and return stable recording keys.
 
@@ -218,8 +221,9 @@ def registered_map_metadata(
     ----------
     map_id : int
         Current approved integer map ID.
-    config : ResolvedEnvConfigV1
-        Frozen ResolvedEnvConfigV1 for the actual episode.
+    config : ResolvedEnvConfigV1 | ResolvedEnvConfigV2
+        Frozen resolved config for the actual episode (V2 records the Red Zone
+        depth, which does not affect map geometry).
 
     Returns
     -------
@@ -252,7 +256,9 @@ def registered_map_metadata(
 
 
 def _snapshot_map_metadata(  # pyright: ignore[reportUnusedFunction]
-    map_id: int, config: ResolvedEnvConfigV1, declared: Mapping[str, Any]
+    map_id: int,
+    config: ResolvedEnvConfigV1 | ResolvedEnvConfigV2,
+    declared: Mapping[str, Any],
 ) -> tuple[AggregationKeyV1, ...]:
     """Verify one pinned map revision without replacing it with today's catalog.
 
@@ -326,7 +332,9 @@ def _recorded_map(bindings: tuple[tuple[str, str], ...], layout: str) -> Recorde
     )
 
 
-def _declared_source_geometry(context: EvaluationEpisodeContext) -> ResolvedEnvConfigV1:
+def _declared_source_geometry(
+    context: EvaluationEpisodeContext,
+) -> ResolvedEnvConfigV1 | ResolvedEnvConfigV2:
     """Return source-order geometry only for an explicit verified spawn marker.
 
     Older records without the namespaced marker keep their exact bank order.

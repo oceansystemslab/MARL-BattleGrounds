@@ -18,6 +18,38 @@ const PNG_MIME_TYPE = "image/png";
 const PNG_SIGNATURE = Object.freeze([137, 80, 78, 71, 13, 10, 26, 10]);
 const PNG_PROVENANCE_KEYWORD = "MARL-BattleGrounds Replay Provenance";
 const PROVENANCE_SCHEMA_ID = "marl_battlegrounds.replay_battlefield_png_provenance";
+// New exports write this provenance version. Version 2 added red_zone_floors.
+const CURRENT_PROVENANCE_SCHEMA_VERSION = 2;
+// The 19 filter IDs of version-1 provenance, frozen so saved PNGs stay readable
+// when the live registry grows.
+const REPLAY_PNG_VISUAL_FILTER_IDS_V1 = Object.freeze([
+  "aura_fields",
+  "aura_modifier_badges",
+  "duration_status_badges",
+  "spawn_shield",
+  "target_selection_visuals",
+  "basic_ability_effects",
+  "ultimate_ability_effects",
+  "regeneration_effects",
+  "cooldown_effects",
+  "status_application",
+  "natural_status_expiry",
+  "freezing_trap_break",
+  "status_clear_on_death",
+  "death_effects",
+  "respawn_wave",
+  "resurrection_effects",
+  "spawn_shield_expiry",
+  "scrolling_battle_text",
+  "death_announcer",
+]);
+// Exact filter IDs each provenance version records; version 2 is the live registry.
+const REPLAY_PNG_VISUAL_FILTER_IDS_BY_VERSION = Object.freeze(
+  new Map([
+    [1, REPLAY_PNG_VISUAL_FILTER_IDS_V1],
+    [2, VISUAL_FILTER_IDS],
+  ]),
+);
 const REPLAY_PRESENTATION_KINDS = new Set([
   "replay_oracle",
   "replay_no_shared_obs_agent_pov",
@@ -216,18 +248,21 @@ function sha256(value, label) {
 }
 
 /**
- * Copy exactly the VISUAL_FILTER_IDS boolean fields into a frozen record.
- * Throw TypeError for missing/extra fields or nonboolean values. value should
- * already be a plain-data snapshot; this helper does not inspect descriptors.
- * No default filters are filled in.
+ * Copy exactly the ids boolean fields into a frozen record.
+ * ids is the filter ID list of one provenance version (default: the live
+ * VISUAL_FILTER_IDS, which version 2 records). Throw TypeError for
+ * missing/extra fields or nonboolean values. value should already be a
+ * plain-data snapshot; this helper does not inspect descriptors. No default
+ * filters are filled in.
  *
- * @param {Record<string, any>} value @returns {Readonly<Record<string, boolean>>}
+ * @param {Record<string, any>} value @param {readonly string[]} [ids]
+ * @returns {Readonly<Record<string, boolean>>}
  */
-function normalizeVisualFilters(value) {
-  exactKeys(value, VISUAL_FILTER_IDS, "Replay export visual filters");
+function normalizeVisualFilters(value, ids = VISUAL_FILTER_IDS) {
+  exactKeys(value, ids, "Replay export visual filters");
   /** @type {Record<string, boolean>} */
   const normalized = {};
-  for (const id of VISUAL_FILTER_IDS) {
+  for (const id of ids) {
     if (typeof value[id] !== "boolean") {
       invalid(`Replay export visual filter ${id} must be boolean.`);
     }
@@ -237,8 +272,11 @@ function normalizeVisualFilters(value) {
 }
 
 /**
- * Validate a version-1 Replay Viewer provenance object and return a deeply
- * frozen plain copy. Require exact root/nested fields, audience-specific
+ * Validate a version-1 or version-2 Replay Viewer provenance object and return
+ * a deeply frozen plain copy with the same version. The versions differ only in
+ * visual_filters: version 1 holds the 19 IDs of REPLAY_PNG_VISUAL_FILTER_IDS_V1,
+ * version 2 the 20 live IDs (adding red_zone_floors); a mixed form is rejected.
+ * Require exact root/nested fields, audience-specific
  * source fields, consistent replay kind/observation mode, nonnegative frame
  * counts and an incoming transition exactly when frame_index is nonzero.
  * Require replay_static, scale factor 2, positive CSS sizes, matching doubled
@@ -263,9 +301,10 @@ function normalizeProvenance(value) {
     ],
     "Replay PNG provenance",
   );
+  const filterIds = REPLAY_PNG_VISUAL_FILTER_IDS_BY_VERSION.get(root.schema_version);
   if (
     root.schema_id !== PROVENANCE_SCHEMA_ID ||
-    root.schema_version !== 1 ||
+    filterIds === undefined ||
     root.product_kind !== "replay_viewer" ||
     !REPLAY_PRESENTATION_KINDS.has(root.presentation_kind)
   ) {
@@ -397,11 +436,12 @@ function normalizeProvenance(value) {
   }
   const filters = normalizeVisualFilters(
     snapshotRecord(presentation.visual_filters, "Replay PNG visual filters"),
+    filterIds,
   );
 
   return deepFreeze({
     schema_id: PROVENANCE_SCHEMA_ID,
-    schema_version: 1,
+    schema_version: root.schema_version,
     product_kind: "replay_viewer",
     presentation_kind: root.presentation_kind,
     authority: { ...authority },
@@ -500,8 +540,9 @@ export function canonicalReplayPngProvenanceV1(value) {
  * The inspection key may be undefined, null or a nonempty string. Resolve
  * the painted selection through the authorized scene, then record 2x pixel
  * sizes. Oracle includes artifact references; Agent POV omits those fields.
- * Return deeply frozen validated provenance; invalid or unresolved inputs
- * throw TypeError. Raw transport objects cannot substitute for the brand.
+ * Return deeply frozen validated provenance at the current version 2, which
+ * records all 20 live filters; invalid or unresolved inputs throw TypeError.
+ * Raw transport objects cannot substitute for the brand.
  *
  * @param {unknown} value
  * @returns {Readonly<Record<string, any>>}
@@ -602,7 +643,7 @@ export function projectReplayPngProvenanceV1(value) {
 
   return normalizeProvenance({
     schema_id: PROVENANCE_SCHEMA_ID,
-    schema_version: 1,
+    schema_version: CURRENT_PROVENANCE_SCHEMA_VERSION,
     product_kind: "replay_viewer",
     presentation_kind: presentation.presentation_kind,
     authority,
@@ -993,7 +1034,7 @@ function provenanceItxtChunk(canonicalProvenanceJson) {
 /**
  * Inspect a PNG with exactly one provenance entry directly after IHDR.
  * Require an uncompressed, untranslated UTF-8 iTXt entry with canonical
- * version-1 provenance, matching PNG dimensions and no duplicate keyword
+ * version-1 or version-2 provenance, matching PNG dimensions and no duplicate keyword
  * in text chunks. Return frozen metadata, chunk types and provenance. Invalid
  * bytes/metadata throw TypeError. This verifies container consistency, not
  * the truth of the picture or the referenced simulator artifacts.

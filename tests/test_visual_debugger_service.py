@@ -670,7 +670,7 @@ def test_terminal_pov_submit_retains_draft_without_appending_stale_transition(
     monkeypatch.setattr(control_module, "step", step_spy)
     monkeypatch.setattr(
         control_module,
-        "capture_evaluation_transition_unit_v2",
+        "capture_evaluation_transition_unit_v3",
         capture_spy,
     )
 
@@ -2372,7 +2372,7 @@ def test_typed_transition_failure_saves_last_prefix_with_exact_origin(
     elif boundary == "capture":
         monkeypatch.setattr(
             control_module,
-            "capture_evaluation_transition_unit_v2",
+            "capture_evaluation_transition_unit_v3",
             fail,
         )
     else:
@@ -2474,7 +2474,7 @@ def test_transition_result_packaging_failure_saves_uncommitted_candidate_prefix(
     )
     initial_session = service.session
     tracked_step = Mock(wraps=control_module.step)
-    tracked_capture = Mock(wraps=control_module.capture_evaluation_transition_unit_v2)
+    tracked_capture = Mock(wraps=control_module.capture_evaluation_transition_unit_v3)
 
     def fail_packaging(*_args: object, **_kwargs: object) -> object:
         raise RuntimeError("private transition packaging detail")
@@ -2482,7 +2482,7 @@ def test_transition_result_packaging_failure_saves_uncommitted_candidate_prefix(
     monkeypatch.setattr(control_module, "step", tracked_step)
     monkeypatch.setattr(
         control_module,
-        "capture_evaluation_transition_unit_v2",
+        "capture_evaluation_transition_unit_v3",
         tracked_capture,
     )
     monkeypatch.setattr(input_module, "_result", fail_packaging)

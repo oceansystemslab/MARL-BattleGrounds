@@ -1121,8 +1121,11 @@ function installDevClient() {
 
   /**
    * Render the active draft with selected object, normalized camera, and host grid/catalog.
-   * Store the resulting camera; an absent draft clears the canvas. Missing required
-   * catalog numbers throw through catalogNumber. No authored values are changed.
+   * The Red Zone tint uses only the latest host validation of this draft; every edit
+   * clears that validation, so no tint shows while a check is pending, and map
+   * drafts, invalid drafts and depth 0 carry none. Store the resulting camera; an
+   * absent draft clears the canvas. Missing required catalog numbers throw through
+   * catalogNumber. No authored values are changed.
    */
   function renderCanvas() {
     if (state.editor.draft === null) {
@@ -1137,6 +1140,7 @@ function installDevClient() {
       normalizeAuthoringCamera(state.editor.camera, map.width, map.height),
       catalogNumber("fixed_grid_world_units"),
       state.catalog,
+      state.editor.validation?.red_zone ?? null,
     );
   }
 

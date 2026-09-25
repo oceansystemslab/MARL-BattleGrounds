@@ -2,6 +2,9 @@
 
 Normal regeneration reads the existing package manifest's explicit source paths.
 No source is edited and no runtime API resolves a mutable latest revision.
+Scenario sources must be version-2 drafts, which declare their Team Deathmatch
+Red Zone depth; each packaged scenario records its resolved config V2. Each
+scenario's approval is the approved source its manifest record names.
 """
 
 from __future__ import annotations
@@ -26,7 +29,7 @@ from marl_battlegrounds._tdm_assets import (
     asset_manifest,
     map_id_aliases,
 )
-from marl_battlegrounds.evaluation.catalog import build_resolved_env_config_v1
+from marl_battlegrounds.evaluation.catalog import build_resolved_env_config_v2
 from marl_battlegrounds.evaluation.models import GlobalAnalysisSnapshotV1
 from scripts.dev.visual_debugger.authoring_compiler import (
     compile_dev_map,
@@ -34,7 +37,7 @@ from scripts.dev.visual_debugger.authoring_compiler import (
 )
 from scripts.dev.visual_debugger.authoring_models import (
     DevMapDraftV1,
-    DevScenarioDraftV1,
+    DevScenarioDraftV2,
 )
 
 
@@ -70,6 +73,7 @@ def export_tdm_assets(
     scenario_sources: tuple[Path, ...],
     destination: Path,
     expected_scenario_source_sha256: Mapping[Path, str] | None = None,
+    approved_scenario_sources: tuple[Path, ...] | None = None,
 ) -> TDMAssetManifest:
     """Compile approved map and scenario sources into ordered package resources.
 
@@ -79,8 +83,9 @@ def export_tdm_assets(
         Exactly 52 approved records, ordered by map_id from 0 through 51.
         Each source path, identity, and compiled resource digest must match.
     scenario_sources : tuple of pathlib.Path
-        Exactly eight draft paths ordered as scenario IDs 1 through 8.
-        Scenario 3 must preserve the approved r24 content except notes.
+        Exactly eight version-2 scenario draft paths (dev-scenario-draft@2,
+        which declare their Red Zone depth), ordered as scenario IDs 1 through
+        8. A version-1 draft is refused.
     destination : pathlib.Path
         Output root for maps, scenarios, manifest, history, and alias JSON.
     expected_scenario_source_sha256 : Mapping[pathlib.Path, str] or None, default=None
@@ -88,6 +93,13 @@ def export_tdm_assets(
         Each supplied path must be an input source. Check its captured bytes
         before compilation or output writes. None keeps direct callers' existing
         source-selection behavior; the CLI supplies every approved scenario hash.
+    approved_scenario_sources : tuple of pathlib.Path or None, default=None
+        Each scenario's approved source draft, in the same order. None means
+        every scenario is approved at its own source revision. The CLI passes
+        the approved_source paths the installed manifest records. An approved
+        draft is recorded as provenance; its bytes are hash-checked with the
+        sources, and its content must equal its source's content except notes
+        (so both share one semantic digest).
 
     Returns
     -------
@@ -98,7 +110,8 @@ def export_tdm_assets(
     ------
     ValueError
         Counts, ordering, draft validation, or approved source/resource identities
-        differ, or an expected source path is not among the inputs.
+        differ, an approval differs from its source other than in notes, or an
+        expected source path is not among the inputs.
     RuntimeError
         Source files change during export.
     OSError
@@ -118,10 +131,13 @@ def export_tdm_assets(
     if tuple(row.map_id for row in map_records) != tuple(range(52)):
         raise ValueError("map records must be ordered by map_id from 0 through 51")
     map_sources = tuple(Path(row.source.source_path) for row in map_records)
-    approval_sources = tuple(
-        path.with_name("r24.json") if scenario_id == 3 else path
-        for scenario_id, path in enumerate(scenario_sources, start=1)
+    approval_sources = (
+        scenario_sources
+        if approved_scenario_sources is None
+        else approved_scenario_sources
     )
+    if len(approval_sources) != len(scenario_sources):
+        raise ValueError("each scenario needs exactly one approved source")
     original_bytes = {
         path: path.read_bytes()
         for path in (*map_sources, *scenario_sources, *approval_sources)
@@ -187,7 +203,8 @@ def export_tdm_assets(
         )
         maps.append(info)
     for scenario_id, path in enumerate(scenario_sources, start=1):
-        draft = DevScenarioDraftV1.model_validate_json(original_bytes[path])
+        # Packaged scenarios declare their Red Zone depth: version 2 only.
+        draft = DevScenarioDraftV2.model_validate_json(original_bytes[path])
         if draft.asset_id != f"scenario_{scenario_id}":
             raise ValueError(f"scenario source order disagrees with {scenario_id}")
         compiled = compile_dev_scenario(draft)
@@ -202,17 +219,23 @@ def export_tdm_assets(
             )
         )
         content = ScenarioContent(
-            configuration=build_resolved_env_config_v1(compiled.config),
+            configuration=build_resolved_env_config_v2(compiled.config),
             initial_snapshot=snapshot,
             step_count=int(state.step_count),
             notes=compiled.content.notes,
         )
         approval_path = approval_sources[scenario_id - 1]
-        approval = DevScenarioDraftV1.model_validate_json(original_bytes[approval_path])
-        if scenario_id == 3:
-            approved_content = approval.content.model_dump(exclude={"notes"})
-            if draft.content.model_dump(exclude={"notes"}) != approved_content:
-                raise ValueError("Scenario 3 source must preserve approved r24 physics")
+        approval = DevScenarioDraftV2.model_validate_json(original_bytes[approval_path])
+        if approval.asset_id != draft.asset_id:
+            raise ValueError(f"scenario approval disagrees with source {scenario_id}")
+        # The installed physics must be the approved physics; only notes may
+        # differ, so the source's semantic digest is also the approval's.
+        if approval.content.model_dump(exclude={"notes"}) != draft.content.model_dump(
+            exclude={"notes"}
+        ):
+            raise ValueError(
+                f"scenario {scenario_id} source must keep its approved physics"
+            )
         info = TDMScenarioInfo(
             approved_source=_source(
                 approval_path,
@@ -298,6 +321,9 @@ def main() -> None:
         ),
         destination=destination,
         expected_scenario_source_sha256=expected_scenario_source_sha256,
+        approved_scenario_sources=tuple(
+            Path(row.approved_source.source_path) for row in manifest.scenarios
+        ),
     )
 
 

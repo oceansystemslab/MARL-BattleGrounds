@@ -3,9 +3,11 @@
 Registry lookup imports no simulator code. Load helpers bind files to one
 checked manifest snapshot, verify sizes and hashes, and use the public replay
 loader on private temporary copies. The source directory is never modified.
-Historical manifests require replay/metric pairs; current manifests describe
-completed version-3 replay files. These samples are presentation demos, not
-benchmark results or attestations of the current source tree.
+Historical manifests require replay/metric pairs. Schema-2 manifests describe
+completed version-3 replay files; current schema-3 manifests describe completed
+version-4 replay files, which record the Red Zone rule. These samples are
+presentation demos, not benchmark results or attestations of the current
+source tree.
 """
 
 from __future__ import annotations
@@ -31,16 +33,24 @@ _REPOSITORY_ROOT = Path(__file__).resolve().parents[3]
 
 SAMPLE_REPLAY_DIRECTORY = _REPOSITORY_ROOT / "examples" / "replays" / "v1"
 CURRENT_SAMPLE_REPLAY_DIRECTORY = (
-    _REPOSITORY_ROOT / "artifacts" / "visual-debugger-samples" / "v3"
+    _REPOSITORY_ROOT / "artifacts" / "visual-debugger-samples" / "v4"
 )
-CURRENT_SAMPLE_REPLAY_MANIFEST_SCHEMA_VERSION = 2
-CURRENT_SAMPLE_REPLAY_GENERATOR_ID = "visual-debugger-sample-replays-v2"
+CURRENT_SAMPLE_REPLAY_MANIFEST_SCHEMA_VERSION = 3
+CURRENT_SAMPLE_REPLAY_GENERATOR_ID = "visual-debugger-sample-replays-v3"
 SAMPLE_REPLAY_MANIFEST_PATH = SAMPLE_REPLAY_DIRECTORY / "manifest.json"
 SAMPLE_REPLAY_MANIFEST_SCHEMA_ID = (
     "marl_battlegrounds.visual_debugger.sample_replay_manifest"
 )
 SAMPLE_REPLAY_MANIFEST_SCHEMA_VERSION = 1
 SAMPLE_REPLAY_GENERATOR_ID = "visual-debugger-sample-replays-v1"
+# Each sample manifest schema names its generator and the replay version it
+# holds: 1 → replay 1 (with metric sidecars), 2 → replay 3, 3 → replay 4.
+_GENERATOR_ID_BY_SCHEMA = {
+    1: SAMPLE_REPLAY_GENERATOR_ID,
+    2: "visual-debugger-sample-replays-v2",
+    3: CURRENT_SAMPLE_REPLAY_GENERATOR_ID,
+}
+_REPLAY_VERSION_BY_SCHEMA = {1: 1, 2: 3, 3: 4}
 SAMPLE_REPLAY_DEMO_PROVENANCE_NOTICE = (
     "Deterministic unofficial presentation demo; not a benchmark, policy "
     "evaluation, source-tree attestation, or host attestation."
@@ -754,13 +764,8 @@ def _read_sample_replay_manifest_from_directory_descriptor(
     )
     if (
         manifest["schema_id"] != SAMPLE_REPLAY_MANIFEST_SCHEMA_ID
-        or schema_version not in (1, 2)
-        or manifest["generator_id"]
-        != (
-            SAMPLE_REPLAY_GENERATOR_ID
-            if schema_version == 1
-            else CURRENT_SAMPLE_REPLAY_GENERATOR_ID
-        )
+        or schema_version not in _GENERATOR_ID_BY_SCHEMA
+        or manifest["generator_id"] != _GENERATOR_ID_BY_SCHEMA[schema_version]
     ):
         raise SampleReplayVerificationError(
             "sample replay manifest identity is unsupported"
@@ -1009,7 +1014,9 @@ def _load_verified_sample_replay_from_snapshot(
         raise SampleReplayVerificationError(
             f"sample {name!r} could not enter the private validation boundary"
         ) from error
-    expected_replay_version = 1 if historical else 3
+    expected_replay_version = _REPLAY_VERSION_BY_SCHEMA[
+        cast(int, manifest["schema_version"])
+    ]
     if loaded.replay.schema_version != expected_replay_version:
         raise SampleReplayVerificationError(
             f"sample {name!r} replay version differs from its manifest"

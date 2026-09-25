@@ -15,7 +15,7 @@ their existing owners; PPO never imports this module or Flashbax.
 Replay stores only permitted Team A material: the five Team A observation rows,
 their 5x5 source permissions, Team A masks and chosen actions (world frame),
 the team task reward and shaping reward separately, lifecycle flags, the
-919-value physical state once per game row, and eight int32 identity fields.
+920-value physical state once per game row, and eight int32 identity fields.
 Rebuilding the actor inputs of a sample uses the same builder as live action
 selection, so the learner sees exactly what the actor saw. Every numerical
 helper here is pure JAX for jit and scan; replay descriptors are host setup.
@@ -144,7 +144,7 @@ class QMIXReplayRow(NamedTuple):
         real ending, including a horizon draw, not a collection cutoff); real
         decision. Stored rows are always valid.
     training_state : Array
-        Float32 (919,) world-frame physical state for the mixer only.
+        Float32 (920,) world-frame physical state for the mixer only.
     episode_id, decision_step, requested_stage, episode_stage, source_index,
     learner_update, opponent_update, opponent_snapshot : Array
         Int32 identities copied from the transition, for sample checks and
@@ -152,8 +152,8 @@ class QMIXReplayRow(NamedTuple):
 
     Notes
     -----
-    One row is 29,664 bytes with the current encoder: 25,695 bytes of Team A
-    observation and permissions and 3,969 bytes of the rest. No Team B row,
+    One row is 29,688 bytes with the current encoder: 25,715 bytes of Team A
+    observation and permissions and 3,973 bytes of the rest. No Team B row,
     opposite-team permission, learning output or expanded feature is stored.
     Replay schema version: ``baselines.qmix.QMIX_REPLAY_SCHEMA_VERSION``.
     """
@@ -291,7 +291,7 @@ def _init_replay(
     index is a strong int32 0 and is_full is False. Flashbax's own init uses
     empty storage and a weak index, which would change after a checkpoint
     restore and force a new compilation. At B=32 and C=1000 this allocates
-    949,248,000 bytes on the default device.
+    950,016,000 bytes on the default device.
     """
     spec = _row_spec(collection, carry)
     capacity = qmix.buffer_size
@@ -369,7 +369,7 @@ def _expand_sample(sample: QMIXReplayRow, qmix: QMIXConfig) -> QMIXBatch:
     passed through ``build_team_actor_input`` for Team A, the same builder as
     live action selection. In the "left" frame, flagged rows' views, masks and
     stored world actions are reflected. Rewards are task plus shaping.
-    Returns float32 (M,S,5,5164) features among the QMIXBatch leaves; about
+    Returns float32 (M,S,5,5165) features among the QMIXBatch leaves; about
     264 MB for M=128, S=20. Pure JAX.
     """
     m, s = sample.valid.shape
@@ -693,7 +693,7 @@ def init_qmix_learner(
 
     Notes
     -----
-    Host setup: content checks, allocation of the replay (949,248,000 bytes at
+    Host setup: content checks, allocation of the replay (950,016,000 bytes at
     B=32 and C=1000), network initialization and reset. No actor decision,
     optimizer step, writer or file write happens. Reuse the descriptor.
     """

@@ -1,8 +1,10 @@
 /**
  * @file Build the map/scenario editor's native form fields and decode their edits.
- * The inspector shows authored values and host-supplied mechanics. It does
- * not validate simulator rules, mutate draft content or save files. Input
- * events carry explicit draft paths for the owning editor to apply.
+ * The inspector shows authored values and host-supplied mechanics, and gives
+ * some fields hover, focus and screen-reader help. It does not validate
+ * simulator rules, mutate draft content or save files. Input events carry
+ * explicit draft paths for the owning editor to apply. Default values, such as
+ * a new scenario's Red Zone depth, come from the host, never from this file.
  */
 import {
   authoringKind,
@@ -10,6 +12,22 @@ import {
   selectedAuthoringObject,
 } from "./authoring-model.js";
 import { formatDisplayNumber } from "./display.js";
+import { createSemanticDescriptor, registerTooltipOwner } from "./tooltip.js";
+
+/**
+ * Help for the Red Zone Depth field. title and text fill its tooltip; text also
+ * fills the hidden element with ID id, which the input lists in its
+ * aria-describedby. The ID must be unique in the page; only one Red Zone Depth
+ * field is shown at a time.
+ */
+const RED_ZONE_DEPTH_HELP = Object.freeze({
+  id: "authoring-red-zone-depth-help",
+  title: "Red Zone Depth",
+  text:
+    "How far each team's Red Zone reaches in from its own spawn edge, in map units. " +
+    "When an agent dies inside its own team's Red Zone, the enemy team gets 2 points. " +
+    "0 turns the rule off.",
+});
 
 /** @typedef {Record<string, any>} JsonRecord */
 
@@ -60,7 +78,14 @@ export function humanizeAuthoringIdentifier(value) {
  * select; type=textarea chooses a multiline input; otherwise create an input
  * with type defaulting to text. Apply value, optional limits/step, encoded
  * draft path and readonly/disabled state. New nodes use the page document
- * and reference authoring-inspector-help. Return undefined; no event handler,
+ * and reference authoring-inspector-help.
+ *
+ * Optional descriptor.help is {id, title, text}. With it, the label becomes a
+ * non-inspectable tooltip owner, so hovering the field or focusing its input
+ * shows title and text. A hidden element with ID help.id and the same text is
+ * appended after the label, and help.id is added after
+ * authoring-inspector-help in the input's aria-describedby; it is added, not
+ * swapped in, so screen readers read both. Return undefined; no event handler,
  * draft update or host validation is installed here.
  *
  * @param {HTMLElement} owner @param {Record<string, any>} descriptor
@@ -108,10 +133,40 @@ function appendField(owner, descriptor) {
   if (descriptor.path) {
     input.dataset.authoringPath = JSON.stringify(descriptor.path);
   }
-  input.setAttribute("aria-describedby", "authoring-inspector-help");
+  const describedBy = ["authoring-inspector-help"];
+  /** @type {HTMLSpanElement | null} */
+  let help = null;
+  if (descriptor.help) {
+    help = document.createElement("span");
+    help.id = descriptor.help.id;
+    help.className = "sr-only";
+    help.textContent = descriptor.help.text;
+    describedBy.push(help.id);
+    registerTooltipOwner(
+      label,
+      createSemanticDescriptor({
+        kind: "control",
+        id: `authoring-field:${descriptor.help.id}`,
+        title: descriptor.help.title,
+        tone: "information",
+        accent: "none",
+        summary: descriptor.help.text,
+        rows: [],
+        sections: [],
+        metadata: { compact: true, full: false },
+        anchor: "element",
+      }),
+      { inspectable: false },
+    );
+  }
+  input.setAttribute("aria-describedby", describedBy.join(" "));
   input.disabled = Boolean(descriptor.readonly);
   label.append(input);
   owner.append(label);
+  if (help) {
+    // Outside the label, so the help text never joins the input's name.
+    owner.append(help);
+  }
 }
 
 /**
@@ -282,7 +337,11 @@ function classOptions(catalog) {
  * Append whole-draft editing groups to form. draft must be a recognized
  * map/scenario with the expected nested fields. Maps show identity and size;
  * scenarios add embedded map, roster sizes, episode rules and current state.
- * HTML min/step hints do not replace host validation. Return undefined and
+ * A scenario whose task declares red_zone_depth (version 2) also shows the
+ * Red Zone Depth field in map units, with min 0, max the map width, any step
+ * and field help; a version 1 draft has no depth and shows no field. The
+ * value shown is the draft's own; no default is written here. HTML
+ * min/max/step hints do not replace host validation. Return undefined and
  * leave draft unchanged; the caller clears the form before rendering.
  *
  * @param {HTMLElement} form @param {JsonRecord} draft
@@ -355,6 +414,22 @@ function renderDocument(form, draft) {
       content.task.score_threshold,
       { type: "number", min: 1, step: "1" },
     ),
+    ...(Object.hasOwn(content.task, "red_zone_depth")
+      ? [
+          field(
+            "Red Zone Depth",
+            ["content", "task", "red_zone_depth"],
+            content.task.red_zone_depth,
+            {
+              type: "number",
+              min: 0,
+              max: map.width,
+              step: "any",
+              help: RED_ZONE_DEPTH_HELP,
+            },
+          ),
+        ]
+      : []),
     field("Max steps", ["content", "episode", "max_steps"], content.episode.max_steps, {
       type: "number",
       min: 1,

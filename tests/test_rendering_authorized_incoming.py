@@ -1,4 +1,8 @@
-"""Check incoming summaries against the recipient's allowed information."""
+"""Check incoming summaries against the recipient's allowed information.
+
+Live adjacent slices and replay POV indexes give the same summaries; current
+live sessions record replay V4, whose actor view is POV V3.
+"""
 
 from __future__ import annotations
 
@@ -58,13 +62,13 @@ from marl_battlegrounds.evaluation.pov import (
     ActorPovVisibleBodyObservationChangedCueV1,
     build_actor_pov_adjacent_transition_slice_v1,
     export_actor_pov_replay_v1,
-    export_actor_pov_replay_v2,
+    export_actor_pov_replay_v3,
 )
 from marl_battlegrounds.evaluation.replay import (
     RuntimeProvenanceV1,
     build_replay_bundle_v1,
 )
-from marl_battlegrounds.evaluation.replay_v3 import build_replay_v3
+from marl_battlegrounds.evaluation.replay_v4 import build_replay_v4
 from marl_battlegrounds.rendering.authorized_incoming import (
     NoSharedObsIncomingSummaryV1,
     NoSharedObsOwnStatusChangedIncomingCueV1,
@@ -1341,7 +1345,7 @@ def test_real_death_and_respawn_keep_recipient_self_authorized_in_live_and_repla
     runtime_payload["package_version"] = (
         session.evaluation_context.code_revision.package_version
     )
-    replay = build_replay_v3(
+    replay = build_replay_v4(
         session.evaluation_context,
         frames,
         transitions,
@@ -1350,7 +1354,7 @@ def test_real_death_and_respawn_keep_recipient_self_authorized_in_live_and_repla
         end_or_failure_reason="incoming-summary-fixture",
     )
     replay_index = build_actor_pov_projection_index_v1(
-        export_actor_pov_replay_v2(replay, global_slot=5).content,
+        export_actor_pov_replay_v3(replay, global_slot=5).content,
     )
     replay_summaries = tuple(
         build_replay_no_shared_obs_incoming_summary_v1(

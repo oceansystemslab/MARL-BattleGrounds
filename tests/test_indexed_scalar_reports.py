@@ -2,6 +2,7 @@
 
 Indexes use the ordinary scalar ownership/cell rules, keep UTF-8 and quoted
 newlines intact, skip unused metric conversion, and reject changed sources.
+Host schema 2 indexes read scalar schemas 14 and 15 and reject 16.
 """
 
 import csv
@@ -31,7 +32,9 @@ _HEADER = (
 )
 
 
-def _fixture(tmp_path: Path) -> tuple[Path, dict[str, Any], tuple[OriginKey, ...]]:
+def _fixture(
+    tmp_path: Path, scalar: int = 14
+) -> tuple[Path, dict[str, Any], tuple[OriginKey, ...]]:
     names = ('Mâge "one"\nSecond line', "Other, player", "Last")
     rows = [
         ("run", "tournament", f"pass-{i}", 1, i, 47, "config", name, 2.5, 2**24 + 1)
@@ -46,7 +49,7 @@ def _fixture(tmp_path: Path) -> tuple[Path, dict[str, Any], tuple[OriginKey, ...
     path.write_bytes(payload + b"uncommitted,broken\n")
     manifest: dict[str, Any] = {
         "schema_version": 2,
-        "metric_schema_version": 14,
+        "metric_schema_version": scalar,
         "metric_schema_id": "marlbg.tdm.scalar",
         "run_id": "run",
         "configurations": {"config": {}},
@@ -169,3 +172,31 @@ def test_index_rejects_invalid_read_batch_size(tmp_path: Path, size: object) -> 
     )
     with pytest.raises(ValueError, match="positive integer"):
         list(index.iter_rows(keys, batch_size=cast(int, size)))
+
+
+def test_index_reads_both_current_scalar_schemas_and_rejects_a_later_one(
+    tmp_path: Path,
+) -> None:
+    for scalar in (14, 15, 16):
+        directory = tmp_path / str(scalar)
+        directory.mkdir()
+        path, manifest, keys = _fixture(directory, scalar)
+        if scalar == 16:
+            with pytest.raises(ValueError, match="schema"):
+                IndexedScalarTable(
+                    path,
+                    table_name="match_results.csv",
+                    manifest=manifest,
+                    expected_header=_HEADER,
+                    origins=keys,
+                )
+            continue
+        index = IndexedScalarTable(
+            path,
+            table_name="match_results.csv",
+            manifest=manifest,
+            expected_header=_HEADER,
+            origins=keys,
+        )
+        rows = [row for batch in index.iter_rows(keys[::-1]) for row in batch]
+        assert [row["pass_id"] for row in rows] == ["pass-2", "pass-1", "pass-0"]

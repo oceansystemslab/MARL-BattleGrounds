@@ -10,7 +10,10 @@ plumbing and is not a manuscript sampling plan.
 from __future__ import annotations
 
 from marl_battlegrounds._tdm_assets import ScenarioContent, scenario_content
-from marl_battlegrounds.evaluation.catalog import build_roster_v1
+from marl_battlegrounds.evaluation.catalog import (
+    build_resolved_env_config_v2,
+    build_roster_v1,
+)
 from marl_battlegrounds.evaluation.models import (
     ContentAddressedIdentityV1,
     EvaluationFrame,
@@ -18,16 +21,16 @@ from marl_battlegrounds.evaluation.models import (
     VersionedIdentityV1,
     canonical_digest_sha256,
 )
-from marl_battlegrounds.evaluation.replay_v3 import ReplayArtifactV3
+from marl_battlegrounds.evaluation.replay_v4 import ReplayArtifactV4
 from marl_battlegrounds.evaluation.scenario import (
     ResolvedScenarioSpecificationV3,
-    ScenarioEvaluationRecordV4,
+    ScenarioEvaluationRecordV5,
     ScenarioMeasurementDefinitionV1,
     ScenarioMeasurementResultV1,
     ScenarioPredicateResultV1,
     ScenarioScalarValueV1,
     ScenarioSeedScheduleV3,
-    build_scenario_evaluation_record_v4,
+    build_scenario_evaluation_record_v5,
     resolved_initial_state_digest_sha256,
 )
 from marl_battlegrounds.policies.reactive_tdm_alpha import (
@@ -235,7 +238,10 @@ def _prepared_scenario_specification(
                 content.step_count, content.initial_snapshot
             )
         ),
-        "resolved_config_digest_sha256": scenario.info.resolved_configuration_digest,
+        # The resolved config V2 digest, which covers the Red Zone depth.
+        "resolved_config_digest_sha256": build_resolved_env_config_v2(
+            scenario.config
+        ).canonical_digest_sha256,
         "roster_template": roster,
         "role_template": tuple(
             "not_applicable"
@@ -277,10 +283,10 @@ def _prepared_scenario_specification(
 def build_tdm_scenario_evaluation_record(
     scenario_id: int,
     specification: ResolvedScenarioSpecificationV3,
-    replay: ReplayArtifactV3,
+    replay: ReplayArtifactV4,
     *,
     schedule_coordinate: int,
-) -> ScenarioEvaluationRecordV4:
+) -> ScenarioEvaluationRecordV5:
     """Join one scenario replay to its declared terminal-reward endpoint.
 
     Parameters
@@ -289,16 +295,16 @@ def build_tdm_scenario_evaluation_record(
         Packaged scenario number, 1 through 8.
     specification : ResolvedScenarioSpecificationV3
         Exact current official specification for this scenario.
-    replay : ReplayArtifactV3
-        Version 3 replay with the approved frame zero and recorded Team B
+    replay : ReplayArtifactV4
+        Version 4 replay with the approved frame zero and recorded Team B
         controller identity.
     schedule_coordinate : int
         Zero-based index into the specification's matched schedule.
 
     Returns
     -------
-    ScenarioEvaluationRecordV4
-        Version 4 record joining specification, replay, and schedule coordinate.
+    ScenarioEvaluationRecordV5
+        Version 5 record joining specification, replay, and schedule coordinate.
         A complete replay ending with terminated or truncated reports Team A reward
         and whether it equals 1. Other replays report an unavailable endpoint.
 
@@ -371,7 +377,7 @@ def build_tdm_scenario_evaluation_record(
         if reward is not None
         else "Complete terminal TDM reward unavailable.",
     )
-    return build_scenario_evaluation_record_v4(
+    return build_scenario_evaluation_record_v5(
         specification,
         replay,
         schedule_coordinate=schedule_coordinate,

@@ -4,6 +4,9 @@ The fixtures cover all twelve B/T shapes, exact even update budgets and shared
 capture points, invalid measurements, frozen package checks, read-only status,
 and failure/stop boundaries. Mock jobs never call a policy, evaluator or GPU.
 The separate launcher tests own real process-group shutdown and source copies.
+The declaration pins Red Zone depth 0.0 for its base and every calibration
+job's config, and the frozen package's content identity is prepared at that
+depth, so the screen keeps one point per death.
 """
 
 from __future__ import annotations
@@ -69,6 +72,13 @@ def test_declaration_covers_twelve_fixed_shapes_without_global_random_changes() 
     assert first["base_config"]["shaping_coefficient"] == 0.01
     assert first["base_config"]["ppo"]["input_scale"] == 0.01
     assert first["base_config"]["ppo"]["value_normalization"] is False
+    # The frozen screen keeps one point per death: every calibration job's config
+    # comes from this base, so each job trains and validates at depth 0.0.
+    assert first["base_config"]["red_zone_depth"] == 0.0
+    assert {
+        screen.calibration_config(first, case)["red_zone_depth"]
+        for case in first["cases"]
+    } == {0.0}
 
 
 @pytest.mark.parametrize("batch", [32, 512, 1024])
@@ -654,7 +664,7 @@ def test_prepare_builds_isolated_cpu_package_and_generated_status_command(
     assert not (output / "source/docs/dev/milestone_fixture.md").exists()
     assert private.read_text() == "Private plan must stay in the original checkout"
     assert before == screen._launch._files(repository / ".git")
-    content.assert_called_once_with(output / ".venv/bin/python", output / "source")
+    content.assert_called_once_with(output / ".venv/bin/python", output / "source", 0.0)
     assert not (output / "study.json").exists()
     assert not (output / "process.json").exists()
     for name in screen._SCRIPT_ACTIONS:

@@ -1,6 +1,9 @@
 /**
  * @file Check metric ordering, missing/applicable values, source-to-recipient views
- * and exact/natural-language searches.
+ * and exact/natural-language searches. The Red Zone topic keeps team totals, then
+ * helpers, then victims in Python's order; its shares show the fraction unit with
+ * numerator and denominator help; searches keep Red Zone kills, Red Zone deaths
+ * and ordinary kills apart.
  */
 import assert from "node:assert/strict";
 import test from "node:test";
@@ -1048,4 +1051,196 @@ test("metric tooltips keep identities and explain both parts of a fraction witho
   }
   assert.equal(values({ ...common, unit: "fraction" }).Unit, "Share: 1 means 100%");
   assert.equal(values(common)["Blank When"], "Not collected.");
+});
+
+test("Red Zone rows keep team, helper and victim order, share help and kill/death search", () => {
+  /** @param {string} kind @param {string} subject @param {string} source
+   * @param {string[]} [qualifiers] */
+  const redZoneFacts = (kind, subject, source, qualifiers = []) => ({
+    ...facts(kind, subject, { source, relation: "enemy" }),
+    qualifiers,
+  });
+  const where = [{ topic: "red_zone", view: "single" }];
+  /** @param {number[]} key */
+  const order = (key) => ({ red_zone: [...key, 0, 0, 0] });
+  const rows = [
+    {
+      name: "agent_5_red_zone_death_fraction",
+      label: "Share of Team B Red Zone Deaths",
+      description: "What share of Team B's Red Zone deaths were this agent's deaths.",
+      subject: "Agent ID 5 · Mage · Team B",
+      unit: "fraction",
+      scope: "agent",
+      subjects: [5],
+      subject_role: "recipient",
+      numerator: "This agent's Red Zone deaths during the selected period",
+      denominator: "All Red Zone deaths on Team B during the same period",
+      guidance: "Context dependent for Team B.",
+      missing_when: "The Red Zone rule was not recorded.",
+      order: 5,
+      topic_order: order([2, 5, -1, 104]),
+      search_facts: redZoneFacts("death", "recipient", "team", ["fraction"]),
+    },
+    {
+      name: "agent_0_red_zone_kill_participation",
+      label: "Share of Team A Red Zone Kills",
+      description: "What share of Team A's Red Zone kills this agent helped with.",
+      subject: "Agent ID 0 · Mage · Team A",
+      unit: "fraction",
+      scope: "agent",
+      subjects: [0],
+      subject_role: "contributor",
+      numerator: "Red Zone kills this agent helped with during the selected period",
+      denominator: "All Red Zone kills by Team A during the same period",
+      guidance: "Context dependent for Team A.",
+      missing_when: "The Red Zone rule was not recorded.",
+      order: 3,
+      topic_order: order([1, 0, -1, 102]),
+      search_facts: redZoneFacts("kill", "source", "agent", [
+        "participation",
+        "fraction",
+      ]),
+    },
+    {
+      name: "agent_5_red_zone_deaths",
+      label: "Red Zone Deaths",
+      description: "How many times this agent died inside Team B's Red Zone.",
+      subject: "Agent ID 5 · Mage · Team B",
+      unit: "count",
+      scope: "agent",
+      subjects: [5],
+      subject_role: "recipient",
+      order: 4,
+      topic_order: order([2, 5, -1, 103]),
+      search_facts: redZoneFacts("death", "recipient", "team"),
+    },
+    {
+      name: "team_a_red_zone_kills",
+      label: "Red Zone Kills",
+      description: "How many enemies Team A killed inside the enemy team's Red Zone.",
+      subject: "Team A",
+      unit: "count",
+      scope: "team",
+      subjects: [1],
+      subject_role: "team",
+      order: 0,
+      topic_order: order([0, 1, -1, 100]),
+      search_facts: redZoneFacts("kill", "source", "team"),
+    },
+    {
+      name: "agent_0_red_zone_kill_contributions",
+      label: "Red Zone Kill Contributions",
+      description: "How many Red Zone kills this agent helped with.",
+      subject: "Agent ID 0 · Mage · Team A",
+      unit: "count",
+      scope: "agent",
+      subjects: [0],
+      subject_role: "contributor",
+      order: 2,
+      topic_order: order([1, 0, -1, 101]),
+      search_facts: redZoneFacts("kill", "source", "agent", ["contribution"]),
+    },
+    {
+      name: "team_a_red_zone_deaths",
+      label: "Red Zone Deaths",
+      description: "How many times agents on Team A died inside their own Red Zone.",
+      subject: "Team A",
+      unit: "count",
+      scope: "team",
+      subjects: [1],
+      subject_role: "recipient",
+      order: 1,
+      topic_order: order([0, 1, -1, 103]),
+      search_facts: redZoneFacts("death", "recipient", "team"),
+    },
+  ].map((row) => ({
+    ...row,
+    applicable: true,
+    valid: row.unit === "count",
+    value: row.unit === "count" ? 1 : null,
+    locations: where,
+  }));
+  const total = {
+    name: "team_a_kills",
+    label: "Total Kills",
+    description: "How many enemies Team A has killed so far.",
+    subject: "Team A",
+    unit: "count",
+    scope: "team",
+    subjects: [1],
+    order: 6,
+    applicable: true,
+    locations: [{ topic: "priority", view: "single" }],
+    topic_order: { priority: [0, 1, -1, 12, 0, 0, 0] },
+    search_facts: redZoneFacts("kill", "source", "team"),
+  };
+  const before = structuredClone(rows);
+  assert.deepEqual(
+    selectedMetricRows({ statistics: [...rows, total] }, "red_zone", "single").map(
+      (/** @type {Record<string, any>} */ row) => row.name,
+    ),
+    [
+      "team_a_red_zone_kills",
+      "team_a_red_zone_deaths",
+      "agent_0_red_zone_kill_contributions",
+      "agent_0_red_zone_kill_participation",
+      "agent_5_red_zone_deaths",
+      "agent_5_red_zone_death_fraction",
+    ],
+  );
+  assert.deepEqual(rows, before);
+  const shareHelp = (/** @type {Record<string, any>} */ row) =>
+    Object.fromEntries(
+      metricTooltipRows(row).map(({ label, value }) => [label, value]),
+    );
+  for (const name of [
+    "agent_0_red_zone_kill_participation",
+    "agent_5_red_zone_death_fraction",
+  ]) {
+    const row = rows.find((item) => item.name === name);
+    assert(row);
+    const help = shareHelp(row);
+    assert.deepEqual(Object.keys(help), [
+      "CSV Column",
+      "Unit",
+      "Numerator",
+      "Denominator",
+      "How to Read It",
+      "Blank When",
+    ]);
+    assert.equal(help.Unit, "Share: 1 means 100%");
+    assert.equal(help.Numerator, row.numerator);
+    assert.equal(help.Denominator, row.denominator);
+    assert.equal(help["Blank When"], "The Red Zone rule was not recorded.");
+  }
+  const count = rows.find((item) => item.name === "team_a_red_zone_kills");
+  assert(count);
+  assert.deepEqual(Object.keys(shareHelp(count)), [
+    "CSV Column",
+    "Unit",
+    "How to Read It",
+    "Blank When",
+  ]);
+  const index = buildIndex(
+    [...rows, total],
+    [
+      { name: "red_zone", label: "Red Zone" },
+      { name: "priority", label: "Episode Results" },
+    ],
+    testAgents,
+    classNames,
+  );
+  const names = (/** @type {string} */ query) =>
+    findMeasurements(index, query).map((row) => row.name);
+  assert.deepEqual(names("red zone kills"), [
+    "team_a_red_zone_kills",
+    "agent_0_red_zone_kill_contributions",
+    "agent_0_red_zone_kill_participation",
+  ]);
+  assert.deepEqual(names("red zone deaths"), [
+    "team_a_red_zone_deaths",
+    "agent_5_red_zone_deaths",
+    "agent_5_red_zone_death_fraction",
+  ]);
+  assert.deepEqual(names("team_a_red_zone_kills"), ["team_a_red_zone_kills"]);
 });

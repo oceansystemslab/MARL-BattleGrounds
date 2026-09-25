@@ -786,23 +786,23 @@ def test_replay_staging_keeps_one_model_and_serializes_each_completion_once(
     from collections.abc import Iterable
 
     import marl_battlegrounds.evaluation.replay_io as replay_io
-    import marl_battlegrounds.evaluation.replay_v3 as replay_v3
-    from marl_battlegrounds.evaluation.models import EvaluationEpisodeContextV3
+    import marl_battlegrounds.evaluation.replay_v4 as replay_v4
+    from marl_battlegrounds.evaluation.models import EvaluationEpisodeContextV4
     from marl_battlegrounds.evaluation.replay import RuntimeProvenanceV1
     from marl_battlegrounds.evaluation.replay_capture import ReplayPackets
 
     assert terminal.replay is not None
     references: list[weakref.ReferenceType[object]] = []
     publications: list[Path] = []
-    build = replay_v3.replay_from_packets
+    build = replay_v4.replay_from_packets
     publish = replay_io.publish_prepared_replay
 
     def checked_build(
-        context: EvaluationEpisodeContextV3,
+        context: EvaluationEpisodeContextV4,
         packets: Iterable[ReplayPackets],
         *,
         runtime_provenance: RuntimeProvenanceV1,
-    ) -> replay_v3.ReplayArtifactV3:
+    ) -> replay_v4.ReplayArtifactV4:
         assert all(reference() is None for reference in references)
         replay = build(context, packets, runtime_provenance=runtime_provenance)
         references.append(weakref.ref(replay))
@@ -821,7 +821,7 @@ def test_replay_staging_keeps_one_model_and_serializes_each_completion_once(
             prepared, destination, verify_existing_replay=verify_existing_replay
         )
 
-    monkeypatch.setattr(replay_v3, "replay_from_packets", checked_build)
+    monkeypatch.setattr(replay_v4, "replay_from_packets", checked_build)
     monkeypatch.setattr(replay_io, "publish_prepared_replay", staged_publish)
     packets = jax.tree.map(
         lambda *values: jnp.concatenate(values),

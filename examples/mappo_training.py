@@ -9,8 +9,17 @@ Install training and viz extras. Run with JAX_PLATFORMS=cpu::
 Defaults use MAPPO, four environments and 32 real transitions to check wiring,
 not learning. --method chooses another PPO method for a new tiny run.
 --config reads the same JSON settings as the package train command;
-use a declared panel-backed configuration for a real demonstration. Evaluation
-is optional and uses Random only as a diagnostic. No trained competence is implied.
+use a declared panel-backed configuration for a real demonstration. A config
+file names TrainConfig fields. red_zone_depth sets the Team Deathmatch Red Zone
+depth in map units for training and validation games: the default 5.0 gives the
+enemy 2 points when an agent dies in its own spawn-side strip, and 0.0 keeps one
+point per death. For example::
+
+    {"method": "mappo", "num_envs": 4, "total_env_steps": 32,
+     "red_zone_depth": 6.0, "ppo": {"rollout_length": 4, "epochs": 1}}
+
+Evaluation is optional, plays at evaluate's default depth (5.0) and uses Random
+only as a diagnostic. No trained competence is implied.
 """
 
 import argparse

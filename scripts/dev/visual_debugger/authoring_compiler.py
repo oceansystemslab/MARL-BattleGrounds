@@ -7,6 +7,14 @@ configuration/state validators, and builds coherent initial observations and mas
 Scenario compilation initializes JAX arrays and performs reset work; it does not
 advance a gameplay transition or write files. Validation helpers return field-linked
 problems so the editor can point to the value that needs attention.
+
+Both scenario content versions compile. Version 1 means Red Zone depth 0.0.
+Version 2's authored depth is checked as typed, in Core's order, before any
+float32 rounding could hide a bad value; only a passing depth is rounded. The
+runtime configuration is recorded with ``build_resolved_env_config_v2``. At depth
+0.0 the semantic payload is exactly the old ``dev-scenario-semantics@1`` payload,
+so old semantic digests stay valid; a positive depth uses
+``dev-scenario-semantics@2``.
 """
 
 from __future__ import annotations
@@ -15,7 +23,7 @@ import math
 import re
 from collections.abc import Mapping
 from dataclasses import dataclass
-from typing import Literal, cast
+from typing import Literal, cast, overload
 
 import jax
 import jax.numpy as jnp
@@ -60,8 +68,12 @@ from marl_battlegrounds.core.types import (
     Info,
     Observation,
 )
-from marl_battlegrounds.evaluation.catalog import build_resolved_env_config_v1
-from marl_battlegrounds.evaluation.models import canonical_digest_sha256
+from marl_battlegrounds.evaluation.catalog import build_resolved_env_config_v2
+from marl_battlegrounds.evaluation.models import (
+    FLOAT32_SMALLEST_NORMAL,
+    canonical_digest_sha256,
+    float32_value,
+)
 from scripts.dev.visual_debugger.authoring_models import (
     DevAgentStateV1,
     DevAuthoringProblemV1,
@@ -71,10 +83,14 @@ from scripts.dev.visual_debugger.authoring_models import (
     DevPillarV1,
     DevPointV1,
     DevRosterSlotV1,
+    DevScenarioContent,
     DevScenarioContentV1,
+    DevScenarioContentV2,
     DevScenarioDraftV1,
+    DevScenarioDraftV2,
     DevSpawnPadV1,
     DevWallV1,
+    declared_red_zone_depth,
 )
 
 _INT32_MIN = int(np.iinfo(np.int32).min)
@@ -149,14 +165,18 @@ class CompiledDevMapV1:
 class CompiledDevScenarioV1:
     """Validated authored endpoint with matching config, state, observation and mask.
 
-    The content is copied and normalized. ``config`` and ``initial_state`` contain the
-    runtime inputs; ``observation``, ``action_mask`` and ``info`` come from Core's
+    The content is copied and normalized and keeps its version (1 or 2).
+    ``config`` and ``initial_state`` contain the runtime inputs, with
+    ``config.team_deathmatch_red_zone_depth`` set to the declared depth (0.0 for
+    version 1). ``observation``, ``action_mask`` and ``info`` come from Core's
     initial-state authority. Map/scenario semantic digests identify physical content.
-    Resolved configuration/state digests identify the exact runtime payloads.
-    ``problems`` retains warnings; compilation does not return a failed partial state.
+    Resolved configuration/state digests identify the exact runtime payloads; the
+    configuration digest is that of ``build_resolved_env_config_v2``, which records
+    the depth. ``problems`` retains warnings; compilation does not return a failed
+    partial state.
     """
 
-    content: DevScenarioContentV1
+    content: DevScenarioContent
     config: EnvConfig
     initial_state: EnvState
     observation: Observation
@@ -401,25 +421,116 @@ def normalize_map_content(
     )
 
 
-def normalize_scenario_content(
-    content: DevScenarioContentV1,
-) -> DevScenarioContentV1:
-    """Normalize the authored map, motion settings and agent state numbers.
+def _red_zone_depth_problem(
+    red_zone_depth: float,
+    map_width: float,
+) -> DevAuthoringProblemV1 | None:
+    """Check one raw authored Red Zone depth in Core's order.
 
     Parameters
     ----------
-    content : DevScenarioContentV1
+    red_zone_depth : float
+        The depth exactly as authored, in map units, before any float32 rounding.
+    map_width : float
+        The map width in map units, raw or already float32; its float32 value is
+        used.
+
+    Returns
+    -------
+    DevAuthoringProblemV1 or None
+        None when the depth is 0.0 or passes every check. Otherwise the first
+        failure, as an error linked to ``task.red_zone_depth``, checked in this
+        order: not finite (``scenario-red-zone-depth-not-finite``); a negative
+        sign bit, -0.0 included, so "off" has one encoding
+        (``scenario-red-zone-depth-negative``); a positive value whose float32 is
+        not finite (``scenario-red-zone-depth-not-finite``), or is zero or
+        subnormal (``scenario-red-zone-depth-underflow``); a float32 value above
+        the float32 map width (``scenario-red-zone-depth-exceeds-map-width``).
+
+    Notes
+    -----
+    These are Core's own depth checks, done here on the raw value so that, for
+    example, 1e-50 reports underflow instead of silently becoming 0.0. A value
+    that passes still passes after rounding to float32. Host-only; no arrays.
+    """
+    field_path = "task.red_zone_depth"
+    if not math.isfinite(red_zone_depth):
+        return _problem(
+            "error",
+            "scenario-red-zone-depth-not-finite",
+            "Red Zone depth must be a finite number.",
+            field_path,
+        )
+    if math.copysign(1.0, red_zone_depth) < 0.0:
+        return _problem(
+            "error",
+            "scenario-red-zone-depth-negative",
+            "Red Zone depth must not be negative. Use 0 to turn the rule off; "
+            "-0 is not allowed.",
+            field_path,
+        )
+    if red_zone_depth == 0.0:
+        return None
+    execution_depth = float32_value(red_zone_depth)
+    if not math.isfinite(execution_depth):
+        return _problem(
+            "error",
+            "scenario-red-zone-depth-not-finite",
+            "Red Zone depth must stay finite after rounding to float32.",
+            field_path,
+        )
+    if execution_depth < FLOAT32_SMALLEST_NORMAL:
+        return _problem(
+            "error",
+            "scenario-red-zone-depth-underflow",
+            f"Red Zone depth must be 0 or at least {FLOAT32_SMALLEST_NORMAL} map "
+            "units. Smaller positive values round to zero in float32 and would "
+            "silently turn the rule off.",
+            field_path,
+        )
+    if execution_depth > float32_value(map_width):
+        return _problem(
+            "error",
+            "scenario-red-zone-depth-exceeds-map-width",
+            "Red Zone depth must not be larger than the map width.",
+            field_path,
+        )
+    return None
+
+
+@overload
+def normalize_scenario_content(
+    content: DevScenarioContentV1,
+) -> DevScenarioContentV1: ...
+
+
+@overload
+def normalize_scenario_content(
+    content: DevScenarioContentV2,
+) -> DevScenarioContentV2: ...
+
+
+def normalize_scenario_content(content: DevScenarioContent) -> DevScenarioContent:
+    """Normalize the authored map, motion settings, agent state numbers and depth.
+
+    Parameters
+    ----------
+    content : DevScenarioContentV1 or DevScenarioContentV2
         Strict scenario editor content.
 
     Returns
     -------
-    DevScenarioContentV1
-        Deep copy whose runtime floating values have float32 precision.
+    DevScenarioContentV1 or DevScenarioContentV2
+        Deep copy of the same version whose runtime floating values have float32
+        precision. A version 2 Red Zone depth is rounded to float32 only when the
+        raw value passes the compiler's depth checks; a failing depth is left
+        exactly as authored, so the later check still sees and reports it.
 
     Raises
     ------
     ValueError
         If numeric conversion fails; linked errors identify the original editor field.
+        A failing Red Zone depth never raises here.
 
     Notes
     -----
@@ -457,7 +568,7 @@ def normalize_scenario_content(
             )
         }
     )
-    return content.model_copy(
+    normalized = content.model_copy(
         update={
             "embedded_map": normalize_map_content(
                 content.embedded_map,
@@ -468,6 +579,19 @@ def normalize_scenario_content(
         },
         deep=True,
     )
+    if isinstance(normalized, DevScenarioContentV2):
+        raw_depth = normalized.task.red_zone_depth
+        # Round only a passing depth: rounding first could turn 1e-50 into 0.0
+        # or -1e-50 into -0.0 and hide the author's mistake.
+        if _red_zone_depth_problem(raw_depth, content.embedded_map.width) is None:
+            normalized = normalized.model_copy(
+                update={
+                    "task": normalized.task.model_copy(
+                        update={"red_zone_depth": float32_value(raw_depth)}
+                    )
+                }
+            )
+    return normalized
 
 
 def _compile_obstacles(content: DevMapContentV1) -> Array:
@@ -863,7 +987,7 @@ def compile_dev_map(
     )
 
 
-def _active(global_slot: int, content: DevScenarioContentV1) -> bool:
+def _active(global_slot: int, content: DevScenarioContent) -> bool:
     """Check whether a fixed global slot belongs to its authored team-size prefix."""
     return global_slot % 5 < (
         content.team_a_size if global_slot < 5 else content.team_b_size
@@ -871,11 +995,14 @@ def _active(global_slot: int, content: DevScenarioContentV1) -> bool:
 
 
 def _scenario_custom_problems(
-    content: DevScenarioContentV1,
+    content: DevScenarioContent,
 ) -> tuple[DevAuthoringProblemV1, ...]:
-    """Collect editor-specific map, numeric, roster and starting-state problems.
+    """Collect editor-specific map, numeric, task, roster and starting-state problems.
 
-    This host pass keeps field links; Core remains the final runtime validator.
+    ``content`` comes from ``normalize_scenario_content``, which leaves a failing
+    Red Zone depth exactly as authored, so the depth check here sees the raw
+    value. This host pass keeps field links; Core remains the final runtime
+    validator.
     """
     problems = [
         problem.model_copy(
@@ -973,6 +1100,12 @@ def _scenario_custom_problems(
         message="TDM score threshold must be at least one.",
         field_path="task.score_threshold",
     )
+    depth_problem = _red_zone_depth_problem(
+        declared_red_zone_depth(content),
+        content.embedded_map.width,
+    )
+    if depth_problem is not None:
+        problems.append(depth_problem)
     max_steps_valid = require_minimum(
         episode.max_steps,
         1,
@@ -1177,7 +1310,7 @@ def _scenario_custom_problems(
     return tuple(problems)
 
 
-def _requested_class_ids(content: DevScenarioContentV1) -> Array:
+def _requested_class_ids(content: DevScenarioContent) -> Array:
     """Build int32 class IDs for all ten slots, with neutral IDs in inactive rows."""
 
     def class_id(global_slot: int, slot: DevRosterSlotV1) -> int:
@@ -1200,10 +1333,13 @@ def _requested_class_ids(content: DevScenarioContentV1) -> Array:
 
 
 def _build_config(
-    content: DevScenarioContentV1, compiled_map: CompiledDevMapV1
+    content: DevScenarioContent, compiled_map: CompiledDevMapV1
 ) -> EnvConfig:
     """Build product configuration from the normalized draft using the shared profile
     authority.
+
+    The Red Zone depth is ``declared_red_zone_depth(content)``: 0.0 for version 1,
+    the checked float32 depth for version 2.
     """
     profile = resolve_agent_profile(
         _requested_class_ids(content),
@@ -1212,6 +1348,7 @@ def _build_config(
     return EnvConfig(
         task_mode=TASK_MODE_TDM,
         team_deathmatch_score_threshold=content.task.score_threshold,
+        team_deathmatch_red_zone_depth=declared_red_zone_depth(content),
         max_steps=content.episode.max_steps,
         map_width=float(compiled_map.content.width),
         map_height=float(compiled_map.content.height),
@@ -1235,7 +1372,7 @@ def _build_config(
 
 def _overlay_authored_state(
     reset_state: EnvState,
-    content: DevScenarioContentV1,
+    content: DevScenarioContent,
 ) -> EnvState:
     """Copy explicitly editable starting fields over reset state and retain neutral
     history.
@@ -1354,12 +1491,12 @@ def _state_digest(state: EnvState) -> str:
     )
 
 
-def scenario_semantic_payload(content: DevScenarioContentV1) -> dict[str, object]:
+def scenario_semantic_payload(content: DevScenarioContent) -> dict[str, object]:
     """Describe normalized physical scenario settings and initial state.
 
     Parameters
     ----------
-    content : DevScenarioContentV1
+    content : DevScenarioContentV1 or DevScenarioContentV2
         Complete embedded map, task, roster and authored starting state.
 
     Returns
@@ -1367,17 +1504,36 @@ def scenario_semantic_payload(content: DevScenarioContentV1) -> dict[str, object
     dict of str to object
         Schema-tagged physical values in fixed slot order. Display prose and provenance
         IDs are excluded; runtime-relevant task and state fields remain included.
+        The payload depends on the effective Red Zone depth, not on the content
+        version. At depth 0.0 (every version 1 draft, and version 2 at 0.0) it is
+        exactly the old ``dev-scenario-semantics@1`` payload, whose task holds only
+        ``task`` and ``score_threshold``, so every old semantic digest stays
+        valid. A positive depth gives ``dev-scenario-semantics@2``, whose task
+        also holds the float32 ``red_zone_depth``.
 
     Raises
     ------
     ValueError
-        If a runtime floating value cannot be normalized.
+        If a runtime floating value cannot be normalized, or the Red Zone depth
+        fails the compiler's depth checks (its message names the problem).
     """
     content = normalize_scenario_content(content)
+    red_zone_depth = declared_red_zone_depth(content)
+    depth_problem = _red_zone_depth_problem(red_zone_depth, content.embedded_map.width)
+    if depth_problem is not None:
+        raise ValueError(depth_problem.message)
+    task: dict[str, object] = {
+        "task": content.task.task,
+        "score_threshold": content.task.score_threshold,
+    }
+    schema = "dev-scenario-semantics@1"
+    if red_zone_depth != 0.0:
+        schema = "dev-scenario-semantics@2"
+        task["red_zone_depth"] = red_zone_depth
     return {
-        "schema": "dev-scenario-semantics@1",
+        "schema": schema,
         "embedded_map": map_semantic_payload(content.embedded_map),
-        "task": content.task.model_dump(mode="json"),
+        "task": task,
         "episode": content.episode.model_dump(mode="json"),
         "global_state": content.global_state.model_dump(mode="json"),
         "team_sizes": (content.team_a_size, content.team_b_size),
@@ -1401,13 +1557,14 @@ def scenario_semantic_payload(content: DevScenarioContentV1) -> dict[str, object
     }
 
 
-def scenario_semantic_digest(content: DevScenarioContentV1) -> str:
+def scenario_semantic_digest(content: DevScenarioContent) -> str:
     """Hash a scenario's normalized physical content.
 
     Parameters
     ----------
-    content : DevScenarioContentV1
-        Scenario whose physical identity is needed.
+    content : DevScenarioContentV1 or DevScenarioContentV2
+        Scenario whose physical identity is needed. Version 1 content and its
+        version 2 copy at depth 0.0 have the same digest.
 
     Returns
     -------
@@ -1417,7 +1574,7 @@ def scenario_semantic_digest(content: DevScenarioContentV1) -> str:
     Raises
     ------
     ValueError
-        If normalization fails.
+        If normalization fails or the Red Zone depth fails its checks.
     """
     return canonical_digest_sha256(scenario_semantic_payload(content))
 
@@ -1593,12 +1750,17 @@ def _core_problem(
     error: Exception,
     *,
     phase: Literal["config", "state"],
-    content: DevScenarioContentV1,
+    content: DevScenarioContent,
     config: EnvConfig | None = None,
     state: EnvState | None = None,
 ) -> DevAuthoringProblemV1:
     """Translate a Core error into one editor-linked problem, retaining its original
     message.
+
+    Agent rows are located first. Otherwise Core's Red Zone depth messages link to
+    ``task.red_zone_depth`` and its Team Deathmatch threshold messages, such as
+    the maximum threshold, link to ``task.score_threshold``; other known global
+    fields follow, and anything else links to ``scenario``.
     """
     message = str(error)
     field_path = "scenario"
@@ -1610,7 +1772,11 @@ def _core_problem(
             object_id = content.agent_states[global_slot].object_id
             field_path = f"agent_states.{global_slot}.{field_name}"
     if field_path == "scenario":
-        if "step_count" in message:
+        if "team_deathmatch_red_zone_depth" in message:
+            field_path = "task.red_zone_depth"
+        elif "team_deathmatch_score_threshold" in message:
+            field_path = "task.score_threshold"
+        elif "step_count" in message:
             field_path = "global_state.step_count"
         elif "team_deathmatch_scores" in message:
             team = "a" if content.global_state.team_a_score < 0 else "b"
@@ -1636,26 +1802,37 @@ def _core_problem(
 
 
 def compile_dev_scenario(
-    source: DevScenarioDraftV1 | DevScenarioContentV1,
+    source: DevScenarioDraftV1
+    | DevScenarioDraftV2
+    | DevScenarioContentV1
+    | DevScenarioContentV2,
 ) -> CompiledDevScenarioV1:
     """Build one coherent initial endpoint from a validated authored scenario.
 
     Parameters
     ----------
-    source : DevScenarioDraftV1 or DevScenarioContentV1
-        Strict editor scenario, including embedded map and all ten fixed agent rows.
+    source : DevScenarioDraftV1, DevScenarioDraftV2 or their content models
+        Strict editor scenario, including embedded map and all ten fixed agent rows:
+        a draft of either version, or its ``DevScenarioContentV1`` or
+        ``DevScenarioContentV2``. Version 1 compiles at Red Zone depth 0.0;
+        version 2 at its declared depth.
 
     Returns
     -------
     CompiledDevScenarioV1
         Normalized independent content, validated config/state, matching observation
         and action mask, runtime/semantic digests, and any nonblocking warnings.
+        The configuration digest comes from ``build_resolved_env_config_v2``. A
+        version 1 source and its version 2 copy at depth 0.0 give the same
+        semantic, map, configuration and state digests.
 
     Raises
     ------
     DevAuthoringValidationError
         If numeric conversion, editor checks, product config validation, or authored
         state initialization fails. Problems retain the relevant editor field links.
+        A bad Red Zone depth is reported from its raw value and linked to
+        ``task.red_zone_depth``.
 
     Notes
     -----
@@ -1665,7 +1842,9 @@ def compile_dev_scenario(
     occurs. Previous-action history remains neutral for the new initial endpoint.
     """
     raw_content = (
-        source.content if not isinstance(source, DevScenarioContentV1) else source
+        source.content
+        if isinstance(source, (DevScenarioDraftV1, DevScenarioDraftV2))
+        else source
     )
     try:
         content = normalize_scenario_content(raw_content)
@@ -1713,7 +1892,7 @@ def compile_dev_scenario(
         )
         raise DevAuthoringValidationError(tuple(custom_problems)) from error
 
-    resolved_config = build_resolved_env_config_v1(config)
+    resolved_config = build_resolved_env_config_v2(config)
     return CompiledDevScenarioV1(
         content=content.model_copy(deep=True),
         config=config,
@@ -1730,15 +1909,19 @@ def compile_dev_scenario(
 
 
 def validate_dev_scenario(
-    source: DevScenarioDraftV1 | DevScenarioContentV1,
+    source: DevScenarioDraftV1
+    | DevScenarioDraftV2
+    | DevScenarioContentV1
+    | DevScenarioContentV2,
 ) -> tuple[DevAuthoringProblemV1, ...]:
     """Return scenario compilation problems without exposing an invalid partial
     state.
 
     Parameters
     ----------
-    source : DevScenarioDraftV1 or DevScenarioContentV1
-        Scenario to check through the same path used for loading.
+    source : DevScenarioDraftV1, DevScenarioDraftV2 or their content models
+        Scenario to check through the same path used for loading; either draft
+        version, or its ``DevScenarioContentV1`` or ``DevScenarioContentV2``.
 
     Returns
     -------
@@ -1756,18 +1939,36 @@ def validate_dev_scenario(
         return error.problems
 
 
+@overload
 def apply_alive_edit(
     content: DevScenarioContentV1,
     *,
     global_slot: int,
     alive: bool,
-) -> DevScenarioContentV1:
+) -> DevScenarioContentV1: ...
+
+
+@overload
+def apply_alive_edit(
+    content: DevScenarioContentV2,
+    *,
+    global_slot: int,
+    alive: bool,
+) -> DevScenarioContentV2: ...
+
+
+def apply_alive_edit(
+    content: DevScenarioContent,
+    *,
+    global_slot: int,
+    alive: bool,
+) -> DevScenarioContent:
     """Apply one explicit editor Alive/Dead change to an active agent row.
 
     Parameters
     ----------
-    content : DevScenarioContentV1
-        Source scenario; other rows are preserved.
+    content : DevScenarioContentV1 or DevScenarioContentV2
+        Source scenario; other rows are preserved, and so is its version.
     global_slot : int
         Active agent slot from zero through nine.
     alive : bool
@@ -1776,7 +1977,7 @@ def apply_alive_edit(
 
     Returns
     -------
-    DevScenarioContentV1
+    DevScenarioContentV1 or DevScenarioContentV2
         New content with the selected row changed. Setting Alive does not invent health;
         the compiler still checks whether the edited state is valid.
 
@@ -1809,19 +2010,32 @@ def apply_alive_edit(
     return content.model_copy(update={"agent_states": tuple(rows)})
 
 
-def canonicalize_inactive_rows(content: DevScenarioContentV1) -> DevScenarioContentV1:
+@overload
+def canonicalize_inactive_rows(
+    content: DevScenarioContentV1,
+) -> DevScenarioContentV1: ...
+
+
+@overload
+def canonicalize_inactive_rows(
+    content: DevScenarioContentV2,
+) -> DevScenarioContentV2: ...
+
+
+def canonicalize_inactive_rows(content: DevScenarioContent) -> DevScenarioContent:
     """Clear rows made inactive by an explicit editor team-size change.
 
     Parameters
     ----------
-    content : DevScenarioContentV1
+    content : DevScenarioContentV1 or DevScenarioContentV2
         Source content carrying the desired team sizes and all ten fixed rows.
 
     Returns
     -------
-    DevScenarioContentV1
-        Content with active rows preserved and inactive rows set to the neutral class,
-        zero position/health/status values, and dead state while retaining object IDs.
+    DevScenarioContentV1 or DevScenarioContentV2
+        Content of the same version with active rows preserved and inactive rows
+        set to the neutral class, zero position/health/status values, and dead
+        state while retaining object IDs.
 
     Notes
     -----

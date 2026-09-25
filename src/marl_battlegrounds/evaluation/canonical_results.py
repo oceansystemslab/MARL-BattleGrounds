@@ -2,8 +2,11 @@
 
 CanonicalView extends the shared table view with full original game ownership.
 It reads immutable configuration/schedule references and borrows TournamentRecords
-for raw rows. Loading summaries does not verify unrelated model/report payloads,
-run a method, fit ratings, create locks or repair files.
+for raw rows. The full-report columns follow the snapshot's pinned scalar schema,
+the same header TournamentRecords reads with, and the result's metadata reports
+that pinned version as metric_schema_version. Loading summaries does not verify
+unrelated model/report payloads, run a method, fit ratings, create locks or
+repair files.
 """
 
 from __future__ import annotations
@@ -15,10 +18,7 @@ from collections.abc import Iterator, Mapping
 from pathlib import Path
 from typing import Any, cast
 
-from marl_battlegrounds.evaluation.metric_catalog import (
-    FULL_METRIC_NAMES,
-    PRIORITY_METRIC_NAMES,
-)
+from marl_battlegrounds.evaluation.metric_catalog import PRIORITY_METRIC_NAMES
 from marl_battlegrounds.evaluation.results import (
     Row,
     _cell_type,
@@ -43,12 +43,14 @@ from marl_battlegrounds.evaluation.tournament_records import (
     origin_key,
 )
 
+# Raw roles whose headers never depend on the scalar schema. full_metrics.csv
+# is also raw; its header comes from the snapshot pin (CanonicalView._raw_header).
 _RAW_HEADERS = {
     "match_results.csv": MATCH_COLUMNS,
-    "full_metrics.csv": (*IDENTITY_COLUMNS, *FULL_METRIC_NAMES),
     "priority_metrics.csv": (*IDENTITY_COLUMNS, *PRIORITY_METRIC_NAMES),
     "episodes.csv": EPISODE_COLUMNS,
 }
+_RAW_ROLES = frozenset({*_RAW_HEADERS, "full_metrics.csv"})
 
 
 def read_canonical_files(
@@ -96,6 +98,27 @@ class CanonicalView(_View):
     no-file result. Saved views read their two immutable reference files and
     narrow outcomes for spawn coverage at construction. Wide data stays lazy.
     Summaries use the existing durable reader and shared ranking projection.
+
+    ``metadata['metric_schema_version']`` is the snapshot's pinned scalar
+    schema, not the version in the run's own ``run_details.json``. The full
+    report follows that pin, so a reader can pick the matching header with
+    ``FULL_METRIC_NAMES_BY_SCHEMA_VERSION[metadata['metric_schema_version']]``.
+    Example: a run that reuses a snapshot saved before the Red Zone rule
+    (pins 14, 2, 3) says 14 and has the 11,148 schema-14 metric columns,
+    even though its own writer recorded 15.
+
+    Attributes
+    ----------
+    records : TournamentRecords
+        The accessor that joins each logical game to its original rows. A
+        no-file result uses the supplied one; a saved view builds one from the
+        two reference files and the run's recorded asset locations.
+    metadata : dict
+        The shared view's metadata, with metric_schema_version replaced by the
+        snapshot's pinned scalar schema (see above), plus tournament_owner (the
+        run's tournament "schedule" pass), origin_join_version (1) and
+        schedule_reference (the recorded SHA-256 of tournament_games.jsonl).
+        Other attributes come from the shared view unchanged.
     """
 
     def __init__(
@@ -107,7 +130,34 @@ class CanonicalView(_View):
         pass_id: str | None = None,
         memory: Mapping[str, object] | None = None,
     ) -> None:
-        """Resolve current logical scope without reading full reports or models."""
+        """Resolve current logical scope without reading full reports or models.
+
+        Parameters
+        ----------
+        manifest : Row
+            The run's checked manifest. It must hold a version-1
+            ``tournament_reuse`` reference.
+        run_dir : pathlib.Path or None
+            The saved run directory, or None for a no-file result.
+        phase, pass_id : str or None, optional
+            The selected scope, as for the shared view. Default None.
+        memory : mapping or None, optional
+            In-memory tables. A no-file result must supply
+            ``memory['_record_access']``, its prepared TournamentRecords.
+
+        Raises
+        ------
+        ValueError
+            The reference version is unsupported, a no-file result has no
+            record accessor, or a saved reference file or pin is invalid.
+
+        Notes
+        -----
+        After the shared view is built, ``metadata['metric_schema_version']``
+        is replaced by the snapshot's pinned scalar schema
+        (``self.records.scalar_schema``). This covers saved runs,
+        ``load_results`` and in-memory results alike.
+        """
         reuse = _mapping(manifest.get("tournament_reuse"))
         if reuse.get("version") != 1:
             raise ValueError("unsupported canonical result reference version")
@@ -145,6 +195,9 @@ class CanonicalView(_View):
         )
         self.metadata.update(
             {
+                # The full report follows the snapshot pin, so the version a
+                # researcher reads must be the pin too (14 for an old snapshot).
+                "metric_schema_version": self.records.scalar_schema,
                 "tournament_owner": {
                     "run_id": manifest["run_id"],
                     "phase": "tournament",
@@ -170,20 +223,34 @@ class CanonicalView(_View):
             in self.identities
         )
 
+    def _raw_header(self, filename: str) -> tuple[str, ...]:
+        """Return the header of one raw role in the snapshot's pinned schema.
+
+        filename is a key of _RAW_ROLES. full_metrics.csv uses the header that
+        TournamentRecords reads with, so a snapshot pinned to scalar schema 14
+        describes its original 11,148 metric columns.
+        """
+        if filename == "full_metrics.csv":
+            return self.records.headers[filename]
+        return _RAW_HEADERS[filename]
+
     def _header(self, filename: str) -> tuple[str, ...]:
-        """Use current raw schemas without opening unrelated source reports."""
+        """Use pinned raw schemas without opening unrelated source reports."""
         return (
-            _RAW_HEADERS[filename]
-            if filename in _RAW_HEADERS
+            self._raw_header(filename)
+            if filename in _RAW_ROLES
             else super()._header(filename)
         )
 
     def _present(self, filename: str) -> bool:
         """Describe logical raw table roles without claiming optional capture."""
-        return filename in _RAW_HEADERS or super()._present(filename)
+        return filename in _RAW_ROLES or super()._present(filename)
 
     def _describe(self, name: str) -> Row:
-        """Keep table availability separate from borrowed files and required scores."""
+        """Keep table availability separate from borrowed files and required scores.
+
+        Full-report columns follow the snapshot's pinned scalar schema.
+        """
         if name not in {"episodes", "matches", "priority_metrics", "full_metrics"}:
             result = super()._describe(name)
             if (
@@ -212,14 +279,7 @@ class CanonicalView(_View):
             if name == "episodes"
             else MATCH_COLUMNS
             if name == "matches"
-            else (
-                *IDENTITY_COLUMNS,
-                *(
-                    FULL_METRIC_NAMES
-                    if name == "full_metrics"
-                    else PRIORITY_METRIC_NAMES
-                ),
-            )
+            else self._raw_header(f"{name}.csv")
         )
         return {
             "availability": "available" if enabled else "disabled",

@@ -5,7 +5,9 @@ randomness. They cover scalar/odd worker counts, mixed host/JAX execution, one
 provider call per decision, provider failure before advancement, and compilation
 reuse for same-shaped changed parameters. No learner or Core rule changes here.
 Fixed batches also keep padding inactive before custom initialization, preserve
-real game keys through refill and resume, and never publish padded games.
+real game keys through refill and resume, and never publish padded games. A
+default evaluation saves replay V4 files whose resolved config V2 and context
+column 19 record the default Red Zone depth 5.0.
 """
 
 # Public workflow proofs also inspect their shared compiled execution boundary.
@@ -27,6 +29,7 @@ from marl_battlegrounds.evaluation.evaluate import (
     evaluate,
     evaluate_episodes,
 )
+from marl_battlegrounds.evaluation.models import ResolvedEnvConfigV2
 from marl_battlegrounds.evaluation.policy_execution import (
     PolicyTree,
     System,
@@ -35,11 +38,15 @@ from marl_battlegrounds.evaluation.policy_execution import (
     policy,
     shared_policy,
 )
-from marl_battlegrounds.evaluation.replay_v3 import ReplayArtifactV3
+from marl_battlegrounds.evaluation.replay_io import load_replay
+from marl_battlegrounds.evaluation.replay_v4 import ReplayArtifactV4
 from marl_battlegrounds.evaluation.results import EvaluationResult
 from marl_battlegrounds.policies.actor import ActorAction
 from marl_battlegrounds.policies.random_valid import random_policy
-from marl_battlegrounds.tasks import make_standard_team_deathmatch_config
+from marl_battlegrounds.tasks import (
+    DEFAULT_TDM_RED_ZONE_DEPTH,
+    make_standard_team_deathmatch_config,
+)
 
 runner = import_module("marl_battlegrounds.evaluation.evaluate")
 
@@ -134,7 +141,7 @@ def test_recurrent_system_refill_and_chunking_keep_games_identical() -> None:
         run_id="refill",
     )
 
-    def indexed(result: EvaluationResult) -> dict[int, ReplayArtifactV3]:
+    def indexed(result: EvaluationResult) -> dict[int, ReplayArtifactV4]:
         return {
             int(r.header.context.identity.episode_id.split("-")[-1]): r
             for r in result.replays
@@ -261,6 +268,19 @@ def test_saved_system_pair_routes_and_replays_join_actual_episodes(
     )
     assert result.status == "complete"
     assert len(result.replay_paths) == 2
+    # A default evaluation records the default Red Zone depth in each replay.
+    for path in result.replay_paths:
+        replay = load_replay(path).replay
+        assert type(replay) is ReplayArtifactV4
+        resolved = replay.header.context.resolved_env_config
+        assert type(resolved) is ResolvedEnvConfigV2
+        assert resolved.team_deathmatch_red_zone_depth == DEFAULT_TDM_RED_ZONE_DEPTH
+        assert DEFAULT_TDM_RED_ZONE_DEPTH == 5.0
+        assert {
+            row[19]
+            for frame in replay.frames
+            for row in frame.base_observation.context_features
+        } == {5.0}
     assert len(result.table("episodes")["episode_id"]) == 2
     assert list(result.table("full_metrics")["episode_id"]) == [1]
     assert result.metadata["spawn_balance"]["paired_complete"] is True

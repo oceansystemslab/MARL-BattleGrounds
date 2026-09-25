@@ -247,6 +247,7 @@ def _config(
     return EnvConfig(
         task_mode=0,
         team_deathmatch_score_threshold=0,
+        team_deathmatch_red_zone_depth=0.0,
         max_steps=max_steps,
         map_width=20.0,
         map_height=12.0,
@@ -714,7 +715,7 @@ def test_static_shape_constants_are_consistent() -> None:
     assert AGENT_FEATURE_ULTIMATE_INTERACTION_RADIUS < UNIT_FEATURES
     assert MAX_OBJECTIVE_SLOTS == 8
     assert OBJECTIVE_FEATURES == 12
-    assert CONTEXT_FEATURES == 19
+    assert CONTEXT_FEATURES == 20
     context_feature_indices = sorted(
         value
         for name, value in vars(core_types).items()

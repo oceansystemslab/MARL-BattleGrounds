@@ -30,6 +30,7 @@ from marl_battlegrounds.evaluation.pov import (
     ActorPovReplayContent,
     export_actor_pov_replay_v1,
     export_actor_pov_replay_v2,
+    export_actor_pov_replay_v3,
 )
 from marl_battlegrounds.evaluation.replay import (
     ReplayArtifactReferenceV1,
@@ -50,6 +51,11 @@ from marl_battlegrounds.evaluation.replay_v3 import (
     ReplayArtifactReferenceV3,
     ReplayArtifactV3,
     replay_reference_v3,
+)
+from marl_battlegrounds.evaluation.replay_v4 import (
+    ReplayArtifactReferenceV4,
+    ReplayArtifactV4,
+    replay_reference_v4,
 )
 from marl_battlegrounds.rendering.evaluation_adapter import (
     EvaluationScenePresentationStateV1,
@@ -211,13 +217,26 @@ def _safe_metric_report_filename(episode_id: str) -> str:
 
 def _replay_reference(
     bundle: LoadedReplayBundle,
-) -> ReplayArtifactReferenceV1 | ReplayArtifactReferenceV2 | ReplayArtifactReferenceV3:
-    """Build the version-appropriate immutable replay identity and byte-length facts."""
+) -> (
+    ReplayArtifactReferenceV1
+    | ReplayArtifactReferenceV2
+    | ReplayArtifactReferenceV3
+    | ReplayArtifactReferenceV4
+):
+    """Build the version-appropriate immutable replay identity and byte-length facts.
+
+    Replay V1-V4 each get their own reference version. Raise TypeError for any
+    other replay type instead of labelling it as V1.
+    """
     replay = bundle.replay
+    if type(replay) is ReplayArtifactV4:
+        return replay_reference_v4(replay)
     if type(replay) is ReplayArtifactV3:
         return replay_reference_v3(replay)
     if type(replay) is ReplayArtifactV2:
         return replay_reference_v2(replay)
+    if type(replay) is not ReplayArtifactV1:
+        raise TypeError("replay reference requires an exact supported replay")
     return ReplayArtifactReferenceV1(
         artifact_id=replay.artifact_id,
         episode_id=replay.header.context.identity.episode_id,
@@ -249,8 +268,10 @@ def _completion_badge(bundle: LoadedReplayBundle) -> ReplayCompletionBadgeV1:
 def _processing_badge(bundle: LoadedReplayBundle) -> ReplayProcessingBadgeV1:
     """Report legacy metric processing; newer capture-only formats report not
     requested.
+
+    Replay V2-V4 record no metric processing; only replay V1 carries it.
     """
-    if type(bundle.replay) in (ReplayArtifactV2, ReplayArtifactV3):
+    if type(bundle.replay) in (ReplayArtifactV2, ReplayArtifactV3, ReplayArtifactV4):
         return ReplayProcessingBadgeV1(
             status="not_requested", processed_transition_count=0
         )
@@ -459,7 +480,8 @@ class ReplayViewerService:
             recorded_frame_count=len(self._replay.frames),
             metric_report_availability=(
                 "not_recorded"
-                if type(bundle.replay) in (ReplayArtifactV2, ReplayArtifactV3)
+                if type(bundle.replay)
+                in (ReplayArtifactV2, ReplayArtifactV3, ReplayArtifactV4)
                 else "available"
                 if bundle.metric_report_artifact is not None
                 else "missing"
@@ -1567,12 +1589,19 @@ class ReplayViewerService:
         """Get or build one actor's immutable visual projection and timeline.
 
         Populate the supplied cache only after construction. Preserve whether the
-        replay version supports exact actor-input export or only a visual projection.
+        replay version supports exact actor-input export or only a visual projection:
+        replay V4 exports POV V3, replay V3 exports POV V2, historical projection-V1
+        replays export POV V1, and replay V2 (or projection V2) is visual only.
         """
         cached = cache.get(global_slot)
         if cached is not None:
             return cached
-        if type(self._replay) is ReplayArtifactV3:
+        if type(self._replay) is ReplayArtifactV4:
+            content = export_actor_pov_replay_v3(
+                self._replay, global_slot=global_slot
+            ).content
+            exact_actor_input_export_available = True
+        elif type(self._replay) is ReplayArtifactV3:
             content = export_actor_pov_replay_v2(
                 self._replay, global_slot=global_slot
             ).content

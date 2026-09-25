@@ -45,6 +45,7 @@ from marl_battlegrounds.baselines.qmix import (
     QMIXConfig,
     validate_qmix_batch_size,
 )
+from marl_battlegrounds.tasks import DEFAULT_TDM_RED_ZONE_DEPTH
 from marl_battlegrounds.training._run_io import (
     ProgressReporter,
     TrainingSpeedEstimate,
@@ -119,12 +120,26 @@ default="mappo"
         of 1/30, 5%, 5% and 50% of requested experience. Keeps canonical 5v5
         and all training maps. Cannot be combined with curriculum=True.
         Evaluation stays K20/H300. Actual played shares can lag stage changes.
+    red_zone_depth : float, default=DEFAULT_TDM_RED_ZONE_DEPTH (5.0)
+        Team Deathmatch Red Zone depth in map units for every training game
+        and every validation game of this run. When an agent dies inside its
+        own team's Red Zone (the strip this deep at its own spawn side), the
+        enemy team gets 2 points instead of 1; it is still one kill and one
+        death. 0.0 keeps one point per death. It must be a Python float that
+        passes Core's scalar rules: finite, not negative (-0.0 is refused) and,
+        when positive, a normal float32 value; training setup also checks it
+        against every map width before any file is written. It is fixed for a
+        run: a resume that declares another depth is refused. A JSON config
+        may write it as an integer such as 6, which reads as 6.0; a saved run
+        config without it was saved before the rule and reads as 0.0.
     shaping_coefficient : float, default=0.01
         Finite nonnegative shaping weight. Task reward remains separately logged.
     shaping_mode : {"potential", "score_delta"}, default="potential"
         Potential preserves the discounted task objective. Score_delta adds
-        reward for team kills minus deaths without terminal cancellation; it
-        deliberately changes the training objective. Used only when shaping is
+        reward for the team's new points minus the enemy's new points without
+        terminal cancellation; it deliberately changes the training objective.
+        Points follow the task's scoring, so with a positive red_zone_depth a
+        Red Zone death moves it by 2 instead of 1. Used only when shaping is
         True. Evaluation always uses native task rewards and win rules.
     pinned_opponent_share : float, default=0.0
         Probability, within [0, 0.8], that each new training game meets the
@@ -240,6 +255,7 @@ default="mappo"
     total_env_steps: int = 10_000_000
     curriculum: bool = False
     score_threshold_curriculum: bool = False
+    red_zone_depth: float = DEFAULT_TDM_RED_ZONE_DEPTH
     shaping: bool = False
     shaping_coefficient: float = 0.01
     shaping_mode: Literal["potential", "score_delta"] = "potential"
@@ -269,7 +285,10 @@ default="mappo"
 
         Resolves qmix=None to DEFAULT_QMIX_CONFIG for QMIX runs, pqn=None to
         DEFAULT_PQN_CONFIG for PQN-VDN runs and checkpoint_interval_updates=None
-        to 25 (PPO) or 1600 (QMIX and PQN-VDN).
+        to 25 (PPO) or 1600 (QMIX and PQN-VDN). red_zone_depth is checked by
+        the training content owner's copy of Core's scalar rules
+        (``_content._validate_red_zone_depth``); map widths are checked later,
+        when train prepares the content.
         """
         method = validate_training_method(self.method)
         if not isinstance(cast(object, self.ppo), PPOConfig):
@@ -332,6 +351,11 @@ default="mappo"
                 raise TypeError(f"{name} must be bool")
         if self.curriculum and self.score_threshold_curriculum:
             raise ValueError("Choose team/map curriculum or score-threshold curriculum")
+        from marl_battlegrounds.training._content import (
+            _validate_red_zone_depth,  # pyright: ignore[reportPrivateUsage]
+        )
+
+        _validate_red_zone_depth(self.red_zone_depth)
         if self.num_envs % 2:
             raise ValueError("num_envs must be even for paired spawn ends")
         if self.total_env_steps % self.num_envs:
@@ -499,10 +523,31 @@ class TrainResult:
 def config_to_dict(config: TrainConfig) -> dict[str, Any]:
     """Return version-1 JSON-ready settings; preserve every resolved option.
 
-    Only the run's own settings block is kept (``methods.method_settings_field``):
-    a PPO config omits qmix and pqn, so historical PPO bytes are unchanged; a
-    QMIX config keeps only its resolved qmix settings and a PQN-VDN config
-    only its resolved pqn settings.
+    Parameters
+    ----------
+    config : TrainConfig
+        A validated training config. Its defaults are already resolved, for
+        example qmix=None has become DEFAULT_QMIX_CONFIG for a QMIX run.
+
+    Returns
+    -------
+    dict[str, Any]
+        A new dictionary: "schema_version": 1 first, then every TrainConfig
+        field in field order after a JSON round trip, so tuples become lists
+        and settings objects become dictionaries. Only the run's own settings
+        block is kept (``methods.method_settings_field``): a PPO config omits
+        qmix and pqn, so historical PPO bytes are unchanged; a QMIX config
+        keeps only its resolved qmix settings and a PQN-VDN config only its
+        resolved pqn settings. red_zone_depth is always written as a JSON
+        number such as 5.0 (map units; 0.0 means the Red Zone rule is off), so
+        every new saved config states its scoring rule. The schema version
+        stays 1 (a config saved before the rule lacks the key).
+
+    Notes
+    -----
+    Host-only; config is not changed. train saves this dictionary in the run's
+    metadata, which checkpoints carry as metadata.config, and compares two of
+    them to check a resume config. config_from_dict reads it back.
     """
     data = json.loads(json.dumps(asdict(config)))
     kept = method_settings_field(config.method)
@@ -515,13 +560,43 @@ def config_to_dict(config: TrainConfig) -> dict[str, Any]:
 def config_from_dict(value: dict[str, Any]) -> TrainConfig:
     """Read version-1 settings and reject unknown fields before opening a run.
 
-    value is a JSON object with optional schema_version=1. Omitted settings
-    use TrainConfig defaults; ppo, qmix and pqn are settings objects. A config
-    may contain only its own method's block: a QMIX config no ppo or pqn, a
-    PQN-VDN config no ppo or qmix, a PPO config no qmix or pqn. Lists for
-    fractions and extra save points become tuples. Invalid versions, fields
-    and values raise ValueError or TypeError. The input dictionary is not
-    changed.
+    Parameters
+    ----------
+    value : dict[str, Any]
+        A JSON object with optional schema_version=1. Omitted settings use
+        TrainConfig defaults; ppo, qmix and pqn are settings objects. A config
+        may contain only its own method's block: a QMIX config no ppo or pqn,
+        a PQN-VDN config no ppo or qmix, a PPO config no qmix or pqn (method
+        defaults to "mappo"). red_zone_depth is the Red Zone depth in map
+        units; 0.0 turns the rule off.
+
+    Returns
+    -------
+    TrainConfig
+        The validated config. Lists for validation fractions, extra save points
+        (checkpoint_env_steps) and validation_opponents become tuples. A JSON
+        integer red_zone_depth (not true or false) becomes the equal float, so
+        6 reads as 6.0; an omitted depth takes the TrainConfig default
+        (DEFAULT_TDM_RED_ZONE_DEPTH, 5.0).
+
+    Raises
+    ------
+    ValueError
+        schema_version is not the integer 1; a field is unknown; a settings
+        block belongs to another method; an integer red_zone_depth is too
+        large to become a float ("red_zone_depth must be finite"); or
+        TrainConfig or a settings object rejects a value.
+    TypeError
+        ppo, qmix or pqn is not a JSON object; one of the three list settings
+        is not a JSON array; a settings object gets an unknown key; or
+        TrainConfig or a settings object rejects a value's type.
+
+    Notes
+    -----
+    Host-only; the input dictionary is not changed. An omitted depth means
+    5.0 here, so a config saved before the Red Zone rule must first pass
+    through checkpoints.saved_training_config, which fills the missing depth
+    with 0.0 (its original one-point scoring).
     """
     data = dict(value)
     version = data.pop("schema_version", 1)
@@ -557,6 +632,12 @@ def config_from_dict(value: dict[str, Any]) -> TrainConfig:
             if not isinstance(data[name], (list, tuple)):
                 raise TypeError(f"{name} must be a JSON array")
             data[name] = tuple(data[name])
+    # JSON has one number type: a hand-written 6 means the depth 6.0.
+    if type(data.get("red_zone_depth")) is int:
+        try:
+            data["red_zone_depth"] = float(data["red_zone_depth"])
+        except OverflowError as error:
+            raise ValueError("red_zone_depth must be finite") from error
     return TrainConfig(**data)
 
 
@@ -642,6 +723,11 @@ def train(
         Older checkpoints without that identity remain readable but cannot
         resume. A saved config without ppo.spawn_frame means "world" whatever
         the current default is; a supplied config that disagrees is rejected.
+        A checkpoint saved before the Red Zone rule (actor input schema 1) is
+        refused before any file is touched; resuming it needs the source
+        environment that created it. A supplied config whose red_zone_depth
+        differs from the saved run's is refused with a message naming both
+        depths, also before any file is touched.
         A QMIX or PQN-VDN resume restores into a shape-only template, so
         restoring never holds a second learner. Once training starts, train
         keeps no reference to the first learner state; a QMIX block then holds
@@ -677,12 +763,17 @@ def train(
     Runs synchronously and owns its files/process lock until completion. Device
     selection belongs to the caller's environment before importing JAX. No
     budget extension, replacement seed or silent retry occurs. Validation uses
-    independent frozen Systems and keys, with its own saved M8 records.
+    independent frozen Systems and keys, with its own saved M8 records, and
+    plays under the run's red_zone_depth. Setup prepares the training content
+    once (checking the depth against every map width) before a new
+    validation panel is published, and passes it to the learner; a ranked
+    panel whose recorded depth differs from the run's is refused.
     """
     attempt_started = time.monotonic()
     started_at = utc_now()
     from marl_battlegrounds.training import checkpoints, learner, validation
     from marl_battlegrounds.training._compilation import execution_identity
+    from marl_battlegrounds.training._content import prepare_training_content
     from marl_battlegrounds.training.curriculum import make_training_schedule
 
     if (output_dir is None) == (resume_from is None):
@@ -693,7 +784,16 @@ def train(
         saved = checkpoints.read_checkpoint_details(checkpoint)
         if saved["kind"] != "learner":
             raise ValueError("Resume requires a complete learner checkpoint")
+        # A checkpoint saved before Red Zone cannot resume here; refuse it
+        # before any file (lock, panel or log) is touched.
+        checkpoints._require_current_schemas(saved)  # pyright: ignore[reportPrivateUsage]
         inherited = config_from_dict(checkpoints.saved_training_config(saved))
+        if config is not None and config.red_zone_depth != inherited.red_zone_depth:
+            raise ValueError(
+                f"Resume config declares red_zone_depth {config.red_zone_depth}, "
+                f"but the saved run uses {inherited.red_zone_depth}. The depth is "
+                "fixed for a run; start a new run to use another depth."
+            )
         if config is not None and config_to_dict(config) != config_to_dict(inherited):
             raise ValueError("Resume config differs from the saved experiment")
         config = inherited
@@ -721,13 +821,28 @@ def train(
         if validation_opponents is not None
         else config.validation_opponents
     )
+    schedule = make_training_schedule(
+        total_env_steps=config.total_env_steps,
+        num_envs=config.num_envs,
+        curriculum=config.curriculum,
+        score_threshold_curriculum=config.score_threshold_curriculum,
+        early_history_capture=config.pinned_opponent_share > 0,
+    )
+    # Prepare the content (every map checks the depth against its width)
+    # before a new panel can be published, so a bad setting leaves no file.
+    prepared = prepare_training_content(
+        score_thresholds=schedule.score_thresholds,
+        red_zone_depth=config.red_zone_depth,
+    )
     panel_path = (
         Path(config.validation_panel)
         if config.validation_panel
         else root / "validation_panel" / "panel.json"
     )
     if config.validation_panel or (saved is not None and panel_path.exists()):
-        panel = validation.load_panel(panel_path, bindings=declared)
+        panel = validation.load_panel(
+            panel_path, bindings=declared, red_zone_depth=config.red_zone_depth
+        )
     elif declared is not None:
         if saved is not None:
             raise ValueError("Resume cannot introduce a new validation panel")
@@ -752,13 +867,6 @@ def train(
         checkpoints.artifact_identity(config.slot_diagnostic_actor)
     if config.purpose == "demonstration" and (panel is None or not panel.qualified):
         raise ValueError("Demonstration requires a qualified frozen validation panel")
-    schedule = make_training_schedule(
-        total_env_steps=config.total_env_steps,
-        num_envs=config.num_envs,
-        curriculum=config.curriculum,
-        score_threshold_curriculum=config.score_threshold_curriculum,
-        early_history_capture=config.pinned_opponent_share > 0,
-    )
     # Setup performs no real action. Resume replaces all template numerical values.
     state: Any
     if config.qmix is not None:
@@ -767,6 +875,7 @@ def train(
         collection, state = qmix_learner.init_qmix_learner(
             schedule=schedule,
             seed=config.seed,
+            prepared=prepared,
             shaping=config.shaping,
             shaping_coefficient=config.shaping_coefficient,
             shaping_mode=config.shaping_mode,
@@ -782,6 +891,7 @@ def train(
         collection, state = pqn_learner.init_pqn_learner(
             schedule=schedule,
             seed=config.seed,
+            prepared=prepared,
             shaping=config.shaping,
             shaping_coefficient=config.shaping_coefficient,
             shaping_mode=config.shaping_mode,
@@ -795,6 +905,7 @@ def train(
         collection, state = learner.init_learner(
             schedule=schedule,
             seed=config.seed,
+            prepared=prepared,
             ppo=config.ppo,
             method=config.method,
             shaping=config.shaping,
@@ -832,6 +943,7 @@ def train(
             config.random_initialization_result,
             actor_digest=initial_digest,
             seed_pairs=cast(int, config.random_diagnostic_seed_pairs),
+            red_zone_depth=config.red_zone_depth,
         )
     # PPO keeps the argument-free call; QMIX also records Flashbax, PQN-VDN
     # records the same set as PPO.
@@ -1169,22 +1281,31 @@ def _random_progress(results: list[dict[str, Any]]) -> dict[str, Any] | None:
 
     results contains this run's completed Random captures, including an optional
     shared initialization. Return the latest capture's game counts, equal-map
-    mean kills and deaths, and its change from initialization. Missing combat
-    scores remain None. Capture times are the times when the actor was saved,
-    not the time when its evaluation finished. Empty results return None.
-    This only reads small host dictionaries; it opens no files, touches no
-    device arrays and changes neither evidence nor checkpoint state.
+    mean kills and deaths, and its change from initialization. Kills are read
+    from the columns analysis._kill_columns names for each record: recorded
+    kills for records that carry a Red Zone depth (a Red Zone death gives 2
+    points but is still one kill), the score columns for older records, where
+    points and kills were equal. Missing combat values remain None. Capture
+    times are the times when the actor was saved, not the time when its
+    evaluation finished. Empty results return None. This only reads small host
+    dictionaries; it opens no files, touches no device arrays and changes
+    neither evidence nor checkpoint state.
     """
+    from marl_battlegrounds.training.analysis import (
+        _kill_columns,  # pyright: ignore[reportPrivateUsage]
+    )
+
     if not results:
         return None
 
     def mean_scores(record: dict[str, Any]) -> tuple[float | None, float | None]:
-        """Average map scores equally; missing or invalid scores stay unavailable."""
+        """Average map kills for and against equally; missing values stay None."""
         cells = record.get("cells", [])
         if not cells:
             return None, None
-        first = [cell.get("mean_team_a_score") for cell in cells]
-        second = [cell.get("mean_team_b_score") for cell in cells]
+        team_a, team_b = (f"mean_{name}" for name in _kill_columns(record))
+        first = [cell.get(team_a) for cell in cells]
+        second = [cell.get(team_b) for cell in cells]
         if any(
             isinstance(value, bool)
             or not isinstance(value, (int, float))
@@ -1779,6 +1900,7 @@ class _Run:
             else min(32, self.config.num_envs),
             chunk_size=128,
             event_callback=lambda record: self.event("validation_segment", **record),
+            red_zone_depth=self.config.red_zone_depth,
         )
         key = "routine_results" if purpose == "routine" else "confirmation_results"
         if not any(item["task_id"] == summary["task_id"] for item in self.host[key]):
@@ -1833,6 +1955,8 @@ class _Run:
         Publish the accumulated records and existing host game and combat means.
         Combat changes compare equal-map mean kills minus deaths with the
         verified initialization. They are early learning clues, not native wins.
+        Games use the run's red_zone_depth; a reused initialization must have
+        been recorded at that same depth.
         """
         import jax
 
@@ -1868,6 +1992,7 @@ class _Run:
                 event_callback=lambda record: self.event(
                     "random_validation_segment", **record
                 ),
+                red_zone_depth=self.config.red_zone_depth,
             )
             record = {
                 **summary,
@@ -1881,7 +2006,10 @@ class _Run:
             identity = checkpoints.artifact_identity(actor)
             record = {
                 **validation.read_random_initialization(
-                    reference, actor_digest=identity["actor_digest"], seed_pairs=pairs
+                    reference,
+                    actor_digest=identity["actor_digest"],
+                    seed_pairs=pairs,
+                    red_zone_depth=self.config.red_zone_depth,
                 ),
                 "reference_path": str(Path(reference).absolute()),
                 "reused_initialization": True,
@@ -2562,7 +2690,10 @@ class _Run:
         )
 
     def run_slot_check(self) -> None:
-        """Run the declared trained comparison only after the final actor exists."""
+        """Run the declared trained comparison only after the final actor exists.
+
+        The games use the run's red_zone_depth, which the slot task records.
+        """
         from marl_battlegrounds.training.validation import run_slot_diagnostic
 
         assert self.panel is not None
@@ -2577,6 +2708,7 @@ class _Run:
             / "slot_diagnostic"
             / Path(self.host["final_actor"]).name,
             event_callback=lambda record: self.event("slot_segment", **record),
+            red_zone_depth=self.config.red_zone_depth,
         )
         atomic_json(self.root / "slot_diagnostic.json", result)
         self.host["slot_complete"] = True

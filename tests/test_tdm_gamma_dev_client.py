@@ -42,7 +42,8 @@ needs SharedObs on either team. These tests check that:
 - Trap hold in the recording: while the trapped actor has 2 or more Trap
   ticks, no Team B non-Priest targets it. This is GAMMA's rule, not luck:
   BETA, given one of those same observations, does target it.
-- A saved GAMMA replay reopens with GAMMA rows and the GAMMA label.
+- A saved GAMMA replay is a current record (replay V4 with context V4 and
+  frame V3) and reopens with GAMMA rows and the GAMMA label.
 
 The session scenario is the compiled Scenario 1 fixture with Team B's Warrior
 and Hunter alive and a 3-tick Hunter Trap already on Team A slot 2, so Team B
@@ -105,8 +106,8 @@ from marl_battlegrounds.core.types import (
 from marl_battlegrounds.evaluation.models import (
     AssignedPolicySlotV2,
     ContentAddressedIdentityV1,
-    EvaluationEpisodeContextV3,
-    EvaluationFrameV2,
+    EvaluationEpisodeContextV4,
+    EvaluationFrameV3,
     ExecutionInformationMode,
     JointActionV1,
     canonical_digest_sha256,
@@ -118,7 +119,7 @@ from marl_battlegrounds.evaluation.replay_io import (
     load_replay,
     preflight_replay_destination,
 )
-from marl_battlegrounds.evaluation.replay_v3 import ReplayArtifactV3
+from marl_battlegrounds.evaluation.replay_v4 import ReplayArtifactV4
 from marl_battlegrounds.policies.actor import ActorAction
 from marl_battlegrounds.policies.reactive_tdm_alpha import (
     reactive_tdm_alpha_controller_descriptor,
@@ -250,7 +251,7 @@ def _context(
     team_b: TeamBController = "tdm_gamma",
     mode: ExecutionInformationMode = "shared_obs",
     scenario: DebuggerScenario | None = None,
-) -> EvaluationEpisodeContextV3:
+) -> EvaluationEpisodeContextV4:
     source = get_scenario("arena_5v5") if scenario is None else scenario
     config, _state = source.build_scenario()
     return build_debugger_evaluation_context_v1(
@@ -265,12 +266,12 @@ def _context(
     )
 
 
-def _aggregation(context: EvaluationEpisodeContextV3) -> dict[str, str]:
+def _aggregation(context: EvaluationEpisodeContextV4) -> dict[str, str]:
     return {row.name: row.value for row in context.aggregation_keys}
 
 
 def _identity(
-    descriptor: dict[str, object], context: EvaluationEpisodeContextV3
+    descriptor: dict[str, object], context: EvaluationEpisodeContextV4
 ) -> ContentAddressedIdentityV1:
     return ContentAddressedIdentityV1.model_validate(
         {
@@ -353,7 +354,7 @@ def _joint_rows(
     )
 
 
-def _assert_gamma_team_b_rows(context: EvaluationEpisodeContextV3) -> None:
+def _assert_gamma_team_b_rows(context: EvaluationEpisodeContextV4) -> None:
     aggregation = _aggregation(context)
     digest = _identity(
         reactive_tdm_gamma_controller_descriptor(), context
@@ -434,7 +435,7 @@ def recorded_gamma(tmp_path_factory: pytest.TempPathFactory) -> _RecordedGamma:
         advanced = control.submit_interactive(sessions[-1])
         incoming = advanced.incoming_evaluation_view
         assert incoming is not None
-        assert isinstance(incoming.successor_frame, EvaluationFrameV2)
+        assert isinstance(incoming.successor_frame, EvaluationFrameV3)
         recorder.append(incoming.transition, incoming.successor_frame)
         sessions.append(advanced)
         if advanced.episode_sealed:
@@ -1201,7 +1202,7 @@ def test_recorded_gamma_transitions_pair_each_decision_frame_with_its_choice(
 ) -> None:
     sessions = recorded_gamma.sessions
     replay = load_replay(recorded_gamma.replay_path).replay
-    assert isinstance(replay, ReplayArtifactV3)
+    assert isinstance(replay, ReplayArtifactV4)
     assert len(replay.frames) == len(replay.transitions) + 1 == len(sessions)
     config = sessions[0].config
     team_b_priests = tuple(
@@ -1281,12 +1282,12 @@ def test_gamma_replay_reopens_with_gamma_rows_and_label(
 ) -> None:
     initial = recorded_gamma.sessions[0]
     reopened = load_replay(recorded_gamma.replay_path)
-    assert isinstance(reopened.replay, ReplayArtifactV3)
+    assert isinstance(reopened.replay, ReplayArtifactV4)
     header = reopened.replay.header
     assert header.context == initial.evaluation_context
     assert header.runtime_provenance.policy_execution_included
     context = header.context
-    assert isinstance(context, EvaluationEpisodeContextV3)
+    assert isinstance(context, EvaluationEpisodeContextV4)
     _assert_gamma_team_b_rows(context)
     assert recording_policy_execution_included(context)
     summary = build_match_summary_v1(context, reopened.replay.frames[0])

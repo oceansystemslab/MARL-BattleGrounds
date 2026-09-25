@@ -101,6 +101,7 @@ def _target_scenario(actor_class_id: int = MAGE_CLASS_ID) -> tuple[EnvConfig, En
     config = EnvConfig(
         task_mode=0,
         team_deathmatch_score_threshold=0,
+        team_deathmatch_red_zone_depth=0.0,
         max_steps=100,
         map_width=20.0,
         map_height=12.0,

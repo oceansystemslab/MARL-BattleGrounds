@@ -6,8 +6,8 @@
  * exactly Team A Manual, Team B tdm_gamma and SharedObs, and lock NoSharedObs.
  * A selected Team B actor must show "Reactive TDM GAMMA" as its read-only
  * controller. One real Submit must record one transition, and Finish
- * (finish_and_review) must save the replay and hand the page to review with
- * Team B named "Reactive TDM GAMMA". The saved file must record every Team B
+ * (finish_and_review) must save a current replay (V4) and hand the page to
+ * review with Team B named "Reactive TDM GAMMA". The saved file must record every Team B
  * row as policy kind tdm_gamma, algorithm
  * reactive-team-deathmatch-gamma-controller, deterministic, with the GAMMA
  * pressure protocol digest. A separate Replay Viewer opened on that file must
@@ -293,7 +293,7 @@ test("Team B GAMMA records one real step and reopens with its identity", async (
   const saved = await readJsonArtifact(started.replayPath);
   expect(saved.value).toMatchObject({
     schema_id: "marl_battlegrounds.evaluation.replay_artifact",
-    schema_version: 3,
+    schema_version: 4,
     header: { recorded_transition_count: 1 },
   });
   expectGammaContext(saved.value.header.context);

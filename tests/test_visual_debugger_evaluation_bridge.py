@@ -2,6 +2,11 @@
 including that a scenario naming an approved map records that map's approved
 source as its layout identity without changing episode IDs, and that a map ID
 whose approved digest differs from the recorded map digest is rejected.
+
+The debugger writes current records: context V4 with resolved config V2 (which
+records the Red Zone depth; built-in debugger scenes are neutral at depth 0.0),
+schema bindings V4, actor projections SharedObs V3 and NoSharedObs V4, and an
+authored initial frame captured as frame V3.
 """
 
 from __future__ import annotations
@@ -33,20 +38,22 @@ from tests.visual_debugger_fixtures import approved_map_draft
 
 from marl_battlegrounds.core.env import initialize_scenario_state
 from marl_battlegrounds.evaluation.capture import (
-    capture_initial_evaluation_frame_v2,
+    capture_initial_evaluation_frame_v3,
 )
 from marl_battlegrounds.evaluation.map_identity import recorded_map
 from marl_battlegrounds.evaluation.models import (
-    REQUIRED_SCHEMA_BINDINGS_V3,
+    REQUIRED_SCHEMA_BINDINGS_V4,
     AssignedPolicySlotV2,
     CodeRevisionV1,
     ContentAddressedIdentityV1,
-    EvaluationEpisodeContextV3,
+    EvaluationEpisodeContextV4,
+    EvaluationFrameV3,
     ExecutionInformationMode,
     NotApplicablePolicySlotV1,
+    ResolvedEnvConfigV2,
     canonical_json_bytes,
 )
-from marl_battlegrounds.tasks import list_tdm_maps
+from marl_battlegrounds.tasks import DEFAULT_TDM_RED_ZONE_DEPTH, list_tdm_maps
 
 
 def _code_revision(*, dirty: bool = False) -> CodeRevisionV1:
@@ -81,7 +88,7 @@ def _context(
     team_b_controller: TeamBController = "manual",
     execution_information_mode: ExecutionInformationMode | None = None,
     scenario_name: str = "arena_5v5",
-) -> EvaluationEpisodeContextV3:
+) -> EvaluationEpisodeContextV4:
     scenario = get_scenario(scenario_name)
     config, _state = scenario.build_scenario()
     return build_debugger_evaluation_context_v1(
@@ -181,8 +188,10 @@ def test_context_is_custom_debug_no_shared_and_keeps_exact_cp2_bindings() -> Non
     )
     assert (
         tuple((row.schema_id, row.schema_version) for row in context.schema_versions)
-        == REQUIRED_SCHEMA_BINDINGS_V3
+        == REQUIRED_SCHEMA_BINDINGS_V4
     )
+    assert type(context.resolved_env_config) is ResolvedEnvConfigV2
+    assert context.resolved_env_config.team_deathmatch_red_zone_depth == 0.0
     assert tuple(row.name for row in context.aggregation_keys) == tuple(
         sorted(row.name for row in context.aggregation_keys)
     )
@@ -601,8 +610,8 @@ def test_information_mode_changes_projection_and_identity_but_not_named_seeds() 
     assert shared.actor_projection.identifier == (
         "base-observation-plus-authorized-sensor-source-bank"
     )
-    assert shared.actor_projection.version == 2
-    assert no_shared.actor_projection.version == 3
+    assert shared.actor_projection.version == 3
+    assert no_shared.actor_projection.version == 4
     assert shared.identity.episode_id != no_shared.identity.episode_id
     assert shared.identity.evaluation_id != no_shared.identity.evaluation_id
     assert shared.seed_protocol == no_shared.seed_protocol
@@ -652,7 +661,11 @@ def test_authored_team_deathmatch_uses_independent_task_map_and_scenario_identit
 def test_registered_map_layout_identity_names_the_approved_source() -> None:
     approved = list_tdm_maps()[41]
     compiled = compile_dev_scenario(
-        new_scenario_draft("preview", source_map=approved_map_draft(41))
+        new_scenario_draft(
+            "preview",
+            source_map=approved_map_draft(41),
+            red_zone_depth=DEFAULT_TDM_RED_ZONE_DEPTH,
+        )
     )
     assert compiled.map_semantic_digest == approved.source.semantic_digest
     source = get_scenario("arena_5v5")
@@ -673,7 +686,7 @@ def test_registered_map_layout_identity_names_the_approved_source() -> None:
             ),
         )
 
-    def context_with(map_id: int | None) -> EvaluationEpisodeContextV3:
+    def context_with(map_id: int | None) -> EvaluationEpisodeContextV4:
         return build_debugger_evaluation_context_v1(
             _launch(),
             scenario=scenario_with(map_id),
@@ -760,13 +773,14 @@ def test_context_captures_the_authored_initial_frame_through_public_cp2_api() ->
         config,
     )
 
-    frame = capture_initial_evaluation_frame_v2(
+    frame = capture_initial_evaluation_frame_v3(
         context,
         state,
         observation,
         action_mask,
         None,
     )
+    assert type(frame) is EvaluationFrameV3
     assert frame.episode_id == context.identity.episode_id
     assert frame.frame_index == 0
     assert context.capture_profile == "evaluation_metric_complete"

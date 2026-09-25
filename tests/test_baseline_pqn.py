@@ -30,9 +30,9 @@ normalization equals a float64 masked-moment reference and ignores NaN
 poison in padding rows and inactive slots. The lambda-return targets match
 hand-computed values for an ending, a horizon draw and an ordinary cutoff.
 The minibatch update skips everything when no TD pair exists. Parameter
-counts and float32 bytes match the planned sizes (4,595,998 parameters and
-12,376 statistics). These checks prove software contracts, not learned skill
-or GPU cost.
+counts and float32 bytes match the planned sizes (4,596,512 parameters and
+12,378 statistics, with the 5,165-feature input). These checks prove software
+contracts, not learned skill or GPU cost.
 """
 
 # pyright: reportPrivateUsage=false, reportUnknownLambdaType=false
@@ -655,12 +655,12 @@ def test_training_normalization_uses_masked_moments_and_ignores_poison(
     network: pqn.PQNInferenceVariables,
 ) -> None:
     rows, games = 3, 2
-    features = jax.random.normal(jax.random.key(11), (rows, games, 5, 5164))
+    features = jax.random.normal(jax.random.key(11), (rows, games, 5, 5165))
     valid = jnp.ones((rows, games), bool).at[2, 1].set(False)
     active = jnp.ones((rows, games, 5), bool).at[:, 0, 3:].set(False)
     values, stats = _training_forward(network, features, valid, active)
     row = np.asarray(valid[..., None] & active).reshape(-1)
-    flat = np.asarray(features, np.float64).reshape(-1, 5164)[row]
+    flat = np.asarray(features, np.float64).reshape(-1, 5165)[row]
     mean, variance = flat.mean(0), np.maximum((flat**2).mean(0) - flat.mean(0) ** 2, 0)
     np.testing.assert_allclose(
         np.asarray(stats["BatchNorm_0"]["mean"]), 0.01 * mean, rtol=2e-5, atol=2e-6
@@ -724,7 +724,7 @@ def _batch(key: Array, rows: int = 4, games: int = 2) -> pqn.PQNBatch:
         jnp.int32
     )
     return pqn.PQNBatch(
-        jax.random.normal(keys[0], (rows, games, 5, 5164)),
+        jax.random.normal(keys[0], (rows, games, 5, 5165)),
         mask,
         actions,
         jax.random.normal(keys[3], (rows, games)) * 0.3,
@@ -776,10 +776,10 @@ def test_parameter_counts_and_bytes_match_the_planned_sizes(
     template = pqn.pqn_actor_template()
     params = sum(math.prod(leaf.shape) for leaf in jax.tree.leaves(template.params))
     stats = sum(math.prod(leaf.shape) for leaf in jax.tree.leaves(template.batch_stats))
-    assert (params, stats) == (4_595_998, 12_376)
-    assert params * 4 == 18_383_992 and stats * 4 == 49_504
+    assert (params, stats) == (4_596_512, 12_378)
+    assert params * 4 == 18_386_048 and stats * 4 == 49_512
     sizes = {
-        "Dense_0": 2_644_480,
+        "Dense_0": 2_644_992,
         "Dense_1": 262_656,
         "ScannedRNN_0": 1_574_912,
         "Dense_2": 101_574,
@@ -797,7 +797,7 @@ def test_parameter_counts_and_bytes_match_the_planned_sizes(
     counts = [
         leaf for leaf in jax.tree.leaves(state.opt_state) if leaf.dtype == jnp.int32
     ]
-    assert moments * 4 == 36_767_984 and len(counts) == 2
+    assert moments * 4 == 36_772_096 and len(counts) == 2
     constant = jax.eval_shape(
         lambda: pqn.initialize_pqn(
             jax.random.key(0),
@@ -809,5 +809,5 @@ def test_parameter_counts_and_bytes_match_the_planned_sizes(
         len([x for x in jax.tree.leaves(constant.opt_state) if x.dtype == jnp.int32])
         == 1
     )
-    history = 20 * (18_383_992 + 49_504 + 4)
-    assert history == 368_670_000
+    history = 20 * (18_386_048 + 49_512 + 4)
+    assert history == 368_711_280

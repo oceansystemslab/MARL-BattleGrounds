@@ -1,4 +1,12 @@
-"""Check Oracle presentation records and the functions that build them."""
+"""Check Oracle presentation records and the functions that build them.
+
+Map records: AuthorizedMapV2 accepts exactly the rows of the shared Red Zone
+contract table (tests.red_zone_scene_cases) marked accepted and refuses the
+rest through the strict wire adapter; the battlefield scene accepts an exact
+V1 or V2 map; build_authorized_map_v2 records depth 0 as red_zone=None and
+refuses bad bases, depths and pad shapes; an Oracle scene from a context whose
+resolved config is V1 keeps AuthorizedMapV1.
+"""
 
 from __future__ import annotations
 
@@ -1592,3 +1600,131 @@ def test_outgoing_builder_accepts_transition_not_transition_view() -> None:
     assert "EvaluationTransitionV1" in str(annotations)
     assert "EvaluationTransitionViewV1" not in str(annotations)
     assert EvaluationTransitionV1 is not EvaluationTransitionViewV1
+
+
+def test_red_zone_map_record_accepts_only_the_exact_scoring_strips() -> None:
+    from tests.red_zone_scene_cases import RED_ZONE_CONTRACT_CASES
+
+    from marl_battlegrounds.rendering.authorized_presentation import (
+        AuthorizedMapV1,
+        AuthorizedMapV2,
+        AuthorizedRedZoneV1,
+    )
+
+    adapter: TypeAdapter[AuthorizedMapV1 | AuthorizedMapV2] = TypeAdapter(
+        AuthorizedMapV1 | AuthorizedMapV2
+    )
+    accepted = 0
+    for case in RED_ZONE_CONTRACT_CASES:
+        payload: dict[str, object] = {
+            "width": case["width"],
+            "height": 12.0,
+            "obstacles": [],
+            "map_version": 2,
+            "red_zone": case["red_zone"],
+        }
+        encoded = json.dumps(payload)
+        if case["accepted"]:
+            record = adapter.validate_json(encoded)
+            red_zone = cast(dict[str, object], case["red_zone"])
+            assert type(record) is AuthorizedMapV2, case["label"]
+            assert record.red_zone == AuthorizedRedZoneV1(
+                depth=cast(float, red_zone["depth"]),
+                team_a_x_range=cast(
+                    tuple[float, float],
+                    tuple(cast(list[float], red_zone["team_a_x_range"])),
+                ),
+                team_b_x_range=cast(
+                    tuple[float, float],
+                    tuple(cast(list[float], red_zone["team_b_x_range"])),
+                ),
+            ), case["label"]
+            assert json.loads(adapter.dump_json(record)) == payload, case["label"]
+            accepted += 1
+        else:
+            with pytest.raises(ValidationError):
+                adapter.validate_json(encoded)
+    assert 0 < accepted < len(RED_ZONE_CONTRACT_CASES)
+    older = adapter.validate_json(
+        json.dumps({"width": 20.0, "height": 12.0, "obstacles": []})
+    )
+    assert type(older) is AuthorizedMapV1
+    unrecorded = adapter.validate_json(
+        json.dumps(
+            {
+                "width": 20.0,
+                "height": 12.0,
+                "obstacles": [],
+                "map_version": 2,
+                "red_zone": None,
+            }
+        )
+    )
+    assert type(unrecorded) is AuthorizedMapV2
+    assert unrecorded.red_zone is None
+    poisoned_maps: tuple[dict[str, object], ...] = (
+        {"width": 20.0, "height": 12.0, "obstacles": [], "map_version": 2},
+        {
+            "width": 20.0,
+            "height": 12.0,
+            "obstacles": [],
+            "map_version": 3,
+            "red_zone": None,
+        },
+        {"width": 20.0, "height": 12.0, "obstacles": [], "red_zone": None},
+    )
+    for poisoned in poisoned_maps:
+        with pytest.raises(ValidationError):
+            adapter.validate_json(json.dumps(poisoned))
+
+
+def test_build_authorized_map_v2_records_depth_and_refuses_bad_inputs(
+    oracle_cases: _OracleCases,
+) -> None:
+    from marl_battlegrounds.rendering.authorized_presentation import (
+        AuthorizedMapV1,
+        AuthorizedMapV2,
+        build_authorized_map_v2,
+    )
+
+    scene = _presentation(oracle_cases, 0).current_endpoint.scene
+    # A V1 config keeps the historical map record.
+    assert type(scene.map) is AuthorizedMapV1
+    pads = ((1.5,) * 5, (18.5,) * 5)
+    off = build_authorized_map_v2(scene.map, red_zone_depth=0.0, team_spawn_pad_x=pads)
+    assert type(off) is AuthorizedMapV2
+    assert off.red_zone is None
+    assert (off.width, off.height, off.obstacles) == (
+        scene.map.width,
+        scene.map.height,
+        scene.map.obstacles,
+    )
+    on = build_authorized_map_v2(scene.map, red_zone_depth=5.0, team_spawn_pad_x=pads)
+    assert on.red_zone is not None
+    assert on.red_zone.depth == 5.0
+    assert on.red_zone.team_a_x_range == (0.0, 5.0)
+    assert on.red_zone.team_b_x_range == (
+        scene.map.width - 5.0,
+        scene.map.width,
+    )
+    assert replace(scene, map=on).map is on
+    with pytest.raises(TypeError, match="exact AuthorizedMapV1"):
+        build_authorized_map_v2(on, red_zone_depth=5.0, team_spawn_pad_x=pads)
+    for depth in (-0.0, -1.0, float("nan"), 5):
+        with pytest.raises(ValueError, match="finite nonnegative float"):
+            build_authorized_map_v2(
+                scene.map,
+                red_zone_depth=cast(float, depth),
+                team_spawn_pad_x=pads,
+            )
+    for depth in (2.0**-149, scene.map.width + 1.0):
+        with pytest.raises(ValueError, match="normal float32"):
+            build_authorized_map_v2(
+                scene.map, red_zone_depth=depth, team_spawn_pad_x=pads
+            )
+    with pytest.raises(ValueError, match="shape"):
+        build_authorized_map_v2(
+            scene.map, red_zone_depth=5.0, team_spawn_pad_x=((1.5,) * 5,)
+        )
+    with pytest.raises(ValueError, match="exact authorized map root"):
+        replace(scene, map=cast(AuthorizedMapV1, object()))

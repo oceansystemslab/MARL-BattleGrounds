@@ -7,7 +7,10 @@ only from the recipient and its recorded admitted allies. It keeps body
 provenance and the recipient-owned next-decision mask.
 
 These host builders accept no Oracle scene, full episode context, event
-batch, simulator state or renderer. Public class documentation is separate
+batch, simulator state or renderer. A recipient frame with 20 context columns
+(POV V3 or SharedObs base-sensor V3) gives an AuthorizedMapV2 whose Red Zone
+strips come from the recipient's own column 19 and public spawn pads; older
+frames keep AuthorizedMapV1. Public class documentation is separate
 from observed per-slot profile values. Opaque presentation keys are scoped
 to a viewing session and recipient; they are display IDs, not credentials.
 Strong boundary checks may rebuild records and perform JSON validation in
@@ -35,16 +38,20 @@ from marl_battlegrounds.evaluation.pov import (
     ActorPovAdjacentTransitionSlice,
     ActorPovAdjacentTransitionSliceV1,
     ActorPovAdjacentTransitionSliceV2,
+    ActorPovAdjacentTransitionSliceV3,
     ActorPovAxisMapping,
     ActorPovAxisMappingV1,
     ActorPovAxisMappingV2,
+    ActorPovAxisMappingV3,
     ActorPovCurrentSlice,
     ActorPovCurrentSliceV1,
     ActorPovCurrentSliceV2,
+    ActorPovCurrentSliceV3,
     ActorPovFrame,
     ActorPovReplayContent,
     ActorPovReplayContentV1,
     ActorPovReplayContentV2,
+    ActorPovReplayContentV3,
     ActorPovSpawnLifecycleV1,
 )
 from marl_battlegrounds.evaluation.wire_shapes import (
@@ -61,6 +68,7 @@ from marl_battlegrounds.rendering.authorized_presentation import (
     AuthorizedClassDocumentationProfileV1,
     AuthorizedClassMechanicsV2,
     AuthorizedClassStatusMechanicV1,
+    AuthorizedMap,
     AuthorizedMapV1,
     AuthorizedObstacleV1,
     AuthorizedRespawnWaveV1,
@@ -68,19 +76,23 @@ from marl_battlegrounds.rendering.authorized_presentation import (
     AuthorizedSpawnShieldMechanicsAvailableV2,
     AuthorizedStatusV1,
     authorized_class_documentation_profile_v1,
+    build_authorized_map_v2,
 )
 from marl_battlegrounds.rendering.evaluation_adapter import (
     SHARED_OBS_SOURCE_MATERIAL_PROJECTION_SCHEMA_VERSION,
     SharedObsBaseSensorFrameV1,
     SharedObsBaseSensorFrameV2,
+    SharedObsBaseSensorFrameV3,
     SharedObsBaseSensorSceneV1,
     SharedObsSensorSourceAvailabilityV1,
     SharedObsSourceMaterialProjection,
     SharedObsSourceMaterialProjectionV1,
     SharedObsSourceMaterialProjectionV2,
+    SharedObsSourceMaterialProjectionV3,
     _shared_obs_base_sensor_scene,  # pyright: ignore[reportPrivateUsage]
 )
 from marl_battlegrounds.rendering.evaluation_wire_features import (
+    CONTEXT_FEATURE_TDM_RED_ZONE_DEPTH_V2,
     DecodedAgentFeatureRowV1,
     decode_agent_feature_row,
 )
@@ -888,12 +900,19 @@ def _validate_shared_projection_declaration(
     if (
         type(projection) is not SharedObsSourceMaterialProjectionV1
         and type(projection) is not SharedObsSourceMaterialProjectionV2
+        and type(projection) is not SharedObsSourceMaterialProjectionV3
     ):
         raise TypeError("SharedObs source material must use its exact projection root.")
     if (
         type(projection.schema_version) is not int
         or projection.schema_version
-        != (2 if type(projection) is SharedObsSourceMaterialProjectionV2 else 1)
+        != (
+            3
+            if type(projection) is SharedObsSourceMaterialProjectionV3
+            else 2
+            if type(projection) is SharedObsSourceMaterialProjectionV2
+            else 1
+        )
         or projection.disclosure_label != _SHARED_SOURCE_MATERIAL_DISCLOSURE_V1
         or projection.observation_materialization != "source_material_only"
         or projection.exact_actor_input_export_available is not False
@@ -902,11 +921,9 @@ def _validate_shared_projection_declaration(
     frame = projection.base_sensor_frame
     scene = projection.base_sensor_scene
     if (
-        (
-            type(frame) is not SharedObsBaseSensorFrameV1
-            and type(frame) is not SharedObsBaseSensorFrameV2
-        )
+        type(frame) is not SharedObsBaseSensorFrameV1
         and type(frame) is not SharedObsBaseSensorFrameV2
+        and type(frame) is not SharedObsBaseSensorFrameV3
     ) or type(scene) is not SharedObsBaseSensorSceneV1:
         raise ValueError("SharedObs source uses an invalid frame or scene root.")
     if (
@@ -957,6 +974,7 @@ def _shared_public_id_by_global_slot(
     if (
         type(projection.axis_mapping) is not ActorPovAxisMappingV1
         and type(projection.axis_mapping) is not ActorPovAxisMappingV2
+        and type(projection.axis_mapping) is not ActorPovAxisMappingV3
     ):
         raise ValueError("SharedObs source axis must use the exact POV mapping.")
     validated_axis = type(projection.axis_mapping).model_validate(
@@ -1254,13 +1272,19 @@ def _validated_source(source: NoSharedObsPovSourceV1) -> NoSharedObsPovSourceV1:
     if (
         type(source) is ActorPovAdjacentTransitionSliceV1
         or type(source) is ActorPovAdjacentTransitionSliceV2
+        or type(source) is ActorPovAdjacentTransitionSliceV3
     ):
         return type(source).model_validate(source.model_dump(mode="python"))
-    if type(source) is ActorPovCurrentSliceV1 or type(source) is ActorPovCurrentSliceV2:
+    if (
+        type(source) is ActorPovCurrentSliceV1
+        or type(source) is ActorPovCurrentSliceV2
+        or type(source) is ActorPovCurrentSliceV3
+    ):
         return type(source).model_validate(source.model_dump(mode="python"))
     if (
         type(source) is ActorPovReplayContentV1
         or type(source) is ActorPovReplayContentV2
+        or type(source) is ActorPovReplayContentV3
     ):
         validated = type(source).model_validate(source.model_dump(mode="python"))
         # The index constructor additionally checks the declared model tree and
@@ -1307,6 +1331,7 @@ def _select_source(
     if (
         type(source) is ActorPovReplayContentV1
         or type(source) is ActorPovReplayContentV2
+        or type(source) is ActorPovReplayContentV3
     ):
         if type(frame_index) is not int or not 0 <= frame_index < len(source.frames):
             raise IndexError("frame_index is outside the captured POV prefix.")
@@ -1318,7 +1343,11 @@ def _select_source(
             class_id=source.class_id,
             axis_mapping=source.axis_mapping,
         )
-    if type(source) is ActorPovCurrentSliceV1 or type(source) is ActorPovCurrentSliceV2:
+    if (
+        type(source) is ActorPovCurrentSliceV1
+        or type(source) is ActorPovCurrentSliceV2
+        or type(source) is ActorPovCurrentSliceV3
+    ):
         if frame_index is not None and frame_index != source.frame.frame_index:
             raise ValueError(
                 "a live current slice accepts only its own canonical frame index."
@@ -1334,6 +1363,7 @@ def _select_source(
     if (
         type(source) is ActorPovAdjacentTransitionSliceV1
         or type(source) is ActorPovAdjacentTransitionSliceV2
+        or type(source) is ActorPovAdjacentTransitionSliceV3
     ):
         if type(frame_index) is not int or frame_index not in (
             source.start_frame.frame_index,
@@ -1388,6 +1418,35 @@ def _authorized_map(source_map: MapSceneV1) -> AuthorizedMapV1:
                 theta=row.theta,
             )
             for row in source_map.obstacles
+        ),
+    )
+
+
+def _recipient_map(
+    base: AuthorizedMapV1,
+    *,
+    context_features: tuple[float, ...],
+    spawn_pads: list[AuthorizedSpawnPadV1],
+) -> AuthorizedMap:
+    """Add the recipient's recorded Red Zone strips when its frame records them.
+
+    base is the recipient's V1 map. context_features is the recipient's own
+    context row: a 20-column row (frame V3) gives an AuthorizedMapV2 built from
+    its column 19 (the Red Zone depth; 0.0 gives red_zone=None) and the ten
+    public spawn pads (five with team_id 1, then five with team_id 2; unused
+    pads included). A 19-column row (frames V1 and V2) returns base unchanged.
+    Only the recipient's own public inputs are read, so Team A and Team B
+    recipients record the same strips as the Oracle. Raise ValueError when
+    build_authorized_map_v2 refuses the depth or pads.
+    """
+    if len(context_features) <= CONTEXT_FEATURE_TDM_RED_ZONE_DEPTH_V2:
+        return base
+    return build_authorized_map_v2(
+        base,
+        red_zone_depth=context_features[CONTEXT_FEATURE_TDM_RED_ZONE_DEPTH_V2],
+        team_spawn_pad_x=(
+            tuple(pad.position[0] for pad in spawn_pads if pad.team_id == 1),
+            tuple(pad.position[0] for pad in spawn_pads if pad.team_id == 2),
         ),
     )
 
@@ -2047,6 +2106,7 @@ def build_no_shared_obs_authorized_scene_v1(
     if (
         type(validated_source) is ActorPovAdjacentTransitionSliceV1
         or type(validated_source) is ActorPovAdjacentTransitionSliceV2
+        or type(validated_source) is ActorPovAdjacentTransitionSliceV3
     ):
         # A nonzero start endpoint intentionally has no prior incoming
         # transition.  Decode only its battlefield facts; do not fabricate a
@@ -2066,9 +2126,7 @@ def build_no_shared_obs_authorized_scene_v1(
         # The compatibility projection performs the exact current-slice/content
         # validation and decodes map/lifecycle facts without any Oracle input.
         legacy_source = cast(
-            ActorPovProjectionIndexV1
-            | ActorPovReplayContentV1
-            | ActorPovCurrentSliceV1,
+            ActorPovProjectionIndexV1 | ActorPovReplayContent | ActorPovCurrentSlice,
             validated_source,
         )
         legacy_scene = build_actor_pov_analyzer_projection_v1(
@@ -2262,7 +2320,11 @@ def build_no_shared_obs_authorized_scene_v1(
     )
     scene = AuthorizedBattlefieldSceneV1(
         schema_version=AUTHORIZED_PRESENTATION_SCHEMA_VERSION,
-        map=_authorized_map(legacy_scene.map),
+        map=_recipient_map(
+            _authorized_map(legacy_scene.map),
+            context_features=frame.context_features,
+            spawn_pads=spawn_pads,
+        ),
         agents=agents,
         aura_fields=aura_fields,
         class_mechanics=tuple(
@@ -2313,9 +2375,9 @@ def build_shared_obs_authorized_scene_v1(
 
     Parameters
     ----------
-    recipient_source_material : SharedObsSourceMaterialProjectionV1 or V2
-        Exact selected recipient projection. Its availability, lifecycle, map and
-        next-decision mask own the resulting view.
+    recipient_source_material : SharedObsSourceMaterialProjection
+        Exact selected recipient projection V1, V2 or V3. Its availability,
+        lifecycle, map and next-decision mask own the resulting view.
     all_active_nonrecipient_source_material : tuple of SharedObsSourceMaterialProjection
         Every and only configured-active nonrecipient source, including opponents
         and unavailable sources. Roots, headers, identity topology and epoch are
@@ -2405,6 +2467,7 @@ def build_shared_obs_authorized_scene_v1(
         not in (
             SharedObsSourceMaterialProjectionV1,
             SharedObsSourceMaterialProjectionV2,
+            SharedObsSourceMaterialProjectionV3,
         )
         for source in all_active_nonrecipient_source_material
     ):
@@ -2632,7 +2695,11 @@ def build_shared_obs_authorized_scene_v1(
     )
     scene = AuthorizedBattlefieldSceneV1(
         schema_version=AUTHORIZED_PRESENTATION_SCHEMA_VERSION,
-        map=_authorized_map(recipient_map),
+        map=_recipient_map(
+            _authorized_map(recipient_map),
+            context_features=recipient_frame.context_features,
+            spawn_pads=spawn_pads,
+        ),
         agents=agents,
         aura_fields=aura_fields,
         class_mechanics=tuple(

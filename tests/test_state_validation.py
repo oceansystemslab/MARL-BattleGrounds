@@ -1,4 +1,10 @@
-"""Check host validation of live snapshots and authored scenario starts."""
+"""Check host validation of live snapshots and authored scenario starts.
+
+Team Deathmatch runtime scores may pass the threshold K by one step's largest
+gain minus one: up to K + 4 at Red Zone depth 0 and up to K + 9 at a positive
+depth, where one step can give a team 10 points. Higher scores are refused
+with the reachable terminal bound in the message.
+"""
 # pyright: reportUnknownArgumentType=false
 # pyright: reportPrivateUsage=false
 
@@ -189,6 +195,7 @@ def _valid_config(
     return EnvConfig(
         task_mode=task_mode,
         team_deathmatch_score_threshold=team_deathmatch_score_threshold,
+        team_deathmatch_red_zone_depth=0.0,
         max_steps=100,
         map_width=30.0,
         map_height=20.0,
@@ -407,6 +414,33 @@ def test_team_deathmatch_runtime_scores_reject_unreachable_overshoot(
             config,
             state._replace(team_deathmatch_scores=jnp.asarray(scores, dtype=jnp.int32)),
         )
+
+
+def test_team_deathmatch_runtime_score_bound_grows_with_red_zone_points() -> None:
+    config = _valid_config(
+        task_mode=TASK_MODE_TDM,
+        team_deathmatch_score_threshold=7,
+    )._replace(team_deathmatch_red_zone_depth=5.0)
+    state, _, _, _ = reset(config, jax.random.key(0))
+
+    for scores in ((16, 16), (16, 0), (0, 16)):
+        assert (
+            validate_env_state(
+                config,
+                state._replace(
+                    team_deathmatch_scores=jnp.asarray(scores, dtype=jnp.int32)
+                ),
+            )
+            is None
+        )
+    for scores in ((17, 0), (0, 17)):
+        with pytest.raises(ValueError, match="reachable terminal bound 16"):
+            validate_env_state(
+                config,
+                state._replace(
+                    team_deathmatch_scores=jnp.asarray(scores, dtype=jnp.int32)
+                ),
+            )
 
 
 def test_team_deathmatch_scenario_scores_must_be_preterminal() -> None:

@@ -19,6 +19,7 @@ from marl_battlegrounds.evaluation.models import (
     EvaluationFrame,
     EvaluationFrameV1,
     EvaluationFrameV2,
+    EvaluationFrameV3,
     ResolvedObstacleV1,
     evaluation_context_type,
 )
@@ -384,7 +385,11 @@ def build_local_oracle_corpse_overlay_v1(
     No files are written.
     """
     evaluation_context_type(context)
-    if type(frame) is not EvaluationFrameV1 and type(frame) is not EvaluationFrameV2:
+    if (
+        type(frame) is not EvaluationFrameV1
+        and type(frame) is not EvaluationFrameV2
+        and type(frame) is not EvaluationFrameV3
+    ):
         raise TypeError("frame must use the exact EvaluationFrameV1 root.")
     if type(base_scene) is not AuthorizedBattlefieldSceneV1:
         raise TypeError("base_scene must use the exact authorized scene root.")

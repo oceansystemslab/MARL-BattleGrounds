@@ -5,6 +5,8 @@ commands. The ordinary trainer owns learning and recovery; M8 owns evaluation;
 the shared analysis module owns reports. Importing this module or reading status
 does not import JAX. Run ``python -m marl_battlegrounds.training.screen --help``
 for preparation and launch commands. Preparation never starts the experiment.
+The screen keeps its original scoring: its declaration pins red_zone_depth 0.0
+(one point per death) for training, content identity and Random checks.
 """
 
 from __future__ import annotations
@@ -76,9 +78,10 @@ def screen_declaration() -> Record:
     private Python Random instance, so the shuffle does not consume a global
     random stream. Optional-library imports may initialize their own state.
     The recipe keeps its original world spawn frame and disabled value
-    normalization even though new PPO runs use left framing and normalization.
-    This preserves the screen's original numerical settings. This function
-    writes no files.
+    normalization even though new PPO runs use left framing and normalization,
+    and pins red_zone_depth to 0.0 (one point per death) even though new runs
+    default to 5.0. This preserves the screen's original numerical settings
+    and scoring. This function writes no files.
     """
     from marl_battlegrounds.baselines.ppo import PPOConfig
     from marl_battlegrounds.training.runner import TrainConfig, config_to_dict
@@ -93,6 +96,7 @@ def screen_declaration() -> Record:
         TrainConfig(
             seed=_TRAINING_SEED,
             curriculum=False,
+            red_zone_depth=0.0,
             shaping=True,
             shaping_mode="score_delta",
             shaping_coefficient=0.01,
@@ -250,15 +254,43 @@ def _physical_cpus() -> list[int]:
     return list(selected.values())
 
 
-def _content_identity(interpreter: Path, source: Path) -> Record:
-    """Resolve content once in the isolated CPU environment, before any launch."""
+def _content_identity(interpreter: Path, source: Path, red_zone_depth: float) -> Record:
+    """Resolve content once in the isolated CPU environment, before any launch.
+
+    Parameters
+    ----------
+    interpreter : Path
+        The package's own Python interpreter.
+    source : Path
+        The package's frozen source directory, used as the working directory.
+    red_zone_depth : float
+        The declaration's Red Zone depth in map units (0.0 for this screen).
+        The content binding records it, so this identity matches the content
+        the screen's runs train on.
+
+    Returns
+    -------
+    Record
+        The training content binding as JSON.
+
+    Raises
+    ------
+    subprocess.CalledProcessError
+        Preparation failed in the package environment.
+
+    Notes
+    -----
+    Starts one CPU child process that reads installed content; it writes no
+    file and runs no game. The depth travels as its exact repr text.
+    """
     command = (
-        "import json; from marl_battlegrounds.training import "
+        "import json, sys; from marl_battlegrounds.training import "
         "prepare_training_content; print(json.dumps("
-        "prepare_training_content().binding.model_dump(mode='json')))"
+        "prepare_training_content(red_zone_depth=float(sys.argv[1]))"
+        ".binding.model_dump(mode='json')))"
     )
     completed = subprocess.run(
-        [str(interpreter), "-I", "-c", command],
+        [str(interpreter), "-I", "-c", command, repr(red_zone_depth)],
         cwd=source,
         env=_launch._environment(None),
         check=True,
@@ -278,12 +310,51 @@ def prepare_screen(
 ) -> Record:
     """Copy the reviewed candidate and build a pinned package without launching.
 
-    repository is the checkout to snapshot, including current public edits.
-    destination must be new. gpu_uuid identifies the authorized internal RTX
-    5090; python supplies the existing Python 3.14 interpreter to uv. Return
-    absolute launch, status, resume and stop commands. Preparation verifies
-    source and dependency identities and may install locked packages. It never
-    changes Git, starts calibration, or replaces an existing package.
+    Parameters
+    ----------
+    repository : str or Path
+        The Git worktree root to snapshot (not a subfolder), including current
+        public edits.
+    destination : str or Path
+        The package directory. It must be new: an existing path is refused.
+        If it is inside repository, Git must ignore it.
+    gpu_uuid : str
+        Full UUID of the authorized internal RTX 5090. It is checked with
+        nvidia-smi, which allocates no GPU memory.
+    python : str, default=sys.executable
+        The existing Python 3.14 interpreter that uv uses to build the
+        package's own environment.
+
+    Returns
+    -------
+    Record
+        Absolute paths and commands: "package" (the package directory);
+        "launch", "status", "resume" and "stop" (each a ``bash <script>``
+        command for one of the package's own scripts); and "log" (the
+        experiment log).
+
+    Raises
+    ------
+    ValueError
+        destination already exists; the UUID does not name exactly one RTX
+        5090; repository is not the Git worktree root; the source copy is
+        unsafe or changes while copying; installing changes the copied source;
+        the environment imports another source package; or the finished
+        package fails validate_screen_package.
+    subprocess.CalledProcessError
+        nvidia-smi, a read-only Git query, uv or a package-environment probe
+        fails. This includes a destination inside repository that Git does not
+        ignore: the ``git check-ignore`` query then fails.
+
+    Notes
+    -----
+    Preparation verifies source and dependency identities and may install
+    locked packages, downloading them if needed. It writes the declaration,
+    which pins red_zone_depth 0.0 (one point per death), and records the
+    training content identity at that depth. It also writes the source copy,
+    the environment, the four scripts, empty working folders and the package
+    manifest. It never changes Git, starts calibration, or replaces an existing
+    package. Files already written stay if a later step fails.
     """
     root = Path(destination).absolute()
     if root.exists():
@@ -296,7 +367,9 @@ def prepare_screen(
     _launch._install(root / "source", root / ".venv", python)
     interpreter = root / ".venv/bin/python"
     runtime = _launch._runtime(interpreter, root / "source")
-    content = _content_identity(interpreter, root / "source")
+    content = _content_identity(
+        interpreter, root / "source", declaration["base_config"]["red_zone_depth"]
+    )
     if _launch._files(root / "source") != origin["files"]:
         raise ValueError("Installing the isolated environment changed source bytes")
     for name in (
@@ -805,7 +878,8 @@ def _worker(
 
     Configuration is already frozen in job/config.json. Calibration never
     becomes a scientific prefix. A single calibration actor may time 40 Random
-    games; these are engineering games and are excluded from the study results.
+    games under the config's red_zone_depth; these are engineering games and
+    are excluded from the study results.
     """
     import jax
 
@@ -873,7 +947,10 @@ def _worker(
 
         started = time.monotonic()
         validate_random(
-            result.final_actor, output_dir=job / "timing-validation", seed_pairs=4
+            result.final_actor,
+            output_dir=job / "timing-validation",
+            seed_pairs=4,
+            red_zone_depth=config.red_zone_depth,
         )
         record["validation_seconds"] = time.monotonic() - started
         record["engineering_validation_games"] = 40

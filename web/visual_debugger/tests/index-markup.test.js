@@ -220,7 +220,7 @@ test("shared shell uses the requested details and visual-filter controls without
     /<button type="button" data-key="Tab">Next actor<\/button>[\s\S]*<button type="button" data-key="Tab" data-shift="true">/u,
   );
   assert.match(markup, /<summary>Visual Key<\/summary>/u);
-  assert.match(markup, /id="visual-filter-count"[^>]*>9 enabled</u);
+  assert.match(markup, /id="visual-filter-count"[^>]*>11 enabled</u);
   assert.match(
     markup,
     /id="enable-all-visual-filters-button"[^>]*>\s*Enable All\s*<\/button>/u,

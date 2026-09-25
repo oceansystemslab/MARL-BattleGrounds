@@ -1,4 +1,16 @@
-"""Check that current actor-POV records use matched observations and transitions."""
+"""Check that actor-POV records use matched observations and transitions.
+
+Live slices, adjacent carriers and replay exports copy only the selected actor's
+rows. Current recordings (context V4, frame V3, replay V4) give POV V3 records:
+the round trip through canonical bytes and save/load keeps context column 19,
+the Red Zone depth, even in frames where the actor is dead; POV V1, V2 and V3
+records, exports, loaders and savers refuse each other's versions by exact type;
+exporting a SharedObs context V4 replay fails with the projection-version
+message; recordings that differ only in Red Zone depth give POV frames that
+differ only at column 19; and the Replay Viewer serves a replay V4 file with a
+V4 reference, an exact POV V3 actor view and the same AuthorizedMapV2 Red Zone
+strips in the Agent POV and Oracle presentations.
+"""
 
 from __future__ import annotations
 
@@ -9,7 +21,10 @@ import pytest
 from pydantic import ValidationError
 from tests.evaluation_fixtures import (
     CapturedEvaluationTrajectory,
+    CurrentCapturedEvaluationTrajectory,
     captured_evaluation_trajectory,
+    current_evaluation_context,
+    evaluation_env_config,
     neutral_action,
 )
 
@@ -18,13 +33,30 @@ from marl_battlegrounds.evaluation.actor_projection import (
     NO_SHARED_OBS_ACTOR_PROJECTION_V2,
 )
 from marl_battlegrounds.evaluation.metrics import EvaluationTransitionViewV1
+from marl_battlegrounds.evaluation.models import EvaluationTransitionV1
 from marl_battlegrounds.evaluation.pov import (
     ActorPovAdjacentTransitionSliceV1,
     ActorPovCurrentSliceV1,
+    ActorPovFrameV3,
+    ActorPovReplayArtifactV3,
     build_actor_pov_adjacent_transition_slice_v1,
     build_actor_pov_current_slice_v1,
+    canonical_actor_pov_replay_json_bytes_v3,
+    export_actor_pov_replay_v3,
     slice_actor_pov_current_frame_v1,
     slice_actor_pov_current_transition_v1,
+    validate_actor_pov_replay_against_replay_v3,
+    validate_actor_pov_replay_artifact_v3,
+)
+from marl_battlegrounds.evaluation.replay_io import (
+    load_actor_pov_replay_artifact_v3,
+    save_actor_pov_replay_artifact_v3,
+)
+from marl_battlegrounds.evaluation.replay_v3 import ReplayArtifactV3
+from marl_battlegrounds.evaluation.replay_v4 import (
+    ReplayArtifactReferenceV4,
+    ReplayArtifactV4,
+    build_replay_v4,
 )
 
 
@@ -472,12 +504,12 @@ def test_current_actor_rows_keep_local_identity_in_live_and_replay(
     )
 
     from marl_battlegrounds.evaluation.pov import (
-        ActorPovCurrentSliceV2,
-        ActorPovReplayArtifactV2,
-        export_actor_pov_replay_v2,
-        validate_actor_pov_replay_against_replay_v2,
+        ActorPovCurrentSliceV3,
+        ActorPovReplayArtifactV3,
+        export_actor_pov_replay_v3,
+        validate_actor_pov_replay_against_replay_v3,
     )
-    from marl_battlegrounds.evaluation.replay_v3 import build_replay_v3
+    from marl_battlegrounds.evaluation.replay_v4 import build_replay_v4
     from marl_battlegrounds.rendering.authorized_pov_scene import (
         build_no_shared_obs_authorized_scene_v1,
     )
@@ -495,7 +527,7 @@ def test_current_actor_rows_keep_local_identity_in_live_and_replay(
         global_slot=global_slot,
         incoming_transition_view=view,
     )
-    assert type(current) is ActorPovCurrentSliceV2
+    assert type(current) is ActorPovCurrentSliceV3
     observed = trajectory.observations[1]
     assert current.frame.self_ally_index == int(observed.self_ally_index[global_slot])
     for name in (
@@ -516,15 +548,15 @@ def test_current_actor_rows_keep_local_identity_in_live_and_replay(
         current.frame.class_ids_by_team,
         np.asarray(observed.spawn_lifecycle.class_ids_by_agent_by_team)[global_slot],
     )
-    replay = build_replay_v3(
+    replay = build_replay_v4(
         trajectory.context,
         trajectory.frames,
         trajectory.transitions,
         runtime_provenance=_runtime_provenance(),
     )
-    exported = export_actor_pov_replay_v2(replay, global_slot=global_slot)
-    assert type(exported) is ActorPovReplayArtifactV2
-    validate_actor_pov_replay_against_replay_v2(exported, replay)
+    exported = export_actor_pov_replay_v3(replay, global_slot=global_slot)
+    assert type(exported) is ActorPovReplayArtifactV3
+    validate_actor_pov_replay_against_replay_v3(exported, replay)
     assert exported.content.frames[1] == current.frame
     scene = build_no_shared_obs_authorized_scene_v1(
         current,
@@ -541,8 +573,8 @@ def test_current_shared_source_rows_keep_relation_flags(global_slot: int) -> Non
     from tests.evaluation_fixtures import current_captured_evaluation_trajectory
 
     from marl_battlegrounds.rendering.evaluation_adapter import (
-        SharedObsBaseSensorFrameV2,
-        SharedObsSourceMaterialProjectionV2,
+        SharedObsBaseSensorFrameV3,
+        SharedObsSourceMaterialProjectionV3,
         build_shared_obs_source_material_projection_v1,
     )
 
@@ -555,11 +587,12 @@ def test_current_shared_source_rows_keep_relation_flags(global_slot: int) -> Non
         trajectory.frames[0],
         selected_global_slot=global_slot,
     )
-    assert type(projection) is SharedObsSourceMaterialProjectionV2
-    assert projection.axis_mapping.source_context_schema_version == 3
-    assert projection.axis_mapping.source_frame_schema_version == 2
+    assert type(projection) is SharedObsSourceMaterialProjectionV3
+    assert projection.axis_mapping.source_context_schema_version == 4
+    assert projection.axis_mapping.source_frame_schema_version == 3
     raw = projection.base_sensor_frame
-    assert type(raw) is SharedObsBaseSensorFrameV2
+    assert type(raw) is SharedObsBaseSensorFrameV3
+    assert len(raw.context_features) == 20
     assert raw.self_ally_index == global_slot % 5
     assert (
         raw.self_features
@@ -590,13 +623,13 @@ def test_current_shared_replay_seek_keeps_the_same_authorized_union(
     )
 
     from marl_battlegrounds.evaluation.replay_io import load_replay, save_replay
-    from marl_battlegrounds.evaluation.replay_v3 import build_replay_v3
+    from marl_battlegrounds.evaluation.replay_v4 import build_replay_v4
 
     trajectory = current_captured_evaluation_trajectory(
         transition_count=2,
         execution_information_mode="shared_obs",
     )
-    replay = build_replay_v3(
+    replay = build_replay_v4(
         trajectory.context,
         trajectory.frames,
         trajectory.transitions,
@@ -683,3 +716,258 @@ def test_current_shared_replay_seek_keeps_the_same_authorized_union(
             == frame.action_mask.move_mask[global_slot]
         )
     assert load_replay(path).replay == replay
+
+
+def _red_zone_trajectory(
+    *,
+    red_zone_depth: float,
+    dead_slots: tuple[int, ...] = (),
+    transition_count: int = 1,
+) -> CurrentCapturedEvaluationTrajectory:
+    import jax
+
+    from marl_battlegrounds.core.env import initialize_scenario_state, reset, step
+    from marl_battlegrounds.core.types import TASK_MODE_TDM
+    from marl_battlegrounds.evaluation.capture import (
+        capture_evaluation_transition_unit_v3,
+        capture_initial_evaluation_frame_v3,
+    )
+
+    config = evaluation_env_config(
+        task_mode=TASK_MODE_TDM,
+        team_deathmatch_score_threshold=5,
+        team_deathmatch_red_zone_depth=red_zone_depth,
+        max_steps=transition_count,
+    )
+    context = current_evaluation_context(config)
+    state, _, _, _ = reset(config, jax.random.PRNGKey(0))
+    for slot in dead_slots:
+        state = state._replace(
+            alive_mask=state.alive_mask.at[slot].set(False),
+            current_health=state.current_health.at[slot].set(0.0),
+        )
+    state, observation, mask, _ = initialize_scenario_state(state, config)
+    frames = [capture_initial_evaluation_frame_v3(context, state, observation, mask)]
+    observations = [observation]
+    transitions: list[EvaluationTransitionV1] = []
+    for index in range(transition_count):
+        state, observation, reward, done, mask, info = step(
+            config, state, mask, neutral_action(), jax.random.PRNGKey(index + 1)
+        )
+        transition, frame = capture_evaluation_transition_unit_v3(
+            context,
+            frames[-1],
+            state,
+            observation,
+            mask,
+            info.transition_facts,
+            reward,
+            done,
+        )
+        frames.append(frame)
+        observations.append(observation)
+        transitions.append(transition)
+    return CurrentCapturedEvaluationTrajectory(
+        context, tuple(frames), tuple(transitions), tuple(observations)
+    )
+
+
+def _replay_v4(trajectory: CurrentCapturedEvaluationTrajectory) -> ReplayArtifactV4:
+    from tests.test_evaluation_pov import (
+        _runtime_provenance,  # pyright: ignore[reportPrivateUsage]
+    )
+
+    return build_replay_v4(
+        trajectory.context,
+        trajectory.frames,
+        trajectory.transitions,
+        runtime_provenance=_runtime_provenance(),
+    )
+
+
+def test_pov_v3_round_trip_keeps_red_zone_column_for_a_dead_actor(
+    tmp_path: Path,
+) -> None:
+    trajectory = _red_zone_trajectory(
+        red_zone_depth=5.0, dead_slots=(0,), transition_count=2
+    )
+    replay = _replay_v4(trajectory)
+    artifact = export_actor_pov_replay_v3(replay, global_slot=0)
+
+    assert type(artifact) is ActorPovReplayArtifactV3
+    assert type(artifact.source_replay) is ReplayArtifactReferenceV4
+    assert artifact.content.axis_mapping.actor_projection_version == 4
+    assert all(type(frame) is ActorPovFrameV3 for frame in artifact.content.frames)
+    for frame in artifact.content.frames:
+        # The selected actor stays dead, yet its own row keeps the public depth.
+        assert frame.self_features[5] == 0.0
+        assert len(frame.context_features) == 20
+        assert frame.context_features[19] == 5.0
+
+    encoded = canonical_actor_pov_replay_json_bytes_v3(artifact)
+    assert ActorPovReplayArtifactV3.model_validate_json(encoded) == artifact
+    path = tmp_path / "dead-actor.marlbg-pov.json"
+    save_actor_pov_replay_artifact_v3(artifact, replay, path)
+    assert path.read_bytes() == encoded
+    loaded = load_actor_pov_replay_artifact_v3(path, source_replay=replay)
+    assert loaded == artifact
+    validate_actor_pov_replay_artifact_v3(loaded)
+    validate_actor_pov_replay_against_replay_v3(loaded, replay)
+
+
+def test_pov_versions_reject_each_other_by_exact_type(tmp_path: Path) -> None:
+    from tests.evaluation_fixtures import pre_red_zone_captured_evaluation_trajectory
+    from tests.test_evaluation_pov import (
+        _runtime_provenance,  # pyright: ignore[reportPrivateUsage]
+    )
+
+    from marl_battlegrounds.evaluation.pov import (
+        ActorPovAxisMappingV3,
+        ActorPovFrameV2,
+        ActorPovReplayArtifactV2,
+        export_actor_pov_replay_v2,
+    )
+    from marl_battlegrounds.evaluation.replay_io import (
+        ReplayLoadError,
+        ReplaySaveError,
+        save_actor_pov_replay_artifact_v2,
+    )
+    from marl_battlegrounds.evaluation.replay_v3 import build_replay_v3
+
+    current_replay = _replay_v4(_red_zone_trajectory(red_zone_depth=5.0))
+    current = export_actor_pov_replay_v3(current_replay, global_slot=0)
+    historical = pre_red_zone_captured_evaluation_trajectory(transition_count=1)
+    historical_replay = build_replay_v3(
+        historical.context,
+        historical.frames,
+        historical.transitions,
+        runtime_provenance=_runtime_provenance(),
+    )
+    older = export_actor_pov_replay_v2(historical_replay, global_slot=0)
+
+    with pytest.raises(TypeError, match="requires ReplayArtifactV4"):
+        export_actor_pov_replay_v3(
+            cast(ReplayArtifactV4, historical_replay), global_slot=0
+        )
+    with pytest.raises(TypeError, match="requires ReplayArtifactV3"):
+        export_actor_pov_replay_v2(
+            cast(ReplayArtifactV3, current_replay), global_slot=0
+        )
+    with pytest.raises(ValidationError):
+        ActorPovReplayArtifactV2.model_validate(current.model_dump(mode="python"))
+    with pytest.raises(ValidationError):
+        ActorPovReplayArtifactV3.model_validate(older.model_dump(mode="python"))
+    with pytest.raises(ValueError, match="exact declared root type"):
+        validate_actor_pov_replay_artifact_v3(cast(ActorPovReplayArtifactV3, older))
+    with pytest.raises(TypeError):
+        validate_actor_pov_replay_against_replay_v3(
+            cast(ActorPovReplayArtifactV3, older), current_replay
+        )
+
+    frame_v3 = current.content.frames[0].model_dump(mode="python")
+    with pytest.raises(ValidationError):
+        ActorPovFrameV2.model_validate({**frame_v3, "schema_version": 2})
+    with pytest.raises(ValidationError, match="context_features"):
+        ActorPovFrameV3.model_validate(
+            {**frame_v3, "context_features": frame_v3["context_features"][:19]}
+        )
+    axis = current.content.axis_mapping.model_dump(mode="python")
+    with pytest.raises(ValidationError, match="POV V3 requires the current actor"):
+        ActorPovAxisMappingV3.model_validate({**axis, "actor_projection_version": 3})
+
+    older_path = tmp_path / "older.marlbg-pov.json"
+    save_actor_pov_replay_artifact_v2(older, historical_replay, older_path)
+    with pytest.raises(ReplayLoadError) as refused:
+        load_actor_pov_replay_artifact_v3(older_path)
+    assert refused.value.code == "unsupported_schema_version"
+    with pytest.raises(ReplaySaveError) as mismatched:
+        save_actor_pov_replay_artifact_v3(
+            current,
+            cast(ReplayArtifactV4, historical_replay),
+            tmp_path / "mismatched.marlbg-pov.json",
+        )
+    assert mismatched.value.code == "invalid_argument"
+
+
+def test_shared_obs_context_v4_export_fails_with_projection_version() -> None:
+    from tests.evaluation_fixtures import current_captured_evaluation_trajectory
+
+    shared = current_captured_evaluation_trajectory(
+        transition_count=1, execution_information_mode="shared_obs"
+    )
+    replay = _replay_v4(shared)
+    with pytest.raises(ValueError, match="projection version"):
+        export_actor_pov_replay_v3(replay, global_slot=0)
+
+
+def test_red_zone_depth_changes_only_pov_context_column_19() -> None:
+    off = export_actor_pov_replay_v3(
+        _replay_v4(_red_zone_trajectory(red_zone_depth=0.0, transition_count=2)),
+        global_slot=5,
+    )
+    on = export_actor_pov_replay_v3(
+        _replay_v4(_red_zone_trajectory(red_zone_depth=5.0, transition_count=2)),
+        global_slot=5,
+    )
+    assert len(off.content.frames) == len(on.content.frames) == 3
+    for off_frame, on_frame in zip(off.content.frames, on.content.frames, strict=True):
+        assert off_frame.context_features[19] == 0.0
+        assert on_frame.context_features[19] == 5.0
+        assert off_frame.context_features[:19] == on_frame.context_features[:19]
+        assert off_frame.model_dump(
+            exclude={"context_features"}
+        ) == on_frame.model_dump(exclude={"context_features"})
+    assert off.content.transitions == on.content.transitions
+
+
+def test_replay_viewer_serves_pov_v3_and_red_zone_maps_from_replay_v4(
+    tmp_path: Path,
+) -> None:
+    from scripts.dev.visual_debugger.presentation_protocol import (
+        ReplayNoSharedObsAuthorizedPresentationFrameV1,
+        ReplayOracleAuthorizedPresentationFrameV1,
+    )
+    from scripts.dev.visual_debugger.replay_protocol import ActorPovReplayViewerFrameV1
+    from scripts.dev.visual_debugger.replay_service import ReplayViewerService
+
+    from marl_battlegrounds.evaluation.replay_io import load_replay, save_replay
+    from marl_battlegrounds.rendering.authorized_presentation import AuthorizedMapV2
+
+    replay = _replay_v4(_red_zone_trajectory(red_zone_depth=5.0, transition_count=2))
+    path = tmp_path / "red-zone.marlbg-replay.json"
+    save_replay(replay, path)
+    loaded = load_replay(path)
+
+    pov = ReplayViewerService(
+        loaded,
+        initial_frame_index=1,
+        view_mode="pov",
+        pov_global_slot=5,
+        viewer_session_id="red-zone-pov",
+    )
+    raw = pov.current_frame()
+    assert type(raw) is ActorPovReplayViewerFrameV1
+    reference = raw.artifact_facts.artifact_summary.replay_reference
+    assert type(reference) is ReplayArtifactReferenceV4
+    assert reference.replay_schema_version == 4
+    assert raw.artifact_facts.processing.status == "not_requested"
+    agent = pov.current_presentation().payload
+    assert type(agent) is ReplayNoSharedObsAuthorizedPresentationFrameV1
+    assert agent.authority.exact_actor_input_export_available is True
+    agent_map = agent.current_endpoint.parts.scene.map
+    assert type(agent_map) is AuthorizedMapV2
+    assert agent_map.red_zone is not None
+    assert agent_map.red_zone.team_a_x_range == (0.0, 5.0)
+    assert agent_map.red_zone.team_b_x_range == (15.0, 20.0)
+
+    oracle_service = ReplayViewerService(
+        loaded,
+        initial_frame_index=1,
+        view_mode="researcher",
+        viewer_session_id="red-zone-oracle",
+    )
+    oracle = oracle_service.current_presentation().payload
+    assert type(oracle) is ReplayOracleAuthorizedPresentationFrameV1
+    assert oracle.source.source_replay_schema_version == 4
+    assert type(oracle.current_endpoint.scene.map) is AuthorizedMapV2
+    assert oracle.current_endpoint.scene.map.red_zone == agent_map.red_zone

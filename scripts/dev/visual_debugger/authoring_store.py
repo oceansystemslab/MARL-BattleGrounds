@@ -4,6 +4,11 @@ Use ``DevAssetStore`` from the host authoring service. Saves create immutable
 numbered JSON revisions. Mutations share a process lock and reject links or path
 escapes. Revision fences remember deleted identities so stale clients cannot
 reuse an old revision. This module has no command-line entry point.
+
+Saved files are read through one plain union of map version 1, scenario version
+1 and scenario version 2 drafts; each file's schema tag picks its class. The
+store saves the version it is given and never rewrites a saved file, so old
+version 1 scenario files keep their exact bytes.
 """
 
 from __future__ import annotations
@@ -19,20 +24,26 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal
 
-from pydantic import BaseModel, ValidationError
+from pydantic import BaseModel, TypeAdapter, ValidationError
 
 from scripts.dev.visual_debugger.authoring_models import (
     MAX_DEV_ASSET_SEQUENCE,
     DevAuthoringProblemV1,
     DevMapDraftV1,
     DevScenarioDraftV1,
+    DevScenarioDraftV2,
     SafeAssetId,
 )
 
 _ASSET_ID_PATTERN = re.compile(r"^[a-z0-9]+(?:_[a-z0-9]+)*$")
 
 type DevAssetKind = Literal["map", "scenario"]
-type DevDraft = DevMapDraftV1 | DevScenarioDraftV1
+# Every draft version the store reads and writes. A plain union, so the schema
+# tag in each file picks its class.
+type DevDraft = DevMapDraftV1 | DevScenarioDraftV1 | DevScenarioDraftV2
+_STORED_DRAFT: TypeAdapter[DevMapDraftV1 | DevScenarioDraftV1 | DevScenarioDraftV2] = (
+    TypeAdapter(DevMapDraftV1 | DevScenarioDraftV1 | DevScenarioDraftV2)
+)
 
 
 class DevAssetStoreError(ValueError):
@@ -362,8 +373,9 @@ class DevAssetStore:
 
         Parameters
         ----------
-        draft : DevMapDraftV1 or DevScenarioDraftV1
+        draft : DevMapDraftV1, DevScenarioDraftV1 or DevScenarioDraftV2
             Complete validated draft whose revision matches ``expected_revision``.
+            It is saved in the version it has.
         expected_revision : int
             Current revision, from zero through one less than the maximum sequence
             value.
@@ -371,8 +383,8 @@ class DevAssetStore:
 
         Returns
         -------
-        DevMapDraftV1 or DevScenarioDraftV1
-            Saved draft with its revision increased by one.
+        DevMapDraftV1, DevScenarioDraftV1 or DevScenarioDraftV2
+            Saved draft, same version, with its revision increased by one.
 
         Raises
         ------
@@ -451,14 +463,15 @@ class DevAssetStore:
 
         Parameters
         ----------
-        draft : DevMapDraftV1 or DevScenarioDraftV1
-            Complete source content to copy.
+        draft : DevMapDraftV1, DevScenarioDraftV1 or DevScenarioDraftV2
+            Complete source content to copy. It is saved in the version it has, so
+            a version 1 scenario payload is stored as version 1.
         asset_id : str
             Safe lowercase snake_case destination ID, at most 64 characters.
 
         Returns
         -------
-        DevMapDraftV1 or DevScenarioDraftV1
+        DevMapDraftV1, DevScenarioDraftV1 or DevScenarioDraftV2
             Saved copy. A deleted destination continues after its retained revision
             fence.
 
@@ -519,15 +532,18 @@ class DevAssetStore:
 
         Returns
         -------
-        DevMapDraftV1 or DevScenarioDraftV1
-            Parsed immutable draft whose ID and revision match its file path.
+        DevMapDraftV1, DevScenarioDraftV1 or DevScenarioDraftV2
+            Parsed immutable draft whose ID and revision match its file path, in
+            the version its schema tag names. A version 1 scenario is returned as
+            version 1; the file is not changed.
 
         Raises
         ------
         DevAssetNotFoundError
             If no requested draft exists.
         DevAssetIntegrityError
-            If the path, saved JSON, or embedded identity is invalid.
+            If the path, saved JSON, or embedded identity is invalid, or the saved
+            draft's kind does not match ``kind``.
         ValueError
             If the requested ID or revision is invalid.
         """
@@ -545,13 +561,14 @@ class DevAssetStore:
             raise DevAssetNotFoundError(
                 f"{kind} draft {asset_id!r} revision {selected_revision} was not found"
             ) from error
-        model_type = DevMapDraftV1 if kind == "map" else DevScenarioDraftV1
         try:
-            draft = model_type.model_validate_json(payload)
+            draft = _STORED_DRAFT.validate_json(payload)
         except ValidationError as error:
             raise DevAssetIntegrityError(
                 f"stored {kind} draft failed strict parsing"
             ) from error
+        if isinstance(draft, DevMapDraftV1) != (kind == "map"):
+            raise DevAssetIntegrityError(f"stored {kind} draft failed strict parsing")
         if draft.asset_id != asset_id or draft.revision != selected_revision:
             raise DevAssetIntegrityError(
                 "stored draft identity does not match its path"

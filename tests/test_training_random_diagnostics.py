@@ -7,6 +7,11 @@ A PQN-VDN run binds initialization reuse to its greedy identity over both
 parameters and BatchNorm statistics (a statistics-only change is a different
 actor), and its results name the method and optimizer count.
 These are engineering fixtures, not learning or configuration-screen trials.
+The shared runs use red_zone_depth 20.0, as wide as every map, so each death is
+a Red Zone death: every saved Random record (task schema 3) carries the depth
+and each cell's points are exactly twice its recorded kills, with at least one
+kill played. For a record with a depth the progress display reports recorded
+kills (1 kill where the score is 2); an older record reads kills from scores.
 """
 
 # Recovery injection and strict evidence checks inspect owned host boundaries.
@@ -27,7 +32,7 @@ import pytest
 
 from marl_battlegrounds.baselines.ppo import PPOConfig
 from marl_battlegrounds.evaluation.recording_identity import tree_digest
-from marl_battlegrounds.training import checkpoints, runner, validation
+from marl_battlegrounds.training import _content, checkpoints, runner, validation
 from marl_battlegrounds.training._run_io import progress_text, validate_host_state
 from marl_battlegrounds.training.runner import (
     TrainConfig,
@@ -56,6 +61,11 @@ def _files(root: Path) -> dict[str, bytes]:
     }
 
 
+def _no_content(**kwargs: object) -> None:
+    # Learner setup is stubbed below, so the prepared content is never used.
+    del kwargs
+
+
 def test_initialization_reuse_binds_the_selected_method_before_output(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -70,12 +80,15 @@ def test_initialization_reuse_binds_the_selected_method_before_output(
         return None, state
 
     monkeypatch.setattr(learner, "init_learner", initialize)
+    monkeypatch.setattr(_content, "prepare_training_content", _no_content)
     digests: list[str] = []
 
     def read_initialization(
-        path: object, *, actor_digest: str, seed_pairs: int
+        path: object, *, actor_digest: str, seed_pairs: int, red_zone_depth: float
     ) -> None:
         assert path == str(tmp_path / "initialization.json") and seed_pairs == 1
+        # The shared result must have been recorded at the run's own depth.
+        assert red_zone_depth == 5.0
         digests.append(actor_digest)
         raise ValueError("Stop at the initialization identity check")
 
@@ -113,13 +126,15 @@ def test_pqn_initialization_reuse_binds_parameters_and_statistics(
     digests: list[str] = []
 
     def read_initialization(
-        path: object, *, actor_digest: str, seed_pairs: int
+        path: object, *, actor_digest: str, seed_pairs: int, red_zone_depth: float
     ) -> None:
         del path, seed_pairs
+        assert red_zone_depth == 5.0
         digests.append(actor_digest)
         raise ValueError("Stop at the initialization identity check")
 
     monkeypatch.setattr(validation, "read_random_initialization", read_initialization)
+    monkeypatch.setattr(_content, "prepare_training_content", _no_content)
     config = config_from_dict(
         {
             "method": "pqn_vdn",
@@ -184,6 +199,9 @@ def random_runs(tmp_path_factory: pytest.TempPathFactory) -> Any:  # noqa: ANN40
         seed=1701,
         num_envs=4,
         total_env_steps=8,
+        # Every map is 20 units wide, so each death is inside its victim's
+        # own Red Zone: every kill gives 2 points.
+        red_zone_depth=20.0,
         ppo=PPOConfig(rollout_length=1, epochs=1, input_scale=0.01),
         shaping=True,
         shaping_mode="score_delta",
@@ -384,6 +402,19 @@ def test_random_progress_missing_scores_are_not_zero(missing: object) -> None:
     assert result["draws"] == 40
 
 
+def test_random_progress_reports_kills_not_points_for_red_zone_records() -> None:
+    record = _progress_record(4096, 2, 0)
+    for cell in record["cells"]:
+        cell.update(mean_team_a_score=2.0, mean_team_a_kills=1.0, mean_team_b_kills=0)
+    # Without a depth the record predates Red Zone: its scores were its kills.
+    legacy = runner._random_progress([record])
+    assert legacy is not None and legacy["mean_kills_for"] == 2.0
+    result = runner._random_progress([{**record, "red_zone_depth": 5.0}])
+    assert result is not None
+    assert (result["mean_kills_for"], result["mean_kills_against"]) == (1.0, 0.0)
+    assert result["kill_margin"] == 1.0
+
+
 def test_random_progress_without_initialization_has_no_invented_change() -> None:
     assert runner._random_progress([]) is None
     result = runner._random_progress([_progress_record(4096, 2, 2)])
@@ -452,10 +483,20 @@ def test_native_random_captures_preserve_complete_learning_state(
     assert data["calls"] == [("first", 0)] + [
         (name, point) for name in ("first", "reused") for point in (0, 4, 8)
     ]
+    kills = 0.0
     for result in (data["first"], data["reused"]):
         records = json.loads((result.run_dir / "random_diagnostics.json").read_text())
         assert [row["env_steps"] for row in records] == [0, 4, 8]
         assert all(row["games"] == 10 and row["complete"] for row in records)
+        # At depth 20 every kill is a Red Zone kill: points are twice the kills.
+        for row in records:
+            assert row["red_zone_depth"] == 20.0 and row["schema_version"] == 3
+            for cell in row["cells"]:
+                for team in ("a", "b"):
+                    assert cell[f"mean_team_{team}_score"] == (
+                        2 * cell[f"mean_team_{team}_kills"]
+                    )
+                    kills += cell[f"mean_team_{team}_kills"]
         assert all(row["root"] == 19_043_001 for row in records)
         assert all(row["wall_seconds"] >= 0 for row in records)
         assert records[0]["training_seconds"] == 0
@@ -472,6 +513,7 @@ def test_native_random_captures_preserve_complete_learning_state(
             len((result.run_dir / "training_updates.jsonl").read_text().splitlines())
             == 2
         )
+    assert kills > 0
     reused = json.loads(
         (data["reused"].run_dir / "random_diagnostics.json").read_text()
     )[0]

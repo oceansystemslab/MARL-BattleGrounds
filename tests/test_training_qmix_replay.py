@@ -8,7 +8,7 @@ Setup rejects a hook that changes the variable tree or lacks a JSON identity,
 and checkpoint collection details record the identity only when a hook is set.
 Replay rows keep only Team A's five observer rows and 5x5 permissions, the
 team mean task reward and the shaping reward separately. The default layout is
-29,664 bytes per game row with a strong int32 write index. Guarded insertion
+29,688 bytes per game row with a strong int32 write index. Guarded insertion
 stores exactly the real prefix of each block (never padding), in order, across
 block seams and ring wrap; readiness starts at the minimum. Samples are
 consecutive stored rows in time order, drawn with replacement; the newest row
@@ -294,12 +294,12 @@ def test_replay_layout_keeps_only_team_a_rows(blocks: _Blocks) -> None:
     spec = replay._row_spec(collection, carry)
     leaves = cast(list[jax.ShapeDtypeStruct], jax.tree.leaves(spec))
     per_row = sum(math.prod(leaf.shape[1:]) * leaf.dtype.itemsize for leaf in leaves)
-    assert per_row == 29_664
-    assert 32 * 1000 * per_row == 949_248_000
+    assert per_row == 29_688
+    assert 32 * 1000 * per_row == 950_016_000
     for leaf in jax.tree.leaves(spec.observation):
         assert leaf.shape[:2] == (2, 5)
     assert spec.source_availability.shape == (2, 5, 5)
-    assert spec.training_state.shape == (2, 919)
+    assert spec.training_state.shape == (2, 920)
 
     def default_replay(values: TrainingCarry) -> replay.ReplayState:
         return replay._init_replay(collection, values, qmix.DEFAULT_QMIX_CONFIG)

@@ -6,11 +6,17 @@ initialization rounds differently with other CPU thread counts). Real
 permitted inputs exercise both spawn frames, action legality and same-call
 probabilities. Feedforward actors keep no recurrent parameters,
 state or network loop. Masked updates preserve unused optimizers and ignore
-excluded rows while keeping the existing shared ValueNorm rules. These CPU
-checks prove software contracts, not learned skill or GPU cost.
+excluded rows while keeping the existing shared ValueNorm rules. The System
+factories of all six methods take actor_input_schema: the default 2 keeps
+the existing hooks (and so the recorded registrations above), 1 picks the
+cached schema-1 hook once per scale and frame, and any other value (0, 3, a
+Boolean, a float or a string) is refused. These CPU checks prove software
+contracts, not learned skill or GPU cost.
 """
 
+# pyright: reportPrivateUsage=false
 import json
+from collections.abc import Callable
 from functools import partial
 from pathlib import Path
 from typing import Any, cast
@@ -23,6 +29,7 @@ from jax import Array
 from tests.evaluation_fixtures import evaluation_env_config
 from tests.training_learner_helpers import equal, finite
 
+from marl_battlegrounds.baselines import ppo, pqn, qmix
 from marl_battlegrounds.baselines.actions import (
     action_log_prob,
     categorical_action_mask,
@@ -50,7 +57,11 @@ from marl_battlegrounds.baselines.ppo import (
 )
 from marl_battlegrounds.core.types import AGENT_FEATURE_X
 from marl_battlegrounds.environment import make
-from marl_battlegrounds.evaluation.policy_execution import SystemInput, SystemOutput
+from marl_battlegrounds.evaluation.policy_execution import (
+    System,
+    SystemInput,
+    SystemOutput,
+)
 from marl_battlegrounds.evaluation.recording_identity import (
     normalize_system_registration,
 )
@@ -302,6 +313,41 @@ def test_feedforward_changing_weights_inputs_and_keys_reuse_one_compilation(
     assert not np.array_equal(
         original.learning_outputs.log_prob, second.learning_outputs.log_prob
     )
+
+
+def test_system_factories_pick_the_schema_1_hook_and_refuse_other_schemas() -> None:
+    # Cast so each factory is called through one loose signature; the loop passes
+    # the same empty weights to all of them, which only the hook choice reads.
+    hooks = cast(
+        tuple[tuple[Callable[..., System], Callable[[float, str], object]], ...],
+        (
+            (partial(make_ppo_system, method="ippo"), ppo._schema_1_actor_apply),
+            (make_recurrent_mappo_system, ppo._schema_1_actor_apply),
+            (
+                partial(make_ppo_system, method="ff_mappo"),
+                ppo._schema_1_feedforward_actor_apply,
+            ),
+            (qmix.make_qmix_system, qmix._schema_1_q_actor_apply),
+            (pqn.make_pqn_system, pqn._schema_1_pqn_actor_apply),
+        ),
+    )
+    for factory, hook in hooks:
+        for scale, frame in ((1.0, "world"), (0.01, "left")):
+            legacy = factory(
+                (), input_scale=scale, spawn_frame=frame, actor_input_schema=1
+            )
+            again = factory(
+                (), input_scale=scale, spawn_frame=frame, actor_input_schema=1
+            )
+            current = factory((), input_scale=scale, spawn_frame=frame)
+            assert legacy.apply is again.apply is hook(scale, frame)
+            assert current.apply is not legacy.apply
+            assert legacy.init is current.init
+        for schema in cast(tuple[Any, ...], (0, 3, True, 2.0, "2")):
+            with pytest.raises(ValueError, match="actor_input_schema"):
+                factory((), actor_input_schema=schema)
+    world = make_recurrent_mappo_system((), spawn_frame="world", actor_input_schema=2)
+    assert world.apply is ppo._apply_actor
 
 
 @pytest.mark.parametrize("method", ("qmix", "", "FF-IPPO"))

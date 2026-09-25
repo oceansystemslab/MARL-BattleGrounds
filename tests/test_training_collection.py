@@ -308,7 +308,7 @@ def test_split_direct_blocks_keep_identical_decisions_memory_and_successor(
     np.testing.assert_array_equal(whole.memory.team_a, 5)
     assert int(output.real_steps) == 6
     assert output.transitions.training_state is not None
-    assert output.transitions.training_state.shape == (8, 2, 919)
+    assert output.transitions.training_state.shape == (8, 2, 920)
     summary = training_summary(collection, whole)
     assert summary["env_steps"] == 12
     assert sum(cast(list[int], summary["steps_by_map"])) == 12

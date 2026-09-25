@@ -104,14 +104,18 @@ def _source_configs(
     dict[tuple[int, int], EnvConfig],
     dict[str, Any],
     dict[str, tuple[Mapping[str, Any], EnvConfig]],
+    dict[tuple[int, int], str],
 ]:
     """Prepare each declared map's exact source and two complete spawn choices.
 
     config is a validated tournament descriptor and verifier owns its checked
     assets. Return source configs by map ID, resolved configs by (map ID, choice),
-    serialized contents by config ID, then a verified ID-to-(content, config)
-    cache for physical evidence. Choice 0 keeps source banks; choice 1 exchanges
-    both complete banks. Other fields stay exact. Inputs are not changed.
+    serialized contents by config ID, a verified ID-to-(content, config)
+    cache for physical evidence, and the frozen configuration ID of each
+    (map ID, choice). Choice 0 keeps source banks; choice 1 exchanges both
+    complete banks. Other fields stay exact. Inputs are not changed. Content
+    saved before the Red Zone rule (12 keys) restores at depth 0.0 and keeps
+    its original identity, so its IDs are the historical ones.
 
     Host setup imports JAX, restores scalar configs and runs Core's existing
     requested-choice validator. Unsupported information/memory rules, wrong
@@ -122,7 +126,7 @@ def _source_configs(
 
     from marl_battlegrounds.evaluation.evaluation_conditions import (
         config_record,
-        restore_config,
+        restore_recorded_config,
     )
     from marl_battlegrounds.tasks import (
         _roster_ids,
@@ -152,14 +156,22 @@ def _source_configs(
     resolved: dict[tuple[int, int], EnvConfig] = {}
     contents: dict[str, Any] = {}
     verified: dict[str, tuple[Mapping[str, Any], EnvConfig]] = {}
+    resolved_ids: dict[tuple[int, int], str] = {}
     for declaration in config["conditions"]["map_sources"]:
         content = verifier.read_json(declaration["source_config_asset"])
         if not isinstance(content, dict):
             raise ValueError("Source configuration asset must contain one config")
-        source = restore_config(cast(dict[str, Any], content), validate=False)
-        source_id, actual = config_record(source)
-        if source_id != declaration["source_config_id"]:
-            raise ValueError("Source configuration differs from its declared identity")
+        try:
+            source, historical = restore_recorded_config(
+                cast(dict[str, Any], content),
+                declaration["source_config_id"],
+                validate=False,
+            )
+        except ValueError as error:
+            raise ValueError(
+                "Source configuration differs from its declared identity"
+            ) from error
+        source_id, actual = config_record(source, historical=historical)
         conditions = config["conditions"]
         if (
             int(source.max_steps) != conditions["max_steps"]
@@ -176,7 +188,7 @@ def _source_configs(
         registered = declaration["registered_map"]
         if registered is not None:
             from marl_battlegrounds.evaluation.catalog import (
-                build_resolved_env_config_v1,
+                build_resolved_env_config_v2,
             )
             from marl_battlegrounds.evaluation.map_identity import (
                 _authored_map,
@@ -188,7 +200,9 @@ def _source_configs(
                 identity["asset_id"], identity["revision"], identity["semantic_digest"]
             )
             if approved is None or not _geometry_matches(
-                build_resolved_env_config_v1(source), approved[1]
+                # Geometry only; V2 accepts any recorded Red Zone depth.
+                build_resolved_env_config_v2(source),
+                approved[1],
             ):
                 raise ValueError(
                     "Source geometry differs from its registered map identity"
@@ -206,11 +220,13 @@ def _source_configs(
         resolved[map_id, 0] = source
         resolved[map_id, 1] = _swap_spawn_banks(source)
         contents[source_id] = actual
-        swapped_id, swapped = config_record(resolved[map_id, 1])
+        swapped_id, swapped = config_record(resolved[map_id, 1], historical=historical)
         contents[swapped_id] = swapped
         verified[source_id] = actual, source
         verified[swapped_id] = swapped, resolved[map_id, 1]
-    return sources, resolved, contents, verified
+        resolved_ids[map_id, 0] = source_id
+        resolved_ids[map_id, 1] = swapped_id
+    return sources, resolved, contents, verified, resolved_ids
 
 
 def _local_challenger(method: System | Policy) -> tuple[dict[str, Any], dict[str, Any]]:
@@ -280,22 +296,24 @@ def _specs(
     plan: ReusePlan,
     sources: Mapping[int, EnvConfig],
     resolved: Mapping[tuple[int, int], EnvConfig],
+    resolved_ids: Mapping[tuple[int, int], str],
 ) -> dict[int, tuple[EpisodeSpec, ...]]:
     """Return job-ID to exact EpisodeSpec tuples in declared execution order.
 
     plan supplies immutable original execution coordinates. sources and resolved
-    contain the already validated map configurations. Every resolved config ID
-    must match its declared complete bank choice. The specs retain original
+    contain the already validated map configurations; resolved_ids holds their
+    frozen configuration IDs from _source_configs (historical IDs for content
+    saved before Red Zone), so nothing is re-hashed here. Every resolved config
+    ID must match its declared complete bank choice. The specs retain original
     episode/seed IDs; pair block labels are local recording joins, never RNG
     inputs. A mismatch raises before execution. No input changes or actions.
     """
     from marl_battlegrounds.evaluation.evaluate import EpisodeSpec
-    from marl_battlegrounds.evaluation.evaluation_conditions import config_record
 
     by_id = {game["logical_game_id"]: game for game in plan.games}
     pair_ids: dict[str | int, int] = {}
     result: dict[int, tuple[EpisodeSpec, ...]] = {}
-    config_ids = {key: config_record(value)[0] for key, value in resolved.items()}
+    config_ids = resolved_ids
     for game in plan.games:
         if (
             config_ids[game["map_id"], game["spawn_locations"]]
@@ -609,17 +627,18 @@ def _run_resolved_tournament(
     checking a release pin, or that same durable fact on resume. Custom release
     text alone cannot establish protocol compliance. Invalid settings/assets
     fail before writer mutation; execution or
-    output failures propagate with previously durable games preserved.
+    output failures propagate with previously durable games preserved. A
+    snapshot saved before the Red Zone rule (pins 14, 2, 3) can only reuse its
+    recorded games: when any pending game needs execution (a challenger or
+    rerun_existing=True), ValueError "Snapshot configurations were saved before
+    the Red Zone rule; ..." is raised before any output is created.
     """
     from marl_battlegrounds.evaluation.evaluate import (
         _evaluate_tournament_episodes,
         positive_int,
     )
     from marl_battlegrounds.evaluation.evaluation_conditions import capture_ids
-    from marl_battlegrounds.evaluation.metric_catalog import (
-        METRIC_SCHEMA_ID,
-        METRIC_SCHEMA_VERSION,
-    )
+    from marl_battlegrounds.evaluation.metric_catalog import METRIC_SCHEMA_ID
     from marl_battlegrounds.evaluation.policy_execution import Policy
     from marl_battlegrounds.evaluation.run_writer import (
         RUN_SCHEMA_VERSION,
@@ -753,10 +772,10 @@ def _run_resolved_tournament(
     )
     per_job_full = plan.capture_ids(full_ids)
     per_job_replay = plan.capture_ids(selected_replays)
-    sources, resolved, configurations, verified_configs = _source_configs(
+    sources, resolved, configurations, verified_configs, resolved_ids = _source_configs(
         config, verifier
     )
-    specs_by_job = _specs(plan, sources, resolved)
+    specs_by_job = _specs(plan, sources, resolved, resolved_ids)
     schedule = analysis_schedule(
         plan, {key: row["name"] for key, row in participants.items()}
     )
@@ -788,7 +807,10 @@ def _run_resolved_tournament(
     memory_manifest: dict[str, Any] = {
         "schema_version": RUN_SCHEMA_VERSION,
         "metric_schema_id": METRIC_SCHEMA_ID,
-        "metric_schema_version": METRIC_SCHEMA_VERSION,
+        # The snapshot's pin (14 for a pre-Red-Zone (14, 2, 3) snapshot). This
+        # manifest only feeds the record accessors built here. The result a
+        # caller gets reports the pin through CanonicalView's metadata.
+        "metric_schema_version": config["compatibility"]["scalar_schema"],
         "run_id": "in-memory-" + uuid4().hex,
         "configurations": configurations,
         "systems": {},
@@ -822,6 +844,12 @@ def _run_resolved_tournament(
         for job in plan.jobs
         if not all(preflight.completed(game) for game in job_games[job["job_id"]])
     ]
+    if pending_jobs and config["compatibility"]["replay_schema"] == 3:
+        raise ValueError(
+            "Snapshot configurations were saved before the Red Zone rule; recorded "
+            "games can be reused, but new games need a snapshot prepared with "
+            "current configurations."
+        )
     verify_tournament_environment(config, verifier, execution=bool(pending_jobs))
     completed_games = tuple(game for game in plan.games if preflight.completed(game))
     preflight_evidence = None
@@ -1217,6 +1245,8 @@ def run_canonical_tournament(
     ------
     ValueError, TypeError
         Snapshot, method, budget, captures, evidence or resume settings conflict.
+        A snapshot saved before the Red Zone rule can only reuse recorded games;
+        a call that needs a new game raises ValueError before any output.
     OSError, RuntimeError
         Required assets, execution, fitting or durable output fail. Earlier saved
         games remain resumable. No hidden download, retry or provider rollback.

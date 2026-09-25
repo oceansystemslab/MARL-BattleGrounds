@@ -1,4 +1,8 @@
-"""Check which live-debugger frame fields may cross the browser boundary."""
+"""Check which live-debugger frame fields may cross the browser boundary.
+
+Live NoSharedObs sessions record context V4 with the NoSharedObs V4 projection,
+and the visual POV slice keeps that exact policy projection (POV V3).
+"""
 
 import json
 from dataclasses import replace
@@ -41,7 +45,7 @@ from tests.visual_debugger_fixtures import debugger_test_launch_specification
 from marl_battlegrounds.core.axis_mappings import global_slot_to_target_action
 from marl_battlegrounds.core.types import MOVE_EAST, MOVE_NORTH, NUM_MOVE_ACTIONS
 from marl_battlegrounds.evaluation.actor_projection import (
-    NO_SHARED_OBS_ACTOR_PROJECTION_V3,
+    NO_SHARED_OBS_ACTOR_PROJECTION_V4,
 )
 
 
@@ -118,7 +122,7 @@ def test_shared_obs_pov_frame_is_projection_free_and_identity_bound() -> None:
 def test_current_no_shared_visual_slice_keeps_exact_policy_projection() -> None:
     session = _session()
     context = session.evaluation_context
-    assert context.actor_projection == NO_SHARED_OBS_ACTOR_PROJECTION_V3
+    assert context.actor_projection == NO_SHARED_OBS_ACTOR_PROJECTION_V4
 
     visual = build_live_no_shared_obs_visual_current_slice_v1(
         context,
@@ -127,10 +131,11 @@ def test_current_no_shared_visual_slice_keeps_exact_policy_projection() -> None:
     )
     frame = _frame(session, view_mode="pov")
 
-    assert visual.axis_mapping.actor_projection_version == 3
+    assert visual.axis_mapping.actor_projection_version == 4
+    assert visual.axis_mapping.schema_version == 3
     assert session.evaluation_context is context
     assert (
-        session.evaluation_context.actor_projection == NO_SHARED_OBS_ACTOR_PROJECTION_V3
+        session.evaluation_context.actor_projection == NO_SHARED_OBS_ACTOR_PROJECTION_V4
     )
     assert type(frame) is ActorPovLiveDebuggerFrameV2
     assert frame.combat_configuration.team_a_controller == "manual"

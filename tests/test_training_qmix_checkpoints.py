@@ -18,7 +18,12 @@ export records epsilon 0.0 (a forged -0.0 is rejected), the tie rule and its
 optimizer count, loads as the
 greedy System that matches the Q-network's first legal maximum in both spawn
 frames, and shares one inference identity with its learner checkpoint.
-Schemas and dependencies stay exact for PPO and add QMIX's own. Saved host
+Schemas and dependencies stay exact for PPO and add QMIX's own; since Red
+Zone every current dictionary records actor input 2 and training state 2. A
+Q-network saved before Red Zone (actor input schema 1) loads through the
+cached schema-1 QMIX hook with its inference identity bytes kept, cannot be
+exported again (the directory stays unchanged), and its learner cannot resume:
+restore refuses it before any array is read. Saved host
 totals follow fixed-block arithmetic (including totals above int32), and
 saved results must carry QMIX's method and optimizer count, which PPO results
 must not. These checks prove software contracts, not learning or GPU cost.
@@ -45,7 +50,9 @@ import numpy as np
 import pytest
 from tests.evaluation_fixtures import evaluation_env_config
 from tests.test_training_checkpoints import (
+    _as_schema_1_learner,  # pyright: ignore[reportPrivateUsage]
     _files,  # pyright: ignore[reportPrivateUsage]
+    _schema_1_round_trip,  # pyright: ignore[reportPrivateUsage]
     _writer,  # pyright: ignore[reportPrivateUsage]
 )
 
@@ -452,6 +459,31 @@ def test_metadata_faults_fail_before_arrays_are_read(
     assert _files(tmp_path) == before
 
 
+def test_a_schema_1_qmix_actor_loads_through_its_old_route_and_is_not_exported(
+    tmp_path: Path,
+) -> None:
+    _schema_1_round_trip(tmp_path, "qmix", qmix._schema_1_q_actor_apply)
+
+
+def test_a_qmix_learner_saved_before_red_zone_cannot_resume(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    collection, template = _learner()
+    historical = _as_schema_1_learner(_save(tmp_path, template), "qmix")
+    _forbid_arrays(monkeypatch)
+    before = _files(tmp_path)
+    with pytest.raises(ValueError, match="saved before Red Zone"):
+        restore_checkpoint(
+            historical,
+            collection,
+            template,
+            expected_metadata=_expected(_metadata()),
+            method="qmix",
+            qmix=_CONFIG,
+        )
+    assert _files(tmp_path) == before
+
+
 def test_possible_but_wrong_counters_fail_after_loading(tmp_path: Path) -> None:
     collection, template = _learner()
     path = _save(tmp_path, _uninterrupted().states[2])
@@ -683,7 +715,7 @@ def test_schemas_and_dependencies_keep_ppo_bytes() -> None:
     ppo = {
         "checkpoint": 1,
         "actor_input": 2,
-        "training_state": 1,
+        "training_state": 2,
         "action": 1,
         "collection_keys": 1,
         "learner_keys": 1,

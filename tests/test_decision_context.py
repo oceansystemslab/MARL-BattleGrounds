@@ -1,17 +1,30 @@
-"""Check the public context features available when an actor chooses an action."""
+"""Check the public context features available when an actor chooses an action.
+
+Context column 19 is the Team Deathmatch Red Zone depth. Every configured row
+shows it after reset, after step and at an authored start, dead rows included;
+unused rows and neutral mode show 0. Two configs that differ only in depth give
+observations that differ only in that column. Changing the depth reuses one
+compiled reset, and a vmapped reset gives each game its own depth.
+"""
 # pyright: reportPrivateUsage=false
 
+from collections.abc import Callable
 from typing import cast
 
 import jax
 import jax.numpy as jnp
+import numpy as np
+import pytest
 from jax import Array
+from tests.test_team_deathmatch_semantics import _scenario, _task_config
 
 import marl_battlegrounds.core.types as core_types
-from marl_battlegrounds.core.config import resolve_agent_profile
+from marl_battlegrounds.core.config import resolve_agent_profile, validate_env_config
 from marl_battlegrounds.core.env import _build_observation_and_action_mask, reset, step
 from marl_battlegrounds.core.types import (
     CLASS_NEUTRAL,
+    CONTEXT_FEATURE_MAP_HEIGHT,
+    CONTEXT_FEATURE_TDM_RED_ZONE_DEPTH,
     CONTEXT_FEATURES,
     ENVIRONMENT_DIMENSIONS,
     MAX_AGENT_SLOTS,
@@ -57,6 +70,7 @@ def _config(
     return EnvConfig(
         task_mode=0,
         team_deathmatch_score_threshold=0,
+        team_deathmatch_red_zone_depth=0.0,
         max_steps=max_steps,
         map_width=map_width,
         map_height=map_height,
@@ -115,7 +129,7 @@ def test_context_feature_indices_are_contiguous_and_complete() -> None:
         if name.startswith("CONTEXT_FEATURE_") and isinstance(value, int)
     )
 
-    assert CONTEXT_FEATURES == 19
+    assert CONTEXT_FEATURES == 20
     assert context_feature_indices == list(range(CONTEXT_FEATURES))
 
 
@@ -302,3 +316,190 @@ def test_context_is_stable_under_jit_and_scanned_rollout() -> None:
             jnp.asarray((False, False, False, False, True)),
         )
     )
+
+
+type _ResetResult = tuple[EnvState, Observation, ActionMask, Info]
+# One compiled reset serves every Team Deathmatch config below: they share
+# shapes and dtypes, so changing values does not compile again.
+_compiled_reset = cast(Callable[[EnvConfig, Array], _ResetResult], jax.jit(reset))
+
+
+def _red_zone_config(depth: float) -> EnvConfig:
+    # Width-12 Team Deathmatch with Team A slots 0-1 and Team B slot 5 configured.
+    return _task_config(team_sizes=(2, 1), red_zone_depth=depth)
+
+
+def _configured_rows(config: EnvConfig) -> np.ndarray:
+    return np.asarray(config.agent_profile.active_mask)
+
+
+def _assert_only_red_zone_column_differs(
+    observation: Observation,
+    zero_depth_observation: Observation,
+    *,
+    depth: float,
+    configured_rows: np.ndarray,
+) -> None:
+    for leaf, zero_depth_leaf in zip(
+        jax.tree.leaves(observation._replace(context_features=jnp.zeros(()))),
+        jax.tree.leaves(
+            zero_depth_observation._replace(context_features=jnp.zeros(()))
+        ),
+        strict=True,
+    ):
+        np.testing.assert_array_equal(np.asarray(leaf), np.asarray(zero_depth_leaf))
+    context = np.asarray(observation.context_features)
+    zero_depth_context = np.asarray(zero_depth_observation.context_features)
+    other_columns = np.arange(CONTEXT_FEATURES) != CONTEXT_FEATURE_TDM_RED_ZONE_DEPTH
+    np.testing.assert_array_equal(
+        context[:, other_columns], zero_depth_context[:, other_columns]
+    )
+    np.testing.assert_array_equal(
+        context[:, CONTEXT_FEATURE_TDM_RED_ZONE_DEPTH],
+        np.where(configured_rows, np.float32(depth), np.float32(0.0)),
+    )
+    np.testing.assert_array_equal(
+        zero_depth_context[:, CONTEXT_FEATURE_TDM_RED_ZONE_DEPTH], 0.0
+    )
+    assert bool(np.all(context[~configured_rows] == 0.0))
+
+
+def test_red_zone_depth_column_follows_reset_step_and_an_authored_dead_start() -> None:
+    config = _red_zone_config(5.0)
+    zero_depth_config = _red_zone_config(0.0)
+    configured_rows = _configured_rows(config)
+    assert tuple(np.flatnonzero(configured_rows)) == (0, 1, 5)
+    key = jax.random.key(4)
+
+    state, observation, action_mask, _ = _compiled_reset(config, key)
+    zero_state, zero_observation, zero_action_mask, _ = _compiled_reset(
+        zero_depth_config, key
+    )
+    _assert_only_red_zone_column_differs(
+        observation, zero_observation, depth=5.0, configured_rows=configured_rows
+    )
+
+    step_key = jax.random.key(5)
+    _, next_observation, _, _, _, _ = step(
+        config, state, action_mask, _stay_action(), step_key
+    )
+    _, zero_next_observation, _, _, _, _ = step(
+        zero_depth_config, zero_state, zero_action_mask, _stay_action(), step_key
+    )
+    assert (
+        float(
+            next_observation.context_features[
+                0, core_types.CONTEXT_FEATURE_CURRENT_TIMESTEP
+            ]
+        )
+        == 1.0
+    )
+    _assert_only_red_zone_column_differs(
+        next_observation,
+        zero_next_observation,
+        depth=5.0,
+        configured_rows=configured_rows,
+    )
+
+    # Slot 1 is configured but dead at the authored start; it keeps the depth.
+    authored_state, authored_observation, _, _ = _scenario(config, dead_slots=(1,))
+    _, zero_authored_observation, _, _ = _scenario(zero_depth_config, dead_slots=(1,))
+    assert not bool(authored_state.alive_mask[1])
+    _assert_only_red_zone_column_differs(
+        authored_observation,
+        zero_authored_observation,
+        depth=5.0,
+        configured_rows=configured_rows,
+    )
+
+
+def _with_map_height(config: EnvConfig) -> EnvConfig:
+    return config._replace(map_height=17.5)
+
+
+def _with_swapped_banks(config: EnvConfig) -> EnvConfig:
+    return config._replace(
+        team_spawn_pad_positions=config.team_spawn_pad_positions[::-1]
+    )
+
+
+def _unchanged(config: EnvConfig) -> EnvConfig:
+    return config
+
+
+@pytest.mark.parametrize(
+    ("depth", "change"),
+    (
+        (12.0, _unchanged),
+        (5.0, _with_map_height),
+        (5.0, _with_swapped_banks),
+    ),
+    ids=("depth-equal-to-width", "custom-map-height", "swapped-banks"),
+)
+def test_red_zone_depth_column_holds_on_edge_and_custom_layouts(
+    depth: float, change: Callable[[EnvConfig], EnvConfig]
+) -> None:
+    config = change(_red_zone_config(depth))
+    zero_depth_config = change(_red_zone_config(0.0))
+    validate_env_config(config)
+    key = jax.random.key(6)
+    _, observation, _, _ = _compiled_reset(config, key)
+    _, zero_observation, _, _ = _compiled_reset(zero_depth_config, key)
+    assert float(observation.context_features[0, CONTEXT_FEATURE_MAP_HEIGHT]) == (
+        config.map_height
+    )
+    _assert_only_red_zone_column_differs(
+        observation,
+        zero_observation,
+        depth=depth,
+        configured_rows=_configured_rows(config),
+    )
+
+
+def test_neutral_context_keeps_red_zone_depth_column_zero() -> None:
+    _, observation, _, _ = reset(_config(team_sizes=(3, 2)), jax.random.key(0))
+    assert bool(
+        jnp.all(
+            observation.context_features[:, CONTEXT_FEATURE_TDM_RED_ZONE_DEPTH] == 0
+        )
+    )
+
+
+def test_changing_red_zone_depth_reuses_one_compiled_reset() -> None:
+    trace_count = 0
+
+    def counted_reset(config: EnvConfig, key: Array) -> _ResetResult:
+        nonlocal trace_count
+        trace_count += 1
+        return reset(config, key)
+
+    compiled = cast(Callable[[EnvConfig, Array], _ResetResult], jax.jit(counted_reset))
+    for depth in (5.0, 6.0):
+        _, observation, _, _ = compiled(_red_zone_config(depth), jax.random.key(7))
+        np.testing.assert_array_equal(
+            observation.context_features[:, CONTEXT_FEATURE_TDM_RED_ZONE_DEPTH],
+            np.where(_configured_rows(_red_zone_config(depth)), depth, 0.0),
+        )
+    assert trace_count == 1
+
+
+def test_vmapped_reset_gives_each_game_its_own_red_zone_depth() -> None:
+    depths = (0.0, 5.0)
+    configs = tuple(_red_zone_config(depth) for depth in depths)
+
+    def stack(*leaves: object) -> Array:
+        return jnp.stack(tuple(jnp.asarray(leaf) for leaf in leaves))
+
+    stacked = cast(EnvConfig, jax.tree.map(stack, *configs))
+    batched_reset = cast(
+        Callable[[EnvConfig, Array], _ResetResult], jax.jit(jax.vmap(reset))
+    )
+    _, observation, _, _ = batched_reset(
+        stacked, jax.random.split(jax.random.key(8), len(depths))
+    )
+    assert observation.context_features.shape == (2, MAX_AGENT_SLOTS, CONTEXT_FEATURES)
+    for lane, depth in enumerate(depths):
+        np.testing.assert_array_equal(
+            observation.context_features[lane, :, CONTEXT_FEATURE_TDM_RED_ZONE_DEPTH],
+            np.where(_configured_rows(configs[lane]), depth, 0.0),
+        )

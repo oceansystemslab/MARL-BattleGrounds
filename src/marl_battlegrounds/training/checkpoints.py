@@ -12,6 +12,11 @@ built and read by name (Orbax stores NamedTuples as dictionaries); its
 epsilon, optimizer state and kept rows are in the state payload. QMIX and
 PQN-VDN exports and loaded Systems are greedy (epsilon 0, first legal
 maximum).
+
+Artifacts saved before Red Zone use actor input schema 1 (5,164 features).
+load_system still loads them, through the schema-1 System hooks, so they play
+exactly as before and keep their identities. They cannot be exported again,
+and their learner checkpoints cannot resume training in this version.
 """
 
 from __future__ import annotations
@@ -37,6 +42,8 @@ import orbax.checkpoint as ocp  # pyright: ignore[reportMissingTypeStubs]
 
 from marl_battlegrounds.baselines.actions import ACTION_SCHEMA_VERSION
 from marl_battlegrounds.baselines.inputs import (
+    ACTOR_FEATURE_SIZE,
+    ACTOR_FEATURE_SIZES,
     ACTOR_INPUT_SCHEMA_VERSION,
     TRAINING_STATE_SCHEMA_VERSION,
 )
@@ -128,6 +135,43 @@ _PQN_SCHEMAS = {
     "normalization": PQN_NORMALIZATION_SCHEMA_VERSION,
 }
 _PQN_COUNTERS = _QMIX_COUNTERS
+# The exact schema dictionaries artifacts carried before Red Zone (actor input
+# schema 1, and training state schema 1 where present), frozen. load_system
+# still reads them; export and resume refuse them.
+_ACTOR_INPUT_1_SCHEMAS: dict[str, dict[str, int | str]] = {
+    **{
+        method: {
+            "checkpoint": 1,
+            "model": _MODELS[method],
+            "actor_input": 1,
+            "training_state": 1,
+            "action": 1,
+            "collection_keys": 1,
+            "learner_keys": 1,
+        }
+        for method in ("mappo", "ippo", "ff_mappo", "ff_ippo")
+    },
+    "qmix": {
+        "checkpoint": 1,
+        "model": _MODELS["qmix"],
+        "actor_input": 1,
+        "training_state": 1,
+        "action": 1,
+        "collection_keys": 1,
+        "qmix_keys": 1,
+        "replay": 1,
+    },
+    "pqn_vdn": {
+        "checkpoint": 1,
+        "model": _MODELS["pqn_vdn"],
+        "actor_input": 1,
+        "action": 1,
+        "collection_keys": 1,
+        "pqn_keys": 1,
+        "recent_window": 1,
+        "normalization": 1,
+    },
+}
 _CONTEXT = {
     "run_id",
     "attempt_id",
@@ -291,22 +335,65 @@ def _config_method(config: object) -> str:
 def _schema_method(schemas: object) -> str:
     """Return the method named by one complete supported schema dictionary.
 
-    schemas must exactly match checkpoint_schemas for a known model. Reject
-    unknown models, altered versions/types, missing fields and extra fields with
-    ValueError. Each method's own dictionary sets the types, so Boolean or
-    float versions (such as a forged ``"replay": true``) do not stand in for
-    integers. This host-only check reads no arrays and changes no input.
+    schemas must exactly match either checkpoint_schemas for a known model
+    (the current dictionary) or that model's frozen pre-Red-Zone dictionary in
+    _ACTOR_INPUT_1_SCHEMAS (actor input 1, and training state 1 where the
+    method has it). A mixed dictionary, such as actor input 2 with training
+    state 1, matches neither and is rejected. Reject unknown models, altered
+    versions/types, missing fields and extra fields with ValueError. Each
+    method's own dictionary sets the types, so Boolean or float versions (such
+    as a forged ``"replay": true``) do not stand in for integers. This
+    host-only check reads no arrays and changes no input. Use
+    _require_current_schemas where only the current dictionary is allowed.
     """
     value = _object(schemas, "Checkpoint schemas")
     for method, model in _MODELS.items():
-        expected = checkpoint_schemas(method)
-        if (
-            value.get("model") == model
-            and value == expected
-            and all(type(value[key]) is type(item) for key, item in expected.items())
-        ):
-            return method
+        for expected in (checkpoint_schemas(method), _ACTOR_INPUT_1_SCHEMAS[method]):
+            if (
+                value.get("model") == model
+                and value == expected
+                and all(
+                    type(value[key]) is type(item) for key, item in expected.items()
+                )
+            ):
+                return method
     raise ValueError("Checkpoint model or schema differs from this implementation")
+
+
+def _require_current_schemas(details: dict[str, Any]) -> None:
+    """Refuse to resume training from a checkpoint saved before Red Zone.
+
+    Parameters
+    ----------
+    details : dict
+        A checkpoint description from read_checkpoint_details, whose
+        "schemas" entry is a supported current or historical dictionary.
+
+    Raises
+    ------
+    ValueError
+        The saved schemas are the frozen pre-Red-Zone dictionary (actor input
+        schema 1). The message says that this version cannot resume the run
+        and that the original source environment that created it (for example
+        its launch package) can; load_system still reads its actor. Also
+        raised, by _schema_method, for an unsupported dictionary.
+
+    Notes
+    -----
+    This is the one owner of the historical-resume refusal. restore_checkpoint
+    calls it right after the checkpoint kind check, before any array is read.
+    read_checkpoint_description never calls it, so launch, ancestry and
+    analysis can still read old descriptions. Host-only; reads no files.
+    """
+    schemas = _object(details["schemas"], "Checkpoint schemas")
+    if schemas != checkpoint_schemas(_schema_method(schemas)):
+        raise ValueError(
+            "This checkpoint was saved before Red Zone scoring (historical "
+            "actor input schema 1, 5,164 features). This version cannot resume "
+            "its training. Resuming it needs the original source environment "
+            "that created it, for example its launch package; load_system "
+            "still reads its actor."
+        )
 
 
 def saved_training_config(details: dict[str, Any]) -> dict[str, Any]:
@@ -331,7 +418,9 @@ def saved_training_config(details: dict[str, Any]) -> dict[str, Any]:
         ppo.value_normalization is filled with False because historical critics
         predicted raw reward units. Missing validation_opponents and
         slot_diagnostic_actor become None, keeping the historical panel route.
-        Every other
+        Missing red_zone_depth becomes 0.0, because a run saved before the
+        Red Zone rule scored one point per death whatever the current
+        TrainConfig default (5.0) is. Every other
         saved value is returned as saved; absent keys keep taking the current
         TrainConfig and PPOConfig defaults through config_from_dict.
 
@@ -357,7 +446,45 @@ def saved_training_config(details: dict[str, Any]) -> dict[str, Any]:
         config.setdefault("method", "mappo")
     config.setdefault("validation_opponents", None)
     config.setdefault("slot_diagnostic_actor", None)
+    config.setdefault("red_zone_depth", 0.0)
     return config
+
+
+def _config_red_zone_depth(config: object) -> float | None:  # pyright: ignore[reportUnusedFunction]
+    """Read the Red Zone depth a saved training config declares.
+
+    Parameters
+    ----------
+    config : object
+        A saved JSON training config (metadata.config of a checkpoint).
+
+    Returns
+    -------
+    float or None
+        The saved red_zone_depth in map units, or None when the config has no
+        such key because it was saved before the Red Zone rule (one point per
+        death). None tells validation helpers to expect the older record
+        layouts, which carry no depth.
+
+    Raises
+    ------
+    ValueError
+        config is not a JSON object, or its red_zone_depth is not a float.
+        The value's range was checked by TrainConfig when the run started.
+
+    Notes
+    -----
+    Host-only; reads no file and changes nothing. Use this where the saved
+    layout matters (validation task and Random record checks). A config that
+    must be rebuilt as a TrainConfig uses saved_training_config, which reads a
+    missing depth as 0.0 instead.
+    """
+    value = _object(config, "Learner config").get("red_zone_depth")
+    if value is None:
+        return None
+    if type(value) is not float:
+        raise ValueError("Saved red_zone_depth must be a float")
+    return value
 
 
 def _actor_spawn_frame(details: dict[str, Any]) -> str:
@@ -1095,17 +1222,51 @@ default="mappo"
 def read_checkpoint_description(path: str | Path) -> dict[str, Any]:
     """Verify one immutable description, including a pruned ancestor's record.
 
-    path names an actor or learner directory. Check the description's own hash,
-    schema, metadata and safe inventory paths without reading payload files.
-    This supports ancestry after retention removes old numerical payloads. It
-    does not make that ancestor restorable or prove its payload still exists.
-    Use read_checkpoint_details before loading or restoring numerical data.
-    A QMIX actor export must carry input_scale, epsilon exactly 0.0,
+    Parameters
+    ----------
+    path : str or Path
+        An actor or learner directory. It must exist, and no part of its path
+        may be a symbolic link. The learner description
+        (checkpoint_details.json) is read when present, otherwise the actor
+        description (actor_details.json).
+
+    Returns
+    -------
+    dict[str, Any]
+        The verified description exactly as saved: schema_version (always the
+        integer 1), checkpoint_id, kind ("learner" or "actor"), schemas,
+        metadata, actor_layout, actor_digest and the files inventory, plus the
+        kind's and method's own fields (for example a learner's collection,
+        layout, recording_token and counters). Payload files are not read or
+        checked.
+
+    Raises
+    ------
+    ValueError
+        The directory is missing or uses a symbolic link; the description is
+        missing, a symbolic link, not a finite JSON object or has a repeated
+        key; its hash differs from checkpoint_id; its schema, kind or field
+        set is not a supported one; a QMIX or PQN-VDN rule below is broken; a
+        learner's saved config names a different method than its model
+        schema; or an inventory path, provenance, layout, digest, input scale
+        or spawn frame is invalid.
+
+    Notes
+    -----
+    This checks the description's own hash, schema, metadata and safe inventory
+    paths without reading payload files. This supports ancestry after retention
+    removes old numerical payloads. It does not make that ancestor restorable or
+    prove its payload still exists. Use read_checkpoint_details before loading
+    or restoring numerical data.
+
+    A QMIX actor export must carry input_scale, epsilon exactly 0.0 (not -0.0),
     tie_rule "first_legal_maximum" and a nonnegative integer
     metadata.optimizer_steps; spawn_frame is present when not "world". A
-    PQN-VDN export carries the same fields and always its spawn_frame. QMIX
-    and PQN-VDN learners must carry exactly their four counters. Raises
-    ValueError.
+    PQN-VDN export carries the same fields and always its spawn_frame. QMIX and
+    PQN-VDN learners must carry exactly their four counters. Both the current
+    schema dictionaries and the exact pre-Red-Zone ones (actor input schema 1)
+    are accepted, so old descriptions stay readable for launch, ancestry and
+    analysis. Host-only; no file is changed.
     """
     root = _directory(Path(path))
     name = _DESCRIPTION if (root / _DESCRIPTION).exists() else _ACTOR_DESCRIPTION
@@ -1286,6 +1447,8 @@ default="mappo"
         Any payload, context, content, schema, array or boundary check fails.
         Faults that need only metadata (method, config, schema, layout
         including replay, counters) are raised before any array is read.
+        A learner saved before Red Zone (actor input schema 1) is refused by
+        _require_current_schemas right after the checkpoint kind check.
         No recording files or trainer logs have been changed.
     """
     method = validate_training_method(method)
@@ -1293,6 +1456,7 @@ default="mappo"
     details = read_checkpoint_details(root)
     if details["kind"] != "learner":
         raise ValueError("Actor exports cannot resume a learner")
+    _require_current_schemas(details)
     if _schema_method(details["schemas"]) != method:
         raise ValueError("Checkpoint model differs from the requested method")
     expected = _object(dict(expected_metadata), "Expected execution metadata")
@@ -1549,26 +1713,75 @@ def finish_checkpoint_recovery(
     _sync_dir(root)
 
 
-@lru_cache(maxsize=8)
-def _actor_template(method: str = "mappo") -> Tree:
-    """Cache actor shapes/dtypes for one checked static method, default MAPPO.
+@lru_cache(maxsize=16, typed=True)
+def _actor_template(
+    method: str = "mappo", actor_input_schema: int = ACTOR_INPUT_SCHEMA_VERSION
+) -> Tree:
+    """Cache actor shapes/dtypes for one checked method and actor input schema.
 
-    Trace the method-aware initializer with eval_shape. For QMIX the tree is
-    the Q-network parameters only (qmix_actor_template); for PQN-VDN it is the
-    on-disk actor item, Flax's ``{"params", "batch_stats"}`` dictionary built
-    from pqn_actor_template. The returned tree holds only abstract actor
-    leaves; no weights, mixer or optimizer arrays are allocated. Invalid
-    methods raise ValueError before tracing. Callers must not change this
-    shared template; restore creates its own placement targets.
+    Parameters
+    ----------
+    method : str, default="mappo"
+        Training method: "mappo", "ippo", "ff_mappo", "ff_ippo", "qmix" or
+        "pqn_vdn".
+    actor_input_schema : int, default=ACTOR_INPUT_SCHEMA_VERSION
+        2 for the current 5,165-feature actors, or 1 for actors saved before
+        Red Zone (5,164 features).
+
+    Returns
+    -------
+    PyTree
+        Abstract ``jax.ShapeDtypeStruct`` actor leaves; no weights, mixer or
+        optimizer arrays are allocated. The method-aware initializer is traced
+        with eval_shape. For QMIX the tree is the Q-network parameters only
+        (qmix_actor_template); for PQN-VDN it is the on-disk actor item,
+        Flax's ``{"params", "batch_stats"}`` dictionary built from
+        pqn_actor_template. The two schemas differ only in the input width,
+        so the schema-1 tree is the current one with every 5,165-long input
+        axis (the first Dense kernel's rows and, for PQN-VDN, the input
+        BatchNorm leaves) set to 5,164; paths, order, dtypes and every other
+        shape are the same. Tests prove it equals the recorded pre-Red-Zone
+        layouts.
+
+    Raises
+    ------
+    ValueError
+        The method is unknown, or actor_input_schema is not the int 1 or 2.
+        Raised before tracing.
+
+    Notes
+    -----
+    Callers must not change this shared cached template; restore creates its
+    own placement targets. The cache is typed, so True never reuses the
+    template cached for 1 and is refused like any other non-int schema.
     """
-    if validate_training_method(method) == "qmix":
-        return qmix_actor_template()
-    if method == "pqn_vdn":
-        return _pqn_actor_item(pqn_actor_template())
-    method = validate_ppo_method(method)
-    return jax.eval_shape(
-        partial(initialize_ppo, method=method), jax.random.key(0)
-    ).actor_params
+    method = validate_training_method(method)
+    if (
+        type(actor_input_schema) is not int
+        or actor_input_schema not in ACTOR_FEATURE_SIZES
+    ):
+        raise ValueError("actor_input_schema must be 1 or 2.")
+    if method == "qmix":
+        template = qmix_actor_template()
+    elif method == "pqn_vdn":
+        template = _pqn_actor_item(pqn_actor_template())
+    else:
+        template = jax.eval_shape(
+            partial(initialize_ppo, method=validate_ppo_method(method)),
+            jax.random.key(0),
+        ).actor_params
+    width = ACTOR_FEATURE_SIZES[actor_input_schema]
+    if width == ACTOR_FEATURE_SIZE:
+        return template
+
+    def resize(leaf: jax.ShapeDtypeStruct) -> jax.ShapeDtypeStruct:
+        """Give one abstract leaf the schema's input width on its input axes."""
+        shape = tuple(
+            width if size == ACTOR_FEATURE_SIZE else size for size in leaf.shape
+        )
+        return jax.ShapeDtypeStruct(shape, leaf.dtype)
+
+    return jax.tree.map(resize, template)
 
 
 def export_system(
@@ -1629,7 +1842,9 @@ default="mappo"
     ValueError
         Variables, scale, frame or provenance are invalid (for PQN-VDN this
         includes a negative BatchNorm running variance), or the destination
-        conflicts.
+        conflicts. Weights shaped for historical actor input schema 1 (5,164
+        features, saved before Red Zone) are refused with a message saying to
+        keep the original artifact, which load_system reads directly.
     OSError
         A required directory or payload cannot be read or written.
 
@@ -1637,7 +1852,9 @@ default="mappo"
     -----
     Host-only. No map preparation, critic, optimizer or game state is required.
     A PQN-VDN export saves the same actor item, with the same actor_digest, as
-    the learner checkpoint it came from.
+    the learner checkpoint it came from. Every TypeError or ValueError above
+    is raised before any file or directory is written. Exports always record
+    the current schemas.
     """
     method = validate_training_method(method)
     if method == "pqn_vdn":
@@ -1665,7 +1882,14 @@ default="mappo"
         if type(context.get(name)) is not int or context[name] < 0:
             raise ValueError(f"Actor {name} must be a nonnegative integer")
     _digest(context["checkpoint_id"], "Origin checkpoint")
-    if _layout(actor_variables) != _layout(_actor_template(method)):
+    layout = _layout(actor_variables)
+    if layout == _layout(_actor_template(method, 1)):
+        raise ValueError(
+            "These weights use historical actor input schema 1 (5,164 features). "
+            "Export writes current actors only; keep the original artifact, "
+            "which load_system reads directly."
+        )
+    if layout != _layout(_actor_template(method)):
         raise ValueError("Actor variables differ from the selected model schema")
     if not all(
         bool(jnp.all(jnp.isfinite(value))) for value in jax.tree.leaves(actor_variables)
@@ -1719,19 +1943,44 @@ default="mappo"
 def artifact_identity(path: str | Path) -> dict[str, Any]:
     """Read verified actor identity/provenance without restoring numerical state.
 
-    Accept a standalone export or complete learner checkpoint. Return direct
-    actor_digest, weight_digest, input_scale, spawn_frame, checkpoint_id,
-    schemas, run_id, seed and env_steps fields plus original metadata.
-    actor_digest binds model, weights, inference scale and spawn frame. MAPPO at
-    scale 1.0 in the world frame keeps its historical weight digest. weight_digest
-    always identifies only the saved variables. Neither identity proves
-    competence. All file hashes are checked; this operation may read a full
-    learner payload from disk. Missing historical scale means 1.0 and a missing
-    frame means "world". schemas identifies the method. PPO results carry no
-    separate method field. QMIX and PQN-VDN results add "method" ("qmix" or
-    "pqn_vdn") and the integer "optimizer_steps" (the export's recorded count,
-    or a learner's saved "updates" counter), which validation summaries and
-    selection use.
+    Parameters
+    ----------
+    path : str or Path
+        A standalone actor export or a complete learner checkpoint directory.
+        A pruned learner, whose payload files retention removed, is refused.
+
+    Returns
+    -------
+    dict[str, Any]
+        Direct actor_digest, weight_digest, input_scale, spawn_frame,
+        checkpoint_id, schemas, run_id, seed and env_steps fields plus the
+        original metadata. actor_digest binds model, weights, inference scale
+        and spawn frame. MAPPO at scale 1.0 in the world frame keeps its
+        historical weight digest. weight_digest always identifies only the
+        saved variables. schemas identifies the method and the actor input
+        schema (1 for artifacts saved before Red Zone, whose identities keep
+        their original bytes). seed and env_steps come from an export's
+        metadata or a learner's config and counters; seed may be None. PPO
+        results carry no separate method field. QMIX and PQN-VDN results add
+        "method" ("qmix" or "pqn_vdn") and the integer "optimizer_steps" (the
+        export's recorded count, or a learner's saved "updates" counter),
+        which validation summaries and selection use.
+
+    Raises
+    ------
+    ValueError
+        read_checkpoint_details rejects the artifact: its description is
+        invalid (see read_checkpoint_description), or a payload file is
+        missing, changed or unexpected.
+    OSError
+        A saved file cannot be read.
+
+    Notes
+    -----
+    Neither identity proves competence. All file hashes are checked; this
+    operation may read a full learner payload from disk. Missing historical
+    scale means 1.0 and a missing frame means "world". Host-only: no array is
+    restored and no file is changed.
     """
     details = read_checkpoint_details(path)
     metadata = details["metadata"]
@@ -1798,12 +2047,19 @@ def load_system(checkpoint: str | Path) -> System:
     qmix or pqn input_scale;
     actor exports use their explicit saved scale. The saved spawn frame is
     restored the same way and is never inferred from a model's results; a
-    missing frame means "world". Neither route rewrites weights.
+    missing frame means "world". Neither route rewrites weights. The saved
+    actor input schema picks the template and the System route: an artifact
+    saved before Red Zone (schema 1, 5,164 features) is restored with the
+    schema-1 template and built with actor_input_schema=1, so it plays
+    through the schema-1 hooks exactly as before. Its checkpoint label (the
+    inference digest) keeps its bytes; its registration ID is new because
+    the hook is new.
     """
     root = _directory(Path(checkpoint))
     details = read_checkpoint_details(root)
     method = _schema_method(details["schemas"])
-    template = _actor_template(method)
+    schema = cast(int, details["schemas"]["actor_input"])
+    template = _actor_template(method, schema)
     if details["actor_layout"] != _layout(template):
         raise ValueError("Actor artifact schema differs from the installed model")
     actor = _restore_arrays(root / "actor", template, None)
@@ -1820,6 +2076,7 @@ def load_system(checkpoint: str | Path) -> System:
             checkpoint=_inference_digest(details),
             input_scale=_actor_input_scale(details),
             spawn_frame=_actor_spawn_frame(details),
+            actor_input_schema=schema,
         )
     if method == "pqn_vdn":
         return make_pqn_system(
@@ -1828,6 +2085,7 @@ def load_system(checkpoint: str | Path) -> System:
             checkpoint=_inference_digest(details),
             input_scale=_actor_input_scale(details),
             spawn_frame=_actor_spawn_frame(details),
+            actor_input_schema=schema,
         )
     return make_ppo_system(
         actor,
@@ -1835,6 +2093,7 @@ def load_system(checkpoint: str | Path) -> System:
         checkpoint=_inference_digest(details),
         input_scale=_actor_input_scale(details),
         spawn_frame=_actor_spawn_frame(details),
+        actor_input_schema=schema,
     )
 
 
@@ -1846,17 +2105,20 @@ def checkpoint_schemas(method: str = "mappo") -> dict[str, int | str]:
     method : {"mappo", "ippo", "ff_mappo", "ff_ippo", "qmix", "pqn_vdn"}, \
 default="mappo"
         Static method. Unknown values raise ValueError through the shared
-        method check. MAPPO retains its exact historical schema dictionary.
+        method check. MAPPO keeps its historical keys, including learner_keys.
 
     Returns
     -------
     dict[str, int or str]
         A fresh JSON-ready copy of the checkpoint version, model name, actor
-        input, training-state and action versions, and collection/learner key
-        versions. QMIX replaces learner_keys with qmix_keys and adds its replay
-        row version. PQN-VDN has no training-state entry (it keeps no physical
-        state) and adds pqn_keys, recent_window and normalization versions.
-        These are the same identifiers checked during restore. Changing the
+        input (2), training-state (2) and action versions, and collection/learner
+        key versions. QMIX replaces learner_keys with qmix_keys and adds its
+        replay row version. PQN-VDN has no training-state entry (it keeps no
+        physical state) and adds pqn_keys, recent_window and normalization
+        versions. These are the same identifiers checked during restore; new
+        saves and exports write them. Artifacts saved before Red Zone carry
+        the frozen dictionaries with actor input 1 (and training state 1),
+        which load_system reads but export and resume refuse. Changing the
         returned dictionary does not change the shared authority.
 
     Notes

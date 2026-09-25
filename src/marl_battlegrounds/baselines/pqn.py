@@ -29,13 +29,16 @@ Actors read only their permitted SharedObs input and their own memory. The
 team value is the plain sum of the local utilities (VDN): there is no mixer,
 critic or physical-state input. BatchNorm statistics move only in training
 minibatches; action selection always uses the saved statistics, so one lane's
-action never depends on another lane's input. Requires the optional training
-extra. The network, action rule, schedules and update are pure JAX that
-works inside jit, vmap and scan. Host-only: the setting and batch checks,
-the float64 host twins of the schedules, the System factory and the
-running-variance check used by saving, exporting and loading. The default
-settings are the donor's SMAX values (without its
-reward multiplier), not settings qualified for learning in MARL-BGs.
+action never depends on another lane's input. Networks trained before Red
+Zone, on historical actor input schema 1, play through a separate cached
+schema-1 hook that removes the Red Zone depth column and keeps the old
+spawn-side formula. Requires the optional training extra. The network, action
+rule, schedules and update are pure JAX that works inside jit, vmap and scan.
+Host-only: the setting and batch checks, the float64 host twins of the
+schedules, the System factory and the running-variance check used by saving,
+exporting and loading. The default settings are the donor's SMAX values
+(without its reward multiplier), not settings qualified for learning in
+MARL-BGs.
 """
 
 import functools
@@ -69,12 +72,18 @@ from marl_battlegrounds.baselines.actions import (
 )
 from marl_battlegrounds.baselines.inputs import (
     ACTOR_FEATURE_SIZE,
+    ACTOR_INPUT_SCHEMA_VERSION,
     SPAWN_FRAMES,
     encode_actor_inputs,
+    schema_1_actor_input,
     spawn_frame_flag,
     team_obstacle_partners,
 )
-from marl_battlegrounds.baselines.ppo import _input_scale, _spawn_frame
+from marl_battlegrounds.baselines.ppo import (
+    _actor_input_schema,
+    _input_scale,
+    _spawn_frame,
+)
 from marl_battlegrounds.baselines.qmix import (
     QMIX_TIE_RULE,
     TEAM_SLOTS,
@@ -450,7 +459,7 @@ class PQNInferenceVariables(NamedTuple):
         scale and bias leaves. These receive gradients.
     batch_stats : PyTree
         Raw Flax ``batch_stats`` subtree: running mean and variance of the
-        three BatchNorm layers (input 5164, two hidden 512). They move only in
+        three BatchNorm layers (input 5165, two hidden 512). They move only in
         training minibatches, never during action selection.
 
     Notes
@@ -537,7 +546,7 @@ class PQNBatch(NamedTuple):
     ----------
     actor_features : Array
         Float32 (C,D,5,F) encoded permitted actor inputs in the network frame.
-        F is ACTOR_FEATURE_SIZE (5164) for real inputs.
+        F is ACTOR_FEATURE_SIZE (5165) for real inputs.
     action_mask : Array
         Bool (C,D,5,198) categorical legality in the network frame.
     actions : Array
@@ -834,19 +843,24 @@ def _check_typed_key(key: Array) -> None:
         raise ValueError("PQN initialization requires a Threefry key")
 
 
-def _network_variables(key: Array, input_scale: float) -> PQNInferenceVariables:
+def _network_variables(
+    key: Array, input_scale: float, *, features: int = ACTOR_FEATURE_SIZE
+) -> PQNInferenceVariables:
     """Initialize the Q-network from one key with train=False.
 
     key is a typed Threefry key and input_scale the network's finite positive
-    feature multiplier (it changes no parameter shape or value). Zero inputs
-    shaped (rows=1, games=1, 5, ACTOR_FEATURE_SIZE) fix parameter shapes;
-    values depend only on the key and the module paths. Returns the
-    parameters and the initial statistics (mean 0, variance 1).
+    feature multiplier (it changes no parameter shape or value). features is
+    the input width, ACTOR_FEATURE_SIZE (5,165) by default; the donor
+    reference test passes the donor's 5,164 so its recorded initialization
+    stays comparable. Zero inputs shaped (rows=1, games=1, 5, features) fix
+    parameter shapes; values depend only on the key, the width and the module
+    paths. Returns the parameters and the initial statistics (mean 0,
+    variance 1).
     """
     variables = PQNNetwork(input_scale=input_scale).init(
         key,
         jnp.zeros((1, TEAM_SLOTS, PQN_HIDDEN_SIZE), jnp.float32),
-        jnp.zeros((1, 1, TEAM_SLOTS, ACTOR_FEATURE_SIZE), jnp.float32),
+        jnp.zeros((1, 1, TEAM_SLOTS, features), jnp.float32),
         jnp.zeros((1, 1), jnp.bool_),
         jnp.ones((1, 1), jnp.bool_),
         jnp.ones((1, 1, TEAM_SLOTS), jnp.bool_),
@@ -932,8 +946,8 @@ def initialize_pqn(
 
     Notes
     -----
-    Allocates 4,595,998 float32 parameters (18,383,992 bytes), 12,376 float32
-    statistics (49,504 bytes) and two moment trees (36,767,984 bytes) plus
+    Allocates 4,596,512 float32 parameters (18,386,048 bytes), 12,378 float32
+    statistics (49,512 bytes) and two moment trees (36,772,096 bytes) plus
     counters. Works under ``jax.eval_shape``.
     """
     _check_typed_key(key)
@@ -1093,6 +1107,65 @@ def _pqn_actor_apply(
     return apply
 
 
+@functools.lru_cache(maxsize=16)
+def _schema_1_pqn_actor_apply(
+    scale: float, spawn_frame: str
+) -> Callable[[PQNActorVariables, Array, SystemInput, Array], SystemOutput]:
+    """Cache a PQN-VDN hook for networks trained on actor input schema 1.
+
+    Parameters
+    ----------
+    scale : float
+        Already checked positive finite input scale.
+    spawn_frame : str
+        Already checked frame name, "world" or "left".
+
+    Returns
+    -------
+    Callable
+        An apply hook that turns each call's actor views into the historical
+        19-column view with schema_1_actor_input, then runs the unchanged
+        _apply_pqn_actor. The encoder uses the 5,164-feature schema-1 layout,
+        and the "left" frame uses the old spawn-side formula for both the
+        reflected view and the returned actions, so the actor plays exactly
+        as before Red Zone. Keyword defaults record scale and frame index as
+        in _pqn_actor_apply; the hook's own name and code give it a distinct
+        registration ID.
+
+    Notes
+    -----
+    Host-only construction; the hook captures no weights or live inputs.
+    Caching keeps one callable, and so one compiled program, per setting.
+    """
+    frame_index = SPAWN_FRAMES.index(spawn_frame)
+
+    def apply(
+        variables: PQNActorVariables,
+        memory: Array,
+        inputs: SystemInput,
+        keys: Array,
+        *,
+        input_scale: float = scale,
+        spawn_frame_index: int = frame_index,
+    ) -> SystemOutput:
+        """Apply a schema-1 PQN-VDN actor to its historical 19-column view.
+
+        Arguments, outputs and effects follow _apply_pqn_actor; only the
+        context depth column is removed first. Normal System execution
+        supplies only the first four arguments.
+        """
+        return _apply_pqn_actor(
+            variables,
+            memory,
+            inputs._replace(actors=schema_1_actor_input(inputs.actors)),
+            keys,
+            input_scale=input_scale,
+            spawn_frame_index=spawn_frame_index,
+        )
+
+    return apply
+
+
 def make_pqn_system(
     network: PQNInferenceVariables,
     *,
@@ -1101,6 +1174,7 @@ def make_pqn_system(
     spawn_frame: str = "left",
     name: str = "PQN-VDN",
     checkpoint: str | None = None,
+    actor_input_schema: int = ACTOR_INPUT_SCHEMA_VERSION,
 ) -> System:
     """Wrap PQN network variables as an M8 JAX System with epsilon-greedy actions.
 
@@ -1122,6 +1196,13 @@ def make_pqn_system(
         Nonempty display name; it proves nothing about training.
     checkpoint : str or None, default=None
         Optional identity label. No file is opened.
+    actor_input_schema : int, default=ACTOR_INPUT_SCHEMA_VERSION
+        Actor input schema the network was trained on: 2, the current
+        5,165-feature schema (the default), or 1 for networks trained before
+        Red Zone (5,164 features). Schema 1 picks the cached
+        _schema_1_pqn_actor_apply hook once here, so the actor sees and acts
+        exactly as before. The factory does not compare the network's width
+        with the schema.
 
     Returns
     -------
@@ -1134,7 +1215,8 @@ def make_pqn_system(
     Raises
     ------
     ValueError
-        epsilon, input_scale, spawn_frame or name is invalid.
+        epsilon, input_scale, spawn_frame, actor_input_schema or name is
+        invalid.
 
     Notes
     -----
@@ -1143,7 +1225,14 @@ def make_pqn_system(
     optimizer, window or opponent history.
     """
     rate = _unit_interval(epsilon, "epsilon")
-    apply = _pqn_actor_apply(_input_scale(input_scale), _spawn_frame(spawn_frame))
+    scale = _input_scale(input_scale)
+    frame = _spawn_frame(spawn_frame)
+    hook = (
+        _schema_1_pqn_actor_apply
+        if _actor_input_schema(actor_input_schema) == 1
+        else _pqn_actor_apply
+    )
+    apply = hook(scale, frame)
     return System(
         name,
         apply,

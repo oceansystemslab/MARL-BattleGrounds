@@ -2,7 +2,17 @@
  * @file Check browser authoring, saved revision selectors, persistence through
  * restart and exact-start comparisons. Both teams offer the BETA (scenario_5)
  * and GAMMA (tdm_gamma) controllers, disabled under NoSharedObs and enabled
- * under SharedObs.
+ * under SharedObs. The scenario inspector shows the host's
+ * Red Zone Depth with hover, focus and screen-reader help; a negative depth
+ * returns a problem that focuses that field; Duplicate keeps the depth; and a
+ * version 1 scenario fixture saved as version 1 opens as version 2 at depth 0.
+ * The Scenario Author canvas paints the host's Red Zone strips: two
+ * `.authoring-svg-red-zone` rects at world x 0 to 5 and 15 to 20 on the 20-wide
+ * scenario at depth 5 (0 to 6 and 14 to 20 at depth 6), full height, inside the
+ * map clip, after the floor and before the grid and every object, filled
+ * `rgba(127, 29, 29, 0.22)`. No tint shows while a check is pending (the
+ * validate request is held), after the host replies to depth 0 or to an invalid
+ * depth, or while a map draft is open; the scenario's tint returns with its reply.
  */
 import { mkdtemp, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -276,6 +286,37 @@ async function expectSpawnPadRadius(page) {
     .evaluateAll((circles) => circles.map((circle) => circle.getAttribute("r")));
   expect(radii.length).toBeGreaterThan(0);
   expect(new Set(radii)).toEqual(new Set(["0.5"]));
+}
+
+/** @param {import("@playwright/test").Page} page */
+async function authoringRedZoneTint(page) {
+  return page.locator("#authoring-canvas").evaluate((svg) => {
+    const tints = [...svg.querySelectorAll(".authoring-svg-red-zone")];
+    const floor = svg.querySelector(".authoring-svg-map");
+    const grid = svg.querySelector(".authoring-svg-grid");
+    const objects = [...svg.querySelectorAll(".authoring-svg-object")];
+    /** @param {Element | null} first @param {Element | null} second */
+    const precedes = (first, second) =>
+      first !== null &&
+      second !== null &&
+      (first.compareDocumentPosition(second) & Node.DOCUMENT_POSITION_FOLLOWING) !== 0;
+    return {
+      strips: tints.map((tint) => ({
+        x: Number(tint.getAttribute("x")),
+        width: Number(tint.getAttribute("width")),
+        y: Number(tint.getAttribute("y")),
+        height: Number(tint.getAttribute("height")),
+        clipPath: tint.getAttribute("clip-path"),
+        fill: getComputedStyle(tint).fill,
+      })),
+      afterFloor: tints.every((tint) => precedes(floor, tint)),
+      beforeGrid: tints.every((tint) => precedes(tint, grid)),
+      objectCount: objects.length,
+      beforeObjects: tints.every((tint) =>
+        objects.every((object) => precedes(tint, object)),
+      ),
+    };
+  });
 }
 
 test("saved asset selectors expose every naturally ordered identity beyond ten", async ({
@@ -788,6 +829,162 @@ test("authoring persists through restart and drives same-start Combat comparison
     await expect(page.getByText("Role", { exact: true })).toHaveCount(0);
     await expect(page.getByText("Controlled Study", { exact: true })).toHaveCount(0);
     await expect(page.getByText("Study Identities", { exact: true })).toHaveCount(0);
+
+    // The host sends version 2 drafts at its default depth; the browser only shows it.
+    expect(copiedScenario.draft.schema).toBe("dev-scenario-draft@2");
+    expect(copiedScenario.draft.content.task.red_zone_depth).toBe(5);
+    const redZoneDepthHelp =
+      "How far each team's Red Zone reaches in from its own spawn edge, in map units. " +
+      "When an agent dies inside its own team's Red Zone, the enemy team gets 2 points. " +
+      "0 turns the rule off.";
+    const redZoneDepth = page.getByLabel("Red Zone Depth", { exact: true });
+    await expect(redZoneDepth).toHaveValue("5");
+    await expect(redZoneDepth).toHaveAttribute("type", "number");
+    await expect(redZoneDepth).toHaveAttribute("min", "0");
+    await expect(redZoneDepth).toHaveAttribute(
+      "max",
+      String(copiedScenario.draft.content.embedded_map.width),
+    );
+    await expect(redZoneDepth).toHaveAttribute("step", "any");
+    const redZoneDepthDescribedBy = (
+      (await redZoneDepth.getAttribute("aria-describedby")) ?? ""
+    ).split(/\s+/u);
+    expect(redZoneDepthDescribedBy.slice(0, 2)).toEqual([
+      "authoring-inspector-help",
+      "authoring-red-zone-depth-help",
+    ]);
+    await expect(page.locator("#authoring-red-zone-depth-help")).toHaveText(
+      redZoneDepthHelp,
+    );
+    await expect(redZoneDepth).toHaveAccessibleDescription(
+      new RegExp(redZoneDepthHelp.replace(/[.*+?^${}()|[\]\\]/gu, "\\$&"), "u"),
+    );
+    const redZoneDepthField = page
+      .locator("#authoring-inspector-form label")
+      .filter({ has: redZoneDepth });
+    await redZoneDepthField.hover();
+    await expect(page.locator("#visual-tooltip")).toBeVisible();
+    await expect(page.locator("#visual-tooltip-title")).toHaveText("Red Zone Depth");
+    await expect(page.locator("#visual-tooltip-details")).toHaveText(redZoneDepthHelp);
+    await page.locator("#authoring-inspector-heading").hover();
+    await expect(page.locator("#visual-tooltip")).toBeHidden();
+    await redZoneDepth.focus();
+    await expect(page.locator("#visual-tooltip")).toBeVisible();
+    await expect(page.locator("#visual-tooltip-details")).toHaveText(redZoneDepthHelp);
+    await expect(redZoneDepth).toHaveAttribute("aria-describedby", /visual-tooltip/u);
+
+    // The canvas paints the host's Red Zone strips for this 20-wide draft at depth
+    // 5, in world units, after the floor and before the grid and every object.
+    const redZoneTint = canvas.locator(".authoring-svg-red-zone");
+    const mapHeight = copiedScenario.draft.content.embedded_map.height;
+    /** @param {readonly (readonly number[])[]} ranges */
+    const expectedStrips = (ranges) =>
+      ranges.map(([low, high]) => ({
+        x: low,
+        width: high - low,
+        y: 0,
+        height: mapHeight,
+        clipPath: "url(#authoring-map-clip)",
+        fill: "rgba(127, 29, 29, 0.22)",
+      }));
+    expect(copiedScenario.draft.content.embedded_map.width).toBe(20);
+    expect(copiedScenario.validation.red_zone).toEqual({
+      team_a_x_range: [0, 5],
+      team_b_x_range: [15, 20],
+    });
+    await expect(redZoneTint).toHaveCount(2);
+    const depthFiveTint = await authoringRedZoneTint(page);
+    expect(depthFiveTint.strips).toEqual(
+      expectedStrips([
+        [0, 5],
+        [15, 20],
+      ]),
+    );
+    expect(depthFiveTint.objectCount).toBeGreaterThan(0);
+    expect(depthFiveTint).toMatchObject({
+      afterFloor: true,
+      beforeGrid: true,
+      beforeObjects: true,
+    });
+
+    // Every edit clears the last host reply, so no tint shows while the next check
+    // is pending; the held check then brings the strips for the new depth.
+    /** @type {() => void} */
+    let releaseValidation = () => {};
+    const validationReleased = new Promise((resolve) => {
+      releaseValidation = () => resolve(undefined);
+    });
+    /** @type {() => void} */
+    let reportValidationHeld = () => {};
+    const validationHeld = new Promise((resolve) => {
+      reportValidationHeld = () => resolve(undefined);
+    });
+    /** @param {import("@playwright/test").Route} route */
+    const holdValidation = async (route) => {
+      if (route.request().postDataJSON()?.command_type === "validate") {
+        reportValidationHeld();
+        await validationReleased;
+      }
+      await route.continue();
+    };
+    await page.route("**/api/dev/authoring/command", holdValidation);
+    const widerDepth = await applyAuthoringCommand(page, "validate", async () => {
+      try {
+        await redZoneDepth.fill("6");
+        await redZoneDepth.press("Tab");
+        await validationHeld;
+        await expect(redZoneTint).toHaveCount(0);
+      } finally {
+        releaseValidation();
+      }
+    });
+    await page.unroute("**/api/dev/authoring/command", holdValidation);
+    expect(widerDepth.validation.red_zone).toEqual({
+      team_a_x_range: [0, 6],
+      team_b_x_range: [14, 20],
+    });
+    await expect(redZoneTint).toHaveCount(2);
+    expect((await authoringRedZoneTint(page)).strips).toEqual(
+      expectedStrips([
+        [0, 6],
+        [14, 20],
+      ]),
+    );
+
+    // Depth 0 turns the rule off: the host reply carries no strips.
+    const ruleOff = await editField(page, "Red Zone Depth", 0);
+    expect(ruleOff.validation.execution_valid).toBe(true);
+    expect(ruleOff.validation.red_zone).toBeNull();
+    await expectAuthoringIdle(page);
+    await expect(redZoneTint).toHaveCount(0);
+
+    const negativeDepth = await editField(page, "Red Zone Depth", -1);
+    expect(negativeDepth.validation.execution_valid).toBe(false);
+    expect(negativeDepth.validation.red_zone).toBeNull();
+    expect(negativeDepth.problems).toContainEqual(
+      expect.objectContaining({
+        stable_code: "scenario-red-zone-depth-negative",
+        field_path: "task.red_zone_depth",
+      }),
+    );
+    await expectAuthoringIdle(page);
+    await expect(redZoneTint).toHaveCount(0);
+    const depthProblem = page
+      .locator("#authoring-problem-list button")
+      .filter({ hasText: "scenario-red-zone-depth-negative" });
+    await expect(depthProblem).toHaveCount(1);
+    await depthProblem.click();
+    await expect(redZoneDepth).toBeFocused();
+    await expect(redZoneDepth).toHaveValue("-1");
+    const restoredDepth = await editField(page, "Red Zone Depth", 5);
+    expect(restoredDepth.validation.execution_valid).toBe(true);
+    await expect(redZoneTint).toHaveCount(2);
+    expect((await authoringRedZoneTint(page)).strips).toEqual(
+      expectedStrips([
+        [0, 5],
+        [15, 20],
+      ]),
+    );
     await editField(page, "Step count", 7);
     await editField(page, "Team A score", 1);
     const finalValidation = await editField(page, "Team B score", 2);
@@ -879,6 +1076,9 @@ test("authoring persists through restart and drives same-start Combat comparison
     expect(duplicatedScenario.draft.content.global_state).toEqual(
       updatedScenario.draft.content.global_state,
     );
+    expect(duplicatedScenario.draft.content.task.red_zone_depth).toBe(
+      updatedScenario.draft.content.task.red_zone_depth,
+    );
     await selectPersistedAsset(page, "#authoring-saved-draft-select", scenarioId);
     await expectNoPrompts(page, () =>
       applyAuthoringCommand(page, "open", () =>
@@ -923,11 +1123,15 @@ test("authoring persists through restart and drives same-start Combat comparison
     const scenarioValidationEvidence = await page
       .locator("#authoring-problem-list")
       .innerText();
+    await expect(redZoneTint).toHaveCount(2);
 
     await applyAuthoringCommand(page, "list", () =>
       page.getByRole("button", { name: "Maps", exact: true }).click(),
     );
     expect(await authoringViewBox(page)).toBe(contextualMapViewBox);
+    // A map draft has no match rule, so its canvas shows no tint.
+    await expectAuthoringIdle(page);
+    await expect(redZoneTint).toHaveCount(0);
     await expect(page.locator("#authoring-problem-list")).toHaveText(
       mapValidationEvidence,
     );
@@ -996,6 +1200,7 @@ test("authoring persists through restart and drives same-start Combat comparison
     await expect(page.locator("#authoring-problem-list")).toHaveText(
       scenarioValidationEvidence,
     );
+    await expect(redZoneTint).toHaveCount(2);
     await expect(
       page.getByRole("button", { name: "A1 · mage", exact: true }),
     ).toHaveAttribute("aria-current", "true");
@@ -1247,12 +1452,18 @@ test("authoring persists through restart and drives same-start Combat comparison
       },
     );
     expect(scenarioSave.status()).toBe(200);
-    expect((await scenarioSave.json()).ok).toBe(true);
+    const scenarioSavePayload = await scenarioSave.json();
+    expect(scenarioSavePayload.ok).toBe(true);
+    // Save As keeps the version 1 fixture as version 1; Open edits it as version 2 at 0.
+    expect(scenarioSavePayload.draft.schema).toBe("dev-scenario-draft@1");
     await page.getByRole("button", { name: "Scenarios", exact: true }).click();
     await selectPersistedAsset(page, "#authoring-saved-draft-select", "e2e_scenario_1");
-    await applyAuthoringCommand(page, "open", () =>
+    const openedFixture = await applyAuthoringCommand(page, "open", () =>
       page.locator("#authoring-open").click(),
     );
+    expect(openedFixture.draft.schema).toBe("dev-scenario-draft@2");
+    expect(openedFixture.draft.revision).toBe(1);
+    expect(openedFixture.draft.content.task.red_zone_depth).toBe(0);
     const currentScenarioLoad = await applyAuthoringCommand(page, "open_in_debug", () =>
       page.locator("#authoring-open-debug").click(),
     );

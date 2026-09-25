@@ -1,6 +1,14 @@
 """Check export provenance and file handling without compiling simulator data.
 
 Source changes after the CLI's initial checks must fail before compilation or writes.
+Scenario sources and approvals must be version-2 drafts, which declare a Red Zone
+depth; a version-1 source or approval is refused. Each scenario's approval is the
+approved source that its manifest record names, the same for every scenario: with
+none named, each scenario is approved at its own source. A named approval is
+recorded with its own path, revision and bytes, must share the source's asset ID
+and equal its source in everything except notes, and comes one per scenario. The
+CLI passes the manifest's approved sources, so an untouched export re-exports byte
+for byte.
 """
 
 from __future__ import annotations
@@ -15,10 +23,11 @@ from types import SimpleNamespace
 
 import numpy as np
 import pytest
+from pydantic import ValidationError
 from scripts.dev import export_tdm_assets as exporter
 from scripts.dev.visual_debugger.authoring_models import (
     DevMapDraftV1,
-    DevScenarioDraftV1,
+    DevScenarioDraftV2,
     new_map_draft,
     new_scenario_draft,
 )
@@ -32,8 +41,9 @@ from marl_battlegrounds._tdm_assets import (
 )
 from marl_battlegrounds.evaluation.models import (
     GlobalAnalysisSnapshotV1,
-    ResolvedEnvConfigV1,
+    ResolvedEnvConfigV2,
 )
+from marl_battlegrounds.tasks import DEFAULT_TDM_RED_ZONE_DEPTH
 
 
 def _json_bytes(payload: object) -> bytes:
@@ -51,6 +61,9 @@ class _State:
         return iter(self._values)
 
 
+_FIXTURES = Path(__file__).parent / "fixtures"
+
+
 @dataclass
 class _Inputs:
     records: tuple[TDMMapInfo, ...]
@@ -58,6 +71,7 @@ class _Inputs:
     geometry: MapGeometry
     package: Path
     calls: list[str]
+    approvals: tuple[Path, ...] | None = None
 
     def compile_map(self, draft: DevMapDraftV1) -> SimpleNamespace:
         self.calls.append(draft.asset_id)
@@ -73,7 +87,23 @@ class _Inputs:
             map_records=self.records,
             scenario_sources=self.scenarios,
             destination=destination,
+            approved_scenario_sources=self.approvals,
         )
+
+    def approve_separately(self, scenario_id: int, revision: int) -> Path:
+        # Approve one scenario at its own earlier revision file.
+        source = self.scenarios[scenario_id - 1]
+        draft = DevScenarioDraftV2.model_validate_json(source.read_bytes())
+        approval = source.with_name(f"r{revision}.json")
+        approval.write_bytes(
+            _json_bytes(
+                draft.model_copy(update={"revision": revision}).model_dump(mode="json")
+            )
+        )
+        approvals = list(self.scenarios if self.approvals is None else self.approvals)
+        approvals[scenario_id - 1] = approval
+        self.approvals = tuple(approvals)
+        return approval
 
 
 @pytest.fixture
@@ -128,21 +158,16 @@ def inputs(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> _Inputs:
         )
     sources: list[Path] = []
     for scenario_id in range(1, 9):
-        draft = new_scenario_draft(f"scenario_{scenario_id}").model_copy(
-            update={"revision": 25}
-        )
+        draft = new_scenario_draft(
+            f"scenario_{scenario_id}", red_zone_depth=DEFAULT_TDM_RED_ZONE_DEPTH
+        ).model_copy(update={"revision": 25})
         path = tmp_path / f"scenario_{scenario_id}" / "r25.json"
         path.parent.mkdir()
         path.write_bytes(_json_bytes(draft.model_dump(mode="json")))
-        if scenario_id == 3:
-            approval = draft.model_copy(update={"revision": 24})
-            path.with_name("r24.json").write_bytes(
-                _json_bytes(approval.model_dump(mode="json"))
-            )
         sources.append(path)
     data = _Inputs(tuple(records), tuple(sources), geometry, package, [])
 
-    def compile_scenario(draft: DevScenarioDraftV1) -> SimpleNamespace:
+    def compile_scenario(draft: DevScenarioDraftV2) -> SimpleNamespace:
         data.calls.append(draft.asset_id)
         return SimpleNamespace(
             content=draft.content,
@@ -160,10 +185,10 @@ def inputs(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> _Inputs:
     monkeypatch.setattr(exporter, "compile_dev_map", data.compile_map)
     monkeypatch.setattr(exporter, "compile_dev_scenario", compile_scenario)
 
-    def resolved_config(_: object) -> ResolvedEnvConfigV1:
+    def resolved_config(_: object) -> ResolvedEnvConfigV2:
         return content.configuration
 
-    monkeypatch.setattr(exporter, "build_resolved_env_config_v1", resolved_config)
+    monkeypatch.setattr(exporter, "build_resolved_env_config_v2", resolved_config)
     return data
 
 
@@ -222,7 +247,7 @@ def test_export_detects_mid_export_changes(
     path = {
         "map": Path(inputs.records[-1].source.source_path),
         "scenario": inputs.scenarios[-1],
-        "approval": inputs.scenarios[2].with_name("r24.json"),
+        "approval": inputs.approve_separately(6, 24),
         "history": inputs.package / "map_history.json",
         "aliases": inputs.package / "map_id_aliases.json",
     }[changed]
@@ -248,8 +273,10 @@ def test_repeated_exports_are_exact_and_keep_history_alias_bytes(
     assert first == second
     assert first.maps == inputs.records
     assert len(first.scenarios) == 8
-    assert first.scenarios[2].source.revision == 25
-    assert first.scenarios[2].approved_source.revision == 24
+    # With no approvals named, each scenario is approved at its own source.
+    for row in first.scenarios:
+        assert row.source.revision == 25
+        assert row.approved_source == row.source
     first_files = {
         path.relative_to(first_dir): path.read_bytes()
         for path in first_dir.rglob("*.json")
@@ -268,7 +295,11 @@ def test_repeated_exports_are_exact_and_keep_history_alias_bytes(
 def test_cli_exports_to_a_fresh_directory_from_the_installed_manifest(
     inputs: _Inputs, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    manifest = inputs.export(tmp_path / "seed")
+    # A separate approval is reproduced only if the CLI passes the manifest's own.
+    inputs.approve_separately(3, 24)
+    seed = tmp_path / "seed"
+    manifest = inputs.export(seed)
+    assert manifest.scenarios[2].approved_source.revision == 24
     destination = tmp_path / "fresh"
     monkeypatch.setattr(exporter, "asset_manifest", lambda: manifest)
     monkeypatch.setattr(
@@ -281,6 +312,15 @@ def test_cli_exports_to_a_fresh_directory_from_the_installed_manifest(
         )
         == manifest
     )
+    seed_files = {
+        path.relative_to(seed): path.read_bytes() for path in seed.rglob("*.json")
+    }
+    fresh_files = {
+        path.relative_to(destination): path.read_bytes()
+        for path in destination.rglob("*.json")
+    }
+    assert len(seed_files) == 63
+    assert fresh_files == seed_files
 
 
 @pytest.mark.parametrize("changed", ("scenario", "approval"))
@@ -290,13 +330,10 @@ def test_cli_rejects_source_changes_between_preflight_and_snapshot(
     monkeypatch: pytest.MonkeyPatch,
     changed: str,
 ) -> None:
+    approval = inputs.approve_separately(3, 24)
     manifest = inputs.export(tmp_path / "seed")
     inputs.calls.clear()
-    source = (
-        inputs.scenarios[-1]
-        if changed == "scenario"
-        else inputs.scenarios[2].with_name("r24.json")
-    )
+    source = inputs.scenarios[-1] if changed == "scenario" else approval
     original = source.read_bytes()
     destination = tmp_path / "fresh"
     export = exporter.export_tdm_assets
@@ -307,6 +344,7 @@ def test_cli_rejects_source_changes_between_preflight_and_snapshot(
         scenario_sources: tuple[Path, ...],
         destination: Path,
         expected_scenario_source_sha256: Mapping[Path, str] | None = None,
+        approved_scenario_sources: tuple[Path, ...] | None = None,
     ) -> TDMAssetManifest:
         source.write_bytes(original + b"\n")
         return export(
@@ -314,6 +352,7 @@ def test_cli_rejects_source_changes_between_preflight_and_snapshot(
             scenario_sources=scenario_sources,
             destination=destination,
             expected_scenario_source_sha256=expected_scenario_source_sha256,
+            approved_scenario_sources=approved_scenario_sources,
         )
 
     monkeypatch.setattr(exporter, "asset_manifest", lambda: manifest)
@@ -326,3 +365,90 @@ def test_cli_rejects_source_changes_between_preflight_and_snapshot(
     assert inputs.calls == []
     assert not destination.exists()
     assert source.read_bytes() == original + b"\n"
+
+
+def test_each_scenario_is_approved_by_the_source_its_manifest_names(
+    inputs: _Inputs, tmp_path: Path
+) -> None:
+    approval = inputs.approve_separately(6, 24)
+    manifest = inputs.export(tmp_path / "output")
+    for scenario_id, row in enumerate(manifest.scenarios, start=1):
+        if scenario_id != 6:
+            assert row.approved_source == row.source
+            continue
+        raw = approval.read_bytes()
+        assert row.source.revision == 25
+        assert row.approved_source == row.source.model_copy(
+            update={
+                "revision": 24,
+                "source_path": approval.as_posix(),
+                "source_sha256": hashlib.sha256(raw).hexdigest(),
+            }
+        )
+
+
+@pytest.mark.parametrize("fault", ("asset_id", "count", "physics"))
+def test_mismatched_approvals_are_refused(
+    inputs: _Inputs, tmp_path: Path, fault: str
+) -> None:
+    destination = tmp_path / "output"
+    if fault == "physics":
+        approval = inputs.approve_separately(6, 24)
+        draft = DevScenarioDraftV2.model_validate_json(approval.read_bytes())
+        notes_only = draft.content.model_copy(update={"notes": "Approved setup."})
+        approval.write_bytes(
+            _json_bytes(
+                draft.model_copy(update={"content": notes_only}).model_dump(mode="json")
+            )
+        )
+        inputs.export(tmp_path / "notes_only")
+        task = draft.content.task.model_copy(update={"score_threshold": 7})
+        changed = draft.content.model_copy(update={"task": task})
+        approval.write_bytes(
+            _json_bytes(
+                draft.model_copy(update={"content": changed}).model_dump(mode="json")
+            )
+        )
+        with pytest.raises(
+            ValueError, match="scenario 6 source must keep its approved"
+        ):
+            inputs.export(destination)
+        assert not (destination / "manifest.json").exists()
+        return
+    if fault == "count":
+        inputs.approvals = inputs.scenarios[:7]
+        with pytest.raises(ValueError, match="exactly one approved source"):
+            inputs.export(destination)
+        assert not destination.exists()
+        assert inputs.calls == []
+        return
+    # Scenario 6 named as approved by scenario 5's draft.
+    inputs.approvals = (
+        *inputs.scenarios[:5],
+        inputs.scenarios[4],
+        *inputs.scenarios[6:],
+    )
+    with pytest.raises(ValueError, match="scenario approval disagrees with source 6"):
+        inputs.export(destination)
+    assert not (destination / "manifest.json").exists()
+
+
+@pytest.mark.parametrize("role", ("source", "approval"))
+def test_version_1_scenario_drafts_are_refused(
+    inputs: _Inputs, tmp_path: Path, role: str
+) -> None:
+    # The committed Scenario 1 r34 fixture is a version-1 draft with no depth.
+    old = (_FIXTURES / "scenario_1_r34.json").read_bytes()
+    assert json.loads(old)["schema"] == "dev-scenario-draft@1"
+    path = inputs.scenarios[0]
+    if role == "source":
+        path.write_bytes(old)
+    else:
+        path = inputs.approve_separately(1, 24)
+        path.write_bytes(old)
+    destination = tmp_path / "output"
+    with pytest.raises(ValidationError, match="dev-scenario-draft@2"):
+        inputs.export(destination)
+    assert not (destination / "manifest.json").exists()
+    assert not (destination / "scenarios").exists()
+    assert ("scenario_1" in inputs.calls) == (role == "approval")

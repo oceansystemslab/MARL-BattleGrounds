@@ -2,6 +2,9 @@
 
 Old recordings retain their declared names and layouts. New evaluations require
 the current catalog; unknown sources never gain an ID from matching geometry.
+New recording contexts are context V4 with the NoSharedObs V4 projection; the
+old-map records here are resolved config V1 at Red Zone depth 0.0, as recorded
+before the rule.
 """
 
 import json
@@ -14,13 +17,13 @@ import pytest
 from marl_battlegrounds import _tdm_assets
 from marl_battlegrounds.evaluation import revision
 from marl_battlegrounds.evaluation.actor_projection import (
-    NO_SHARED_OBS_ACTOR_PROJECTION_V3,
+    NO_SHARED_OBS_ACTOR_PROJECTION_V4,
 )
 from marl_battlegrounds.evaluation.models import (
     AggregationKeyV1,
     AssignedPolicySlotV2,
     CodeRevisionV2,
-    EvaluationEpisodeContextV3,
+    EvaluationEpisodeContextV4,
 )
 from marl_battlegrounds.evaluation.recording_context import build_recording_context
 from marl_battlegrounds.evaluation.runtime_provenance import capture_runtime_provenance
@@ -43,7 +46,10 @@ def test_recorded_map_names_splits_geometry_and_safe_filenames(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     from marl_battlegrounds.evaluation import map_identity
-    from marl_battlegrounds.evaluation.catalog import build_resolved_env_config_v1
+    from marl_battlegrounds.evaluation.catalog import (
+        build_resolved_env_config_v1,
+        build_resolved_env_config_v2,
+    )
     from marl_battlegrounds.evaluation.map_identity import approved_map_id, recorded_map
     from marl_battlegrounds.evaluation.replay_io import generated_replay_filename
     from marl_battlegrounds.tasks import list_tdm_maps
@@ -52,7 +58,9 @@ def test_recorded_map_names_splits_geometry_and_safe_filenames(
         map_id=map_id, team_a_roster=("priest",), team_b_roster=("mage", "mage")
     )
     old_geometry = _tdm_assets.map_history()[map_id].geometry
+    # Old-map recordings predate Red Zone: their V1 records have depth 0.0.
     old_config = config._replace(
+        team_deathmatch_red_zone_depth=0.0,
         map_width=old_geometry.map_width,
         map_height=old_geometry.map_height,
         obstacles=jnp.asarray(old_geometry.obstacles, dtype=jnp.float32),
@@ -186,7 +194,7 @@ def test_recorded_map_names_splits_geometry_and_safe_filenames(
     # An explicitly declared map cannot be attached to another map's geometry.
     wrong = context.model_copy(
         update={
-            "resolved_env_config": build_resolved_env_config_v1(
+            "resolved_env_config": build_resolved_env_config_v2(
                 make_standard_team_deathmatch_config(
                     map_id=13, team_a_roster=("mage",), team_b_roster=("priest",)
                 )
@@ -462,7 +470,7 @@ def test_custom_trainer_unknown_history_and_seeds_stay_absent(mode: str) -> None
     assert context.seed_protocol.focal_policy_seed is None
     assert context.execution_information_mode == mode
     if mode == "no_shared_obs":
-        assert context.actor_projection == NO_SHARED_OBS_ACTOR_PROJECTION_V3
+        assert context.actor_projection == NO_SHARED_OBS_ACTOR_PROJECTION_V4
     learner = context.policy_assignments[0]
     assert isinstance(learner, AssignedPolicySlotV2)
     assert learner.lifecycle == "evolving"
@@ -636,7 +644,7 @@ def _source_context(
     map_id: int | None = 0,
     metadata: object = None,
     change: str | None = None,
-) -> EvaluationEpisodeContextV3:
+) -> EvaluationEpisodeContextV4:
     from typing import cast
 
     from marl_battlegrounds.core.types import EnvConfig
@@ -828,6 +836,8 @@ def test_replay_valid_requested_choice_does_not_validate_unused_source_banks() -
     )._replace(
         task_mode=0,
         team_deathmatch_score_threshold=0,
+        # Neutral mode has no Red Zone; the TDM factory default is 5.0.
+        team_deathmatch_red_zone_depth=0.0,
         agent_profile=resolve_agent_profile(
             jnp.array([5] + [0] * 9, jnp.int32), jnp.array([1, 0], jnp.int32)
         ),

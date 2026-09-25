@@ -1,6 +1,15 @@
-"""Check scoring, rewards and episode endings through public TDM trajectories."""
+"""Check scoring, rewards and episode endings through public TDM trajectories.
 
-from collections.abc import Iterable
+The helpers build a 12 x 12 Team Deathmatch map with Hunters, Team A's pads at
+x = 2 and Team B's at x = 10, Team A authored at x = 4 and Team B at x = 7, and
+a Stay action with no Ultimates. Keywords change one class per slot, swap the
+two pad banks, move chosen agents and submit chosen moves and Ultimates;
+other test files, such as test_team_deathmatch_red_zone.py, import them. The
+tests here keep the Red Zone depth 0.0, so every new death gives the other
+team 1 point.
+"""
+
+from collections.abc import Iterable, Mapping
 from typing import cast
 
 import jax
@@ -58,12 +67,19 @@ def _task_config(
     score_threshold: int = 5,
     max_steps: int = 20,
     respawn_periods: tuple[int, int] = (5, 5),
+    red_zone_depth: float = 0.0,
+    class_rows: Iterable[tuple[int, int]] = (),
+    swap_banks: bool = False,
 ) -> EnvConfig:
+    # class_rows: (global slot, class ID) pairs that replace a configured
+    # Hunter. swap_banks puts Team A's pads at x = 10 and Team B's at x = 2.
     class_ids = jnp.full((MAX_AGENT_SLOTS,), CLASS_NEUTRAL, dtype=jnp.int32)
     class_ids = class_ids.at[: team_sizes[0]].set(HUNTER_CLASS_ID)
     class_ids = class_ids.at[
         MAX_AGENTS_PER_TEAM : MAX_AGENTS_PER_TEAM + team_sizes[1]
     ].set(HUNTER_CLASS_ID)
+    for slot, class_id in class_rows:
+        class_ids = class_ids.at[slot].set(class_id)
     profile = resolve_agent_profile(
         class_ids,
         jnp.asarray(team_sizes, dtype=jnp.int32),
@@ -78,19 +94,23 @@ def _task_config(
         spawn_positions = spawn_positions.at[MAX_AGENTS_PER_TEAM + local_slot].set(
             (10.0, y_position)
         )
+    team_spawn_pad_positions = spawn_positions.reshape(
+        (2, MAX_AGENTS_PER_TEAM, ENVIRONMENT_DIMENSIONS)
+    )
+    if swap_banks:
+        team_spawn_pad_positions = team_spawn_pad_positions[::-1]
 
     return EnvConfig(
         task_mode=task_mode,
         team_deathmatch_score_threshold=score_threshold,
+        team_deathmatch_red_zone_depth=red_zone_depth,
         max_steps=max_steps,
         map_width=12.0,
         map_height=12.0,
         obstacles=jnp.zeros((MAX_OBSTACLE_SLOTS, OBSTACLE_FEATURES), dtype=jnp.float32),
         agent_profile=profile,
         ordinary_movement_distance_scale=1.0,
-        team_spawn_pad_positions=spawn_positions.reshape(
-            (2, MAX_AGENTS_PER_TEAM, ENVIRONMENT_DIMENSIONS)
-        ),
+        team_spawn_pad_positions=team_spawn_pad_positions,
         spawn_shield_duration_steps=0,
         spawn_shield_movement_speed=2.0,
         team_respawn_wave_period_step_count=jnp.asarray(
@@ -118,16 +138,23 @@ def _scenario(
     low_health_slots: Iterable[int] = (),
     dead_slots: Iterable[int] = (),
     due_respawn_teams: Iterable[int] = (),
+    positions: Mapping[int, tuple[float, float]] | None = None,
 ) -> tuple[EnvState, Observation, ActionMask, Info]:
+    # positions: global slot -> (x, y) centres that replace the default places.
     state, _, _, _ = reset(config, jax.random.key(0))
     team_sizes = (
         int(jnp.sum(config.agent_profile.active_mask[:MAX_AGENTS_PER_TEAM])),
         int(jnp.sum(config.agent_profile.active_mask[MAX_AGENTS_PER_TEAM:])),
     )
+    agent_positions = _combat_positions(team_sizes)
+    for slot, position in (positions or {}).items():
+        agent_positions = agent_positions.at[slot].set(
+            jnp.asarray(position, dtype=jnp.float32)
+        )
     state = state._replace(
         team_deathmatch_scores=jnp.asarray(scores, dtype=jnp.int32),
         step_count=jnp.asarray(step_count, dtype=jnp.int32),
-        agent_positions=_combat_positions(team_sizes),
+        agent_positions=agent_positions,
     )
     for slot in low_health_slots:
         state = state._replace(current_health=state.current_health.at[slot].set(1.0))
@@ -145,14 +172,27 @@ def _scenario(
     return initialize_scenario_state(state, config)
 
 
-def _joint_action(*target_rows: tuple[int, int]) -> Action:
+def _joint_action(
+    *target_rows: tuple[int, int],
+    moves: Iterable[tuple[int, int]] = (),
+    ultimates: Iterable[int] = (),
+) -> Action:
+    # target_rows and moves: (global slot, action) pairs; ultimates: the slots
+    # that use their Ultimate. Every other slot stays, targets nothing and
+    # does not use its Ultimate.
     target_actions = jnp.full((MAX_AGENT_SLOTS,), _TARGET_NONE, dtype=jnp.int32)
     for actor_slot, target_action in target_rows:
         target_actions = target_actions.at[actor_slot].set(target_action)
+    move_actions = jnp.full((MAX_AGENT_SLOTS,), MOVE_STAY, dtype=jnp.int32)
+    for actor_slot, move_action in moves:
+        move_actions = move_actions.at[actor_slot].set(move_action)
+    ultimate_actions = jnp.zeros((MAX_AGENT_SLOTS,), dtype=jnp.int32)
+    for actor_slot in ultimates:
+        ultimate_actions = ultimate_actions.at[actor_slot].set(1)
     return Action(
-        move=jnp.full((MAX_AGENT_SLOTS,), MOVE_STAY, dtype=jnp.int32),
+        move=move_actions,
         select_target=target_actions,
-        use_ultimate=jnp.zeros((MAX_AGENT_SLOTS,), dtype=jnp.int32),
+        use_ultimate=ultimate_actions,
     )
 
 

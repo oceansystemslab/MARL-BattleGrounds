@@ -2,7 +2,11 @@
 
 Preparation reads installed TDM resources and their scientific authorities once
 at host setup. The frozen binding records the finite built-in content closure;
-it admits no external datasets, replays, feedback or seed schedules.
+it admits no external datasets, replays, feedback or seed schedules. New
+bindings are version 3: they record the declared winning scores and the Team
+Deathmatch Red Zone depth every source configuration uses. Version 1 and 2
+bindings (saved before Red Zone scoring) stay readable as records, but
+prepare_training_content refuses to rebuild or resume them.
 pinned_opponent_evidence records what is known about a pinned training
 opponent's own training content and controller exposure; it never refuses a
 method, and it cannot certify a researcher's undeclared outside influences. The returned
@@ -16,6 +20,7 @@ import ast
 from collections.abc import Mapping
 from dataclasses import dataclass
 from importlib.resources import files
+from math import isfinite
 from pathlib import Path
 from typing import Annotated, Literal, Self, cast
 
@@ -36,15 +41,17 @@ from marl_battlegrounds._tdm_assets import (
     asset_manifest,
     scenario_content,
 )
+from marl_battlegrounds.core.config import maximum_team_deathmatch_score_threshold
 from marl_battlegrounds.core.types import EnvConfig
 from marl_battlegrounds.evaluation.catalog import (
-    build_resolved_env_config_v1,
+    build_resolved_env_config_v2,
     build_static_mechanics_catalog_v1,
 )
 from marl_battlegrounds.evaluation.models import (
-    REQUIRED_SCHEMA_BINDINGS_V3,
+    REQUIRED_SCHEMA_BINDINGS_V4,
     ContentAddressedIdentityV1,
     EvaluationModel,
+    _validate_recorded_red_zone_depth,  # pyright: ignore[reportPrivateUsage]
     canonical_digest_sha256,
     canonical_json_bytes,
 )
@@ -57,6 +64,7 @@ from marl_battlegrounds.evaluation.tdm_scenarios import (
     build_tdm_qualification_seed_schedule,
 )
 from marl_battlegrounds.tasks import (
+    DEFAULT_TDM_RED_ZONE_DEPTH,
     _load_tdm_scenario,  # pyright: ignore[reportPrivateUsage]
     balanced_spawn_configs,
     canonical_tournament_rosters,
@@ -65,6 +73,16 @@ from marl_battlegrounds.tasks import (
 
 type _Digest = Annotated[str, StringConstraints(pattern=r"^[0-9a-f]{64}$")]
 _SHARED_NAMES = ("static-mechanics", "evaluation-schemas", "simulator-rules")
+# The largest finite float32 value. Used as a width that never binds, because a
+# binding records no map widths (Core checks each map's width instead).
+_FLOAT32_MAX = float(np.finfo(np.float32).max)
+# prepare_training_content's refusal for bindings saved before Red Zone scoring.
+_SAVED_BEFORE_RED_ZONE = (
+    "This training content was saved before Red Zone scoring (content binding "
+    "version {version}, one point per kill). This version cannot rebuild it. "
+    "Resuming that experiment needs the original source environment that "
+    "created it."
+)
 
 
 class _MapContent(EvaluationModel):
@@ -72,7 +90,9 @@ class _MapContent(EvaluationModel):
 
     info retains the catalog's resource hash and unverified authored-file
     provenance. layout hashes resolved float32 geometry only. configuration
-    hashes the full canonical 5v5 configuration. Neither identity grants a use;
+    hashes the full canonical 5v5 configuration: a resolved-env-config version 1
+    record in binding versions 1 and 2, and a version 2 record, which includes
+    the Red Zone depth, in binding version 3. Neither identity grants a use;
     the parent binding checks the ordered split independently of display labels.
     """
 
@@ -107,10 +127,18 @@ class TrainingContentBinding(EvaluationModel):
     ----------
     schema_id, schema_version, eligibility_version
         Version 1 keeps the original 42 K20 sources. Version 2 adds the ordered
-        score_thresholds declaration; the content use rules remain version 1.
+        score_thresholds declaration. Both were saved before Red Zone scoring
+        (one point per kill), record resolved-env-config version 1 map
+        identities and hash REQUIRED_SCHEMA_BINDINGS_V3; their saved bytes stay
+        valid, but prepare_training_content no longer builds or resumes them.
+        Version 3, the only version built today, requires score_thresholds and
+        red_zone_depth, records resolved-env-config version 2 map identities
+        and hashes REQUIRED_SCHEMA_BINDINGS_V4. The content use rules
+        (eligibility_version) remain version 1 throughout.
     maps
         Ordered 52 verified map records. IDs 0-41 are training, 42-46 validation,
         and 47-51 test. Scientific layouts are distinct across all map roots.
+        Every map configuration identity uses the binding's Red Zone depth.
     protected_scenarios
         Ordered eight protected starts, controllers and recording-check
         specifications. Their layouts cannot occur in training or validation.
@@ -120,6 +148,7 @@ class TrainingContentBinding(EvaluationModel):
     source_bank
         Full 256-bit identity of the ordered configuration bank. Each threshold
         contributes 42 rows in map order; threshold blocks keep declared order.
+        Every row carries the binding's Red Zone depth.
     source_configurations
         Ordered source configuration identities under the recording bank format.
     canonical_digest
@@ -128,6 +157,16 @@ class TrainingContentBinding(EvaluationModel):
     score_thresholds
         Distinct positive integer winning scores, default (20,). Version 1
         omits this field when saved, preserving its historical bytes and hash.
+        Version 2 requires scores other than (20,). Version 3 must state the
+        field, (20,) included.
+    red_zone_depth
+        Team Deathmatch Red Zone depth in map units that every source and map
+        configuration uses. 0.0 keeps one point per kill; the default for new
+        content is DEFAULT_TDM_RED_ZONE_DEPTH (5.0). Required in version 3,
+        where it must be a finite float with a positive sign (-0.0 is
+        refused) and, when positive, a normal float32 value (Core's scalar
+        rules; Core checks the map width while the bank is built). None in
+        versions 1 and 2, which reject the field and omit it when saved.
 
     Notes
     -----
@@ -142,7 +181,7 @@ class TrainingContentBinding(EvaluationModel):
     schema_id: Literal["marl_battlegrounds.training_content"] = (
         "marl_battlegrounds.training_content"
     )
-    schema_version: Literal[1, 2] = 1
+    schema_version: Literal[1, 2, 3] = 1
     eligibility_version: Literal[1] = 1
     maps: tuple[_MapContent, ...]
     protected_scenarios: tuple[_ProtectedScenario, ...]
@@ -151,11 +190,18 @@ class TrainingContentBinding(EvaluationModel):
     source_configurations: tuple[_Digest, ...]
     canonical_digest: _Digest
     score_thresholds: tuple[int, ...] = (20,)
+    red_zone_depth: float | None = None
 
     @model_serializer(mode="wrap")
     def _serialize(self, handler: SerializerFunctionWrapHandler) -> dict[str, object]:
-        """Keep version-1 serialization unchanged, including its original digest."""
+        """Keep version-1 and version-2 serialization unchanged, with their digests.
+
+        Version 1 drops score_thresholds and red_zone_depth; version 2 drops
+        red_zone_depth; version 3 writes both.
+        """
         result = handler(self)
+        if self.schema_version < 3:
+            result.pop("red_zone_depth", None)
         if self.schema_version == 1:
             result.pop("score_thresholds", None)
         return result
@@ -165,9 +211,30 @@ class TrainingContentBinding(EvaluationModel):
         """Reject incomplete closure, forbidden overlap or a false record digest.
 
         Validation reads no files. Fresh preparation separately verifies current
-        resources. Return this frozen record; raise ValueError on disagreement.
+        resources. Version 3 must state score_thresholds and red_zone_depth, and
+        the depth must pass Core's scalar rules; versions 1 and 2 must not carry
+        a depth. Return this frozen record; raise ValueError on disagreement.
         """
-        _validate_score_thresholds(self.score_thresholds)
+        if self.schema_version == 3:
+            if (
+                "score_thresholds" not in self.model_fields_set
+                or self.red_zone_depth is None
+            ):
+                raise ValueError(
+                    "Version-3 training content requires score_thresholds and "
+                    "red_zone_depth"
+                )
+            _validate_red_zone_depth(self.red_zone_depth)
+        elif (
+            "red_zone_depth" in self.model_fields_set or self.red_zone_depth is not None
+        ):
+            raise ValueError(
+                "Version-1 and version-2 training content was saved before Red "
+                "Zone scoring and has no red_zone_depth"
+            )
+        _validate_score_thresholds(
+            self.score_thresholds, red_zone_depth=self.red_zone_depth
+        )
         if self.schema_version == 1 and self.score_thresholds != (20,):
             raise ValueError("Version-1 training content requires K20")
         if self.schema_version == 2 and self.score_thresholds == (20,):
@@ -180,6 +247,7 @@ class TrainingContentBinding(EvaluationModel):
             raise ValueError(
                 "training content requires protected scenarios 1 through 8"
             )
+        configuration_version = 2 if self.schema_version == 3 else 1
         for row in self.maps:
             expected = (
                 "training"
@@ -197,7 +265,7 @@ class TrainingContentBinding(EvaluationModel):
                 raise ValueError("unsupported resolved layout identity")
             if (
                 row.configuration.identifier != "resolved-env-config"
-                or row.configuration.version != 1
+                or row.configuration.version != configuration_version
             ):
                 raise ValueError("unsupported resolved configuration identity")
         layouts = tuple(row.layout.canonical_digest for row in self.maps)
@@ -269,8 +337,10 @@ class TrainingContentBinding(EvaluationModel):
         """Return the path-independent comparison used for training resume.
 
         Preserve resolved content, use roles, source order, controller rules,
-        seed membership and specification endpoints. Exclude display wording,
-        authored paths/revisions and raw-resource packaging. No files are read.
+        seed membership and specification endpoints. Versions 2 and 3 add
+        score_thresholds; version 3 also adds red_zone_depth, so a resume at
+        another depth is incompatible. Exclude display wording, authored
+        paths/revisions and raw-resource packaging. No files are read.
         """
         protected: list[dict[str, object]] = []
         for row in self.protected_scenarios:
@@ -308,8 +378,10 @@ class TrainingContentBinding(EvaluationModel):
             "source_bank": self.source_bank,
             "source_configurations": self.source_configurations,
         }
-        if self.schema_version == 2:
+        if self.schema_version >= 2:
             result["score_thresholds"] = self.score_thresholds
+        if self.schema_version == 3:
+            result["red_zone_depth"] = self.red_zone_depth
         return result
 
 
@@ -320,14 +392,16 @@ class PreparedTrainingContent:
     Attributes
     ----------
     binding : TrainingContentBinding
-        Immutable version-1 or version-2 setup and resume evidence. Keep outside
-        JAX loops. Only the extended threshold declaration needs version 2.
+        Immutable version-3 setup and resume evidence, including the declared
+        winning scores and Red Zone depth. Keep outside JAX loops.
     source_configs : EnvConfig
         Canonical 5v5 source bank. Every array leaf starts with axis 42 times
         the threshold count. Each threshold block holds maps 0 through 41; row i
-        belongs to training map i % 42. Original spawn banks and other task
-        defaults remain intact. Both spawn arrangements passed host validation. Do not
-        mutate or donate the shared bank while samplers or recorders use it.
+        belongs to training map i % 42. team_deathmatch_red_zone_depth is the
+        binding's depth on every row (float32). Original spawn banks and other
+        task defaults remain intact. Both spawn arrangements passed host
+        validation. Do not mutate or donate the shared bank while samplers or
+        recorders use it.
     """
 
     binding: TrainingContentBinding
@@ -394,7 +468,10 @@ def _shared_definitions() -> tuple[ContentAddressedIdentityV1, ...]:
     Read six installed Core Python sources and remove documentation strings before
     hashing their syntax trees. Formatting, comments and docstrings do not change
     this executable identity. The mechanics catalog and schema versions retain
-    their existing owners. This finite read belongs only at setup.
+    their existing owners. The evaluation-schemas identity hashes
+    REQUIRED_SCHEMA_BINDINGS_V4, the bindings of version 3 content; version 1
+    and 2 bindings recorded REQUIRED_SCHEMA_BINDINGS_V3 and keep those saved
+    bytes, which are never rebuilt. This finite read belongs only at setup.
     """
     bodies: dict[str, str] = {}
     for name in ("types", "axis_mappings", "combat", "config", "geometry", "env"):
@@ -415,58 +492,161 @@ def _shared_definitions() -> tuple[ContentAddressedIdentityV1, ...]:
         bodies[name] = ast.dump(tree, include_attributes=False)
     return (
         _identity("static-mechanics", {"catalog": build_static_mechanics_catalog_v1()}),
-        _identity("evaluation-schemas", {"bindings": REQUIRED_SCHEMA_BINDINGS_V3}),
+        _identity("evaluation-schemas", {"bindings": REQUIRED_SCHEMA_BINDINGS_V4}),
         _identity("simulator-rules", bodies),
     )
 
 
-def _validate_score_thresholds(values: tuple[int, ...]) -> None:
+def _validate_red_zone_depth(depth: object) -> float:
+    """Check one Red Zone depth with Core's scalar rules, without a map width.
+
+    Parameters
+    ----------
+    depth : object
+        Red Zone depth in map units, declared for new content or read from a
+        version 3 binding. 0.0 keeps one point per kill.
+
+    Returns
+    -------
+    float
+        The same depth, unchanged.
+
+    Raises
+    ------
+    TypeError
+        depth is not exactly a Python float. bool, int and NumPy scalars are
+        refused, as Core refuses them.
+    ValueError
+        depth is not finite; has a negative sign (-0.0 included, so "off" has
+        one spelling); or, when positive, its float32 value is not finite or
+        is below the smallest normal float32 value.
+
+    Notes
+    -----
+    Host-only; reads no files. The sign and float32 rules come from the
+    recorded-config owner in evaluation.models. A binding records no map
+    widths, so the width limit is given as the largest float32 value and never
+    binds here; Core checks each map's width when preparation builds its
+    configuration.
+    """
+    if type(depth) is not float:
+        raise TypeError(
+            f"red_zone_depth must be a Python float, not {type(depth).__name__}"
+        )
+    if not isfinite(depth):
+        raise ValueError(f"red_zone_depth must be finite, not {depth}")
+    _validate_recorded_red_zone_depth(depth, task_mode=1, map_width=_FLOAT32_MAX)
+    return depth
+
+
+def _maximum_score_threshold(red_zone_depth: float | None) -> int:
+    """Return the largest winning score a training content binding may declare.
+
+    Parameters
+    ----------
+    red_zone_depth : float or None
+        The binding's checked Red Zone depth in map units, or None for a
+        version 1 or 2 binding saved before Red Zone scoring.
+
+    Returns
+    -------
+    int
+        Versions 1 and 2 (None) keep 2**24 - 4 (16,777,212), their original
+        one-point bound. Version 3 uses Core's
+        maximum_team_deathmatch_score_threshold for its depth: 16,777,212 at
+        depth 0.0 and 16,777,207 at a positive depth.
+
+    Notes
+    -----
+    The one place this module reads a score bound. Pure host arithmetic.
+    """
+    if red_zone_depth is None:
+        return 2**24 - 4
+    return maximum_team_deathmatch_score_threshold(red_zone_depth)
+
+
+def _validate_score_thresholds(
+    values: tuple[int, ...], *, red_zone_depth: float | None = None
+) -> None:
     """Require a nonempty tuple of distinct supported positive integer scores.
 
-    Reject bool and values outside Core's existing exact-float score range.
+    Parameters
+    ----------
+    values : tuple[int, ...]
+        Declared winning scores in source-bank order.
+    red_zone_depth : float or None, default=None
+        Checked Red Zone depth in map units that selects the upper bound
+        through _maximum_score_threshold. None means a binding saved before
+        Red Zone scoring.
+
+    Raises
+    ------
+    TypeError
+        values is not a nonempty tuple, or holds a bool or non-int value.
+    ValueError
+        A value repeats or falls outside [1, bound].
+
+    Notes
+    -----
     This host check changes no files and allocates no numerical arrays.
     """
     if not isinstance(cast(object, values), tuple) or not values:
         raise TypeError("score_thresholds must be a nonempty tuple")
     if any(type(value) is not int for value in values):
         raise TypeError("score_thresholds must contain Python integers, not bool")
+    bound = _maximum_score_threshold(red_zone_depth)
     if len(set(values)) != len(values) or any(
-        not 1 <= value <= 2**24 - 4 for value in values
+        not 1 <= value <= bound for value in values
     ):
-        raise ValueError("score_thresholds must be distinct scores in [1, 2**24 - 4]")
+        raise ValueError(f"score_thresholds must be distinct scores in [1, {bound}]")
 
 
 def prepare_training_content(
     *,
     expected: TrainingContentBinding | Mapping[str, object] | None = None,
     score_thresholds: tuple[int, ...] | None = None,
+    red_zone_depth: float | None = None,
 ) -> PreparedTrainingContent:
     """Verify built-in content and prepare canonical sources for declared scores.
 
     Parameters
     ----------
     expected : TrainingContentBinding | Mapping[str, object] | None
-        Saved version-1 or version-2 binding, or its JSON mapping. Defaults to
-        a fresh setup.
-        Revalidate its structure and digest, then compare scientific content with
-        the installed package. Historical locations and harmless labels may differ.
+        Saved version 3 binding, or its JSON mapping. Defaults to a fresh
+        setup. Revalidate its structure and digest, then compare scientific
+        content with the installed package. Historical locations and harmless
+        labels may differ. A version 1 or 2 binding (saved before Red Zone
+        scoring) is refused first, before any validation or file read.
     score_thresholds : tuple[int, ...] or None, default=None
         Distinct supported positive integer winning scores, in source-bank order.
         None uses expected.score_thresholds when resuming, otherwise (20,).
         Each score adds maps 0..41 as a complete block. Other rules stay unchanged.
-        K20-only output keeps the original version-1 binding and bank identity.
+    red_zone_depth : float or None, default=None
+        Team Deathmatch Red Zone depth in map units for every map and source
+        configuration. 0.0 keeps one point per kill. None uses
+        expected.red_zone_depth when resuming, otherwise
+        DEFAULT_TDM_RED_ZONE_DEPTH (5.0). A given value must be a Python float
+        that Core accepts on every installed map (finite, positive sign, a
+        normal float32 value when positive, at most the map width). A value
+        that differs from the saved depth makes a resume incompatible.
 
     Returns
     -------
     PreparedTrainingContent
-        Current immutable binding and shared EnvConfig bank with float32,
-        int32 and Boolean leaves. Source order is threshold, then map 0..41.
+        Current immutable version 3 binding and shared EnvConfig bank with
+        float32, int32 and Boolean leaves. Source order is threshold, then
+        map 0..41.
 
     Raises
     ------
+    TypeError
+        score_thresholds or red_zone_depth has the wrong Python type.
     ValueError
-        Content, split declarations, dependency evidence or a saved binding is
-        invalid, overlaps protected content or is scientifically incompatible.
+        expected is a version 1 or 2 binding (the message says it was saved
+        before Red Zone scoring and needs the original source environment);
+        or content, split declarations, dependency evidence, the declared
+        scores or depth, or a saved binding is invalid, overlaps protected
+        content or is scientifically incompatible.
     OSError
         A required installed resource or shared rule source cannot be read.
 
@@ -481,12 +661,27 @@ def prepare_training_content(
     """
     saved = None
     if expected is not None:
+        version = (
+            expected.schema_version
+            if isinstance(expected, TrainingContentBinding)
+            else expected.get("schema_version", 1)
+        )
+        # A record without a version validates as version 1, so it is refused too.
+        if type(version) is int and version in (1, 2):
+            raise ValueError(_SAVED_BEFORE_RED_ZONE.format(version=version))
         saved = TrainingContentBinding.model_validate_json(
             canonical_json_bytes(expected)
         )
     if score_thresholds is None:
         score_thresholds = saved.score_thresholds if saved is not None else (20,)
-    _validate_score_thresholds(score_thresholds)
+    if red_zone_depth is None:
+        red_zone_depth = (
+            saved.red_zone_depth
+            if saved is not None and saved.red_zone_depth is not None
+            else DEFAULT_TDM_RED_ZONE_DEPTH
+        )
+    depth = _validate_red_zone_depth(red_zone_depth)
+    _validate_score_thresholds(score_thresholds, red_zone_depth=depth)
     manifest = asset_manifest()
     team_a, team_b = canonical_tournament_rosters()
     maps: list[_MapContent] = []
@@ -496,6 +691,7 @@ def prepare_training_content(
             map_id=info.map_id,
             team_a_roster=team_a,
             team_b_roster=team_b,
+            red_zone_depth=depth,
         )
         # The task factory verifies resource bytes and resolves this exact layout.
         layout = _layout_identity(_config_geometry(config))
@@ -508,8 +704,8 @@ def prepare_training_content(
                 layout=layout,
                 configuration=ContentAddressedIdentityV1(
                     identifier="resolved-env-config",
-                    version=1,
-                    canonical_digest=build_resolved_env_config_v1(
+                    version=2,
+                    canonical_digest=build_resolved_env_config_v2(
                         config
                     ).canonical_digest_sha256,
                 ),
@@ -543,7 +739,7 @@ def prepare_training_content(
     bank_digest, references, _ = ordered_source_bank_identity(bank)
     payload: dict[str, object] = {
         "schema_id": "marl_battlegrounds.training_content",
-        "schema_version": 1 if score_thresholds == (20,) else 2,
+        "schema_version": 3,
         "eligibility_version": 1,
         "maps": tuple(maps),
         "protected_scenarios": tuple(scenarios),
@@ -554,9 +750,9 @@ def prepare_training_content(
             canonical_digest=bank_digest,
         ),
         "source_configurations": tuple(references),
+        "score_thresholds": score_thresholds,
+        "red_zone_depth": depth,
     }
-    if score_thresholds != (20,):
-        payload["score_thresholds"] = score_thresholds
     binding = TrainingContentBinding.model_validate(
         {
             **payload,
@@ -576,11 +772,13 @@ def _leakage_projection(binding: TrainingContentBinding) -> dict[str, object]:
     """Keep the part of a binding that decides protected-controller exposure.
 
     The protected scenario closure: each scenario's ID, root and layout.
-    Ordinary map revisions, threshold banks and controller rule descriptors are
-    left out, so a source run on older maps or another threshold bank still
-    links, while a run made under a different protected closure does not. The
-    source run's own binding was verified by this gate when it trained, which
-    already kept protected content out of its training. No files are read.
+    Ordinary map revisions, threshold banks, the Red Zone depth, the binding
+    version and controller rule descriptors are left out, so a source run on
+    older maps, another threshold bank or another depth still links, while a
+    run made under a different protected closure does not (for example one
+    trained before the installed scenarios were republished). The source run's
+    own binding was verified by this gate when it trained, which already kept
+    protected content out of its training. No files are read.
     """
     return {
         "protected": [
@@ -618,7 +816,11 @@ def _export_origin(
     -----
     Reads the export's description and its sibling learner description
     ``<run>/checkpoints/<checkpoint_id>/`` without payloads; each description's
-    own hash is verified. Writes nothing.
+    own hash is verified. Writes nothing. The learner's saved binding may be
+    any version (1, 2 or 3): it is only read as a record, never rebuilt. A
+    binding that no longer validates, or one saved under a different
+    protected closure (such as before the installed scenarios were
+    republished), gives ("declared", None) rather than an error.
     """
     from marl_battlegrounds.training import checkpoints
 

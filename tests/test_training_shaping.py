@@ -7,7 +7,9 @@ actor loop checks that optional learner feedback changes no actor input, action,
 task reward or simulator transition. These CPU cases do not claim learning gains
 or GPU speed; the composed collector owns proof that disabled work is omitted.
 Score-delta cases keep terminal kill feedback, net simultaneous deaths, ignore
-padding and use reset-local scores without changing native rewards.
+padding and use reset-local scores without changing native rewards. Feedback
+follows points, so a Red Zone death (two points) moves it by twice the
+coefficient, for or against the team.
 """
 
 from collections.abc import Callable
@@ -152,6 +154,20 @@ def test_score_delta_keeps_terminal_kills_and_nets_simultaneous_deaths(
     np.testing.assert_array_equal(
         team_score_delta_shaping(before, info._replace(completed=~info.completed)),
         actual,
+    )
+
+
+def test_score_delta_follows_points_so_a_red_zone_death_counts_twice(
+    config: EnvConfig,
+) -> None:
+    before = jnp.asarray(((3, 3), (3, 3), (3, 3)), jnp.int32)
+    # Row 0: an enemy dies in its own Red Zone (2 points, one kill).
+    # Row 1: the same, plus an ordinary own death on the same tick.
+    # Row 2: an own Red Zone death.
+    info = _info(config, ((5, 3), (5, 4), (3, 5)))
+    actual = team_score_delta_shaping(before, info, coefficient=0.1)
+    np.testing.assert_allclose(
+        actual, ((0.2, -0.2), (0.1, -0.1), (-0.2, 0.2)), rtol=0, atol=1e-7
     )
 
 

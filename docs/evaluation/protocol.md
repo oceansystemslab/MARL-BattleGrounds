@@ -177,6 +177,17 @@ eligible for training. Researchers may define other distributions over
 structurally valid episode configurations, subject to the experiment's
 declared content-separation rules.
 
+The Red Zone depth is part of those task mechanics
+([A44](../design/specification_amendments.md#a44-team-deathmatch-red-zone-scoring)).
+New training runs, fresh evaluation and new generic tournaments use 5.0 map
+units unless the caller sets `red_zone_depth`; `0.0` keeps one point per death.
+Results, runs and tournament snapshots saved before the rule keep depth 0.0
+and their original one-point meaning. Their recorded games stay readable and
+reusable, but new games need current configurations: a pre-rule snapshot
+cannot add a challenger's games, and a pre-rule evaluation pass cannot be
+resumed. Games under different depths score differently, so each comparison
+should state the depth its games used.
+
 The approved benchmark 1v1–5v5 roster rule uses equal team sizes. Each team
 draws its own class subset independently and uniformly, without duplicate
 classes. A 1v1 draw excludes Priest. Draws at 2v2–4v4 allow all five classes.
@@ -334,12 +345,15 @@ adapter.
 supersedes the earlier forward dual-regime benchmark plan. Official baseline
 training and evaluation, controlled scenarios, tournament and cross-play
 cells, ratings, leaderboards, and Paper 1 reports require the current relative
-input projection introduced by A37:
+input projection introduced by A37 and extended by A44 (the Red Zone depth in
+context column 19):
 
 ```text
 execution_information_mode = shared_obs
-actor_projection = base-observation-plus-authorized-sensor-source-bank@2
+actor_projection = base-observation-plus-authorized-sensor-source-bank@3
 ```
+
+Records made before the Red Zone rule carry projection @2 and keep that meaning.
 
 Every official replay frame must carry exactly the availability matrix derived
 from its frozen roster: a recipient/source entry is true if and only if both
@@ -817,14 +831,18 @@ one episode is enough for a stochastic method. Compare policies using the same
 fixed scenario seeds when possible.
 
 The approved TDM suite contains exactly eight scenarios. Scenarios 1, 2 and
-4–8 have five-transition horizons; approved Scenario 3 r24 alone has a
+4–8 have five-transition horizons; approved Scenario 3 alone has a
 ten-transition horizon for sustained body blocking, with the canonical
 five-transition respawn-wave period. Scenario/map design approval is complete
 under A36; remaining identity, transport and evidence checks do not reopen it.
 These horizons are properties of this suite, not a global scenario-schema limit.
-The packaged Scenario 3 r26 changes only the accepted r24 Notes; its physical
-state, map and configuration are identical. The package manifest retains both
-the approved source and distributed revision identities.
+Under A44 all eight scenarios were republished at Red Zone depth 5.0: S1 r42,
+S2 r20, S3 r27, S4 r15, S5 r16, S6 r17, S7 r30 and S8 r19. S1, S5 and S6 were
+moved sideways (−2.375, +3.5 and −1.625 map units) so that no player in their
+known solutions enters a Red Zone; every game fact of their witness lines is
+unchanged. Scenario 3 was re-approved at r27, whose physical state, map and
+configuration equal the accepted r24 apart from the depth. The package
+manifest retains both the approved source and distributed revision identities.
 
 `marl_battlegrounds.tasks` provides public map/scenario discovery and loading,
 `make_standard_team_deathmatch_config` for explicit approved maps and independently
@@ -849,8 +867,8 @@ replays describe their recorded map versions, not the revised layouts.
 
 `python -m scripts.dev.qualify_tdm_scenarios <new-directory>` exercises all
 eight packaged definitions at two fixed schedule coordinates through the shared
-`evaluate_episodes` executor, current scalar metrics, replay V3 and scenario
-record V4. One RunWriter run retains one full scalar CSV row per episode. Team A
+`evaluate_episodes` executor, current scalar metrics, replay V4 and scenario
+record V5. One RunWriter run retains one full scalar CSV row per episode. Team A
 uses ALPHA as a pipeline control; Team B uses the approved ALPHA/BETA pressure
 binding. Before capture, the context binds the actual built-in callable's
 versioned controller descriptor separately from its frozen variables digest,
@@ -1256,8 +1274,9 @@ Scenario and actor-POV companions use the same finite canonical JSON,
 descriptor-bound nonsymlink path walk, size/depth limits, and atomic no-clobber
 publication. A POV save must validate its completed replay reference. A
 historical V1/V2 scenario save or load validates both its replay and metric-report
-evidence joins. Historical V3 scenario records join replay V2 directly. Current
-V4 scenario records join replay V3. Neither family has a metric-report field. A structurally valid but foreign record is not accepted as
+evidence joins. Historical V3 scenario records join replay V2 directly, and
+historical V4 records join replay V3. Current V5 scenario records join replay
+V4. None of these has a metric-report field. A structurally valid but foreign record is not accepted as
 a local scenario result.
 
 Canonical V2 scenario loading and saving remain JAX-free and establish artifact
@@ -1269,8 +1288,9 @@ requires the canonical SharedObs mode and projection, and checks the exact
 configured-roster availability topology on every replay frame.
 Historical V3 readers preserve this separation:
 `validate_official_scenario_evaluation_record_v3` applies the same product,
-initial-state and all-frame SharedObs checks to replay V2. Current V4 scenario
-records join replay V3 and use the corresponding V4 official gate. No mutable draft, filename, or successful transport round trip can
+initial-state and all-frame SharedObs checks to replay V2. Historical V4
+scenario records join replay V3 and use the V4 official gate; current V5
+records join replay V4 and use the corresponding V5 official gate. No mutable draft, filename, or successful transport round trip can
 substitute for the explicit official gate.
 
 Rollout completion, evaluation-processing validity, and per-statistic endpoint
@@ -1356,9 +1376,12 @@ and activity masks distinguish hidden enemies from allies and unused padding.
 `self_ally_index` is a scalar own-team row number from 0 to 4; inactive actors
 receive zero. Shared networks normally condition on `self_features`.
 
-The current contract uses base observation/frame V2, episode context V3,
-SharedObs projection V2, NoSharedObs projection V3 and replay V3. Historical
-records keep their original team-number feature and projection meaning. A run
+The current contract uses base observation V3/frame V3 (20 context columns;
+column 19 is the Red Zone depth), episode context V4 with resolved config V2,
+SharedObs projection V3, NoSharedObs projection V4 and replay V4 (A44). Records
+made before the Red Zone rule (frame V2, context V3, projections V2/V3, replay
+V3) and older records keep their original team-number feature and projection
+meaning. A run
 cannot resume with a different input contract. See
 [A37](../design/specification_amendments.md#a37-relative-policy-identity-and-versioned-recordings)
 and the [policy input guide](workflows.md#policy-inputs).

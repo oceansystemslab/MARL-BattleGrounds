@@ -12,6 +12,7 @@ import csv
 import fcntl
 import io
 import json
+import math
 import os
 from collections import ChainMap
 from collections.abc import Callable, Iterable, Mapping, Sequence
@@ -27,8 +28,8 @@ from uuid import uuid4
 import numpy as np
 
 from marl_battlegrounds.evaluation.actor_projection import (
-    NO_SHARED_OBS_ACTOR_PROJECTION_V3,
-    SHARED_OBS_ACTOR_PROJECTION_V2,
+    NO_SHARED_OBS_ACTOR_PROJECTION_V4,
+    SHARED_OBS_ACTOR_PROJECTION_V3,
 )
 from marl_battlegrounds.evaluation.metric_catalog import (
     FULL_METRIC_NAMES,
@@ -43,7 +44,7 @@ if TYPE_CHECKING:
 
     from marl_battlegrounds.core.types import EnvConfig
     from marl_battlegrounds.environment import EpisodeInfo
-    from marl_battlegrounds.evaluation.models import EvaluationEpisodeContextV3
+    from marl_battlegrounds.evaluation.models import EvaluationEpisodeContextV4
     from marl_battlegrounds.evaluation.replay import RuntimeProvenanceV1
     from marl_battlegrounds.evaluation.replay_capture import ReplayPackets
     from marl_battlegrounds.evaluation.replay_recording import ReplayCollector
@@ -97,11 +98,15 @@ MATCH_COLUMNS = (
     *PRIORITY_METRIC_NAMES,
 )
 _SUMMARY_TABLES = ("tournament_results.csv", "matchup_results.csv", "map_results.csv")
+# New runs record the Red Zone projections (context V4). A run recorded with the
+# older projections cannot be resumed by this writer; its files stay readable.
 _INPUT_PROJECTIONS = {
-    "shared_obs": SHARED_OBS_ACTOR_PROJECTION_V2.model_dump(mode="json"),
-    "no_shared_obs": NO_SHARED_OBS_ACTOR_PROJECTION_V3.model_dump(mode="json"),
+    "shared_obs": SHARED_OBS_ACTOR_PROJECTION_V3.model_dump(mode="json"),
+    "no_shared_obs": NO_SHARED_OBS_ACTOR_PROJECTION_V4.model_dump(mode="json"),
 }
 _VERIFICATION_CACHE_SIZE = 256
+# The EnvConfig field added with Red Zone scoring; historical identities omit it.
+_RED_ZONE_DEPTH_FIELD = "team_deathmatch_red_zone_depth"
 
 type _ConfigValidationKey = tuple[str, object, tuple[tuple[str, tuple[int, ...]], ...]]
 
@@ -115,7 +120,7 @@ class _PreparedReplay(NamedTuple):
     """
 
     packets: ReplayPackets
-    contexts: dict[int, tuple[EvaluationEpisodeContextV3, RuntimeProvenanceV1]]
+    contexts: dict[int, tuple[EvaluationEpisodeContextV4, RuntimeProvenanceV1]]
     config_ids: dict[int, str]
     provenance: dict[str, object] | None
 
@@ -296,7 +301,9 @@ def _remember_verification[Key, Value](
     cache[key] = value
 
 
-def configuration_identity(config: EnvConfig) -> tuple[str, dict[str, object]]:
+def configuration_identity(
+    config: EnvConfig, *, historical: bool = False
+) -> tuple[str, dict[str, object]]:
     """Identify one numerical episode config by its recorded content.
 
     Parameters
@@ -304,6 +311,11 @@ def configuration_identity(config: EnvConfig) -> tuple[str, dict[str, object]]:
     config : EnvConfig
         One environment-normalized scalar EnvConfig tree. Callers should
         normalize scalar/array dtypes before comparing configuration identity.
+    historical : bool, default=False
+        False records every EnvConfig field. True reproduces the identity a
+        config had before the Team Deathmatch Red Zone field existed: the
+        team_deathmatch_red_zone_depth key is left out of the content and the
+        digest. Only a depth of exactly +0.0 has a historical identity.
 
     Returns
     -------
@@ -314,7 +326,8 @@ def configuration_identity(config: EnvConfig) -> tuple[str, dict[str, object]]:
     Raises
     ------
     ValueError
-        JSON would contain NaN or Infinity.
+        JSON would contain NaN or Infinity, or historical is True and the
+        depth is not exactly +0.0.
     TypeError
         A leaf cannot be serialized.
 
@@ -326,7 +339,48 @@ def configuration_identity(config: EnvConfig) -> tuple[str, dict[str, object]]:
     import jax
 
     content = cast(dict[str, object], _json_value(jax.device_get(config)))
-    return sha256(_json_bytes(content)).hexdigest(), content
+    if historical:
+        depth = content.pop(_RED_ZONE_DEPTH_FIELD)
+        if (
+            not isinstance(depth, float)
+            or depth != 0.0
+            or math.copysign(1.0, depth) < 0.0
+        ):
+            raise ValueError(
+                "a historical configuration identity needs Red Zone depth +0.0, "
+                f"not {depth!r}"
+            )
+    return configuration_content_identity(content), content
+
+
+def configuration_content_identity(content: Mapping[str, object]) -> str:
+    """Hash saved configuration content exactly as configuration_identity does.
+
+    Parameters
+    ----------
+    content : Mapping[str, object]
+        JSON-compatible configuration content, for example the dictionary a
+        run_details.json or tournament snapshot recorded. It may be current
+        (13 keys) or historical (12 keys, before the Red Zone field).
+
+    Returns
+    -------
+    str
+        SHA-256 hex digest of sorted compact UTF-8 JSON plus a newline.
+
+    Raises
+    ------
+    ValueError
+        The content contains NaN or Infinity.
+    TypeError
+        A value is not JSON-serializable.
+
+    Notes
+    -----
+    Pure host function; nothing is validated or restored. Use it to check a
+    saved identity before building any array from the content.
+    """
+    return sha256(_json_bytes(content)).hexdigest()
 
 
 def _replay_summaries(packets: ReplayPackets) -> dict[int, tuple[int, int, int, int]]:
@@ -479,7 +533,7 @@ class RunWriter:
         self._replay_ids: dict[str, int] = {}
         self._replay_config_ids: dict[int, str] = {}
         self._preflight_contexts: dict[
-            int, tuple[EvaluationEpisodeContextV3, RuntimeProvenanceV1]
+            int, tuple[EvaluationEpisodeContextV4, RuntimeProvenanceV1]
         ] = {}
         self._pending_replays: dict[str, dict[str, object]] = {}
         self._recording_provenance: dict[str, object] | None = None
@@ -1680,7 +1734,7 @@ class RunWriter:
 
     def _replay_context(
         self, packet: ReplayPackets
-    ) -> tuple[EvaluationEpisodeContextV3, RuntimeProvenanceV1]:
+    ) -> tuple[EvaluationEpisodeContextV4, RuntimeProvenanceV1]:
         """Consume one context prepared before any replay publication.
 
         This callback runs only during application. Missing preparation is an
@@ -1694,7 +1748,7 @@ class RunWriter:
     def _prepare_replay_context(
         self, packet: ReplayPackets, provenance: dict[str, object] | None
     ) -> tuple[
-        EvaluationEpisodeContextV3, RuntimeProvenanceV1, dict[str, object] | None
+        EvaluationEpisodeContextV4, RuntimeProvenanceV1, dict[str, object] | None
     ]:
         """Resolve initial replay identities without changing writer state.
 
@@ -2497,7 +2551,7 @@ class RunWriter:
 
         rows = jax.tree.map(flatten, host)
         entry = self._details["passes"][self._pass_key]
-        contexts: dict[int, tuple[EvaluationEpisodeContextV3, RuntimeProvenanceV1]] = {}
+        contexts: dict[int, tuple[EvaluationEpisodeContextV4, RuntimeProvenanceV1]] = {}
         replay_configs: dict[int, str] = {}
         provenance = None
         for index in np.flatnonzero(np.asarray(rows.valid) & np.asarray(rows.initial)):

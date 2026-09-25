@@ -14,7 +14,11 @@ initial rounds): the counts, optimizer steps, used sequences, TD pairs,
 kept-row pairs and exposure marginals must match the closed-form totals,
 also beyond int32; routine validation at 4,224 and 8,320 transitions is
 accepted while a result at 8,192 (the old rule's point) is rejected; and the
-initial-collection phase is labelled "Initial Random Collection".
+initial-collection phase is labelled "Initial Random Collection". A training
+score threshold is shown in points ("Need 3 Points To Win"), never kills,
+because a Red Zone death gives 2 points. Saved validation tasks are rebuilt at
+the saved config's red_zone_depth (none for a config saved before the rule), so
+a task saved at another depth, or without one, is rejected.
 """
 
 from __future__ import annotations
@@ -83,7 +87,8 @@ def test_eta_waits_for_warm_updates_and_starts_over_after_resume() -> None:
 
 def test_progress_separates_training_threshold_from_validation() -> None:
     text = io_helpers.progress_text({"score_threshold": 3})
-    assert "New Training Games Need 3 Kills To Win" in text
+    assert "New Training Games Need 3 Points To Win" in text
+    assert "Kills To Win" not in text
     assert "Validation Still Needs 20" in text
     assert "New Training Games" not in io_helpers.progress_text({})
 
@@ -317,10 +322,11 @@ def _description(
     parent: dict[str, Any] | None = None,
     panel: bool = False,
     attempt: str = "original",
+    red_zone_depth: float | None = None,
 ) -> dict[str, Any]:
     from marl_battlegrounds.training import checkpoints
 
-    config = {
+    config: dict[str, Any] = {
         "seed": 42,
         "num_envs": 4,
         "total_env_steps": 32,
@@ -332,6 +338,8 @@ def _description(
         "confirmation_seed_pairs": 2,
         "slot_diagnostic": False,
     }
+    if red_zone_depth is not None:
+        config["red_zone_depth"] = red_zone_depth
     details: dict[str, Any] = {
         "schema_version": 1,
         "kind": "learner",
@@ -414,6 +422,7 @@ def _validation(
     panel: FrozenPanel,
     purpose: str,
     monkeypatch: pytest.MonkeyPatch,
+    red_zone_depth: float | None = None,
 ) -> dict[str, Any]:
     from marl_battlegrounds.training import validation
 
@@ -427,6 +436,7 @@ def _validation(
         purpose=purpose,
         seed_pairs=pairs,
         members=tuple((member.name, member.actor_digest) for member in panel.members),
+        red_zone_depth=red_zone_depth,
     )
     directory = root / "validation" / f"{purpose}-{key}"
     directory.mkdir(parents=True)
@@ -528,20 +538,37 @@ def test_saved_host_rejects_a_different_ancestor_execution(tmp_path: Path) -> No
     }
 
 
+@pytest.mark.parametrize(
+    ("run_depth", "task_depth"),
+    ((None, None), (6.0, 6.0), (6.0, None), (6.0, 5.0), (None, 5.0)),
+)
 def test_saved_host_checks_completed_validation_and_allows_current_pending_task(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
+    run_depth: float | None,
+    task_depth: float | None,
 ) -> None:
     panel = _panel()
-    origin = _description(tmp_path, _saved_host(pending=True), panel=True)
+    origin = _description(
+        tmp_path, _saved_host(pending=True), panel=True, red_zone_depth=run_depth
+    )
     actor = _actor(tmp_path, origin)
     host = _saved_host(steps=16, pending=True)
     host["actors"] = {origin["checkpoint_id"]: str(actor)}
     host["routine_results"] = [
-        _validation(tmp_path, origin, panel, "routine", monkeypatch)
+        _validation(
+            tmp_path, origin, panel, "routine", monkeypatch, red_zone_depth=task_depth
+        )
     ]
     host["validation_games"] = 20
-    current = _description(tmp_path, host, parent=origin, panel=True)
+    current = _description(
+        tmp_path, host, parent=origin, panel=True, red_zone_depth=run_depth
+    )
+    if run_depth != task_depth:
+        # Saved tasks are rebuilt at the run's own depth (none before the rule).
+        with pytest.raises(ValueError, match="task identity"):
+            io_helpers.validate_host_state(tmp_path, current, panel=panel)
+        return
     io_helpers.validate_host_state(tmp_path, current, panel=panel)
     host["routine_results"][0]["panel_digest"] = "f" * 64
     with pytest.raises(ValueError, match="task identity"):

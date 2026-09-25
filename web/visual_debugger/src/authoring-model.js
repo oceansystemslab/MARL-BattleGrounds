@@ -74,7 +74,10 @@ function finiteNumber(value, label) {
 /**
  * Return map or scenario for a recognized draft schema with object content.
  * Other values throw TypeError. The check recognizes dev-map-draft@1 and
- * dev-scenario-draft@1; it does not validate their full content or revision.
+ * both scenario versions: dev-scenario-draft@2, the version the host sends
+ * for editing (it declares content.task.red_zone_depth), and the older
+ * dev-scenario-draft@1, which has no depth. It does not validate their full
+ * content or revision.
  *
  * @param {any} draft
  */
@@ -85,7 +88,10 @@ export function authoringKind(draft) {
   if (draft.schema === "dev-map-draft@1") {
     return "map";
   }
-  if (draft.schema === "dev-scenario-draft@1") {
+  if (
+    draft.schema === "dev-scenario-draft@2" ||
+    draft.schema === "dev-scenario-draft@1"
+  ) {
     return "scenario";
   }
   throw new TypeError("Authoring draft schema is unsupported.");

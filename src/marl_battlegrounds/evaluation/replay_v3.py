@@ -1,6 +1,8 @@
-"""Build current self-contained replays with exact relative observation frames.
+"""Build and read historical V3 replays with exact relative observation frames.
 
-V3 binds current episode context to V2 frames and unchanged transition facts.
+V3 binds episode context V3 to V2 frames (19 context columns) and unchanged
+transition facts. It was the current format before the Red Zone rule; new
+recordings use replay_v4 (context V4, frame V3), and V3 files stay readable.
 It reuses the V2 envelope's ordering, completion and digest authorities rather
 than duplicating them. Builders operate on captured records; metrics, simulator
 execution and file publication belong to separate modules.
@@ -49,7 +51,7 @@ class ReplayArtifactHeaderV3(ReplayArtifactHeaderV2):
     schema_version : Literal[3]
         Fixed integer 3.
     context : EvaluationEpisodeContextV3
-        Exact EvaluationEpisodeContextV3 with current information contracts.
+        Exact EvaluationEpisodeContextV3 (the pre-Red-Zone context version).
 
     Notes
     -----
@@ -74,7 +76,7 @@ class ReplayArtifactV3(ReplayArtifactV2):
     header : ReplayArtifactHeaderV3
         Exact ReplayArtifactHeaderV3.
     frames : tuple[EvaluationFrameV2, ...]
-        Tuple of EvaluationFrameV2 containing current observation leaves.
+        Tuple of EvaluationFrameV2 containing the V3 replay's observation leaves.
 
     Notes
     -----
@@ -90,7 +92,7 @@ class ReplayArtifactV3(ReplayArtifactV2):
 
     @model_validator(mode="after")
     def _validate_current_frames(self) -> ReplayArtifactV3:
-        """Check every current frame against the recorded execution information
+        """Check every V2 frame against the recorded execution information
         contract.
         """
         for frame in self.frames:
@@ -99,7 +101,7 @@ class ReplayArtifactV3(ReplayArtifactV2):
 
 
 class ReplayArtifactReferenceV3(ReplayArtifactReferenceV2):
-    """Path-free reference to original current replay bytes.
+    """Path-free reference to original V3 replay bytes.
 
     Attributes
     ----------
@@ -130,7 +132,7 @@ def build_replay_v3(
     end_or_failure_reason: str | None = None,
     failure_origin: RolloutFailureOrigin | None = None,
 ) -> ReplayArtifactV3:
-    """Seal current captured rows into a validated V3 replay.
+    """Seal context V3 captured rows into a validated V3 replay.
 
     Parameters
     ----------
@@ -201,7 +203,7 @@ def build_replay_v3(
 
 
 def replay_reference_v3(replay: ReplayArtifactV3) -> ReplayArtifactReferenceV3:
-    """Describe the original canonical bytes of an exact current replay.
+    """Describe the original canonical bytes of an exact V3 replay.
 
     Parameters
     ----------
@@ -236,7 +238,7 @@ def replay_reference_v3(replay: ReplayArtifactV3) -> ReplayArtifactReferenceV3:
 
 
 def validate_replay_artifact_v3(replay: ReplayArtifactV3) -> None:
-    """Validate a current replay's exact model tree without converting versions.
+    """Validate a V3 replay's exact model tree without converting versions.
 
     Parameters
     ----------
@@ -275,7 +277,7 @@ def replay_from_packets(
     end_or_failure_reason: str | None = None,
     failure_origin: RolloutFailureOrigin | None = None,
 ) -> ReplayArtifactV3:
-    """Build a current replay from one ordered stream of scalar capture packets.
+    """Build a V3 replay from one ordered stream of scalar capture packets.
 
     Parameters
     ----------

@@ -13,7 +13,9 @@ padding, inactive-slot, frame and reward adaptations have separate tests in
 
 Contracts checked here: the settings defaults equal the donor's SMAX YAML
 (the SMAX reward multiplier and the donor's 128 games are not copied);
-initialization from one key equals the same-stack donor exactly for
+initialize_pqn equals its own construction (``_network_variables`` plus the
+optimizer) exactly at the current 5,165-feature width, and that construction
+at the donor's recorded 5,164 features equals the same-stack donor exactly for
 parameters, BatchNorm statistics and the clipped RAdam state, with the
 isolated oracle's per-leaf digests and orthogonal recurrent kernels equal;
 inference-mode values and memory; training-mode values, memory and updated
@@ -50,6 +52,7 @@ from tests.baseline_donor_reference import _store_tree
 from tests.pqn_donor_reference import (
     ACTIONS,
     AGENTS,
+    FEATURES,
     FORWARD_ENVS,
     FORWARD_ROWS,
     FORWARD_SEED,
@@ -155,6 +158,20 @@ def _world(case: dict[str, int]) -> pqn.PQNConfig:
     )
 
 
+def _initial_state(
+    config: pqn.PQNConfig, planned: int, features: int | None = None
+) -> pqn.PQNTrainState:
+    # initialize_pqn's construction. The donor oracles were recorded with
+    # 5,164 features, so the donor proof passes that width (FEATURES).
+    key = jax.random.key(INIT_SEED)
+    if features is None:
+        network = pqn._network_variables(key, config.input_scale)
+    else:
+        network = pqn._network_variables(key, config.input_scale, features=features)
+    optimizer = pqn.pqn_optimizer(config, planned)
+    return pqn.PQNTrainState(network, optimizer.init(network.params), jnp.int32(0))
+
+
 @dataclass
 class Reference:
     metadata: dict[str, Any]
@@ -171,9 +188,7 @@ def reference() -> Reference:
     metadata, arrays = load_pqn_reference()
     ns = build_same_stack_pqn_reference(GRADIENT_CASE)
     donor_state = ns["create_agent"](jax.random.key(INIT_SEED))
-    bg_state = pqn.initialize_pqn(
-        jax.random.key(INIT_SEED), pqn=_world(GRADIENT_CASE), planned_learning_blocks=1
-    )
+    bg_state = _initial_state(_world(GRADIENT_CASE), 1, FEATURES)
     params = with_recurrent_kernels(bg_state.network.params, arrays)
     network = pqn.PQNInferenceVariables(params, bg_state.network.batch_stats)
     donor_variables = {
@@ -229,6 +244,12 @@ def test_defaults_match_the_pinned_donor_config() -> None:
 def test_initialization_matches_the_same_stack_donor_exactly(
     reference: Reference, record_property: RecordProperty
 ) -> None:
+    # initialize_pqn is exactly this construction at the current width.
+    config = _world(GRADIENT_CASE)
+    actual = pqn.initialize_pqn(
+        jax.random.key(INIT_SEED), pqn=config, planned_learning_blocks=1
+    )
+    _compare(actual, _initial_state(config, 1), exact=True)
     bg = reference.bg_state
     donor = reference.donor_state
     _compare(
@@ -442,9 +463,7 @@ def test_two_learning_blocks_match_the_donor_through_the_epoch_loop(
     config = _world(case)
     planned = int(arrays["update/num_updates"])
     assert planned == case["blocks"]
-    start = pqn.initialize_pqn(
-        jax.random.key(INIT_SEED), pqn=config, planned_learning_blocks=planned
-    )
+    start = _initial_state(config, planned, FEATURES)
     state = start._replace(
         network=pqn.PQNInferenceVariables(
             with_recurrent_kernels(start.network.params, arrays),

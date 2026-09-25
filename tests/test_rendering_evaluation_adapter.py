@@ -1,4 +1,9 @@
-"""Check conversion of replay and actor-POV records into display data."""
+"""Check conversion of replay and actor-POV records into display data.
+
+SharedObs base-sensor frames pair each version with its context width: V1 and V2
+hold 19 context columns and V3 (frame V3, context V4) holds 20; agent rows
+decode the same way for versions 2 and 3, and version 4 is refused.
+"""
 
 from __future__ import annotations
 
@@ -1244,3 +1249,49 @@ def test_rendering_surface_exports_stabilized_cp7_projection_seams() -> None:
         rendering.initialize_status_source_evidence_v2
         is initialize_status_source_evidence_v2
     )
+
+
+def test_shared_base_sensor_frame_versions_pair_with_their_context_width() -> None:
+    from tests.evaluation_fixtures import (
+        current_captured_evaluation_trajectory,
+        pre_red_zone_captured_evaluation_trajectory,
+    )
+
+    from marl_battlegrounds.rendering.evaluation_adapter import (
+        SharedObsBaseSensorFrameV2,
+        SharedObsBaseSensorFrameV3,
+        build_shared_obs_source_material_projection_v1,
+    )
+    from marl_battlegrounds.rendering.evaluation_wire_features import (
+        decode_agent_feature_row,
+    )
+
+    current = current_captured_evaluation_trajectory(
+        transition_count=1, execution_information_mode="shared_obs"
+    )
+    older = pre_red_zone_captured_evaluation_trajectory(
+        transition_count=1, execution_information_mode="shared_obs"
+    )
+    frame_v3 = build_shared_obs_source_material_projection_v1(
+        current.context, current.frames[0], selected_global_slot=5
+    ).base_sensor_frame
+    frame_v2 = build_shared_obs_source_material_projection_v1(
+        older.context, older.frames[0], selected_global_slot=5
+    ).base_sensor_frame
+    assert type(frame_v3) is SharedObsBaseSensorFrameV3
+    assert type(frame_v2) is SharedObsBaseSensorFrameV2
+    assert frame_v3.schema_version == 3
+    assert len(frame_v3.context_features) == 20
+    assert frame_v3.context_features[:19] == frame_v2.context_features
+    with pytest.raises(ValueError, match="context_features"):
+        replace(frame_v3, context_features=frame_v3.context_features[:19])
+    with pytest.raises(ValueError, match="context_features"):
+        replace(frame_v2, context_features=frame_v3.context_features)
+    with pytest.raises(ValueError, match="unknown SharedObs base-sensor frame"):
+        replace(frame_v3, schema_version=2)
+    self_row = frame_v3.self_features
+    assert decode_agent_feature_row(
+        self_row, schema_version=3, team_id=2, is_enemy=False
+    ) == decode_agent_feature_row(self_row, schema_version=2, team_id=2, is_enemy=False)
+    with pytest.raises(ValueError, match="supported schema"):
+        decode_agent_feature_row(self_row, schema_version=4, team_id=2, is_enemy=False)

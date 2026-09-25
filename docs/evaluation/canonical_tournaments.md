@@ -141,6 +141,29 @@ missing games, and a failed reuse check never chooses it automatically. Fresh
 execution needs its models, exact conditions and schedule evidence. It does not
 need the old measurements it will replace.
 
+### Snapshots And The Red Zone Rule
+
+Team Deathmatch gives the enemy team 2 points instead of 1 when an agent dies
+inside its own team's Red Zone ([A44](../design/specification_amendments.md#a44-team-deathmatch-red-zone-scoring)).
+A snapshot keeps the rule its games were played under. The depth sits inside
+each source configuration asset, so the source configuration ID and the
+snapshot ID already cover it. The snapshot has no separate depth setting.
+`run_canonical_tournament` takes no `red_zone_depth`, and
+`run_tournament(config=..., red_zone_depth=...)` fails before any write, because
+the configuration owns its rules.
+
+A snapshot saved before the rule pins scalar schema 14, run schema 2 and
+replay schema 3. Its 12-key configurations read as depth 0.0 (one point per
+death) under their original IDs, so the snapshot keeps its identity. Its
+recorded games can still be read and reused. Any call that needs a new game,
+such as adding a challenger or `rerun_existing=True`, stops before writing
+anything: "Snapshot configurations were saved before the Red Zone rule;
+recorded games can be reused, but new games need a snapshot prepared with
+current configurations." Prepare a new snapshot from current configurations to
+play new games under the rule. Editing a source configuration is refused even
+when its file hash and snapshot ID are recomputed: the edited content no longer
+matches its recorded configuration ID.
+
 ## Prepare Assets Explicitly
 
 Tournament execution is offline. It verifies required hashes, sizes and recorded
@@ -255,6 +278,11 @@ incumbent. An exact cutoff tie does not promote. An unapproved choice among tied
 lowest incumbents blocks the decision. A promotion retains 55 incumbent matchups
 and 11 challenger matchups, then fits those twelve afresh. Retries keep the saved
 schedule and keys and cannot apply membership twice.
+
+A store may start from a snapshot saved before the Red Zone rule; it keeps its
+original snapshot ID. A challenger's games would be new games under the current
+rule, so executing that admission stops with the message above before any run
+directory or store change.
 
 The release instant is 00:00 Europe/London on the first day of the month. Its
 cutoff is 72 elapsed hours earlier. The store records both local and UTC instants.

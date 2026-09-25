@@ -47,6 +47,35 @@ def _integer(text: str) -> int:
         raise argparse.ArgumentTypeError("Use a decimal integer") from error
 
 
+def _decimal(text: str) -> float:
+    """Parse a plain decimal number, such as 6, 6.0 or -0.5, into a float.
+
+    Parameters
+    ----------
+    text : str
+        An optional + or - sign, then ASCII digits with at most one decimal
+        point and at least one digit.
+
+    Returns
+    -------
+    float
+        The Python float value; "6" gives 6.0.
+
+    Raises
+    ------
+    argparse.ArgumentTypeError
+        The text has an exponent (1e3), NaN, infinity, underscores (1_0),
+        spaces, other characters or a second point. argparse reports it as a
+        usage error. The called API checks the allowed range.
+    """
+    digits = text[1:] if text.startswith(("+", "-")) else text
+    whole, _, fraction = digits.partition(".")
+    number = whole + fraction
+    if not number or not number.isascii() or not number.isdecimal():
+        raise argparse.ArgumentTypeError("Use a decimal number such as 5.0")
+    return float(text)
+
+
 def _ids(text: str) -> tuple[int, ...]:
     """Parse a nonempty ordered map-ID list; the API checks its allowed values."""
     return tuple(_integer(value) for value in _tokens(text))
@@ -163,6 +192,16 @@ def build_parser() -> argparse.ArgumentParser:
             default=argparse.SUPPRESS,
             help=f"New-run default: {default}; omission inherits saved settings",
         )
+    evaluate.add_argument(
+        "--red-zone-depth",
+        type=_decimal,
+        default=argparse.SUPPRESS,
+        help=(
+            "Red Zone depth in map units: an agent that dies in its own "
+            "team's zone gives the enemy 2 points; 0 turns it off. New-run "
+            "default: 5.0; omission inherits saved settings"
+        ),
+    )
     evaluate.add_argument(
         "--phase", default="evaluation", help="Pass phase (default: evaluation)"
     )

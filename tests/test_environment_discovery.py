@@ -1,4 +1,9 @@
-"""Check agent discovery, space descriptions and legal action sampling."""
+"""Check agent discovery, space descriptions and legal action sampling.
+
+A ready map built by make uses the Red Zone depth 5.0 when none is given and
+forwards a supplied depth, including 0.0, to every game's config and to the
+depth column every configured actor sees.
+"""
 
 from collections.abc import Callable
 from typing import cast
@@ -14,7 +19,11 @@ from marl_battlegrounds import EnvironmentState, tasks
 from marl_battlegrounds import types as public_types
 from marl_battlegrounds.core import env as core
 from marl_battlegrounds.core import types as core_types
-from marl_battlegrounds.core.types import Action, EnvConfig
+from marl_battlegrounds.core.types import (
+    CONTEXT_FEATURE_TDM_RED_ZONE_DEPTH,
+    Action,
+    EnvConfig,
+)
 from marl_battlegrounds.policies.actor import (
     ActorAction,
     build_joint_action_from_actor_actions,
@@ -344,4 +353,33 @@ def test_ready_map_defaults_balance_banks_and_raw_handles_require_config() -> No
     assert int(explicit.episode_id) == 1
     np.testing.assert_array_equal(
         explicit.config.agent_profile.class_ids, source.agent_profile.class_ids
+    )
+
+
+@pytest.mark.parametrize(
+    ("depth_choice", "expected_depth"),
+    ((None, 5.0), (6.0, 6.0), (0.0, 0.0)),
+    ids=("omitted-uses-default", "supplied-six", "supplied-zero"),
+)
+def test_ready_map_red_zone_depth_defaults_to_five_and_forwards_a_supplied_value(
+    depth_choice: float | None, expected_depth: float
+) -> None:
+    if depth_choice is None:
+        env = marl_bgs.make("tdm", map_id=0, num_envs=2, metrics="none")
+    else:
+        env = marl_bgs.make(
+            "tdm", map_id=0, num_envs=2, metrics="none", red_zone_depth=depth_choice
+        )
+    assert tasks.DEFAULT_TDM_RED_ZONE_DEPTH == 5.0
+    observation, state = env.reset(jax.random.key(13))
+    np.testing.assert_array_equal(
+        state.config.team_deathmatch_red_zone_depth,
+        np.full((2,), expected_depth, dtype=np.float32),
+    )
+    configured = np.asarray(state.config.agent_profile.active_mask)
+    np.testing.assert_array_equal(
+        np.asarray(observation.observation.context_features)[
+            ..., CONTEXT_FEATURE_TDM_RED_ZONE_DEPTH
+        ],
+        np.where(configured, np.float32(expected_depth), np.float32(0.0)),
     )

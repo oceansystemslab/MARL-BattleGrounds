@@ -285,10 +285,10 @@ def _record_one_sample(
         max_file_size_bytes=SAMPLE_REPLAY_MAX_MEMBER_SIZE_BYTES,
     )
     if (
-        loaded.replay.schema_version != 3
+        loaded.replay.schema_version != 4
         or loaded.replay.completion.completion_state != "complete"
     ):
-        raise RuntimeError("public sample reload did not resolve a complete V3 replay")
+        raise RuntimeError("public sample reload did not resolve a complete V4 replay")
     replay = loaded.replay
     transition_count = len(replay.transitions)
     if transition_count != len(scenario.frames):
@@ -377,7 +377,7 @@ def generate_sample_replays(
 
     Notes
     -----
-    This runs fixed scripted scenarios, writes version-3 replay files and a
+    This runs fixed scripted scenarios, writes version-4 replay files and a
     manifest in a temporary sibling, then verifies them. Failure removes the
     unpublished staging directory. Demo provenance is not a benchmark or current
     source-tree attestation.
@@ -534,7 +534,7 @@ def build_parser() -> argparse.ArgumentParser:
         type=Path,
         default=None,
         help=(
-            "sample directory (generate: artifacts/visual-debugger-samples/v3; "
+            "sample directory (generate: artifacts/visual-debugger-samples/v4; "
             "check: examples/replays/v1)"
         ),
     )

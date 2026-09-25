@@ -4,11 +4,34 @@ These CPU tests exercise schedules without running games wherever possible. The
 small saved cases check current state, exact outcomes, resumed configuration
 identity and rejection before any run/pass mutation. Authored single episodes
 remain valid and are never expanded into undeclared comparisons.
+
+Saved configs from before the Red Zone rule: the four 12-key configs in
+tests/fixtures/scalar_schema_2/run_details.json restore at depth 0.0, and
+config_record(historical=True) and restore_recorded_config reproduce their
+recorded IDs and keys. Content that differs from its ID fails before any
+array is built. Only depth +0.0 has a historical identity, a positive depth
+can never be written as resolved config V1, and a saved pass from before the
+rule is readable but cannot be resumed.
+
+The Red Zone option: option(..., missing=) reads a pass saved before an option
+existed as its missing value (0.0 for red_zone_depth) and compares explicit
+values with it; red_zone_depth_option defaults to 5.0, inherits a saved depth,
+accepts a value with the same float32 value, refuses ints, and refuses -0.0
+against a saved or missing 0.0 (the float32 bytes differ). evaluate records
+the depth in its pass options; 0.0 and 6.0 give different configuration IDs
+from 5.0; omitted, an exact source keeps its own depth; a supplied depth that
+differs from an exact source, even 5.0, raises "conflicts" before any file is
+written. Public evaluate refuses to resume a pass saved before the rule with
+the one clear message, changing no file, whether maps and red_zone_depth are
+omitted or supplied (0.0 or 5.0). A pass counts as saved before the rule when
+its generated contract lacks the depth option or its content has 12 keys;
+each sign alone is enough, and a pass with no contract is covered too.
 """
 
 # Host setup tests intentionally inspect the private resolver boundary.
 # pyright: reportPrivateUsage=false
 
+import json
 from collections import Counter
 from importlib import import_module
 from pathlib import Path
@@ -19,16 +42,25 @@ import numpy as np
 import pytest
 
 from marl_battlegrounds.core import env as core
+from marl_battlegrounds.evaluation import evaluation_conditions
+from marl_battlegrounds.evaluation.catalog import build_resolved_env_config_v1
 from marl_battlegrounds.evaluation.evaluate import (
     EpisodeSpec,
     evaluate,
     evaluate_episodes,
 )
 from marl_battlegrounds.evaluation.evaluation_conditions import (
+    OMITTED,
+    Omitted,
     config_record,
     default_maps,
+    option,
     prepare_schedule,
+    red_zone_depth_option,
     restore_config,
+    restore_recorded_config,
+    same_float32,
+    saved_specs,
 )
 from marl_battlegrounds.evaluation.policy_execution import independent_policies, policy
 from marl_battlegrounds.tasks import (
@@ -39,6 +71,10 @@ from marl_battlegrounds.tasks import (
 )
 
 runner = import_module("marl_battlegrounds.evaluation.evaluate")
+# Four raw configs saved before the Red Zone rule, keyed by their recorded IDs.
+_PRE_RED_ZONE_RUN_DETAILS = (
+    Path(__file__).parent / "fixtures" / "scalar_schema_2" / "run_details.json"
+)
 
 
 def _resolved(monkeypatch: pytest.MonkeyPatch, **kwargs: Any) -> dict[str, Any]:  # noqa: ANN401 - Exercise public keyword combinations.
@@ -383,3 +419,256 @@ def test_pinned_source_map_keeps_approved_historical_geometry() -> None:
     bad["name"] = "forged"
     with pytest.raises(ValueError, match="snapshot map identity"):
         prepare_schedule([spec], registered_maps={old.info.map_id: bad})
+
+
+def _pre_red_zone_configs() -> dict[str, dict[str, Any]]:
+    details = json.loads(_PRE_RED_ZONE_RUN_DETAILS.read_bytes())
+    return cast(dict[str, dict[str, Any]], details["configurations"])
+
+
+def _saved_pass(
+    identifier: str, content: dict[str, Any]
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    return (
+        {"configurations": {identifier: content}},
+        {
+            "details": {"episode_ids": [1]},
+            "episodes": {"1": {"configuration_digest": identifier}},
+        },
+    )
+
+
+def test_pre_red_zone_configs_restore_at_depth_zero_under_their_recorded_ids() -> None:
+    legacy = _pre_red_zone_configs()
+    assert len(legacy) == 4
+    for identifier, content in legacy.items():
+        assert len(content) == 12 and "team_deathmatch_red_zone_depth" not in content
+        config, historical = restore_recorded_config(content, identifier)
+        assert historical is True
+        assert config.team_deathmatch_red_zone_depth == 0.0
+        assert restore_config(content).team_deathmatch_red_zone_depth == 0.0
+        assert config_record(config, historical=True) == (identifier, content)
+        current_id, current_content = config_record(config)
+        assert current_id != identifier
+        assert current_content == {**content, "team_deathmatch_red_zone_depth": 0.0}
+        assert restore_recorded_config(current_content, current_id)[1] is False
+        (spec,) = saved_specs(_saved_pass(current_id, current_content))
+        assert spec.env_config.team_deathmatch_red_zone_depth == 0.0
+        with pytest.raises(ValueError, match="saved before the Red Zone rule"):
+            saved_specs(_saved_pass(identifier, content))
+
+
+def test_recorded_identity_is_checked_first_and_positive_depths_have_none(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    identifier, content = next(iter(_pre_red_zone_configs().items()))
+
+    def restored_too_early(*args: object, **kwargs: object) -> None:
+        raise AssertionError("content was restored before its identity check")
+
+    with monkeypatch.context() as patch:
+        patch.setattr(evaluation_conditions, "restore_config", restored_too_early)
+        for changed in (
+            {**content, "max_steps": content["max_steps"] + 1},
+            {**content, "team_deathmatch_red_zone_depth": 0.0},
+            {**content, "team_deathmatch_red_zone_depth": 5.0},
+        ):
+            with pytest.raises(ValueError, match="differs from its recorded identity"):
+                restore_recorded_config(changed, identifier)
+
+    config = make_standard_team_deathmatch_config(
+        map_id=12, max_steps=1, team_a_roster=("mage",), team_b_roster=("priest",)
+    )
+    assert config.team_deathmatch_red_zone_depth == 5.0
+    for depth in (5.0, -0.0):
+        with pytest.raises(ValueError, match=r"needs Red Zone depth \+0\.0"):
+            config_record(
+                config._replace(team_deathmatch_red_zone_depth=depth), historical=True
+            )
+    with pytest.raises(ValueError, match="cannot record a Red Zone depth"):
+        build_resolved_env_config_v1(config)
+    identifier, content = config_record(config)
+    assert content["team_deathmatch_red_zone_depth"] == 5.0
+    assert restore_recorded_config(content, identifier)[1] is False
+
+
+def test_option_reads_a_pass_saved_before_an_option_as_its_missing_value() -> None:
+    # Without missing, a saved pass lacking the key reads as the default and
+    # accepts any explicit value (the older rule, kept for other options).
+    assert option(OMITTED, None, "depth", 5.0) == 5.0
+    assert option(OMITTED, {}, "depth", 5.0) == 5.0
+    assert option(7.0, {}, "depth", 5.0) == 7.0
+    # With missing, the lacking key reads as missing and explicit values must
+    # equal it.
+    assert option(OMITTED, None, "depth", 5.0, missing=0.0) == 5.0
+    assert option(OMITTED, {}, "depth", 5.0, missing=0.0) == 0.0
+    assert option(0.0, {}, "depth", 5.0, missing=0.0) == 0.0
+    with pytest.raises(
+        ValueError, match=r"^depth differs from the saved evaluation conditions$"
+    ):
+        option(5.0, {}, "depth", 5.0, missing=0.0)
+    assert option(OMITTED, {"depth": 6.0}, "depth", 5.0, missing=0.0) == 6.0
+    assert option(6.0, {"depth": 6.0}, "depth", 5.0, missing=0.0) == 6.0
+    with pytest.raises(ValueError, match="differs from the saved"):
+        option(0.0, {"depth": 6.0}, "depth", 5.0, missing=0.0)
+
+
+def test_red_zone_depth_option_defaults_inherits_and_compares_in_float32() -> None:
+    assert red_zone_depth_option(OMITTED, None) == 5.0
+    assert red_zone_depth_option(OMITTED, {"seed": 0}) == 0.0
+    assert red_zone_depth_option(OMITTED, {"red_zone_depth": 6.0}) == 6.0
+    assert red_zone_depth_option(6.0, None) == 6.0
+    # The same float32 value is the same rule, so the saved value comes back.
+    assert red_zone_depth_option(5.0000001, {"red_zone_depth": 5.0}) == 5.0
+    assert red_zone_depth_option(0.0, {"seed": 0}) == 0.0
+    # Python's == calls -0.0 and 0.0 equal, but their float32 bytes differ.
+    for supplied, saved in (
+        (5.0, {"seed": 0}),
+        (6.0, {"red_zone_depth": 5.0}),
+        (-0.0, {"red_zone_depth": 0.0}),
+        (-0.0, {"seed": 0}),
+    ):
+        with pytest.raises(
+            ValueError,
+            match=r"^red_zone_depth differs from the saved evaluation conditions$",
+        ):
+            red_zone_depth_option(supplied, saved)
+    for wrong in (6, True, np.float64(6.0)):
+        with pytest.raises(TypeError, match="red_zone_depth must be a Python float"):
+            red_zone_depth_option(cast(Any, wrong), None)
+    assert same_float32(5.0, 5.0000001)
+    assert not same_float32(0.0, -0.0)
+    assert not same_float32(5.0, 5.001)
+
+
+def test_evaluate_records_the_depth_and_never_ignores_a_supplied_one(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    identities: dict[float, set[str]] = {}
+    depths: tuple[float | Omitted, ...] = (OMITTED, 0.0, 5.0, 6.0)
+    for depth in depths:
+        resolved = _resolved(
+            monkeypatch,
+            num_episodes=2,
+            maps=[12],
+            max_steps=1,
+            red_zone_depth=depth,
+        )
+        expected = 5.0 if isinstance(depth, Omitted) else depth
+        assert resolved["contract"]["options"]["red_zone_depth"] == expected
+        assert {
+            spec.env_config.team_deathmatch_red_zone_depth for spec in resolved["specs"]
+        } == {expected}
+        found = {config_record(spec.env_config)[0] for spec in resolved["specs"]}
+        assert identities.setdefault(expected, found) == found
+    # Each depth is a different rule, so it has different configuration IDs.
+    assert not identities[0.0] & identities[5.0]
+    assert not identities[6.0] & identities[5.0]
+    source = make_standard_team_deathmatch_config(
+        map_id=12,
+        max_steps=1,
+        team_a_roster=("mage",),
+        team_b_roster=("priest",),
+        red_zone_depth=0.0,
+    )
+    # Omitted, the exact source keeps its own depth; an equal value is accepted.
+    for depth in depths[:2]:
+        specs = _resolved(
+            monkeypatch, num_episodes=2, maps=[source], red_zone_depth=depth
+        )["specs"]
+        assert {s.env_config.team_deathmatch_red_zone_depth for s in specs} == {0.0}
+    for depth in (5.0, 6.0):
+        with pytest.raises(
+            ValueError,
+            match=r"^red_zone_depth conflicts with the exact source configuration$",
+        ):
+            evaluate(
+                "random",
+                "random",
+                num_episodes=2,
+                maps=[source],
+                red_zone_depth=depth,
+                output_dir=tmp_path / "conflict",
+            )
+    with pytest.raises(TypeError, match="red_zone_depth must be a Python float"):
+        evaluate(
+            "random",
+            "random",
+            num_episodes=2,
+            maps=[12],
+            red_zone_depth=cast(Any, 6),
+            output_dir=tmp_path / "integer",
+        )
+    assert not list(tmp_path.iterdir())
+
+
+def _pre_red_zone_manifest(
+    identifier: str,
+    content: dict[str, Any],
+    contract_options: dict[str, Any] | None,
+) -> dict[str, Any]:
+    details: dict[str, Any] = {"episode_ids": [1], "num_episodes": 1}
+    if contract_options is not None:
+        details["evaluation_contract"] = {
+            "version": 1,
+            "schedule_kind": "generated",
+            "options": contract_options,
+            "episode_ids": [1],
+        }
+    return {
+        "schema_version": 2,
+        "configurations": {identifier: content},
+        "passes": {
+            '["evaluation","1"]': {
+                "phase": "evaluation",
+                "pass_id": "1",
+                "details": details,
+                "episodes": {"1": {"configuration_digest": identifier}},
+            }
+        },
+    }
+
+
+def test_public_evaluate_refuses_to_resume_a_pass_saved_before_the_red_zone_rule(
+    tmp_path: Path,
+) -> None:
+    identifier, content = next(iter(_pre_red_zone_configs().items()))
+    current_id, current_content = config_record(restore_config(content))
+    old_options: dict[str, Any] = {"seed": 0, "spawn_mode": "default"}
+    saved_passes = {
+        # The old evaluator saved no contract; its content has 12 keys.
+        "legacy": _pre_red_zone_manifest(identifier, content, None),
+        # A generated pass from before the rule: no depth option, 12 keys.
+        "contract": _pre_red_zone_manifest(identifier, content, old_options),
+        # Each sign alone marks a pass saved before the rule.
+        "no-depth-option": _pre_red_zone_manifest(
+            current_id, current_content, old_options
+        ),
+        "old-content": _pre_red_zone_manifest(
+            identifier, content, {**old_options, "red_zone_depth": 0.0}
+        ),
+    }
+    message = (
+        r"^This pass was saved before the Red Zone rule\. Its results stay "
+        r"readable; resuming it needs the source version that recorded it\.$"
+    )
+    depths: tuple[float | Omitted, ...] = (OMITTED, 0.0, 5.0)
+    for name, manifest in saved_passes.items():
+        run_dir = tmp_path / name
+        run_dir.mkdir()
+        (run_dir / "run_details.json").write_text(json.dumps(manifest))
+        before = (run_dir / "run_details.json").read_bytes()
+        # The same clear refusal with or without maps and red_zone_depth.
+        for maps in (None, [12]):
+            for depth in depths:
+                with pytest.raises(ValueError, match=message):
+                    evaluate(
+                        "random",
+                        "random",
+                        num_episodes=1,
+                        maps=maps,
+                        resume_from=run_dir,
+                        red_zone_depth=depth,
+                    )
+        assert [path.name for path in run_dir.iterdir()] == ["run_details.json"]
+        assert (run_dir / "run_details.json").read_bytes() == before

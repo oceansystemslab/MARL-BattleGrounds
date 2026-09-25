@@ -26,15 +26,15 @@ from marl_battlegrounds.evaluation.models import (
 from marl_battlegrounds.evaluation.policy_execution import controller_identity, policy
 from marl_battlegrounds.evaluation.replay_io import (
     load_replay,
-    load_scenario_evaluation_record_v4,
-    save_scenario_evaluation_record_v4,
+    load_scenario_evaluation_record_v5,
+    save_scenario_evaluation_record_v5,
 )
-from marl_battlegrounds.evaluation.replay_v3 import ReplayArtifactV3, build_replay_v3
+from marl_battlegrounds.evaluation.replay_v4 import ReplayArtifactV4, build_replay_v4
 from marl_battlegrounds.evaluation.revision import discover_code_revision_v2
 from marl_battlegrounds.evaluation.run_writer import IDENTITY_COLUMNS, RunWriter
 from marl_battlegrounds.evaluation.scenario import (
     ResolvedScenarioSpecificationV3,
-    ScenarioEvaluationRecordV4,
+    ScenarioEvaluationRecordV5,
 )
 from marl_battlegrounds.evaluation.tdm_scenarios import (
     TDM_BETA_SCENARIO_IDS,
@@ -51,8 +51,8 @@ class QualificationEpisode:
     """Current endpoint evidence and optional complete scalar metric row."""
 
     specification: ResolvedScenarioSpecificationV3
-    replay: ReplayArtifactV3
-    record: ScenarioEvaluationRecordV4
+    replay: ReplayArtifactV4
+    record: ScenarioEvaluationRecordV5
     full_metrics: Columns
 
 
@@ -112,8 +112,40 @@ def capture_tdm_qualification_episode(
 ) -> QualificationEpisode:
     """Capture one real evaluator episode, optionally retain a truthful prefix.
 
+    Parameters
+    ----------
+    scenario_id : int
+        Approved packaged scenario, 1 to 8. ALPHA plays Team A. Team B is BETA
+        in the BETA scenarios (``TDM_BETA_SCENARIO_IDS``) and ALPHA otherwise.
+    coordinate : int
+        Row of the fixed qualification seed schedule: 0 or 1.
+    stop_after : int or None, default=None
+        None keeps the whole episode. A nonnegative ``int`` below the episode's
+        transition count keeps only the first ``stop_after`` transitions and
+        ``stop_after + 1`` frames, as a replay marked partial. A value at or
+        above the transition count keeps the whole episode.
+
+    Returns
+    -------
+    QualificationEpisode
+        The resolved scenario specification, the current replay (V4), the
+        scenario evaluation record (V5) built from that replay, and the full
+        scalar metric row. A prefix has empty ``full_metrics``, and its record
+        reports the endpoint as unavailable.
+
+    Raises
+    ------
+    ValueError
+        If stop_after is neither None nor a nonnegative plain ``int``, if
+        scenario_id is not 1 to 8, or if coordinate does not select a seed row.
+
+    Notes
+    -----
     Prefix witnesses do not expose the completed episode's scalar metrics as if
-    they described that prefix. All trajectory execution remains in the evaluator.
+    they described that prefix. All trajectory execution remains in the
+    evaluator: one game with ``num_envs=1``, full metrics and one replay. No run
+    writer is passed, so nothing is written to disk. This is pipeline evidence,
+    not a winning witness.
     """
     if stop_after is not None and (type(stop_after) is not int or stop_after < 0):
         raise ValueError("stop_after must be a nonnegative integer or None")
@@ -134,7 +166,7 @@ def capture_tdm_qualification_episode(
     replay = result.replays[0]
     full_metrics = result.full_metrics
     if stop_after is not None and stop_after < len(replay.transitions):
-        replay = build_replay_v3(
+        replay = build_replay_v4(
             replay.header.context,
             replay.frames[: stop_after + 1],
             replay.transitions[:stop_after],
@@ -225,8 +257,8 @@ def qualify_tdm_scenarios(destination: Path) -> dict[str, object]:
                 scenario_id, coordinate, specification, _ = planned[int(episode_id)]
                 replay_path = paths["run_details"].parent / reference["path"]
                 replay = load_replay(replay_path).replay
-                if not isinstance(replay, ReplayArtifactV3):
-                    raise TypeError("current qualification requires replay V3")
+                if not isinstance(replay, ReplayArtifactV4):
+                    raise TypeError("current qualification requires replay V4")
                 record = build_tdm_scenario_evaluation_record(
                     scenario_id,
                     specification,
@@ -235,9 +267,9 @@ def qualify_tdm_scenarios(destination: Path) -> dict[str, object]:
                 )
                 stem = f"scenario-{scenario_id}-coordinate-{coordinate}"
                 record_path = destination / f"{stem}.marlbg-scenario.json"
-                save_scenario_evaluation_record_v4(record, replay, record_path)
+                save_scenario_evaluation_record_v5(record, replay, record_path)
                 if (
-                    load_scenario_evaluation_record_v4(
+                    load_scenario_evaluation_record_v5(
                         record_path, source_replay=replay
                     )
                     != record
@@ -280,7 +312,8 @@ def qualify_tdm_scenarios(destination: Path) -> dict[str, object]:
         )
     result: dict[str, object] = {
         "schema_id": "marl_battlegrounds.tdm_scenario_qualification",
-        "schema_version": 2,
+        # Schema 3: replay V4 and scenario record V5 (Red Zone rule recorded).
+        "schema_version": 3,
         "purpose": "ALPHA Team A pipeline control; not winning or manuscript evidence",
         "complete": len(rows) == 16 and not errors,
         "code_revision": revision.model_dump(mode="json"),

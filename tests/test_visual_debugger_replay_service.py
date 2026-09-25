@@ -4791,8 +4791,8 @@ def test_loaded_commands_and_static_render_never_enter_scientific_factories(
                 "build_interactive_joint_action",
                 "build_scripted_joint_action",
                 "step",
-                "capture_initial_evaluation_frame_v2",
-                "capture_evaluation_transition_unit_v2",
+                "capture_initial_evaluation_frame_v3",
+                "capture_evaluation_transition_unit_v3",
             ),
         ),
         (jax.random, ("key", "split")),
@@ -5003,7 +5003,7 @@ def test_metric_analysis_is_cached_across_scopes_cursors_and_pov(
     sidecar = service.current_metric_report()
     catalog_bytes = service.metric_catalog()
     catalog = json.loads(catalog_bytes)
-    assert len(catalog["measurements"]) == 11148
+    assert len(catalog["measurements"]) == 11192
     assert any(not row["applicable"] for row in catalog["measurements"])
     assert all(
         "value" not in row and "valid" not in row for row in catalog["measurements"]

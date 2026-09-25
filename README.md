@@ -51,8 +51,27 @@ For a scalar or odd batch, set `balance_spawn_locations=False`. An explicit
 `env_config` remains exact and overrides automatic preparation. Equal episode
 counts alone do not establish equal training steps from both spawn locations.
 
-See [examples/environment.py](examples/environment.py) for a runnable loop and
-[Ubuntu setup](docs/dev/setup_ubuntu.md) for the locked GPU environment.
+Team Deathmatch counts points, and one enemy death is not always one point.
+Each team's Red Zone is the full-height strip at its own spawn edge, 5.0 map
+units deep by default. When an agent dies with its centre inside its own team's Red Zone, the
+enemy team gets 2 points instead of 1. It is still one kill and one death, so
+kill counts and K/D do not double. Set the depth with `red_zone_depth`:
+
+```python
+deeper = marl_bgs.make("tdm", map_id=0, num_envs=128, red_zone_depth=6.0)
+one_point = marl_bgs.make("tdm", map_id=0, num_envs=128, red_zone_depth=0.0)
+```
+
+`0.0` turns the rule off, so every death gives 1 point. `evaluate` and
+`run_tournament` take the same keyword, the `evaluate` command takes
+`--red-zone-depth`, and training sets `red_zone_depth` in its config. An exact
+`env_config` keeps its own depth. Results saved before this rule keep their
+original one-point meaning. See
+[A44](docs/design/specification_amendments.md#a44-team-deathmatch-red-zone-scoring).
+
+See [examples/environment.py](examples/environment.py) for a runnable loop
+with both depth choices and [Ubuntu setup](docs/dev/setup_ubuntu.md) for the
+locked GPU environment.
 
 ## Choose Maps and Rosters
 
@@ -66,8 +85,9 @@ shared default roster order.
 
 The factory
 `marl_battlegrounds.tasks.make_canonical_team_deathmatch_evaluation_config(map_id=47)`
-fixes mirrored Mage/Warrior/Hunter/Rogue/Priest teams, first to 20, a 300-transition
-horizon, five-transition respawn waves and canonical shields. Canonical map IDs
+fixes mirrored Mage/Warrior/Hunter/Rogue/Priest teams, first to 20 points, the
+default Red Zone depth of 5.0 (pass `red_zone_depth` to change it), a
+300-transition horizon, five-transition respawn waves and canonical shields. Canonical map IDs
 are 47–51. Training maps are 0–41, including curriculum maps 0–11; validation
 maps are 42–46. Numbered map names, authored IDs and saved-map folders use the
 same IDs. See the

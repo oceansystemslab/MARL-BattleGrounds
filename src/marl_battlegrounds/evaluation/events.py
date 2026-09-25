@@ -4,6 +4,9 @@ The decoder joins adjacent frames with Core-authored facts and recorded class
 rules. It does not step the simulator or use fresh physics calculations. Event
 order is a serialization convention: ranks group related events and stable slot
 coordinates break ties. The order does not create extra policy decision epochs.
+Team Deathmatch points are re-derived from the recorded start positions and the
+recorded configuration (the Red Zone rule, when the record holds a depth): a
+rule check, not physics. Renderers read recorded facts and never re-run it.
 """
 
 from __future__ import annotations
@@ -12,6 +15,8 @@ from dataclasses import dataclass
 from typing import cast
 
 from marl_battlegrounds.evaluation.models import (
+    TEAM_DEATHMATCH_POINTS_PER_DEATH,
+    TEAM_DEATHMATCH_POINTS_PER_RED_ZONE_DEATH,
     AbilityActivatedEventV1,
     ActionRejectedEventV1,
     AgentDiedEventV1,
@@ -29,6 +34,7 @@ from marl_battlegrounds.evaluation.models import (
     LethalDamageContributionEventV1,
     OrdinaryMovementPhaseDisplacementEventV1,
     RecipientHealthResolutionEventV1,
+    ResolvedEnvConfigV2,
     RespawnWaveOccurredEventV1,
     SourceDamageOutputEventV1,
     SourceHealingOutputEventV1,
@@ -41,6 +47,8 @@ from marl_battlegrounds.evaluation.models import (
     TeamDeathmatchCompletedEventV1,
     TeamDeathmatchScoreChangedEventV1,
     TransitionFactsV1,
+    red_zone_team_on_right,
+    red_zone_x_range,
 )
 
 _NULL_RECIPIENT_SORT_INDEX = 10
@@ -959,11 +967,18 @@ def _derive_team_deathmatch_authority_v1(
 ) -> _TeamDeathmatchAuthorityV1:
     """Check recorded scores and outcome against deaths, roster, and horizon.
 
-    Count each newly dead active opponent toward the other team's score. At a
-    threshold, higher score wins and equal scores draw; a horizon-only finish draws.
-    Both completion conditions may hold. Reject post-terminal starts or inconsistent
-    scores/outcomes with ValueError. Task-neutral records keep zero TDM scores and
-    ongoing outcome while still tracking horizon completion.
+    Each newly dead configured recipient gives the other team points: 2
+    (TEAM_DEATHMATCH_POINTS_PER_RED_ZONE_DEATH) when its recorded start position
+    is inside its own team's Red Zone, else 1. The depth is the recorded float32
+    depth when the context holds ResolvedEnvConfigV2 and 0.0 for older records
+    (one point per death, their original rule). The side comes from
+    red_zone_team_on_right on the recorded pads and the strip from
+    red_zone_x_range, both bounds inclusive. Score changes must equal these
+    points exactly. At a threshold, higher score wins and equal scores draw; a
+    horizon-only finish draws. Both completion conditions may hold. Reject
+    post-terminal starts or inconsistent scores/outcomes with ValueError.
+    Task-neutral records keep zero TDM scores and ongoing outcome while still
+    tracking horizon completion.
     """
     task_mode = context.resolved_env_config.task_mode
     start_scores = start_frame.snapshot.team_deathmatch_scores
@@ -999,20 +1014,41 @@ def _derive_team_deathmatch_authority_v1(
     ):
         raise ValueError("Team Deathmatch transitions cannot start after completion")
 
+    config = context.resolved_env_config
+    red_zone_ranges: tuple[tuple[float, float], ...] | None = None
+    if (
+        isinstance(config, ResolvedEnvConfigV2)
+        and config.team_deathmatch_red_zone_depth > 0.0
+    ):
+        red_zone_ranges = tuple(
+            red_zone_x_range(
+                config.map_width,
+                config.team_deathmatch_red_zone_depth,
+                red_zone_team_on_right(config.map_width, [pad[0] for pad in team_pads]),
+            )
+            for team_pads in config.team_spawn_pad_positions
+        )
+    start_positions = start_frame.snapshot.agent_positions
     expected_score_increments = [0, 0]
-    for is_newly_dead, roster_row in zip(
-        facts.death_facts.is_newly_dead_by_recipient,
-        context.roster,
-        strict=True,
+    for slot, (is_newly_dead, roster_row) in enumerate(
+        zip(
+            facts.death_facts.is_newly_dead_by_recipient,
+            context.roster,
+            strict=True,
+        )
     ):
         if not is_newly_dead or not roster_row.configured_active:
             continue
-        if roster_row.configured_team_id == 1:
-            expected_score_increments[1] += 1
-        elif roster_row.configured_team_id == 2:
-            expected_score_increments[0] += 1
-        else:
+        team_id = roster_row.configured_team_id
+        if team_id not in (1, 2):
             raise ValueError("configured active TDM roster slots require team 1 or 2")
+        points = TEAM_DEATHMATCH_POINTS_PER_DEATH
+        if red_zone_ranges is not None:
+            low, high = red_zone_ranges[team_id - 1]
+            if low <= start_positions[slot][0] <= high:
+                points = TEAM_DEATHMATCH_POINTS_PER_RED_ZONE_DEATH
+        # A Team A victim scores for Team B (index 1), and the reverse.
+        expected_score_increments[2 - team_id] += points
 
     actual_score_increments = tuple(
         successor_score - start_score
@@ -1024,7 +1060,8 @@ def _derive_team_deathmatch_authority_v1(
     )
     if actual_score_increments != tuple(expected_score_increments):
         raise ValueError(
-            "Team Deathmatch score edges must equal newly dead configured opponents"
+            "Team Deathmatch score edges must equal points from newly dead "
+            "configured opponents"
         )
 
     threshold_reached = any(score >= score_threshold for score in successor_scores)

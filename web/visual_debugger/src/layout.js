@@ -5,8 +5,10 @@
  * layoutCrossPhaseOccupancy places transient cue boxes and directed routes across
  * animation phases. These functions use deterministic geometry only: no DOM reads,
  * network calls, random draws or simulator decisions. Distances are CSS pixels
- * except the world dimensions accepted by the transform. Returned layout records
- * are frozen; opaque status payload objects remain owned by their caller.
+ * except the world dimensions accepted by the transform and redZoneFloorIntervals,
+ * which turns a recorded map.red_zone into at most two merged floor strips in world
+ * x units. Returned layout records are frozen; opaque status payload objects remain
+ * owned by their caller.
  */
 import {
   createPolylineRouteGeometry,
@@ -4045,4 +4047,46 @@ function leaderLine(body, dock, anchor) {
     start: frozenPoint(body.left, bodyCenterY),
     end: frozenPoint(dock.right, dockCenterY),
   });
+}
+
+/**
+ * Turn a recorded Red Zone record into at most two floor strips to tint.
+ *
+ * displayWidth is the scene map's own width in world units (the floor drawn on
+ * screen). redZone is the recorded `map.red_zone` record, or null when the rule
+ * is off, the map record predates it, or the Red Zone Floors filter is off. Its
+ * team_a_x_range and team_b_x_range are inclusive [x_min, x_max] world bounds
+ * that the normalizer has already checked (float32 values; a range may be
+ * collapsed, x_min == x_max, or reach just past a raw displayed width).
+ *
+ * Each range is clipped to [0, displayWidth]. A clipped interval with no
+ * positive width is dropped, so a collapsed range paints nothing. The rest are
+ * merged where they overlap or touch, so an overlap is never painted twice and
+ * never looks darker. Return a frozen array of 0, 1 or 2 frozen
+ * {start, end} intervals in rising order. Pure display arithmetic: it never
+ * changes a record, a score or a metric.
+ *
+ * @param {number} displayWidth
+ * @param {Readonly<{team_a_x_range: readonly number[], team_b_x_range: readonly number[]}> | null} redZone
+ * @returns {ReadonlyArray<Readonly<{start: number, end: number}>>}
+ */
+export function redZoneFloorIntervals(displayWidth, redZone) {
+  if (redZone === null || !(displayWidth > 0)) {
+    return Object.freeze([]);
+  }
+  const clipped = [redZone.team_a_x_range, redZone.team_b_x_range]
+    .map(([low, high]) => [Math.max(0, low), Math.min(displayWidth, high)])
+    .filter(([low, high]) => high - low > 0)
+    .sort((first, second) => first[0] - second[0]);
+  /** @type {Array<{start: number, end: number}>} */
+  const merged = [];
+  for (const [low, high] of clipped) {
+    const last = merged.at(-1);
+    if (last !== undefined && low <= last.end) {
+      last.end = Math.max(last.end, high);
+    } else {
+      merged.push({ start: low, end: high });
+    }
+  }
+  return Object.freeze(merged.map((interval) => Object.freeze(interval)));
 }

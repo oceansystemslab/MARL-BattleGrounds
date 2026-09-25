@@ -1,6 +1,8 @@
 /**
  * @file Check that only normalized authorized frames become browser views and that
- * identity/preferences keep their exact scope.
+ * identity/preferences keep their exact scope. The scene view passes a recorded
+ * version 2 map's Red Zone strips through exactly and frozen, keeps `null` when
+ * the rule is off (depth 0), and adds no Red Zone to a legacy version 1 map.
  */
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
@@ -688,6 +690,45 @@ test("scene adapter preserves exact mask and owner-centered settled overlays", a
       );
     }
   }
+});
+
+test("scene view passes the recorded Red Zone through exactly and frozen", async () => {
+  const recordedSource = fixture.red_zone_cases.live_oracle_depth_6;
+  const recorded = authorizedPresentationSceneView(
+    await normalizeAuthorizedPresentationFrameV1(recordedSource),
+  );
+  assert.ok(recorded);
+  assert.deepEqual(
+    recorded.map.red_zone,
+    recordedSource.current_endpoint.scene.map.red_zone,
+  );
+  // Guards against a fixture whose record is empty on both sides of the comparison.
+  assert.deepEqual(recorded.map.red_zone, {
+    depth: 6,
+    team_a_x_range: [0, 6],
+    team_b_x_range: [14, 20],
+  });
+  assertRecursivelyFrozen(recorded.map.red_zone);
+
+  const ruleOff = authorizedPresentationSceneView(
+    await normalizeAuthorizedPresentationFrameV1(
+      fixture.red_zone_cases.live_oracle_depth_0,
+    ),
+  );
+  assert.ok(ruleOff);
+  assert.equal(ruleOff.map.red_zone, null);
+
+  const legacySource = fixture.compatibility_cases.legacy_v1;
+  assert.equal(
+    Object.hasOwn(legacySource.current_endpoint.scene.map, "map_version"),
+    false,
+  );
+  const legacy = authorizedPresentationSceneView(
+    await normalizeAuthorizedPresentationFrameV1(legacySource),
+  );
+  assert.ok(legacy);
+  assert.equal(Object.hasOwn(legacy.map, "red_zone"), false);
+  assert.equal(legacy.map.red_zone, undefined);
 });
 
 test("all six leaves project the combat countdown as one durable display status", async () => {

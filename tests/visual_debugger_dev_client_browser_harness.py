@@ -31,6 +31,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         new_scenario_draft,
     )
 
+    from marl_battlegrounds.tasks import DEFAULT_TDM_RED_ZONE_DEPTH
+
     store_type = authoring_store.DevAssetStore
     for label, count in (
         ("seed-map-count", options.seed_map_count),
@@ -55,7 +57,9 @@ def main(argv: Sequence[str] | None = None) -> int:
             )
             seed_store.save_draft(draft, expected_revision=0)
         for index in range(options.seed_scenario_count):
-            draft = new_scenario_draft(f"seed_scenario_{index}")
+            draft = new_scenario_draft(
+                f"seed_scenario_{index}", red_zone_depth=DEFAULT_TDM_RED_ZONE_DEPTH
+            )
             draft = draft.model_copy(
                 update={
                     "content": draft.content.model_copy(

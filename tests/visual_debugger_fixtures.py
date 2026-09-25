@@ -178,6 +178,7 @@ def rejection_lane_scenario() -> DebuggerScenario:
     config = EnvConfig(
         task_mode=TASK_MODE_NEUTRAL,
         team_deathmatch_score_threshold=0,
+        team_deathmatch_red_zone_depth=0.0,
         max_steps=20,
         map_width=12.0,
         map_height=12.0,

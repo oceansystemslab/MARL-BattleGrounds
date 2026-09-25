@@ -90,7 +90,7 @@ and
 
 ## Display and Evidence Boundaries
 
-The 19 visual filters and separate Ranges control change display, not simulation
+The 20 visual filters and separate Ranges control change display, not simulation
 or recorded data. SharedObs display follows
 [A17](../design/specification_amendments.md#a17-sharedobs-recorded-visual-union-presentation):
 it combines permitted same-tick sensor views for rendering. It does not create a

@@ -58,6 +58,13 @@ _MANUSCRIPT_FAMILIES = (
         "chose the same target.",
     ),
     (
+        "Red Zone kills and deaths",
+        ("red_zone",),
+        "Kills and deaths inside each team's own Red Zone near its spawn, "
+        "who helped with those kills, and each agent's share. Each such death "
+        "counts once but gives the enemy team 2 points.",
+    ),
+    (
         "Damage",
         ("damage_done", "recipient_damage", "damage_received"),
         "Who dealt damage, who took it, which ability dealt it, "
@@ -368,7 +375,7 @@ def dictionary_csv() -> str:
     for index, column in enumerate(METRIC_COLUMNS, 1):
         # Slot columns are class-agnostic. List possible views, whose source
         # membership is resolved from the actual recorded roster at inspection.
-        views = set()
+        views: set[tuple[str, str]] = set()
         topic_text: dict[str, dict[str, str]] = {}
         for roster in rosters:
             for topic, view in metric_locations(column, roster):

@@ -1,4 +1,8 @@
-"""Check the in-process handoff from live recording to replay."""
+"""Check the in-process handoff from live recording to replay.
+
+A live debugger recording is a current replay: frame V3 units in a replay V4
+whose context records the NoSharedObs V4 actor projection.
+"""
 
 import csv
 import io
@@ -61,11 +65,11 @@ from tests.export_visual_debugger_replay_artifacts import export_artifacts
 from tests.visual_debugger_fixtures import debugger_test_launch_specification
 
 from marl_battlegrounds.evaluation.actor_projection import (
-    NO_SHARED_OBS_ACTOR_PROJECTION_V3,
+    NO_SHARED_OBS_ACTOR_PROJECTION_V4,
 )
 from marl_battlegrounds.evaluation.metrics import EvaluationEpisodeObserverV1
 from marl_battlegrounds.evaluation.models import (
-    EvaluationFrameV2,
+    EvaluationFrameV3,
     EvaluationTransitionV1,
 )
 from marl_battlegrounds.evaluation.replay import RuntimeProvenanceV1
@@ -74,6 +78,7 @@ from marl_battlegrounds.evaluation.replay_io import (
     load_replay_bundle_v1,
     preflight_replay_destination,
 )
+from marl_battlegrounds.evaluation.replay_v4 import ReplayArtifactV4
 
 _REPOSITORY_ROOT = Path(__file__).resolve().parents[1]
 _ASSET_ROOT = _REPOSITORY_ROOT / "web" / "visual_debugger"
@@ -266,9 +271,10 @@ def test_finish_installs_replay_before_return_and_starts_settled_at_zero(
     assert replay.binding.apply_command is not None
     viewer = cast(ReplayViewerService, replay.service)
     assert recorder.verified_loaded_bundle is not None
+    assert type(recorder.verified_loaded_bundle.replay) is ReplayArtifactV4
     assert (
         recorder.verified_loaded_bundle.replay.header.context.actor_projection
-        == NO_SHARED_OBS_ACTOR_PROJECTION_V3
+        == NO_SHARED_OBS_ACTOR_PROJECTION_V4
     )
     opened = viewer.apply_command(
         _replay_request(
@@ -490,7 +496,7 @@ def test_registered_capture_round_trip_preserves_exact_researcher_presentation(
     def tracked_append(
         recorder: DebuggerReplayRecorder,
         transition: EvaluationTransitionV1,
-        successor_frame: EvaluationFrameV2,
+        successor_frame: EvaluationFrameV3,
     ) -> None:
         append_units.append((transition.transition_id, successor_frame.frame_id))
         actual_append(recorder, transition, successor_frame)

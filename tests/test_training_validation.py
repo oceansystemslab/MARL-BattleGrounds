@@ -19,6 +19,23 @@ factories in this file, each loading one export with load_system and
 returning a renamed copy, are accepted: panel.json keeps the two references
 and names, and load_panel runs both factories again and restores the same
 names, identities and digest.
+
+Red Zone depth: a task description built without a depth keeps its original
+bytes and ID (schema 1, and schema 2 for System panels); a depth builds schema
+3 (or 4 for System panels, selection schema still 2) that records it, so depths
+0, 5 and 6 and the old layout give four different task IDs, and a bad depth is
+refused; a depth wider than the validation maps is refused before any file is
+written. validate_checkpoint's requests carry the depth (default 5.0), its
+result reports points and recorded kills, and the same folder under another
+depth is refused before any game. A short real pass at depth 6.0 saves 6.0 in
+every game configuration for the panel/Random and slot routes, and after one
+warm pass, fresh passes at depths 5.0 and 0.0 reuse the compiled game program
+(no new compilation for a new depth). load_panel admits a directly frozen
+panel at every depth, a ranked panel only at its ranked float32 depth
+(unversioned ranking evidence means 0.0), and refuses an unknown evidence
+version. mean_kill_difference and the selection tiebreak use
+recorded kills, not points (two points for one Red Zone kill), and selection
+refuses to mix Red Zone scoring rules.
 """
 
 import itertools
@@ -40,6 +57,12 @@ from marl_battlegrounds.baselines.ppo import initialize_ppo
 from marl_battlegrounds.evaluation.policy_execution import System
 from marl_battlegrounds.evaluation.recording_context import capture_recording_provenance
 from marl_battlegrounds.evaluation.recording_identity import tree_digest
+from marl_battlegrounds.evaluation.results import load_results
+from marl_battlegrounds.training.analysis import (
+    _candidates,
+    select_checkpoint,
+    summarize_validation,
+)
 from marl_battlegrounds.training.checkpoints import (
     artifact_identity,
     export_system,
@@ -47,6 +70,7 @@ from marl_battlegrounds.training.checkpoints import (
 )
 from marl_battlegrounds.training.validation import (
     _collection_boundary,
+    _panel_digest,
     _pending,
     _rows,
     _run_pass,
@@ -55,8 +79,11 @@ from marl_battlegrounds.training.validation import (
     evaluation_backend,
     load_panel,
     make_slot_diagnostic_schedule,
+    panel_task_description,
     resolve_validation_schedule,
     validate_checkpoint,
+    validate_random,
+    validation_task_description,
 )
 
 # Tests deliberately exercise the package's internal task ownership boundary.
@@ -434,7 +461,9 @@ def test_real_cpu_tail_resume_uses_all_saved_games_and_keeps_frozen_weights(
 
         validation = import_module("marl_battlegrounds.training.validation")
 
-        def short_schedule(*, maps: list[int], seed_blocks: int) -> object:
+        def short_schedule(
+            *, maps: list[int], seed_blocks: int, red_zone_depth: float
+        ) -> object:
             team_a, team_b = canonical_tournament_rosters()
             return make_slot_diagnostic_schedule(
                 maps=maps,
@@ -445,6 +474,7 @@ def test_real_cpu_tail_resume_uses_all_saved_games_and_keeps_frozen_weights(
                         max_steps=1,
                         team_a_roster=team_a,
                         team_b_roster=team_b,
+                        red_zone_depth=red_zone_depth,
                     )
                     for value in maps
                 ),
@@ -479,6 +509,7 @@ def test_real_cpu_tail_resume_uses_all_saved_games_and_keeps_frozen_weights(
         "num_envs": 2,
         "chunk_size": 1,
         "focal_team": 0,
+        "red_zone_depth": 6.0,
     }
     events: list[dict[str, Any]] = []
     before = artifact_identity(actors[0])
@@ -490,12 +521,19 @@ def test_real_cpu_tail_resume_uses_all_saved_games_and_keeps_frozen_weights(
     monkeypatch.setattr(evaluator, "_jax_system_chunk", original_chunk)
     restored = _run_pass(request, event_callback=events.append)
     assert restored == run_dir
-    rows = _rows(restored, pass_id="fixed", opponent="Random")
+    rows = _rows(restored, pass_id="fixed", opponent="Random", kills=True)
     assert len(rows) == 4
     assert {row["episode_id"] for row in rows} == (
         {1, 2, 3, 4} if kind == "panel" else {1, 2, 5, 6}
     )
     assert all(row["system_game_score"] == 0.5 for row in rows)
+    assert all(row["team_a_kills"] == row["team_b_kills"] == 0 for row in rows)
+    # The request's depth reaches every saved game configuration.
+    saved = load_results(restored, phase="validation", pass_id="fixed").metadata
+    assert {
+        content["team_deathmatch_red_zone_depth"]
+        for content in saved["configurations"].values()
+    } == {6.0}
     assert _pending(restored, pass_id="fixed", total=4) == 0
     count = len(events)
     assert _run_pass(request, event_callback=events.append) == restored
@@ -504,6 +542,21 @@ def test_real_cpu_tail_resume_uses_all_saved_games_and_keeps_frozen_weights(
     assert [
         row["pending_games"] for row in events if row["event"] == "evaluation_segment"
     ] == [4, 2]
+    if kind == "panel":
+        # After one fresh pass warms the programs, other depths with the same
+        # shapes reuse them: the depth is a dynamic value, not a static one.
+        def fresh(name: str, depth: float) -> int:
+            changed = {
+                **request,
+                "output_parent": str(tmp_path / name),
+                "pass_id": name,
+                "red_zone_depth": depth,
+            }
+            _run_pass(changed, event_callback=None)
+            return original_chunk._cache_size()
+
+        warmed = fresh("warm-6", 6.0)
+        assert fresh("new-5", 5.0) == fresh("new-0", 0.0) == warmed > 0
 
 
 def test_loaded_actor_contains_only_the_original_actor_tree(
@@ -540,7 +593,10 @@ def test_default_tasks_bind_exact_population_weights_and_distinct_roots(
         requests.append(request)
         return Path(request["output_parent"])
 
-    def known_rows(path: Path, *, pass_id: str, opponent: str) -> list[dict[str, Any]]:
+    def known_rows(
+        path: Path, *, pass_id: str, opponent: str, kills: bool
+    ) -> list[dict[str, Any]]:
+        assert kills
         return [
             {
                 "map_id": map_id,
@@ -548,6 +604,10 @@ def test_default_tasks_bind_exact_population_weights_and_distinct_roots(
                 "opponent": opponent,
                 "spawn_locations": end,
                 "system_game_score": 0.5,
+                "team_a_score": 2,
+                "team_b_score": 2,
+                "team_a_kills": 1,
+                "team_b_kills": 1,
             }
             for index, map_id in enumerate((42, 43, 44, 45, 46))
             for block in range(pairs)
@@ -563,6 +623,11 @@ def test_default_tasks_bind_exact_population_weights_and_distinct_roots(
     assert result["checkpoint_id"] == "1" * 64
     assert result["actor_digest"] == artifact_identity(actors[0])["actor_digest"]
     assert result["panel_digest"] == panel.digest
+    assert result["schema_version"] == 3 and result["red_zone_depth"] == 5.0
+    assert all(
+        cell["mean_team_a_score"] == 2 and cell["mean_team_a_kills"] == 1
+        for cell in result["cells"]
+    )
     assert len(requests) == 2
     assert len({request["pass_id"] for request in requests}) == 2
     for request in requests:
@@ -570,6 +635,17 @@ def test_default_tasks_bind_exact_population_weights_and_distinct_roots(
         assert request["root"] == root
         assert request["num_envs"] == 32 and request["chunk_size"] == 128
         assert request["maps"] == [42, 43, 44, 45, 46]
+        assert request["red_zone_depth"] == 5.0
+    # The same folder under another depth is a different task and is refused.
+    with pytest.raises(ValueError, match="different scientific conditions"):
+        validate_checkpoint(
+            actors[0],
+            panel,
+            output_dir=tmp_path / "task",
+            purpose=purpose,
+            red_zone_depth=6.0,
+        )
+    assert len(requests) == 2
 
 
 @pytest.mark.parametrize("pending", (1, 31, 32, 33))
@@ -622,3 +698,176 @@ def test_gpu_tail_launches_only_a_cpu_worker_below_32(
         assert call["command"][1:4] == ["-m", validation.__name__, "--worker"]
         assert json.loads(Path(call["command"][4]).read_text()) == request
         assert call["check"] is True
+
+
+def test_task_descriptions_record_the_depth_and_keep_legacy_bytes(
+    actors: tuple[Path, Path], tmp_path: Path
+) -> None:
+    identity = artifact_identity(actors[0])
+    options: dict[str, Any] = dict(
+        checkpoint_id=identity["metadata"]["checkpoint_id"],
+        actor_digest=identity["actor_digest"],
+        env_steps=identity["env_steps"],
+        panel_digest="random-diagnostic-v1",
+        purpose="random",
+        seed_pairs=10,
+        members=(("Random", "builtin-random"),),
+    )
+    legacy = validation_task_description(**options)
+    assert legacy == {
+        key: value for key, value in _diagnostic(identity).items() if key in legacy
+    }
+    assert legacy["schema_version"] == 1 and "red_zone_depth" not in legacy
+    fresh = {
+        depth: validation_task_description(**options, red_zone_depth=depth)
+        for depth in (0.0, 5.0, 6.0)
+    }
+    for depth, task in fresh.items():
+        assert task["schema_version"] == 3 and task["red_zone_depth"] == depth
+    assert len({legacy["task_id"], *(row["task_id"] for row in fresh.values())}) == 4
+    panel = create_panel(opponents=[str(actors[0])], output_dir=tmp_path / "panel")
+    panel_options: dict[str, Any] = dict(
+        checkpoint_id=identity["metadata"]["checkpoint_id"],
+        actor_digest=identity["actor_digest"],
+        env_steps=identity["env_steps"],
+        panel=panel,
+        purpose="routine",
+        seed_pairs=4,
+    )
+    old = panel_task_description(**panel_options)
+    assert old["schema_version"] == 2 and "red_zone_depth" not in old
+    new = {
+        depth: panel_task_description(**panel_options, red_zone_depth=depth)
+        for depth in (0.0, 5.0, 6.0)
+    }
+    for depth, task in new.items():
+        assert task["schema_version"] == 4 and task["red_zone_depth"] == depth
+        assert task["selection_schema_version"] == 2
+        assert {
+            key: value
+            for key, value in task.items()
+            if key not in ("schema_version", "red_zone_depth", "task_id")
+        } == {
+            key: value
+            for key, value in old.items()
+            if key not in ("schema_version", "task_id")
+        }
+    assert len({old["task_id"], *(row["task_id"] for row in new.values())}) == 4
+    for bad, error in ((5, TypeError), (-1.0, ValueError), (math.nan, ValueError)):
+        with pytest.raises(error):
+            validation_task_description(**options, red_zone_depth=bad)
+        with pytest.raises(error):
+            panel_task_description(**panel_options, red_zone_depth=bad)
+    # A depth wider than the 20-unit validation maps is refused before any
+    # validation file (such as task.json) is written, so the folder stays usable.
+    wide = tmp_path / "too-wide"
+    with pytest.raises(ValueError, match="must not exceed map_width"):
+        validate_random(actors[0], output_dir=wide, seed_pairs=1, red_zone_depth=25.0)
+    assert not wide.exists()
+
+
+def test_ranked_panel_is_admitted_only_at_its_ranked_depth(
+    actors: tuple[Path, Path], tmp_path: Path
+) -> None:
+    direct = create_panel(opponents=[str(actors[0])], output_dir=tmp_path / "direct")
+    for depth in (0.0, 5.0, 6.0):
+        assert load_panel(direct.path, red_zone_depth=depth) == direct
+    content = json.loads(direct.path.read_text())
+    evidence: dict[str, Any] = {
+        "schedule_digest": "s",
+        "evidence_digest": "e",
+        "ratings": [],
+        "size": 1,
+    }
+
+    def write(name: str, ranking: dict[str, Any]) -> Path:
+        ranked = {**content, "ranking_evidence": ranking}
+        ranked["panel_digest"] = _panel_digest(ranked)
+        (tmp_path / name).mkdir()
+        (tmp_path / name / "panel.json").write_text(json.dumps(ranked))
+        return tmp_path / name
+
+    # A ranking saved before the Red Zone rule scored one point per death.
+    for folder, ranked_depth in (
+        (write("before-rule", evidence), 0.0),
+        (
+            write("ranked", {**evidence, "schema_version": 2, "red_zone_depth": 6.0}),
+            6.0,
+        ),
+    ):
+        admitted = load_panel(folder, red_zone_depth=ranked_depth)
+        assert (
+            admitted.digest
+            == json.loads((folder / "panel.json").read_text())["panel_digest"]
+        )
+        assert load_panel(folder).digest == admitted.digest
+        with pytest.raises(ValueError, match="ranked with red_zone_depth"):
+            load_panel(folder, red_zone_depth=5.0)
+    # Depths are compared as the float32 values the game configs store.
+    assert load_panel(tmp_path / "ranked", red_zone_depth=6.0000001).digest
+    unknown = write("unknown", {**evidence, "schema_version": 3, "red_zone_depth": 5.0})
+    with pytest.raises(ValueError, match="ranking evidence"):
+        load_panel(unknown, red_zone_depth=5.0)
+
+
+def test_kill_difference_and_selection_use_recorded_kills_not_points() -> None:
+    def summary(
+        points: int, kills: int, *, actual_kills: bool = True
+    ) -> dict[str, Any]:
+        rows = [
+            {
+                "map_id": 42,
+                "seed_id": 1,
+                "opponent": "Alpha",
+                "spawn_locations": end,
+                "system_game_score": 1.0,
+                "team_a_score": points,
+                "team_b_score": 0,
+                "team_a_kills": kills,
+                "team_b_kills": 0,
+            }
+            for end in (0, 1)
+        ]
+        return summarize_validation(
+            rows,
+            maps=[42],
+            opponents=["Alpha"],
+            seed_pairs=1,
+            independent_opponents=True,
+            actual_kills=actual_kills,
+        )
+
+    # One Red Zone kill: two points, one kill.
+    red_zone = summary(2, 1)
+    assert red_zone["mean_kill_difference"] == 1.0
+    assert red_zone["cells"][0]["mean_team_a_score"] == 2.0
+    assert red_zone["cells"][0]["mean_team_a_kills"] == 1.0
+    legacy = summary(2, 1, actual_kills=False)
+    assert legacy["mean_kill_difference"] == 2.0
+    assert "mean_team_a_kills" not in legacy["cells"][0]
+    base = {
+        "complete": True,
+        "purpose": "confirmation",
+        "panel_digest": "panel",
+        "selection_schema_version": 2,
+        "red_zone_depth": 5.0,
+        "score": 1.0,
+        "env_steps": 64,
+    }
+    more_points = {
+        **base,
+        "checkpoint_id": "a",
+        "mean_kill_difference": summary(4, 2)["mean_kill_difference"],
+    }
+    more_kills = {
+        **base,
+        "checkpoint_id": "b",
+        "mean_kill_difference": summary(3, 3)["mean_kill_difference"],
+    }
+    assert select_checkpoint([more_points, more_kills])["checkpoint_id"] == "b"
+    for other in (
+        {**more_kills, "red_zone_depth": 0.0},
+        {key: value for key, value in more_kills.items() if key != "red_zone_depth"},
+    ):
+        with pytest.raises(ValueError, match="Red Zone scoring rules"):
+            _candidates([more_points, other])

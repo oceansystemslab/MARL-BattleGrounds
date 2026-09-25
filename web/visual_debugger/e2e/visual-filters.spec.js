@@ -1,6 +1,13 @@
 /**
  * @file Check page-local visual preferences across live/replay audiences and dense
- * real scenario displays.
+ * real scenario displays. A fresh page in the live Combat Debugger and in the
+ * Replay Viewer starts with the eleven default filters on, including Cooldown
+ * Effects and Red Zone Floors, and Ranges off ("11 enabled"). Default
+ * Configuration, Enable All and Disable All change only local paint and the
+ * Ranges setting. The Red Zone Floors option shows its exact help on hover and
+ * focus, and its checkbox lists both help IDs. Turning Red Zone Floors off and
+ * on in Oracle, or Cooldown Effects off and on in Oracle and Agent POV, sends
+ * no request and leaves the scientific data unchanged.
  */
 import { expect, test } from "@playwright/test";
 
@@ -36,6 +43,7 @@ const FILTERS = Object.freeze([
   ["spawn_shield_expiry", "Spawn-Shield Expiry"],
   ["scrolling_battle_text", "Scrolling Battle Text"],
   ["death_announcer", "Death Announcer"],
+  ["red_zone_floors", "Red Zone Floors"],
 ]);
 
 const FILTER_IDS = FILTERS.map(([id]) => id);
@@ -44,16 +52,28 @@ const INITIAL_FILTERS = new Set([
   "spawn_shield",
   "basic_ability_effects",
   "regeneration_effects",
+  "cooldown_effects",
   "death_effects",
   "resurrection_effects",
   "scrolling_battle_text",
   "respawn_wave",
   "death_announcer",
+  "red_zone_floors",
 ]);
 const INITIAL_DISABLED_FILTERS = FILTER_IDS.filter((id) => !INITIAL_FILTERS.has(id));
 const FILTER_INPUT = 'input[type="checkbox"][data-visual-filter-id]';
 const CHOREOGRAPHY_ROOTS =
   "#battlefield .combat-choreography, #battlefield .combat-choreography-connectors, #battlefield .combat-choreography-routes";
+const RED_ZONE_FLOOR_PAINT =
+  "#battlefield .red-zone-floor-clip, #battlefield .red-zone-floor";
+const RED_ZONE_FLOORS_HELP_ID = "visual-filter-red-zone-floors-help";
+const RED_ZONE_FLOORS_HELP =
+  "Tint each team's Red Zone floor deep red. When an agent dies inside its own " +
+  "team's Red Zone, the enemy team gets 2 points. Turning this off only hides " +
+  "the tint.";
+const DEFAULT_CONFIGURATION_HELP =
+  "Restore the eleven default effects, including Cooldown Effects, Death Announcer " +
+  "and Red Zone Floors, and turn off Ranges.";
 
 /** @type {Awaited<ReturnType<typeof exportReplayArtifacts>> | null} */
 let artifacts = null;
@@ -281,7 +301,13 @@ async function expectFilterSurface(page, disabledIds = [], rangesEnabled = true)
         }
         return {
           id: input.dataset.visualFilterId,
+          option: input.parentElement?.dataset.visualFilterOption,
           label: input.parentElement?.textContent?.trim(),
+          // Focus adds visual-tooltip for a moment; expectRedZoneFloorsHelp checks it.
+          describedBy: (input.getAttribute("aria-describedby") ?? "")
+            .split(/\s+/u)
+            .filter((token) => token !== "visual-tooltip")
+            .join(" "),
           value: input.value,
           type: input.type,
           autocomplete: input.autocomplete,
@@ -293,7 +319,12 @@ async function expectFilterSurface(page, disabledIds = [], rangesEnabled = true)
   expect(rows).toEqual(
     FILTERS.map(([id, label]) => ({
       id,
+      option: id,
       label,
+      describedBy:
+        id === "red_zone_floors"
+          ? `visual-filters-help ${RED_ZONE_FLOORS_HELP_ID}`
+          : "visual-filters-help",
       value: id,
       type: "checkbox",
       autocomplete: "off",
@@ -331,6 +362,111 @@ async function expectFilterSurface(page, disabledIds = [], rangesEnabled = true)
     { id: "disable-all-visual-filters-button", text: "Disable All" },
     { id: "default-visual-filters-button", text: "Default Configuration" },
   ]);
+}
+
+/** @param {import("@playwright/test").Page} page */
+async function expectRedZoneFloorsHelp(page) {
+  const option = page.locator(
+    '#visual-filter-options [data-visual-filter-option="red_zone_floors"]',
+  );
+  const input = option.locator(FILTER_INPUT);
+  const hiddenHelp = page.locator(`#visual-filter-options #${RED_ZONE_FLOORS_HELP_ID}`);
+  const tooltip = page.locator("#visual-tooltip");
+  const ownDescribedBy = `visual-filters-help ${RED_ZONE_FLOORS_HELP_ID}`;
+  const sectionHelp = (await page.locator("#visual-filters-help").textContent()) ?? "";
+  await expect(hiddenHelp).toHaveText(RED_ZONE_FLOORS_HELP);
+  await expect(hiddenHelp).toHaveClass("sr-only");
+  await expect(input).toHaveAttribute("aria-describedby", ownDescribedBy);
+  await expect(input).toHaveAccessibleName("Red Zone Floors");
+  await expect(input).toHaveAccessibleDescription(
+    `${sectionHelp.replace(/\s+/gu, " ").trim()} ${RED_ZONE_FLOORS_HELP}`,
+  );
+
+  await option.hover();
+  await expect(tooltip).toBeVisible();
+  await expect(page.locator("#visual-tooltip-title")).toHaveText("Red Zone Floors");
+  await expect(page.locator("#visual-tooltip-details")).toHaveText(
+    RED_ZONE_FLOORS_HELP,
+  );
+  await page.mouse.move(1, 1);
+  await expect(tooltip).toBeHidden();
+
+  await input.focus();
+  await expect(tooltip).toBeVisible();
+  await expect(page.locator("#visual-tooltip-title")).toHaveText("Red Zone Floors");
+  await expect(page.locator("#visual-tooltip-details")).toHaveText(
+    RED_ZONE_FLOORS_HELP,
+  );
+  await expect(input).toHaveAttribute(
+    "aria-describedby",
+    `${ownDescribedBy} visual-tooltip`,
+  );
+  await input.blur();
+  await expect(tooltip).toBeHidden();
+  await expect(input).toHaveAttribute("aria-describedby", ownDescribedBy);
+}
+
+/** @param {import("@playwright/test").Page} page
+ * @param {"#live-ranges-button" | "#replay-ranges-button"} rangesSelector */
+async function expectFreshDefaults(page, rangesSelector) {
+  await expectFilterSurface(page, INITIAL_DISABLED_FILTERS, false);
+  await expect(page.locator("#visual-filter-count")).toHaveText("11 enabled");
+  await expect(page.locator(rangesSelector)).toHaveAttribute("aria-pressed", "false");
+  await expect(page.locator("#default-visual-filters-button")).toHaveAttribute(
+    "aria-description",
+    DEFAULT_CONFIGURATION_HELP,
+  );
+  await expectRedZoneFloorsHelp(page);
+}
+
+/** @param {string[]} disabledIds */
+function expectedPaintKey(disabledIds) {
+  const disabled = new Set(disabledIds);
+  return `visual-filters-v3:${FILTER_IDS.map((id) => (disabled.has(id) ? "0" : "1")).join("")}`;
+}
+
+/** @param {import("@playwright/test").Page} page */
+function choreographyPaintKeys(page) {
+  return page
+    .locator(CHOREOGRAPHY_ROOTS)
+    .evaluateAll((roots) => roots.map((root) => root.getAttribute("data-paint-key")));
+}
+
+/** @param {import("@playwright/test").Page} page */
+function cooldownInventory(page) {
+  return page.locator("#battlefield .cooldown-cell").evaluateAll((cells) =>
+    cells.map((cell) => ({
+      key: cell.getAttribute("data-presentation-key"),
+      ticks: cell.getAttribute("data-ticks"),
+      ariaLabel: cell.getAttribute("aria-label"),
+    })),
+  );
+}
+
+/** @param {import("@playwright/test").Page} page
+ * @param {{method: string, path: string}[]} apiRequests
+ * @param {boolean} replay
+ * @param {string} label */
+async function expectCooldownToggle(page, apiRequests, replay, label) {
+  const science = await scientificSignature(page, replay);
+  const cooldowns = await cooldownInventory(page);
+  expect(cooldowns.length, `${label} cooldown cells`).toBeGreaterThan(0);
+  await setFilter(
+    page,
+    apiRequests,
+    "cooldown_effects",
+    false,
+    `${label} cooldowns off`,
+  );
+  await expect(
+    page.locator(
+      '#battlefield .cooldown-dock, #battlefield .cooldown-cell, #battlefield .required-dock-fallback[data-kind="cooldown"]',
+    ),
+  ).toHaveCount(0);
+  expect(await scientificSignature(page, replay)).toEqual(science);
+  await setFilter(page, apiRequests, "cooldown_effects", true, `${label} cooldowns on`);
+  expect(await cooldownInventory(page)).toEqual(cooldowns);
+  expect(await scientificSignature(page, replay)).toEqual(science);
 }
 
 /** @param {import("@playwright/test").Page} page
@@ -754,6 +890,7 @@ async function expectAllPaintAbsentWithoutDwell(page) {
         "#battlefield .pov-observed-status",
         "#battlefield .agent-spawn-shield",
         "#battlefield .cooldown-cell",
+        RED_ZONE_FLOOR_PAINT,
         "#battlefield .combat-effect",
         "#battlefield .combat-connector-effect",
         "#battlefield .combat-route-effect",
@@ -783,17 +920,17 @@ async function expectAllPaintAbsentWithoutDwell(page) {
   expect(state.roots).toEqual([
     {
       state: "settled",
-      paintKey: `visual-filters-v2:${"0".repeat(FILTERS.length)}`,
+      paintKey: `visual-filters-v3:${"0".repeat(FILTERS.length)}`,
       childCount: 0,
     },
     {
       state: "settled",
-      paintKey: `visual-filters-v2:${"0".repeat(FILTERS.length)}`,
+      paintKey: `visual-filters-v3:${"0".repeat(FILTERS.length)}`,
       childCount: 0,
     },
     {
       state: "settled",
-      paintKey: `visual-filters-v2:${"0".repeat(FILTERS.length)}`,
+      paintKey: `visual-filters-v3:${"0".repeat(FILTERS.length)}`,
       childCount: 0,
     },
   ]);
@@ -817,7 +954,7 @@ test("visual filters remain page-local across live Oracle/NoShared and replay Or
     presentationKind: "live_oracle",
   });
   await openVisualFilters(page);
-  await expectFilterSurface(page, INITIAL_DISABLED_FILTERS, false);
+  await expectFreshDefaults(page, "#live-ranges-button");
   await expect(page.locator("#roster-details")).toHaveAttribute("open", "");
   await expect(page.locator("#visual-filters")).toHaveAttribute("open", "");
   await ensureRangesOn(page, "live");
@@ -888,6 +1025,39 @@ test("visual filters remain page-local across live Oracle/NoShared and replay Or
       }),
     { label: "live disabled Enable All idempotency" },
   );
+
+  // Default Configuration restores the eleven defaults and turns Oracle ranges
+  // off through one server command; a second press changes nothing.
+  const liveDefaultMark = apiRequests.length;
+  await performCommand(page, "/api/command", () =>
+    page.locator("#default-visual-filters-button").click(),
+  );
+  expect(
+    apiRequests.slice(liveDefaultMark).filter(({ method }) => method === "POST"),
+    "Live Default Configuration range request count",
+  ).toEqual([{ method: "POST", path: "/api/command" }]);
+  await expectFilterSurface(page, INITIAL_DISABLED_FILTERS, false);
+  await expect(page.locator("#visual-filter-count")).toHaveText("11 enabled");
+  await expect(page.locator("#live-ranges-button")).toHaveAttribute(
+    "aria-pressed",
+    "false",
+  );
+  expect(await rangeIndependentScientificSignature(page, false)).toEqual(
+    liveBulkScience,
+  );
+  await expect(page.locator("#step-value")).toHaveText(liveBulkStep ?? "0");
+  await expectLocalOnly(
+    page,
+    apiRequests,
+    () => page.locator("#default-visual-filters-button").click(),
+    { label: "live Default Configuration idempotency" },
+  );
+  await expectFilterSurface(page, INITIAL_DISABLED_FILTERS, false);
+  await performCommand(page, "/api/command", () =>
+    page.locator("#enable-all-visual-filters-button").click(),
+  );
+  await expectFilterSurface(page);
+  expect(await rangeSignature(page, "#live-ranges-button")).toEqual(liveBulkRanges);
 
   await performCommand(page, "/api/command", () =>
     page
@@ -1146,7 +1316,9 @@ test("visual filters remain page-local across live Oracle/NoShared and replay Or
   });
   await expectReplayFrameIndex(page, 1);
   await openVisualFilters(page);
-  await expectFilterSurface(page, INITIAL_DISABLED_FILTERS, false);
+  await expectFreshDefaults(page, "#replay-ranges-button");
+  // Cooldown Effects now starts on, so a fresh page already paints cooldowns.
+  await expect(page.locator("#battlefield .cooldown-cell")).not.toHaveCount(0);
   await ensureRangesOn(page, "replay");
   await page.locator("#enable-all-visual-filters-button").click();
   await setFilter(
@@ -1253,6 +1425,53 @@ test("visual filters remain page-local across live Oracle/NoShared and replay Or
   expect(await scientificSignature(page, true)).toEqual(replayScience);
   expect(await rangeSignature(page, "#replay-ranges-button")).toEqual(replayRanges);
 
+  await expectCooldownToggle(page, apiRequests, true, "Replay Oracle");
+
+  // Red Zone Floors off removes only the tint windows from the map layer and
+  // changes only its own paint-key flag; scientific data and ranges stay the same.
+  const replayMapLayer = page.locator('#battlefield [data-layer="map"]');
+  const mapWithoutTint = () =>
+    replayMapLayer.evaluate((layer) => {
+      const copy = layer.cloneNode(true);
+      if (!(copy instanceof Element)) {
+        throw new TypeError("Map layer is unavailable.");
+      }
+      for (const tint of copy.querySelectorAll(".red-zone-floor-clip")) {
+        tint.remove();
+      }
+      return copy.innerHTML;
+    });
+  const replayMap = await replayMapLayer.innerHTML();
+  const replayMapWithoutTint = await mapWithoutTint();
+  await setFilter(
+    page,
+    apiRequests,
+    "red_zone_floors",
+    false,
+    "replay Red Zone Floors off",
+  );
+  await expectFilterSurface(page, ["target_selection_visuals", "red_zone_floors"]);
+  await expect(page.locator(RED_ZONE_FLOOR_PAINT)).toHaveCount(0);
+  expect(await replayMapLayer.innerHTML()).toBe(replayMapWithoutTint);
+  expect(await choreographyPaintKeys(page)).toEqual(
+    Array(3).fill(expectedPaintKey(["target_selection_visuals", "red_zone_floors"])),
+  );
+  expect(await scientificSignature(page, true)).toEqual(replayScience);
+  expect(await rangeSignature(page, "#replay-ranges-button")).toEqual(replayRanges);
+  await setFilter(
+    page,
+    apiRequests,
+    "red_zone_floors",
+    true,
+    "replay Red Zone Floors on",
+  );
+  expect(await replayMapLayer.innerHTML()).toBe(replayMap);
+  expect(await choreographyPaintKeys(page)).toEqual(
+    Array(3).fill(expectedPaintKey(["target_selection_visuals"])),
+  );
+  expect(await scientificSignature(page, true)).toEqual(replayScience);
+  await expectTooltipCleared(page);
+
   await setFilter(
     page,
     apiRequests,
@@ -1279,6 +1498,7 @@ test("visual filters remain page-local across live Oracle/NoShared and replay Or
       .presentation_kind,
   ).toBe("replay_shared_obs_agent_pov");
   await expectFilterSurface(page, replayDisabled, false);
+  await expectCooldownToggle(page, apiRequests, true, "Replay Shared Agent POV");
   await expectLocalOnly(
     page,
     apiRequests,
@@ -1397,7 +1617,7 @@ test("visual filters remain page-local across live Oracle/NoShared and replay Or
     await enabledChoreographyRoots.evaluateAll((roots) =>
       roots.map((root) => root.getAttribute("data-paint-key")),
     ),
-  ).toEqual(Array(3).fill(`visual-filters-v2:${"1".repeat(FILTERS.length)}`));
+  ).toEqual(Array(3).fill(`visual-filters-v3:${"1".repeat(FILTERS.length)}`));
   await expectLocalOnly(
     page,
     apiRequests,

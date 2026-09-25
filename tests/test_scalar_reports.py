@@ -1,7 +1,8 @@
 """Check versioned scalar reads, durable prefixes, ownership and missing values.
 
 These host-only checks preserve historical headers without rewriting files and
-reject current schema, row, identity and commit-boundary mismatches.
+reject current schema, row, identity and commit-boundary mismatches. Host schema
+2 reads scalar schemas 14 (before the Red Zone columns) and 15; 16 is rejected.
 """
 
 import copy
@@ -84,11 +85,13 @@ def _rows(
     ]
 
 
+@pytest.mark.parametrize("scalar", [14, 15])
 def test_current_read_preserves_exact_integer_summary_and_ignores_suffix(
-    tmp_path: Path,
+    tmp_path: Path, scalar: int
 ) -> None:
     path, manifest = _write(
         tmp_path,
+        scalar=scalar,
         rows=[("run", "evaluation", "first", 17, 3, 1, "config", "", 2**24 + 1)],
     )
     before = path.read_bytes()
@@ -119,7 +122,7 @@ def test_historical_header_owns_removed_measurements_and_blank_values(
 
 
 @pytest.mark.parametrize(
-    "host,scalar", [(1, 14), (2, 13), (2, 15), (3, 14), (True, 13), (1, True)]
+    "host,scalar", [(1, 14), (2, 13), (2, 16), (3, 14), (True, 13), (1, True)]
 )
 def test_unknown_version_pairs_fail_without_changing_files(
     tmp_path: Path, host: int, scalar: int

@@ -2,8 +2,11 @@
 
 ``iter_scalar_rows`` reads bounded batches from a run manifest's committed byte
 range. Historical headers keep their recorded order and values. Current headers
-must match the caller's shared schema. This is a low-level host reader; it does
-not resume a writer, recompute metrics or qualify a tournament population.
+must match the caller's shared schema. Host schema 2 accepts each scalar schema
+listed by metric_catalog.FULL_METRIC_NAMES_BY_SCHEMA_VERSION (14 and 15); the
+catalog is standard-library only, so this reader still loads no JAX. This is a
+low-level host reader; it does not resume a writer, recompute metrics or
+qualify a tournament population.
 """
 
 from __future__ import annotations
@@ -14,6 +17,10 @@ import math
 from collections.abc import Buffer, Callable, Iterator, Mapping, Sequence
 from pathlib import Path
 from typing import BinaryIO, cast
+
+from marl_battlegrounds.evaluation.metric_catalog import (
+    FULL_METRIC_NAMES_BY_SCHEMA_VERSION,
+)
 
 ScalarCell = str | int | float | None
 type _Passes = Mapping[tuple[str, str], tuple[Mapping[str, object], frozenset[int]]]
@@ -464,7 +471,9 @@ def _iter_rows(
     """Parse shared durable rows, admitting unfinished games only for assignments.
 
     Public wrappers own argument/result contracts. ``assignments=True`` requires
-    schema 2/14 and trace ownership instead of a completion. A supplied pass
+    host schema 2 (scalar 14 or 15) and trace ownership instead of a completion.
+    Host schema 1 accepts scalar 1 to 13; host schema 2 accepts each key of
+    FULL_METRIC_NAMES_BY_SCHEMA_VERSION. A supplied pass
     lookup reuses the caller's manifest index; otherwise build it once. No rows
     outside the saved byte boundary are parsed and no file is changed.
     """
@@ -475,13 +484,18 @@ def _iter_rows(
     if (
         type(host) is not int
         or type(scalar) is not int
-        or not ((host == 1 and 1 <= scalar <= 13) or (host == 2 and scalar == 14))
+        or not (
+            (host == 1 and 1 <= scalar <= 13)
+            or (host == 2 and scalar in FULL_METRIC_NAMES_BY_SCHEMA_VERSION)
+        )
         or manifest.get("metric_schema_id") != "marlbg.tdm.scalar"
     ):
         raise ValueError("unsupported host/scalar report schema combination")
     current = host == 2
     if assignments and not current:
-        raise ValueError("policy assignments require host schema 2 and scalar 14")
+        raise ValueError(
+            "policy assignments require host schema 2 and scalar schema 14 or 15"
+        )
     if current and expected_header is None and not summary:
         raise ValueError("current scalar reports require an exact expected header")
     selected = Path(path)
@@ -601,7 +615,7 @@ def iter_scalar_rows(
         Table path. Its filename selects the manifest's durable byte/row boundary.
     manifest : Mapping[str, object]
         Loaded run_details.json. Supports host schema 1/scalar 1 through 13, and
-        host schema 2/scalar 14. Rows must name a run, pass and completion.
+        host schema 2/scalar 14 or 15. Rows must name a run, pass and completion.
     expected_header : sequence of str or None, optional
         Required exact header for a current table. Ignored for historical tables,
         whose recorded header owns the column names and order. Defaults to None.
@@ -784,7 +798,7 @@ def iter_policy_assignments(
     path : str or pathlib.Path
         policy_assignments.csv path. Only its saved durable prefix is read.
     manifest : Mapping[str, object]
-        Host schema 2/scalar 14 run metadata, including Systems, per-pass trace
+        Host schema 2/scalar 14 or 15 run metadata, including Systems, per-pass trace
         epochs and trace_config_ids. Incomplete games are valid trace owners.
     expected_header : sequence of str
         Exact shared assignment header supplied by the writer/table authority.

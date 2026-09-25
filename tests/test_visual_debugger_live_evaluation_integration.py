@@ -1,4 +1,8 @@
-"""Check live debugger evaluation updates as one consistent operation."""
+"""Check live debugger evaluation updates as one consistent operation.
+
+Each Core step makes one current capture (transition unit V3 into frame V3),
+and action builders receive the current episode context V4.
+"""
 
 from __future__ import annotations
 
@@ -30,7 +34,7 @@ from scripts.dev.visual_debugger.service import DebuggerService
 import marl_battlegrounds.evaluation.capture as capture_module
 from marl_battlegrounds.evaluation.models import (
     CodeRevisionV1,
-    EvaluationEpisodeContextV3,
+    EvaluationEpisodeContextV4,
 )
 
 
@@ -166,7 +170,7 @@ def test_one_core_step_has_one_cp2_capture_and_ui_only_input_has_none(
 ) -> None:
     session = _session()
     real_step = control_module.step
-    real_capture = control_module.capture_evaluation_transition_unit_v2
+    real_capture = control_module.capture_evaluation_transition_unit_v3
     calls = {"step": 0, "capture": 0}
 
     def counting_step(*args: object, **kwargs: object) -> object:
@@ -180,7 +184,7 @@ def test_one_core_step_has_one_cp2_capture_and_ui_only_input_has_none(
     monkeypatch.setattr(control_module, "step", counting_step)
     monkeypatch.setattr(
         control_module,
-        "capture_evaluation_transition_unit_v2",
+        "capture_evaluation_transition_unit_v3",
         counting_capture,
     )
 
@@ -268,7 +272,7 @@ def test_interactive_submit_passes_context_to_action_builder_and_config_to_core_
         **kwargs: object,
     ) -> object:
         assert context is session.evaluation_context
-        assert type(context) is EvaluationEpisodeContextV3
+        assert type(context) is EvaluationEpisodeContextV4
         observed["context"] = True
         return real_action_builder(context, *args, **kwargs)  # type: ignore[arg-type]
 
@@ -299,14 +303,14 @@ def test_restart_builds_pending_rows_from_the_new_evaluation_context(
 ) -> None:
     session = _session()
     real_builder = control_module._default_pending_actions  # pyright: ignore[reportPrivateUsage]
-    observed_contexts: list[EvaluationEpisodeContextV3] = []
+    observed_contexts: list[EvaluationEpisodeContextV4] = []
 
     def checking_builder(
-        context: EvaluationEpisodeContextV3,
+        context: EvaluationEpisodeContextV4,
         *args: object,
         **kwargs: object,
     ) -> object:
-        assert type(context) is EvaluationEpisodeContextV3
+        assert type(context) is EvaluationEpisodeContextV4
         observed_contexts.append(context)
         return real_builder(context, *args, **kwargs)  # type: ignore[arg-type]
 

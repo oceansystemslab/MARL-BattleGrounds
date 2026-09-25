@@ -5,11 +5,13 @@ with unique keys, exact schema versions, and canonical bytes. Paths are opened
 through POSIX directory descriptors without following symlinks. Parent
 directories must already exist; this module does not create them.
 
-Replay V2/V3 are single files. Legacy V1 bundles publish a separate metric
-sidecar before the replay that references it. Publication never overwrites an
-existing target; retries can explicitly verify previously published cached
-bytes. Host validation and filesystem durability live here. No simulator rollout,
-policy execution, device initialization, network, or archive extraction occurs.
+Replay V2-V4 are single files; V4 records the Team Deathmatch Red Zone rule
+and older versions keep their original meaning. Legacy V1 bundles publish a
+separate metric sidecar before the replay that references it. Publication
+never overwrites an existing target; retries can explicitly verify previously
+published cached bytes. Host validation and filesystem durability live here.
+No simulator rollout, policy execution, device initialization, network, or
+archive extraction occurs.
 """
 
 from __future__ import annotations
@@ -42,10 +44,13 @@ from marl_battlegrounds.evaluation.pov import (
     ACTOR_POV_ARTIFACT_SCHEMA_ID,
     ActorPovReplayArtifactV1,
     ActorPovReplayArtifactV2,
+    ActorPovReplayArtifactV3,
     validate_actor_pov_replay_against_replay_v1,
     validate_actor_pov_replay_against_replay_v2,
+    validate_actor_pov_replay_against_replay_v3,
     validate_actor_pov_replay_artifact_v1,
     validate_actor_pov_replay_artifact_v2,
+    validate_actor_pov_replay_artifact_v3,
 )
 from marl_battlegrounds.evaluation.replay import (
     METRIC_REPORT_ARTIFACT_SCHEMA_ID,
@@ -59,6 +64,7 @@ from marl_battlegrounds.evaluation.replay import (
 )
 from marl_battlegrounds.evaluation.replay_v2 import ReplayArtifactV2
 from marl_battlegrounds.evaluation.replay_v3 import ReplayArtifactV3
+from marl_battlegrounds.evaluation.replay_v4 import ReplayArtifactV4
 from marl_battlegrounds.evaluation.scenario import (
     SCENARIO_EVALUATION_RECORD_SCHEMA_ID,
     SCENARIO_SCHEMA_VERSION_V2,
@@ -66,10 +72,12 @@ from marl_battlegrounds.evaluation.scenario import (
     ScenarioEvaluationRecordV2,
     ScenarioEvaluationRecordV3,
     ScenarioEvaluationRecordV4,
+    ScenarioEvaluationRecordV5,
     validate_scenario_evaluation_record_v1,
     validate_scenario_evaluation_record_v2,
     validate_scenario_evaluation_record_v3,
     validate_scenario_evaluation_record_v4,
+    validate_scenario_evaluation_record_v5,
 )
 from marl_battlegrounds.evaluation.validation import validate_declared_model_tree
 
@@ -279,12 +287,12 @@ class LoadedReplay:
 
     Attributes
     ----------
-    replay : ReplayArtifactV1 | ReplayArtifactV2 | ReplayArtifactV3
-        ReplayArtifactV1, V2, or V3.
+    replay : ReplayArtifactV1 | ReplayArtifactV2 | ReplayArtifactV3 | ReplayArtifactV4
+        ReplayArtifactV1, V2, V3 or V4 (V4 records the Red Zone rule).
     metric_report_artifact : EvaluationMetricReportArtifactV1 | None
-        Optional V1 sidecar; defaults to None and is forbidden for V2/V3.
+        Optional V1 sidecar; defaults to None and is forbidden for V2-V4.
     status : Literal['complete', 'metric_report_missing', 'not_recorded']
-        not_recorded for V2/V3 (default); complete or metric_report_missing for V1.
+        not_recorded for V2-V4 (default); complete or metric_report_missing for V1.
 
     Notes
     -----
@@ -292,7 +300,7 @@ class LoadedReplay:
     pairing only.
     """
 
-    replay: ReplayArtifactV1 | ReplayArtifactV2 | ReplayArtifactV3
+    replay: ReplayArtifactV1 | ReplayArtifactV2 | ReplayArtifactV3 | ReplayArtifactV4
     metric_report_artifact: EvaluationMetricReportArtifactV1 | None = None
     status: Literal["complete", "metric_report_missing", "not_recorded"] = (
         "not_recorded"
@@ -301,7 +309,7 @@ class LoadedReplay:
     def __post_init__(self) -> None:
         """Require exact replay roots and a sidecar status consistent with that version.
 
-        V2/V3 forbid legacy sidecars and require not_recorded. V1 uses complete only
+        V2-V4 forbid legacy sidecars and require not_recorded. V1 uses complete only
         when
         a sidecar is present. Raise TypeError or ValueError; do not load or validate
         files.
@@ -310,9 +318,10 @@ class LoadedReplay:
             ReplayArtifactV1,
             ReplayArtifactV2,
             ReplayArtifactV3,
+            ReplayArtifactV4,
         ):
             raise TypeError("loaded replay requires an exact supported artifact")
-        if type(self.replay) in (ReplayArtifactV2, ReplayArtifactV3):
+        if type(self.replay) in (ReplayArtifactV2, ReplayArtifactV3, ReplayArtifactV4):
             if self.status != "not_recorded" or self.metric_report_artifact is not None:
                 raise ValueError(
                     "Self-contained replay has no legacy metric-report sidecar"
@@ -439,8 +448,8 @@ class PreparedReplay:
 
     Attributes
     ----------
-    replay : ReplayArtifactV2 | ReplayArtifactV3
-        Exact ReplayArtifactV2 or V3.
+    replay : ReplayArtifactV2 | ReplayArtifactV3 | ReplayArtifactV4
+        Exact ReplayArtifactV2, V3 or V4.
     max_file_size_bytes : int
         Positive per-file cap, default 1 GiB (1024**3 bytes).
     replay_json_bytes : bytes
@@ -454,13 +463,13 @@ class PreparedReplay:
     hash differs in purpose from the artifact's digest field, which excludes itself.
     """
 
-    replay: ReplayArtifactV2 | ReplayArtifactV3
+    replay: ReplayArtifactV2 | ReplayArtifactV3 | ReplayArtifactV4
     max_file_size_bytes: int = DEFAULT_MAX_REPLAY_FILE_SIZE_BYTES_V1
     replay_json_bytes: bytes = field(init=False, repr=False)
     replay_payload_sha256: str = field(init=False)
 
     def __post_init__(self) -> None:
-        """Validate exact V2/V3 replay content and cache canonical bytes within the
+        """Validate exact V2-V4 replay content and cache canonical bytes within the
         limit.
 
         Reject invalid limits/types/models before publishing anything. Oversized bytes
@@ -469,7 +478,11 @@ class PreparedReplay:
         size = _require_positive_limit(
             self.max_file_size_bytes, name="max_file_size_bytes"
         )
-        if type(self.replay) not in (ReplayArtifactV2, ReplayArtifactV3):
+        if type(self.replay) not in (
+            ReplayArtifactV2,
+            ReplayArtifactV3,
+            ReplayArtifactV4,
+        ):
             raise TypeError("prepared replay requires an exact supported artifact")
         canonical = validate_declared_model_tree(
             self.replay, record_name="replay", expected_type=type(self.replay)
@@ -478,16 +491,16 @@ class PreparedReplay:
 
     @classmethod
     def _from_capture(
-        cls, replay: ReplayArtifactV2 | ReplayArtifactV3
+        cls, replay: ReplayArtifactV2 | ReplayArtifactV3 | ReplayArtifactV4
     ) -> PreparedReplay:
         """Prepare freshly validated collector output without a duplicate model-tree
         pass.
 
         Only immediate capture-to-publication uses this trusted path. Require exact
-        replay V2/V3, use the default 1 GiB limit, and cache canonical bytes. Arbitrary
+        replay V2-V4, use the default 1 GiB limit, and cache canonical bytes. Arbitrary
         external models must use the normal strict constructor.
         """
-        if type(replay) not in (ReplayArtifactV2, ReplayArtifactV3):
+        if type(replay) not in (ReplayArtifactV2, ReplayArtifactV3, ReplayArtifactV4):
             raise TypeError(
                 "capture publication requires an exact self-contained replay"
             )
@@ -1228,24 +1241,33 @@ def _load_actor_pov_bytes(
     *,
     path: Path,
     max_json_depth: int,
-    current: bool,
-) -> ActorPovReplayArtifactV1 | ActorPovReplayArtifactV2:
-    """Admit exact POV V1 bytes, or V2 when current is true.
+    pov_version: Literal[1, 2, 3],
+) -> ActorPovReplayArtifactV1 | ActorPovReplayArtifactV2 | ActorPovReplayArtifactV3:
+    """Admit exact canonical POV bytes of the declared pov_version (1, 2 or 3).
 
     Check JSON/schema, complete standalone POV validity, and canonical byte equality.
-    The separate source-replay join is optional at the public load boundary.
+    Bytes of any other POV version fail with unsupported_schema_version. The
+    separate source-replay join is optional at the public load boundary.
     """
-    model = ActorPovReplayArtifactV2 if current else ActorPovReplayArtifactV1
+    model = (
+        ActorPovReplayArtifactV3
+        if pov_version == 3
+        else ActorPovReplayArtifactV2
+        if pov_version == 2
+        else ActorPovReplayArtifactV1
+    )
     _preflight_json(
         payload,
         path=path,
         expected_schema_id=ACTOR_POV_ARTIFACT_SCHEMA_ID,
-        expected_schema_version=2 if current else 1,
+        expected_schema_version=pov_version,
         max_json_depth=max_json_depth,
     )
     try:
         artifact = model.model_validate_json(payload)
-        if type(artifact) is ActorPovReplayArtifactV2:
+        if type(artifact) is ActorPovReplayArtifactV3:
+            validate_actor_pov_replay_artifact_v3(artifact)
+        elif type(artifact) is ActorPovReplayArtifactV2:
             validate_actor_pov_replay_artifact_v2(artifact)
         elif type(artifact) is ActorPovReplayArtifactV1:
             validate_actor_pov_replay_artifact_v1(artifact)
@@ -1697,8 +1719,10 @@ def load_replay(
     Returns
     -------
     LoadedReplay
-        LoadedReplay containing replay V1, V2, or V3. V2/V3 use status not_recorded
-        and no legacy sidecar. V1 resolves its sibling report or reports its absence.
+        LoadedReplay containing replay V1, V2, V3 or V4. V2-V4 use status
+        not_recorded and no legacy sidecar. V1 resolves its sibling report or
+        reports its absence. V4 records the Team Deathmatch Red Zone rule; older
+        versions keep their original one-point meaning.
 
     Raises
     ------
@@ -1708,7 +1732,7 @@ def load_replay(
 
     Notes
     -----
-    Host-only reader does not initialize JAX or rerun simulation. V2/V3 ignore
+    Host-only reader does not initialize JAX or rerun simulation. V2-V4 ignore
     nearby metric files because they are not part of those replay contracts.
     Existing invalid V1 sidecars fail rather than being treated as absent.
     """
@@ -1730,13 +1754,15 @@ def load_replay(
             payload,
             path=replay_path,
             expected_schema_id=REPLAY_ARTIFACT_SCHEMA_ID,
-            expected_schema_version=(1, 2, 3),
+            expected_schema_version=(1, 2, 3, 4),
             max_json_depth=depth,
         )
-        if root["schema_version"] in (2, 3):
-            model = (
-                ReplayArtifactV3 if root["schema_version"] == 3 else ReplayArtifactV2
-            )
+        if root["schema_version"] in (2, 3, 4):
+            model: (
+                type[ReplayArtifactV2] | type[ReplayArtifactV3] | type[ReplayArtifactV4]
+            ) = {2: ReplayArtifactV2, 3: ReplayArtifactV3, 4: ReplayArtifactV4}[
+                cast(int, root["schema_version"])
+            ]
             try:
                 replay = model.model_validate_json(payload)
             except (TypeError, ValueError) as error:
@@ -2144,7 +2170,7 @@ def _publish_staged_replays(  # pyright: ignore[reportUnusedFunction]
 
 
 def save_replay(
-    replay: ReplayArtifactV2 | ReplayArtifactV3,
+    replay: ReplayArtifactV2 | ReplayArtifactV3 | ReplayArtifactV4,
     path: str | os.PathLike[str],
     *,
     max_file_size_bytes: int = DEFAULT_MAX_REPLAY_FILE_SIZE_BYTES_V1,
@@ -2153,8 +2179,8 @@ def save_replay(
 
     Parameters
     ----------
-    replay : ReplayArtifactV2 | ReplayArtifactV3
-        Exact ReplayArtifactV2 or V3, including valid partial prefixes.
+    replay : ReplayArtifactV2 | ReplayArtifactV3 | ReplayArtifactV4
+        Exact ReplayArtifactV2, V3 or V4, including valid partial prefixes.
     path : str | os.PathLike[str]
         Absent nonempty .marlbg-replay.json destination in an existing parent.
     max_file_size_bytes : int
@@ -2189,16 +2215,17 @@ def save_replay(
 def _load_actor_pov_replay_artifact(
     path: str | os.PathLike[str],
     *,
-    source_replay: ReplayArtifactV1 | ReplayArtifactV3 | None,
-    current: bool,
+    source_replay: ReplayArtifactV1 | ReplayArtifactV3 | ReplayArtifactV4 | None,
+    pov_version: Literal[1, 2, 3],
     max_file_size_bytes: int = DEFAULT_MAX_REPLAY_FILE_SIZE_BYTES_V1,
     max_json_depth: int = DEFAULT_MAX_REPLAY_JSON_DEPTH_V1,
-) -> ActorPovReplayArtifactV1 | ActorPovReplayArtifactV2:
+) -> ActorPovReplayArtifactV1 | ActorPovReplayArtifactV2 | ActorPovReplayArtifactV3:
     """Read a bounded canonical POV file and optionally join supplied source evidence.
 
-    current selects POV V2 versus V1. Validate suffix and positive limits, then wrap
-    byte/model/source-join errors as ReplayLoadError. No source replay is discovered
-    from paths or downloaded.
+    pov_version selects the only accepted POV version (1, 2 or 3); a supplied
+    source replay must be its paired version (replay V1, V3 or V4). Validate
+    suffix and positive limits, then wrap byte/model/source-join errors as
+    ReplayLoadError. No source replay is discovered from paths or downloaded.
     """
     try:
         pov_path = _coerce_path(path)
@@ -2233,11 +2260,13 @@ def _load_actor_pov_replay_artifact(
         payload,
         path=pov_path,
         max_json_depth=depth_limit,
-        current=current,
+        pov_version=pov_version,
     )
     if source_replay is not None:
         try:
-            _validate_actor_pov_source_join(artifact, source_replay, current=current)
+            _validate_actor_pov_source_join(
+                artifact, source_replay, pov_version=pov_version
+            )
         except (TypeError, ValueError) as error:
             raise ReplayLoadError(
                 "semantic_validation_failed",
@@ -3117,18 +3146,21 @@ def _save_companion_payload(
 
 
 def _save_actor_pov_replay_artifact(
-    artifact: ActorPovReplayArtifactV1 | ActorPovReplayArtifactV2,
-    source_replay: ReplayArtifactV1 | ReplayArtifactV3,
+    artifact: ActorPovReplayArtifactV1
+    | ActorPovReplayArtifactV2
+    | ActorPovReplayArtifactV3,
+    source_replay: ReplayArtifactV1 | ReplayArtifactV3 | ReplayArtifactV4,
     path: str | os.PathLike[str],
     *,
-    current: bool,
+    pov_version: Literal[1, 2, 3],
     max_file_size_bytes: int = DEFAULT_MAX_REPLAY_FILE_SIZE_BYTES_V1,
 ) -> SavedCompanionArtifactV1:
     """Validate the selected POV version and its source, then publish canonical bytes.
 
-    current selects POV V2/replay V3 or historical POV V1/replay V1. Require a valid
-    .pov suffix, positive byte cap, and absent destination. Wrap source mismatch as
-    invalid_argument and leave source artifacts unchanged.
+    pov_version selects the only accepted pair: 3 for POV V3 with replay V4, 2 for
+    POV V2 with replay V3, or 1 for historical POV V1 with replay V1. Require a
+    valid .pov suffix, positive byte cap, and absent destination. Wrap source
+    mismatch as invalid_argument and leave source artifacts unchanged.
     """
     try:
         pov_path = _coerce_path(path)
@@ -3155,7 +3187,9 @@ def _save_actor_pov_replay_artifact(
             detail=str(error),
         ) from error
     try:
-        _validate_actor_pov_source_join(artifact, source_replay, current=current)
+        _validate_actor_pov_source_join(
+            artifact, source_replay, pov_version=pov_version
+        )
     except (TypeError, ValueError) as error:
         raise ReplaySaveError(
             "invalid_argument",
@@ -3335,16 +3369,37 @@ def save_scenario_evaluation_record_v2(
     )
 
 
+type _ScenarioRecordVersion = Literal[3, 4, 5]
+type _CurrentScenarioRecord = (
+    ScenarioEvaluationRecordV3 | ScenarioEvaluationRecordV4 | ScenarioEvaluationRecordV5
+)
+type _CurrentScenarioReplay = ReplayArtifactV2 | ReplayArtifactV3 | ReplayArtifactV4
+_SCENARIO_RECORD_MODELS: dict[
+    int,
+    type[ScenarioEvaluationRecordV3]
+    | type[ScenarioEvaluationRecordV4]
+    | type[ScenarioEvaluationRecordV5],
+] = {
+    3: ScenarioEvaluationRecordV3,
+    4: ScenarioEvaluationRecordV4,
+    5: ScenarioEvaluationRecordV5,
+}
+
+
 def _validate_current_scenario_record(
-    record: ScenarioEvaluationRecordV3 | ScenarioEvaluationRecordV4,
-    replay: ReplayArtifactV2 | ReplayArtifactV3,
+    record: _CurrentScenarioRecord,
+    replay: _CurrentScenarioReplay,
 ) -> None:
-    """Dispatch exact scenario V3/replay V2 or scenario V4/replay V3 joins.
+    """Dispatch exact scenario V3/replay V2, V4/replay V3 or V5/replay V4 joins.
 
     Raise TypeError for other pairings. Use generic evidence checks, without live
     official Core admission or recomputing measurements.
     """
-    if type(record) is ScenarioEvaluationRecordV4 and type(replay) is ReplayArtifactV3:
+    if type(record) is ScenarioEvaluationRecordV5 and type(replay) is ReplayArtifactV4:
+        validate_scenario_evaluation_record_v5(record, replay)
+    elif (
+        type(record) is ScenarioEvaluationRecordV4 and type(replay) is ReplayArtifactV3
+    ):
         validate_scenario_evaluation_record_v4(record, replay)
     elif (
         type(record) is ScenarioEvaluationRecordV3 and type(replay) is ReplayArtifactV2
@@ -3359,25 +3414,25 @@ def _load_current_scenario_record_bytes(
     *,
     path: Path,
     max_json_depth: int,
-    current: bool,
-) -> ScenarioEvaluationRecordV3 | ScenarioEvaluationRecordV4:
-    """Admit canonical scenario V4 bytes when current, otherwise V3 bytes.
+    version: _ScenarioRecordVersion,
+) -> _CurrentScenarioRecord:
+    """Admit canonical scenario record bytes of exactly the given version (3-5).
 
     Check strict JSON/schema/model structure and exact re-encoding before returning
     the record. Actual replay joins are checked by the outer loader.
     """
-    model = ScenarioEvaluationRecordV4 if current else ScenarioEvaluationRecordV3
+    model = _SCENARIO_RECORD_MODELS[version]
     _preflight_json(
         payload,
         path=path,
         expected_schema_id=SCENARIO_EVALUATION_RECORD_SCHEMA_ID,
-        expected_schema_version=4 if current else 3,
+        expected_schema_version=version,
         max_json_depth=max_json_depth,
     )
     try:
         record = model.model_validate_json(payload)
         canonical_record = cast(
-            ScenarioEvaluationRecordV3 | ScenarioEvaluationRecordV4,
+            _CurrentScenarioRecord,
             validate_declared_model_tree(
                 record,
                 record_name="loaded Versioned scenario evaluation record",
@@ -3402,14 +3457,14 @@ def _load_current_scenario_record_bytes(
 def _load_current_scenario_evaluation_record(
     path: str | os.PathLike[str],
     *,
-    source_replay: ReplayArtifactV2 | ReplayArtifactV3,
-    current: bool,
+    source_replay: _CurrentScenarioReplay,
+    version: _ScenarioRecordVersion,
     max_file_size_bytes: int = DEFAULT_MAX_REPLAY_FILE_SIZE_BYTES_V1,
     max_json_depth: int = DEFAULT_MAX_REPLAY_JSON_DEPTH_V1,
-) -> ScenarioEvaluationRecordV3 | ScenarioEvaluationRecordV4:
-    """Load a bounded V3/V4 scenario file and check its supplied replay evidence.
+) -> _CurrentScenarioRecord:
+    """Load a bounded V3-V5 scenario file and check its supplied replay evidence.
 
-    current selects the exact record version. Require the scenario suffix and positive
+    version selects the exact record version. Require the scenario suffix and positive
     limits. Wrap structural/path/evidence failures in ReplayLoadError; no metric
     sidecar or live official Core validation is performed.
     """
@@ -3446,7 +3501,7 @@ def _load_current_scenario_evaluation_record(
         payload,
         path=scenario_path,
         max_json_depth=depth_limit,
-        current=current,
+        version=version,
     )
     try:
         _validate_current_scenario_record(
@@ -3463,16 +3518,16 @@ def _load_current_scenario_evaluation_record(
 
 
 def _save_current_scenario_evaluation_record(
-    record: ScenarioEvaluationRecordV3 | ScenarioEvaluationRecordV4,
-    source_replay: ReplayArtifactV2 | ReplayArtifactV3,
-    current: bool,
+    record: _CurrentScenarioRecord,
+    source_replay: _CurrentScenarioReplay,
+    version: _ScenarioRecordVersion,
     path: str | os.PathLike[str],
     *,
     max_file_size_bytes: int = DEFAULT_MAX_REPLAY_FILE_SIZE_BYTES_V1,
 ) -> SavedCompanionArtifactV1:
-    """Validate an exact V3/V4 record/replay pair and publish canonical scenario bytes.
+    """Validate an exact V3-V5 record/replay pair and publish canonical scenario bytes.
 
-    current fixes the allowed record version. Require safe suffix/parent/size and
+    version fixes the allowed record version. Require safe suffix/parent/size and
     an absent destination. Generic evidence validation does not recompute endpoint
     values or rerun official simulator admission.
     """
@@ -3501,8 +3556,7 @@ def _save_current_scenario_evaluation_record(
             detail=str(error),
         ) from error
     try:
-        expected = ScenarioEvaluationRecordV4 if current else ScenarioEvaluationRecordV3
-        if type(record) is not expected:
+        if type(record) is not _SCENARIO_RECORD_MODELS[version]:
             raise ValueError("scenario record must use its declared version")
         _validate_current_scenario_record(
             record,
@@ -3563,7 +3617,7 @@ def load_scenario_evaluation_record_v3(
         _load_current_scenario_evaluation_record(
             path,
             source_replay=source_replay,
-            current=False,
+            version=3,
             max_file_size_bytes=max_file_size_bytes,
             max_json_depth=max_json_depth,
         ),
@@ -3610,7 +3664,7 @@ def save_scenario_evaluation_record_v3(
     return _save_current_scenario_evaluation_record(
         record,
         source_replay,
-        False,
+        3,
         path,
         max_file_size_bytes=max_file_size_bytes,
     )
@@ -3658,7 +3712,7 @@ def load_scenario_evaluation_record_v4(
         _load_current_scenario_evaluation_record(
             path,
             source_replay=source_replay,
-            current=True,
+            version=4,
             max_file_size_bytes=max_file_size_bytes,
             max_json_depth=max_json_depth,
         ),
@@ -3705,29 +3759,134 @@ def save_scenario_evaluation_record_v4(
     return _save_current_scenario_evaluation_record(
         record,
         source_replay,
-        True,
+        4,
+        path,
+        max_file_size_bytes=max_file_size_bytes,
+    )
+
+
+def load_scenario_evaluation_record_v5(
+    path: str | os.PathLike[str],
+    *,
+    source_replay: ReplayArtifactV4,
+    max_file_size_bytes: int = DEFAULT_MAX_REPLAY_FILE_SIZE_BYTES_V1,
+    max_json_depth: int = DEFAULT_MAX_REPLAY_JSON_DEPTH_V1,
+) -> ScenarioEvaluationRecordV5:
+    """Load canonical scenario record V5 and check its supplied evidence.
+
+    Parameters
+    ----------
+    path : str | os.PathLike[str]
+        Existing regular file with a nonempty .marlbg-scenario.json stem.
+    source_replay : ReplayArtifactV4
+        Exact ReplayArtifactV4 referenced by the record.
+    max_file_size_bytes : int
+        Exact positive per-file byte cap; defaults to 1 GiB (1024**3).
+    max_json_depth : int
+        Exact positive nesting cap; defaults to 128.
+
+    Returns
+    -------
+    ScenarioEvaluationRecordV5
+        Exact ScenarioEvaluationRecordV5 with validated local fields and evidence joins.
+
+    Raises
+    ------
+    ReplayLoadError
+        Unsafe path, byte/depth limit, wrong schema, noncanonical
+        content, invalid model, or evidence mismatch.
+
+    Notes
+    -----
+    Supplied replay/report objects are checked, not discovered from adjacent
+    paths. This uses generic scenario validation without live official Core
+    admission and does not recompute endpoint values or predicate truth.
+    """
+    return cast(
+        ScenarioEvaluationRecordV5,
+        _load_current_scenario_evaluation_record(
+            path,
+            source_replay=source_replay,
+            version=5,
+            max_file_size_bytes=max_file_size_bytes,
+            max_json_depth=max_json_depth,
+        ),
+    )
+
+
+def save_scenario_evaluation_record_v5(
+    record: ScenarioEvaluationRecordV5,
+    source_replay: ReplayArtifactV4,
+    path: str | os.PathLike[str],
+    *,
+    max_file_size_bytes: int = DEFAULT_MAX_REPLAY_FILE_SIZE_BYTES_V1,
+) -> SavedCompanionArtifactV1:
+    """Validate evidence and publish scenario record V5 without overwrite.
+
+    Parameters
+    ----------
+    record : ScenarioEvaluationRecordV5
+        Exact ScenarioEvaluationRecordV5 to publish.
+    source_replay : ReplayArtifactV4
+        Exact referenced ReplayArtifactV4.
+    path : str | os.PathLike[str]
+        Absent .marlbg-scenario.json path in an existing secure parent.
+    max_file_size_bytes : int
+        Exact positive byte cap; defaults to 1 GiB.
+
+    Returns
+    -------
+    SavedCompanionArtifactV1
+        SavedCompanionArtifactV1 with output path and canonical byte length.
+
+    Raises
+    ------
+    ReplaySaveError
+        Invalid arguments/evidence, unsafe path, size limit,
+        existing target, or atomic publication failure.
+
+    Notes
+    -----
+    Checks generic evidence joins without live official Core admission. Writes
+    only the companion; source replay/report files are not published or changed.
+    Caller-computed measurements and predicate values are not recomputed.
+    """
+    return _save_current_scenario_evaluation_record(
+        record,
+        source_replay,
+        5,
         path,
         max_file_size_bytes=max_file_size_bytes,
     )
 
 
 def _validate_actor_pov_source_join(
-    artifact: ActorPovReplayArtifactV1 | ActorPovReplayArtifactV2,
-    replay: ReplayArtifactV1 | ReplayArtifactV3,
+    artifact: ActorPovReplayArtifactV1
+    | ActorPovReplayArtifactV2
+    | ActorPovReplayArtifactV3,
+    replay: ReplayArtifactV1 | ReplayArtifactV3 | ReplayArtifactV4,
     *,
-    current: bool,
+    pov_version: Literal[1, 2, 3],
 ) -> None:
     """Require the supported POV/source version pair and validate every source join.
 
-    current means exact POV V2 with replay V3; false means exact POV V1 with replay V1.
-    Raise ValueError for other pairings or projection/content disagreement.
+    pov_version 3 means exact POV V3 with replay V4, 2 means exact POV V2 with
+    replay V3, and 1 means exact POV V1 with replay V1. Raise ValueError for
+    other pairings or projection/content disagreement.
     """
-    if current:
+    if pov_version == 3:
+        if (
+            type(artifact) is not ActorPovReplayArtifactV3
+            or type(replay) is not ReplayArtifactV4
+        ):
+            raise ValueError("current POV evidence requires POV V3 and replay V4")
+        validate_actor_pov_replay_against_replay_v3(artifact, replay)
+    elif pov_version == 2:
         if (
             type(artifact) is not ActorPovReplayArtifactV2
             or type(replay) is not ReplayArtifactV3
         ):
-            raise ValueError("current POV evidence requires POV V2 and replay V3")
+            raise ValueError("POV V2 evidence requires POV V2 and replay V3")
         validate_actor_pov_replay_against_replay_v2(artifact, replay)
     else:
         if (
@@ -3780,7 +3939,7 @@ def load_actor_pov_replay_artifact_v1(
         _load_actor_pov_replay_artifact(
             path,
             source_replay=source_replay,
-            current=False,
+            pov_version=1,
             max_file_size_bytes=max_file_size_bytes,
             max_json_depth=max_json_depth,
         ),
@@ -3827,7 +3986,7 @@ def save_actor_pov_replay_artifact_v1(
         artifact,
         source_replay,
         path,
-        current=False,
+        pov_version=1,
         max_file_size_bytes=max_file_size_bytes,
     )
 
@@ -3874,7 +4033,7 @@ def load_actor_pov_replay_artifact_v2(
         _load_actor_pov_replay_artifact(
             path,
             source_replay=source_replay,
-            current=True,
+            pov_version=2,
             max_file_size_bytes=max_file_size_bytes,
             max_json_depth=max_json_depth,
         ),
@@ -3921,7 +4080,105 @@ def save_actor_pov_replay_artifact_v2(
         artifact,
         source_replay,
         path,
-        current=True,
+        pov_version=2,
+        max_file_size_bytes=max_file_size_bytes,
+    )
+
+
+def load_actor_pov_replay_artifact_v3(
+    path: str | os.PathLike[str],
+    *,
+    source_replay: ReplayArtifactV4 | None = None,
+    max_file_size_bytes: int = DEFAULT_MAX_REPLAY_FILE_SIZE_BYTES_V1,
+    max_json_depth: int = DEFAULT_MAX_REPLAY_JSON_DEPTH_V1,
+) -> ActorPovReplayArtifactV3:
+    """Load canonical actor-view artifact V3 with an optional source check.
+
+    Parameters
+    ----------
+    path : str | os.PathLike[str]
+        Existing regular file with a nonempty .marlbg-pov.json stem.
+    source_replay : ReplayArtifactV4 | None
+        Optional exact ReplayArtifactV4; defaults to None. If supplied,
+        every projected source join is checked.
+    max_file_size_bytes : int
+        Exact positive per-file byte cap; defaults to 1 GiB (1024**3).
+    max_json_depth : int
+        Exact positive nesting cap; defaults to 128.
+
+    Returns
+    -------
+    ActorPovReplayArtifactV3
+        Exact ActorPovReplayArtifactV3 after standalone structure/content validation.
+
+    Raises
+    ------
+    ReplayLoadError
+        Unsafe path, size/depth limit, invalid/noncanonical content,
+        wrong version (POV V1 or V2 bytes are refused), or mismatched optional
+        source.
+
+    Notes
+    -----
+    POV V3 is the current actor view, exported from replay V4; each frame keeps
+    context column 19, the recorded Red Zone depth. Standalone loading supports
+    sharing only the actor view. Without source_replay it cannot prove equality
+    to unavailable source evidence. No file is written.
+    """
+    return cast(
+        ActorPovReplayArtifactV3,
+        _load_actor_pov_replay_artifact(
+            path,
+            source_replay=source_replay,
+            pov_version=3,
+            max_file_size_bytes=max_file_size_bytes,
+            max_json_depth=max_json_depth,
+        ),
+    )
+
+
+def save_actor_pov_replay_artifact_v3(
+    artifact: ActorPovReplayArtifactV3,
+    source_replay: ReplayArtifactV4,
+    path: str | os.PathLike[str],
+    *,
+    max_file_size_bytes: int = DEFAULT_MAX_REPLAY_FILE_SIZE_BYTES_V1,
+) -> SavedCompanionArtifactV1:
+    """Check a POV V3 artifact against its source and publish it without overwrite.
+
+    Parameters
+    ----------
+    artifact : ActorPovReplayArtifactV3
+        Exact ActorPovReplayArtifactV3.
+    source_replay : ReplayArtifactV4
+        Exact ReplayArtifactV4 from which this view was projected.
+    path : str | os.PathLike[str]
+        Absent .marlbg-pov.json path in an existing secure parent.
+    max_file_size_bytes : int
+        Exact positive byte cap; defaults to 1 GiB.
+
+    Returns
+    -------
+    SavedCompanionArtifactV1
+        SavedCompanionArtifactV1 with path and canonical byte length.
+
+    Raises
+    ------
+    ReplaySaveError
+        Invalid arguments/source join (including a POV V2 artifact or a replay
+        V3 source), unsafe path, size limit, existing target, or atomic
+        publication failure.
+
+    Notes
+    -----
+    Publishes only the actor-view bytes after checking their source. The full
+    privileged replay is not embedded or copied to the destination.
+    """
+    return _save_actor_pov_replay_artifact(
+        artifact,
+        source_replay,
+        path,
+        pov_version=3,
         max_file_size_bytes=max_file_size_bytes,
     )
 
@@ -3954,6 +4211,7 @@ __all__ = [
     "canonical_scenario_evaluation_record_json_bytes_v2",
     "load_actor_pov_replay_artifact_v1",
     "load_actor_pov_replay_artifact_v2",
+    "load_actor_pov_replay_artifact_v3",
     "load_replay",
     "load_replay_artifact_v1",
     "load_replay_bundle_v1",
@@ -3961,6 +4219,7 @@ __all__ = [
     "load_scenario_evaluation_record_v2",
     "load_scenario_evaluation_record_v3",
     "load_scenario_evaluation_record_v4",
+    "load_scenario_evaluation_record_v5",
     "preflight_replay_bundle_destination_v1",
     "preflight_replay_destination",
     "prepare_replay_bundle_v1",
@@ -3968,10 +4227,12 @@ __all__ = [
     "publish_prepared_replay_bundle_v1",
     "save_actor_pov_replay_artifact_v1",
     "save_actor_pov_replay_artifact_v2",
+    "save_actor_pov_replay_artifact_v3",
     "save_replay",
     "save_replay_bundle_v1",
     "save_scenario_evaluation_record_v1",
     "save_scenario_evaluation_record_v2",
     "save_scenario_evaluation_record_v3",
     "save_scenario_evaluation_record_v4",
+    "save_scenario_evaluation_record_v5",
 ]

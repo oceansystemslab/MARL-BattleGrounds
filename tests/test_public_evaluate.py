@@ -1,4 +1,15 @@
-"""Check complete games through the public evaluation and policy interfaces."""
+"""Check complete games through the public evaluation and policy interfaces.
+
+Red Zone depth: a saved pass records the depth it was run with and a resume
+that omits it inherits that depth; a different explicit depth fails before any
+file changes; on resume a supplied depth is also checked against the pass's
+saved exact source configs ("conflicts", even for the default 5.0). A pass of
+exact sources at depth 0.0 records 5.0, the depth for map-built games, so it
+resumes only with the depth omitted (0.0 "differs", 5.0 "conflicts"). An actor
+trained before Red Zone (actor input schema 1) and a current actor play one
+evaluate call at recorded depths 0.0 and 5.0, and the second depth reuses the
+compiled System chunk.
+"""
 
 import csv
 import io
@@ -7,7 +18,7 @@ from collections.abc import Callable
 from contextlib import ExitStack
 from importlib import import_module
 from pathlib import Path
-from typing import Literal, cast
+from typing import Any, Literal, cast
 
 import jax
 import jax.numpy as jnp
@@ -15,6 +26,7 @@ import numpy as np
 import pytest
 from jax import Array
 
+from marl_battlegrounds.baselines import ppo
 from marl_battlegrounds.core import env as core
 from marl_battlegrounds.core.types import TASK_MODE_OUTCOME_DRAW, ActionMask, EnvConfig
 from marl_battlegrounds.evaluation.analysis import analyze_replay
@@ -28,7 +40,12 @@ from marl_battlegrounds.evaluation.metric_catalog import (
     FULL_METRIC_NAMES,
     PRIORITY_METRIC_NAMES,
 )
-from marl_battlegrounds.evaluation.policy_execution import Policy, PolicyTree, policy
+from marl_battlegrounds.evaluation.policy_execution import (
+    Policy,
+    PolicyTree,
+    System,
+    policy,
+)
 from marl_battlegrounds.evaluation.recording_context import capture_recording_provenance
 from marl_battlegrounds.evaluation.replay_io import LoadedReplay
 from marl_battlegrounds.evaluation.run_writer import IDENTITY_COLUMNS, RunWriter
@@ -41,6 +58,7 @@ from marl_battlegrounds.tasks import (
     list_tdm_maps,
     make_standard_team_deathmatch_config,
 )
+from marl_battlegrounds.training import checkpoints
 
 
 def _config(max_steps: int = 2) -> EnvConfig:
@@ -714,3 +732,164 @@ def test_shared_writer_appends_distinct_validation_passes(tmp_path: Path) -> Non
                 "1000",
                 "2000",
             ]
+
+
+def _files(directory: Path) -> dict[Path, bytes]:
+    return {path: path.read_bytes() for path in directory.rglob("*") if path.is_file()}
+
+
+def test_saved_passes_keep_their_red_zone_depth_and_refuse_a_changed_one(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    provenance = capture_recording_provenance()
+
+    def same_source(**_: object) -> dict[str, object]:
+        return provenance
+
+    monkeypatch.setattr(
+        import_module("marl_battlegrounds.evaluation.evaluate"),
+        "capture_recording_provenance",
+        same_source,
+    )
+    options: dict[str, Any] = {"num_envs": 2, "chunk_size": 1, "metrics": "none"}
+    mapped = evaluate(
+        "random",
+        "random",
+        num_episodes=2,
+        maps=[12],
+        max_steps=1,
+        red_zone_depth=6.0,
+        output_dir=tmp_path / "map",
+        **options,
+    )
+    assert mapped.run_dir is not None
+    manifest = json.loads((mapped.run_dir / "run_details.json").read_text())
+    saved = next(iter(manifest["passes"].values()))["details"]
+    assert saved["evaluation_contract"]["options"]["red_zone_depth"] == 6.0
+    assert {
+        content["team_deathmatch_red_zone_depth"]
+        for content in manifest["configurations"].values()
+    } == {6.0}
+    resumed = evaluate(
+        "random", "random", num_episodes=2, resume_from=mapped.run_dir, **options
+    )
+    assert resumed.status == "complete" and resumed.episodes == ()
+    assert resumed.metadata["evaluation_contract"]["options"]["red_zone_depth"] == 6.0
+    before = _files(mapped.run_dir)
+    with pytest.raises(
+        ValueError,
+        match=r"^red_zone_depth differs from the saved evaluation conditions$",
+    ):
+        evaluate(
+            "random",
+            "random",
+            num_episodes=2,
+            resume_from=mapped.run_dir,
+            red_zone_depth=5.0,
+            **options,
+        )
+    assert _files(mapped.run_dir) == before
+    # Omitted, a new pass records the default 5.0 while its exact source keeps
+    # depth 0.0; a supplied 5.0 then agrees with the pass but not the source.
+    source = make_standard_team_deathmatch_config(
+        map_id=12,
+        team_a_roster=("priest",),
+        team_b_roster=("mage", "mage"),
+        max_steps=1,
+        red_zone_depth=0.0,
+    )
+    exact = evaluate(
+        "random",
+        "random",
+        num_episodes=2,
+        maps=[source],
+        output_dir=tmp_path / "source",
+        **options,
+    )
+    assert exact.run_dir is not None
+    assert exact.metadata["evaluation_contract"]["options"]["red_zone_depth"] == 5.0
+    before = _files(exact.run_dir)
+    with pytest.raises(
+        ValueError,
+        match=r"^red_zone_depth conflicts with the exact source configuration$",
+    ):
+        evaluate(
+            "random",
+            "random",
+            num_episodes=2,
+            resume_from=exact.run_dir,
+            red_zone_depth=5.0,
+            **options,
+        )
+    # The recorded 5.0 describes map-built games only, so the source's own
+    # 0.0 differs from the pass: only an omitted depth resumes it.
+    with pytest.raises(
+        ValueError,
+        match=r"^red_zone_depth differs from the saved evaluation conditions$",
+    ):
+        evaluate(
+            "random",
+            "random",
+            num_episodes=2,
+            resume_from=exact.run_dir,
+            red_zone_depth=0.0,
+            **options,
+        )
+    assert _files(exact.run_dir) == before
+    again = evaluate(
+        "random", "random", num_episodes=2, resume_from=exact.run_dir, **options
+    )
+    assert again.status == "complete"
+
+
+def _ff_mappo_actor(actor_input_schema: int) -> System:
+    # Small seeded weights on the schema's own template: 5,164 input features
+    # for schema 1 (before Red Zone) and 5,165 for schema 2.
+    template: Any = checkpoints._actor_template("ff_mappo", actor_input_schema)  # pyright: ignore[reportPrivateUsage]
+    rng = np.random.default_rng(actor_input_schema)
+
+    def weight(leaf: jax.ShapeDtypeStruct) -> Array:
+        shape = cast(tuple[int, ...], leaf.shape)
+        values = rng.standard_normal(shape) * 0.05
+        return jnp.asarray(values.astype(leaf.dtype))
+
+    weights: Any = jax.tree.map(weight, template)
+    return ppo.make_ppo_system(
+        weights,
+        method="ff_mappo",
+        name=f"schema-{actor_input_schema}",
+        actor_input_schema=actor_input_schema,
+    )
+
+
+def test_old_and_new_actors_share_one_evaluation_at_recorded_red_zone_depths() -> None:
+    evaluator = import_module("marl_battlegrounds.evaluation.evaluate")
+    old, new = _ff_mappo_actor(1), _ff_mappo_actor(2)
+    cache_sizes: list[int] = []
+    for depth in (0.0, 5.0):
+        result = evaluate(
+            old,
+            new,
+            num_episodes=2,
+            maps=[42],
+            max_steps=2,
+            num_envs=2,
+            chunk_size=2,
+            metrics="none",
+            red_zone_depth=depth,
+        )
+        # Schema-1 weights fit only the legacy hook's 5,164 inputs, so complete
+        # games show the old actor played through its old input route.
+        assert result.status == "complete"
+        assert [row.episode_length for row in result.episodes] == [2, 2]
+        assert result.metadata["evaluation_contract"]["options"]["red_zone_depth"] == (
+            depth
+        )
+        contents = cast(dict[str, dict[str, object]], result.metadata["configurations"])
+        assert {
+            content["team_deathmatch_red_zone_depth"] for content in contents.values()
+        } == {depth}
+        cache_sizes.append(evaluator._jax_system_chunk._cache_size())
+    # The depth is a dynamic config value: the second depth compiles nothing new.
+    assert cache_sizes[0] == cache_sizes[1] > 0

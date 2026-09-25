@@ -7,7 +7,10 @@ proves 32-lane padded execution, complete saved rows and no extra provider calls
 after a task completes. No network client is used. Existing tests keep the old
 panel/task hashes and selection covered. A PQN-VDN export is validated against
 a panel holding a host-execution System; its summary names the method and its
-optimizer count.
+optimizer count. A panel chosen from a ranking saves the ranking's Red Zone
+depth (read from its recorded configurations, 5.0 or 6.0) with evidence schema
+2, and load_panel admits it only at that depth. Tests that stop at learner
+setup also skip content preparation, which the runner now does first.
 """
 
 # pyright: reportPrivateUsage=false
@@ -42,7 +45,18 @@ from marl_battlegrounds.evaluation.recording_identity import (
 from marl_battlegrounds.evaluation.results import TournamentResult
 from marl_battlegrounds.policies.actor import ActorAction
 from marl_battlegrounds.policies.input import ActorInput
-from marl_battlegrounds.training import analysis, checkpoints, runner, validation
+from marl_battlegrounds.training import (
+    _content,
+    analysis,
+    checkpoints,
+    runner,
+    validation,
+)
+
+
+def _no_content(**kwargs: object) -> None:
+    # These tests stop at learner setup; the prepared content is never used.
+    del kwargs
 
 
 def _jax_apply(
@@ -520,7 +534,9 @@ def test_independent_mixture_export_and_fake_language_client_complete_validation
     assert len(client.requests) == 50
 
 
-def _ranking_fixture(panel: validation.FrozenPanel) -> TournamentResult:
+def _ranking_fixture(
+    panel: validation.FrozenPanel, red_zone_depth: float = 5.0
+) -> TournamentResult:
     from dataclasses import asdict
 
     from marl_battlegrounds.evaluation.evaluate import normalize_episode_specs
@@ -535,7 +551,13 @@ def _ranking_fixture(panel: validation.FrozenPanel) -> TournamentResult:
     systems = {member.registration_id: member.registration for member in panel.members}
     roster_a, roster_b = canonical_tournament_rosters()
     specs = normalize_episode_specs(
-        validation.VALIDATION_MAPS, 5, roster_a, roster_b, 20, 300
+        validation.VALIDATION_MAPS,
+        5,
+        roster_a,
+        roster_b,
+        20,
+        300,
+        red_zone_depth=red_zone_depth,
     )
     configurations: dict[str, Any] = {}
     sources: dict[int, tuple[str, str]] = {}
@@ -641,6 +663,29 @@ def test_ranked_panel_checks_actual_pool_maps_pairs_and_stable_ties(
     assert selected.members[0].registration_id == min(
         member.registration_id for member in pool.members
     )
+    # The ranking's depth is read from its recorded configurations and saved.
+    evidence = json.loads(selected.path.read_text())["ranking_evidence"]
+    assert evidence["schema_version"] == 2 and evidence["red_zone_depth"] == 5.0
+    assert (
+        validation.load_panel(
+            selected.path, bindings=selected.methods, red_zone_depth=5.0
+        )
+        == selected
+    )
+    with pytest.raises(ValueError, match=r"ranked with red_zone_depth 5\.0"):
+        validation.load_panel(selected.path, red_zone_depth=6.0)
+    deeper = validation.create_panel(
+        opponents=pool.methods,
+        ranking=_ranking_fixture(pool, red_zone_depth=6.0),
+        size=1,
+        output_dir=tmp_path / "deeper",
+    )
+    deeper_evidence = json.loads(deeper.path.read_text())["ranking_evidence"]
+    assert deeper_evidence["red_zone_depth"] == 6.0
+    assert (
+        validation.load_panel(deeper.path, bindings=deeper.methods, red_zone_depth=6.0)
+        == deeper
+    )
     before = deepcopy(ranking.metadata)
     ranking.metadata["map_ids"] = [0]
     with pytest.raises(ValueError, match="development maps"):
@@ -674,6 +719,7 @@ def test_live_system_panel_is_frozen_before_learner_setup(
         raise SetupReachedError
 
     monkeypatch.setattr(learner, "init_learner", begin)
+    monkeypatch.setattr(_content, "prepare_training_content", _no_content)
     client = Client()
     method = System("Live", client.apply, execution="host")
     config = runner.TrainConfig(purpose="demonstration")
@@ -715,6 +761,7 @@ def test_direct_panel_checks_slot_actor_before_learner_or_writer_setup(
         pytest.fail("Slot preflight must not open a writer")
 
     monkeypatch.setattr(learner, "init_learner", begin)
+    monkeypatch.setattr(_content, "prepare_training_content", _no_content)
     monkeypatch.setattr(RunWriter, "__init__", no_writer)
     client = Client()
     method = System("Live", client.apply, execution="host")
@@ -753,6 +800,7 @@ def test_resume_can_rebind_the_same_client_from_a_saved_config_reference(
         raise SetupReachedError
 
     monkeypatch.setattr(learner, "init_learner", begin)
+    monkeypatch.setattr(_content, "prepare_training_content", _no_content)
     config = runner.TrainConfig(validation_opponents=("my_methods:factory",))
     client = Client()
     method = System("Live", client.apply, execution="host")
@@ -768,9 +816,9 @@ def test_resume_can_rebind_the_same_client_from_a_saved_config_reference(
     (run / "run_details.json").write_text("{}")
     checkpoint = run / "checkpoints" / ("c" * 64)
 
-    def details(path: object) -> dict[str, str]:
+    def details(path: object) -> dict[str, object]:
         del path
-        return {"kind": "learner"}
+        return {"kind": "learner", "schemas": checkpoints.checkpoint_schemas()}
 
     def saved_config(saved: object) -> dict[str, Any]:
         del saved

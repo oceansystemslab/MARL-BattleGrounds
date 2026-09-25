@@ -195,7 +195,7 @@ class TrainingTransition(NamedTuple):
     opponent_update is the learner version the opponent's weights come from;
     for games against a named pinned System (opponent_snapshot 0 when the
     collection has one) it is -2, because that System is not a learner version.
-    training_state is float32 (B,919) or None and never enters an actor.
+    training_state is float32 (B,920) or None and never enters an actor.
     Invalid padding has neutral-only masks, zero payloads and -1 identities.
     """
 
@@ -231,7 +231,7 @@ class TrainingRollout(NamedTuple):
     transitions has leading (T,B). initial_memory is Team A's block-entry tree;
     the first real row's episode_start handles a pending episode reset. Final
     observations/masks and active/alive/ended belong to the returned carry before
-    reset, never to padding. final_training_state is optional (B,919).
+    reset, never to padding. final_training_state is optional (B,920).
     real_steps is scalar int32 rounds, not B-multiplied experience. Zero means
     unchanged carry and no learning/bootstrap work. Critic memory is external.
     """
@@ -602,8 +602,9 @@ def init_training_collection(
         Enable team feedback. Disabled work is absent from execution.
     shaping_mode : {"potential", "score_delta"}, default="potential"
         Potential feedback preserves the discounted task objective. Score-delta
-        feedback adds coefficient times new kills minus new deaths, including
-        terminal actions. Both leave native task rewards unchanged. The mode
+        feedback adds coefficient times the team's new points minus the enemy's
+        new points (a Red Zone death gives 2 points, any other death 1),
+        including terminal actions. Both leave native task rewards unchanged. The mode
         is checked even when shaping is disabled and stays fixed for the run.
     discount, coefficient : float, defaults 0.99, 0.01
         Learner discount in [0,1] and nonnegative finite shaping scale.

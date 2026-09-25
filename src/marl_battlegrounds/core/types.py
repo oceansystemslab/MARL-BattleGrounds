@@ -60,7 +60,7 @@ SELF_FEATURES = 58
 UNIT_FEATURES = 58
 MAX_OBJECTIVE_SLOTS = 8
 OBJECTIVE_FEATURES = 12
-CONTEXT_FEATURES = 19
+CONTEXT_FEATURES = 20
 
 # Fixed numeric task modes keep the traced simulator free of strings and registries.
 NUM_TASKS = 3
@@ -79,6 +79,12 @@ TASK_MODE_OUTCOME_DRAW = 3
 REWARD_FOR_WINNING = 1
 REWARD_FOR_LOSING = -1
 REWARD_FOR_DRAWING = 0
+
+# Team Deathmatch points one new configured death gives the other team. A death
+# with the victim's centre inside its own team's Red Zone gives 2; any other
+# death gives 1. Kill and death counts are unchanged: it is still one of each.
+TEAM_DEATHMATCH_POINTS_PER_DEATH = 1
+TEAM_DEATHMATCH_POINTS_PER_RED_ZONE_DEATH = 2
 
 # Context exposes raw simulator and task facts. Canonical learner-facing
 # normalization belongs to the later versioned observation-preprocessing layer.
@@ -103,6 +109,9 @@ CONTEXT_FEATURE_CTF_ENEMY_CAPTURE_COUNT = 15
 CONTEXT_FEATURE_TDM_SCORE_THRESHOLD = 16
 CONTEXT_FEATURE_KOTH_SCORE_THRESHOLD = 17
 CONTEXT_FEATURE_CTF_CAPTURE_THRESHOLD = 18
+# The configured Team Deathmatch Red Zone depth in map units; 0 when the rule is
+# off and in neutral mode. Appended so columns 0-18 keep their meaning.
+CONTEXT_FEATURE_TDM_RED_ZONE_DEPTH = 19
 
 # Self rows and unit-candidate rows use one shared agent-feature schema.
 # self_features exists only for convenient actor conditioning; ally/enemy unit
@@ -325,8 +334,21 @@ class EnvConfig(NamedTuple):
     team_deathmatch_score_threshold: int
     """The score threshold used to end a Team Deathmatch episode.
 
-    Python int: 0 in neutral mode; 1..16,777,212 in Team Deathmatch. The bound
-    keeps the threshold and one-step score overshoot exact in float32.
+    Python int: 0 in neutral mode. In Team Deathmatch 1..16,777,212 at Red Zone
+    depth 0.0 and 1..16,777,207 at a positive depth
+    (config.maximum_team_deathmatch_score_threshold). The bound keeps the
+    threshold and one-step score overshoot exact in float32.
+    """
+    team_deathmatch_red_zone_depth: float
+    """How far each team's Red Zone reaches in from its own spawn edge.
+
+    Python float in map units. Each team's Red Zone is a full-height strip on
+    its own spawn side: x <= depth when the team spawns on the left, and
+    x >= map_width - depth when it spawns on the right (both bounds included,
+    compared in float32). 0.0 turns the rule off and is required in neutral
+    mode. A positive depth must be finite and, after float32 conversion, at
+    least the smallest normal float32 and at most map_width. Every actor sees
+    it in context column CONTEXT_FEATURE_TDM_RED_ZONE_DEPTH.
     """
     max_steps: int
     """The episode step limit.
@@ -423,8 +445,9 @@ class EnvState(NamedTuple):
     """Current integer team scores.
 
     Int32 (2,) in [Team A, Team B] order. Neutral mode uses zero. Valid TDM
-    snapshots stay at or below threshold plus four; both teams may score in one
-    transition.
+    snapshots stay at or below the threshold plus four at Red Zone depth 0.0,
+    or plus nine at a positive depth (config.maximum_team_deathmatch_score_increment
+    minus one); both teams may score in one transition.
     """
     step_count: Array
     """The current episode step.
@@ -833,9 +856,10 @@ class Observation(NamedTuple):
     context_features: Array  # Meta/Config features.
     """Raw current context and episode rules for every observer.
 
-    Float32 (10, 19): raw current step, episode rules, relative team sizes,
-    task flags, scores and thresholds. CONTEXT_FEATURE_* constants name the
-    columns. Reserved task/objective values and unused observer rows are zero.
+    Float32 (10, 20): raw current step, episode rules, relative team sizes,
+    task flags, scores, thresholds and the Team Deathmatch Red Zone depth.
+    CONTEXT_FEATURE_* constants name the columns. Reserved task/objective
+    values and unused observer rows are zero.
     """
     ally_visibility_mask: Array
     """Current visibility of each stable own-team row.

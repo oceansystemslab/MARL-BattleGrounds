@@ -17,7 +17,10 @@ A normal workflow is:
    the recorded game in the [Replay Viewer](replay_viewer.md).
 
 The task selector currently offers TDM. The scoreboard shows both teams'
-controllers, scores, and configured score target. A completed game also shows
+controllers, scores, and configured score target. Scores are points: a death
+gives the enemy team 1 point, or 2 when the agent dies inside its own team's Red
+Zone ([A44](../design/specification_amendments.md#a44-team-deathmatch-red-zone-scoring)),
+so a score can differ from the kill count. A completed game also shows
 Victory, Draw, or Defeat. Older neutral setups appear as **Combat diagnostic**.
 
 Live recording captures the game without computing the full metric suite. Replay
@@ -126,13 +129,30 @@ persists asset content, and Delete Saved is its only removal operation.
 Experiment and evaluation manifests own any later approval, partition, or
 normalized scientific identity.
 
+Scenario drafts declare the Team Deathmatch Red Zone rule in the **TDM
+episode** group. **Red Zone Depth** says how far each team's Red Zone reaches in
+from its own spawn edge, in map units. When an agent dies inside its own team's
+Red Zone, the enemy team gets 2 points instead of 1
+([A44](../design/specification_amendments.md#a44-team-deathmatch-red-zone-scoring));
+0 turns the rule off. A blank scenario and a copy of a saved map start at 5.0,
+the default, and Duplicate keeps the source scenario's depth. Python checks the
+value exactly as typed: a negative value (including -0), a positive value too
+small for float32, or a value wider than the map is a problem linked to the
+field. Scenario drafts saved before the rule (`dev-scenario-draft@1`) keep one
+point per death: they read as depth 0 and keep their semantic digests. Opening
+one for editing shows it at depth 0; the next Save writes the new draft version.
+The Scenario Author canvas tints each team's Red Zone floor from Python's
+latest validation of the current draft, so it shows no tint while a check is
+pending, for map drafts, or at depth 0.
+
 ## Loading Saved Scenarios and Map Previews
 
 The Combat Debugger selector lists every latest execution-valid saved map and
 scenario revision in numeric-aware asset-ID order. Scenario rows load the
 authored starting state. Map rows are explicitly labelled as default 5v5 TDM
-previews: Python copies the map into the default scenario, builds the simulator
-inputs, and validates them. It does not change or save the map. `Open in Debug`
+previews: Python copies the map into the default scenario, with Red Zone depth
+5.0 (`default-tdm-map-preview@2`), builds the simulator inputs, and validates
+them. It does not change or save the map. `Open in Debug`
 in either authoring area calls this same loading service for its current buffer.
 When a map retains an approved TDM map's source name and content digest, its
 preview is recorded under that map's registered identity: the map ID, name and
@@ -390,13 +410,13 @@ Frame is allowlisted by authority: Episode, Frame, Simulator step, and
 conditional Incoming transition. The initial frame has no incoming-transition
 row.
 
-Visual Filters contains 19 independently controlled paint families plus Ranges.
+Visual Filters contains 20 independently controlled paint families plus Ranges.
 Initially enable Ultimate Ability Effects, Spawn Shield, Basic Ability Effects,
-Regeneration Effects, Death Effects, Resurrection Effects, Scrolling Battle
-Text, Respawn Wave and Death Announcer. Ranges start off, giving `9 enabled`.
-Visual Filters and Roster start open; Enable All selects all 20 controls, and
-Default Configuration restores these nine effects with Ranges off. The complete
-inventory is:
+Regeneration Effects, Cooldown Effects, Death Effects, Resurrection Effects,
+Scrolling Battle Text, Respawn Wave, Death Announcer and Red Zone Floors. Ranges
+start off, giving `11 enabled`. Visual Filters and Roster start open; Enable
+All selects all 21 controls, and Default Configuration restores these eleven
+effects with Ranges off. The complete inventory is:
 
 1. Aura Fields
 2. Aura Modifier Badges
@@ -417,6 +437,12 @@ inventory is:
 17. Spawn-Shield Expiry
 18. Scrolling Battle Text
 19. Death Announcer
+20. Red Zone Floors
+
+Red Zone Floors tints each team's Red Zone, a full-height strip on its own spawn
+side, a subtle deep red under obstacles and bodies. The strips come from the
+recorded depth and spawn sides; the browser does not work out the rule itself.
+Turning the filter off only hides the tint.
 
 Death Announcer names the killing team and shows a compact list of victims.
 Hover or focus a victim to see every associated **Kill Contributor**, including
@@ -443,8 +469,8 @@ distinguished by their outcome sign and color rather than by separate filters.
 These switches affect browser paint, accessible descriptions belonging to that
 paint, and nothing else. They do not redact source data, change simulator state,
 or alter authorized event data used by battlefield choreography. Ranges uses its
-existing service/local authority path rather than the 19-entry paint schema.
-**Enable All** and **Disable All** govern all 19 paint families and the active
+existing service/local authority path rather than the 20-entry paint schema.
+**Enable All** and **Disable All** govern all 20 paint families and the active
 Ranges control together.
 
 ## Recording and Recovery

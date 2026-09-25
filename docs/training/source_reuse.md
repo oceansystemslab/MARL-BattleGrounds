@@ -30,15 +30,18 @@ These BG adaptations are checked separately from raw donor comparisons, which
 use scale 1.0, world frame and ValueNorm off. Search recipes do not silently
 change constructor defaults or historical saved settings.
 
-With the current 5,164 actor features, 919 physical-state features and 198
+With the current 5,165 actor features, 920 physical-state features and 198
 actions, the parameter counts are:
 
 | Method | Actor Parameters | Critic Parameters |
 | --- | ---: | ---: |
-| `mappo` | 801,990 | 233,217 |
-| `ippo` | 801,990 | 776,577 |
-| `ff_mappo` | 703,174 | 134,401 |
-| `ff_ippo` | 703,174 | 677,761 |
+| `mappo` | 802,118 | 233,345 |
+| `ippo` | 802,118 | 776,705 |
+| `ff_mappo` | 703,302 | 134,529 |
+| `ff_ippo` | 703,302 | 677,889 |
+
+Actors saved before Red Zone used 5,164 actor features (128 fewer actor
+parameters; each critic's input layer was one feature narrower too).
 
 Each parameter is float32, so weights alone use four bytes per parameter.
 Optimizer state, gradients, temporary arrays and opponent history add storage.
@@ -262,10 +265,13 @@ The default `shaping_mode="potential"` keeps the original score-potential
 adjustment and terminal cancellation: a real ending sets the next potential to
 zero, so over a complete game the discounted adjustments sum to minus the
 starting potential (zero from a tied start). The plain, undiscounted sum need
-not cancel. The explicit `"score_delta"` alternative adds coefficient times new
-team kills minus new team deaths to native reward.
+not cancel. The explicit `"score_delta"` alternative adds coefficient times the
+team's new points minus the enemy's new points to native reward.
 It retains terminal kills and has no terminal cancellation. Both use actual
-scores from the producing game and keep padding at zero.
+scores from the producing game and keep padding at zero. Scores are points, so
+under the Red Zone rule (`TrainConfig.red_zone_depth`, default 5.0) a death in
+the victim's own Red Zone moves either adjustment by twice the coefficient;
+there is no separate Red Zone reward.
 
 This changes the training objective; it is not a donor calculation or a claim
 of policy-invariant shaping. It addresses the absence of lasting feedback in
@@ -433,11 +439,11 @@ One local Q-network is shared by every Team A actor; each actor keeps its own
 GRU that resets before a new episode, Dense 256 with ReLU and a Dense 198 head
 with orthogonal gain 0.01. Parameter paths match the donor, so the same key
 gives the same starting weights on the current stack. The mixer reads the
-layer-normalized 919-value physical state. Its hypernetworks are
-919→64→160 and 919→64→32 for the two weight layers (absolute value keeps the
-mix monotonic) and 919→32 and 919→32→ReLU→1 for the biases; the hidden layer
-uses ELU. With the current input sizes, the Q-network has 1,833,158 parameters
-and the mixer 190,991: 8,096,596 bytes of float32 weights for one copy of each.
+layer-normalized 920-value physical state. Its hypernetworks are
+920→64→160 and 920→64→32 for the two weight layers (absolute value keeps the
+mix monotonic) and 920→32 and 920→32→ReLU→1 for the biases; the hidden layer
+uses ELU. With the current input sizes, the Q-network has 1,833,414 parameters
+and the mixer 191,185: 8,098,396 bytes of float32 weights for one copy of each.
 Target copies and Adam's two moments add three more copies.
 
 | Setting | Default | Meaning |
@@ -499,8 +505,8 @@ return normalization, or tuning is added.
   observation and the next observation). BG's replay row keeps only Team A's
   five observer rows, their 5x5 source permissions, Team A masks and chosen
   actions, the team task reward and the shaping reward separately, lifecycle
-  flags, the 919-value physical state once, and eight identity fields: 29,664
-  bytes per game row, or 949,248,000 bytes for 32 games and 1,000 rows each.
+  flags, the 920-value physical state once, and eight identity fields: 29,688
+  bytes per game row, or 950,016,000 bytes for 32 games and 1,000 rows each.
   The next row of a sequence supplies the successor, so the newest stored row
   of a game is only ever used as a successor. A sample is rebuilt into network
   inputs with the same permitted-input builder the live actor uses; the
@@ -602,9 +608,10 @@ the input, then two blocks of Dense 512, BatchNorm and ReLU, a 512-wide GRU
 that resets before a new episode, and a Dense 198 head. Flax's default
 initializers are kept (LeCun-normal Dense and GRU input kernels, orthogonal
 recurrent kernels, zero biases). Parameter paths match the donor, so the same
-key gives exactly the same starting weights. With BG's 5,164 actor features
-the network has 4,595,998 parameters (18,383,992 float32 bytes) and 12,376
-running statistics (49,504 bytes); RAdam's two moment trees add 36,767,984
+key gives exactly the same starting weights (the donor comparison runs at the
+donor record's 5,164 features). With BG's current 5,165 actor features the
+network has 4,596,512 parameters (18,386,048 float32 bytes) and 12,378
+running statistics (49,512 bytes); RAdam's two moment trees add 36,772,096
 bytes. The team value is the sum of the actors' values (VDN); there is no
 mixer, critic, physical state or target network.
 
@@ -671,15 +678,15 @@ BG keeps its own default of 32.
   (4,096 at B32) are never learned. The exploration schedule starts after
   them, on the learning-block clock.
 - **Stored rows and memory.** The donor keeps whole transitions for its
-  window. BG stores a compact Team A row per game and decision (25,988 bytes:
+  window. BG stores a compact Team A row per game and decision (26,008 bytes:
   the five observer rows and their 5x5 permissions, masks, world-frame
   actions, task and shaping rewards, lifecycle flags and identities) plus the
   memory each actor held just before acting. Between blocks it keeps only the
-  last H real rows per game (4,637,184 bytes at B32, H4); no Q values, Team B
+  last H real rows per game (4,639,744 bytes at B32, H4); no Q values, Team B
   rows, physical state or expanded features are kept. A minibatch rebuilds
   its actor features with the same builder as live action selection, only
-  for its selected games (27,265,920 bytes per default minibatch instead of
-  436,254,720 for the whole window). Like the donor, a window's unroll starts
+  for its selected games (27,271,200 bytes per default minibatch instead of
+  436,339,200 for the whole window). Like the donor, a window's unroll starts
   from the oldest kept row's stored memory, which older weights produced; it
   is never recomputed.
 - **Partial final window.** When the budget ends inside a block, the last

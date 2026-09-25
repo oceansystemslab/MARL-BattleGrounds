@@ -1680,7 +1680,7 @@ def test_submission_failures_have_stable_typed_stage_and_preserve_input_epoch(
     elif boundary == "step":
         monkeypatch.setattr(control, "step", fail)
     elif boundary == "capture":
-        monkeypatch.setattr(control, "capture_evaluation_transition_unit_v2", fail)
+        monkeypatch.setattr(control, "capture_evaluation_transition_unit_v3", fail)
     elif boundary == "coherent_view":
         monkeypatch.setattr(control, "EvaluationTransitionViewV1", fail)
     else:

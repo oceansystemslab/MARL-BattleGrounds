@@ -17,6 +17,7 @@ from marl_battlegrounds.evaluation.models import (
     EvaluationFrame,
     EvaluationFrameV1,
     EvaluationFrameV2,
+    EvaluationFrameV3,
     StaticMechanicsCatalogV1,
     evaluation_context_type,
 )
@@ -24,9 +25,11 @@ from marl_battlegrounds.evaluation.pov import (
     ActorPovAdjacentTransitionSlice,
     ActorPovAdjacentTransitionSliceV1,
     ActorPovAdjacentTransitionSliceV2,
+    ActorPovAdjacentTransitionSliceV3,
     ActorPovCurrentSlice,
     ActorPovCurrentSliceV1,
     ActorPovCurrentSliceV2,
+    ActorPovCurrentSliceV3,
 )
 from marl_battlegrounds.rendering.authorized_incoming import (
     build_live_no_shared_obs_incoming_summary_v1,
@@ -240,6 +243,7 @@ def _canonical_live_view(
     if (
         type(current_frame) is not EvaluationFrameV1
         and type(current_frame) is not EvaluationFrameV2
+        and type(current_frame) is not EvaluationFrameV3
     ):
         raise TypeError("current_frame must be the exact EvaluationFrameV1 root.")
     if current_frame.frame_index == 0:
@@ -859,6 +863,7 @@ def build_live_no_shared_obs_authorized_presentation_v1(
     if (
         type(current_slice) is not ActorPovCurrentSliceV1
         and type(current_slice) is not ActorPovCurrentSliceV2
+        and type(current_slice) is not ActorPovCurrentSliceV3
     ):
         raise TypeError("current_slice must be the exact ActorPovCurrentSliceV1 root.")
     if type(public_catalog) is not StaticMechanicsCatalogV1:
@@ -887,6 +892,7 @@ def build_live_no_shared_obs_authorized_presentation_v1(
         if (
             type(incoming_carrier) is not ActorPovAdjacentTransitionSliceV1
             and type(incoming_carrier) is not ActorPovAdjacentTransitionSliceV2
+            and type(incoming_carrier) is not ActorPovAdjacentTransitionSliceV3
         ):
             raise TypeError("nonzero live NoSharedObs frames require an exact carrier.")
         carrier = type(incoming_carrier).model_validate(
@@ -958,6 +964,7 @@ def build_live_no_shared_obs_authorized_presentation_v1(
         if (
             type(previous_global_frame) is not EvaluationFrameV1
             and type(previous_global_frame) is not EvaluationFrameV2
+            and type(previous_global_frame) is not EvaluationFrameV3
         ):
             raise TypeError(
                 "non-initial live NoSharedObs frames require the exact prior "

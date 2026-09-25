@@ -34,6 +34,8 @@ ASSET_ROLES = frozenset(
         "qualification",
     }
 )
+# Scalar metric, run and replay schema pins of snapshots saved before Red Zone.
+_PRE_RED_ZONE_PINS = (14, 2, 3)
 _CONFIG_FIELDS = frozenset(
     {
         "format",
@@ -485,7 +487,15 @@ def _records(value: object, assets: Mapping[str, Any]) -> set[str]:
 
 
 def _validate(config: dict[str, Any], *, official: bool) -> None:
-    """Check complete descriptor structure without executing its referenced work."""
+    """Check complete descriptor structure without executing its referenced work.
+
+    The compatibility pins (scalar_schema, run_schema, replay_schema) must be
+    exactly (14, 2, 3), a snapshot saved before the Red Zone rule that can be
+    reused but not extended, or (METRIC_SCHEMA_VERSION, 2, 4), a current one. A
+    value no set allows raises ValueError "Unsupported tournament <key>"; valid
+    values in a mixed combination raise "Unsupported tournament schema
+    combination".
+    """
     _object(config, "tournament config", _CONFIG_FIELDS, optional={"source_location"})
     if (
         config["format"] != CONFIG_FORMAT
@@ -551,13 +561,25 @@ def _validate(config: dict[str, Any], *, official: bool) -> None:
     ):
         raise ValueError("Package version differs from code provenance")
     _digest(compatibility["environment_id"], "environment_id")
-    for key, expected in (
-        ("scalar_schema", 14),
-        ("run_schema", 2),
-        ("replay_schema", 3),
-    ):
-        if type(compatibility[key]) is not int or compatibility[key] != expected:
+    for key in ("scalar_schema", "run_schema", "replay_schema"):
+        if type(compatibility[key]) is not int:
             raise ValueError(f"Unsupported tournament {key}")
+    pins = (
+        compatibility["scalar_schema"],
+        compatibility["run_schema"],
+        compatibility["replay_schema"],
+    )
+    # Exactly two pin sets: snapshots saved before the Red Zone rule (scalar
+    # schema 14, replay 3; readable and reusable, not extendable) and current
+    # ones (today's scalar schema, replay 4).
+    from marl_battlegrounds.evaluation.metric_catalog import METRIC_SCHEMA_VERSION
+
+    allowed = (_PRE_RED_ZONE_PINS, (METRIC_SCHEMA_VERSION, 2, 4))
+    if pins not in allowed:
+        for index, key in enumerate(("scalar_schema", "run_schema", "replay_schema")):
+            if all(pins[index] != row[index] for row in allowed):
+                raise ValueError(f"Unsupported tournament {key}")
+        raise ValueError("Unsupported tournament schema combination")
     for key in ("action_stream_version", "initialization_stream_version"):
         _text(compatibility[key], key)
     for key in ("source_manifest_asset", "dependency_lock_asset"):
@@ -675,6 +697,10 @@ def load_tournament_config(
     ------
     ValueError
         JSON, fields, references, paths, identity or required release pins fail.
+        The compatibility pins must be exactly (14, 2, 3), a snapshot saved
+        before the Red Zone rule (reusable, not extendable), or (current scalar
+        schema, 2, 4); any other value or combination raises "Unsupported
+        tournament <key>" or "Unsupported tournament schema combination".
     TypeError
         config is not a supported path/mapping or contains non-JSON values.
     OSError

@@ -1,4 +1,14 @@
-"""Check NoSharedObs scene decoding and its information limits."""
+"""Check NoSharedObs scene decoding and its information limits.
+
+Red Zone scene records: for every shared geometry case (tests.red_zone_scene_cases)
+the Oracle scene of a context with resolved config V2 carries AuthorizedMapV2
+whose strips come from Core's side rule and the float32 strip rule, the stored
+bounds are the bounds Core's classifier red_zone_death_mask uses under jit (each
+team's new deaths on both recorded edges and one float32 step inside them count;
+one step outside, while still on the map, does not), and Team A and Team B
+NoSharedObs recipients (POV V3, 20 context columns) record exactly the same
+red_zone as the Oracle; recordings with 19-column frames keep AuthorizedMapV1.
+"""
 
 from __future__ import annotations
 
@@ -7,24 +17,39 @@ import json
 import os
 import subprocess
 import sys
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from dataclasses import asdict
 from pathlib import Path
 from struct import pack, unpack
 from typing import cast
 
+import jax
+import jax.numpy as jnp
+import numpy as np
 import pytest
+from jax import Array
 from pydantic import TypeAdapter, ValidationError
 from tests.evaluation_fixtures import (
     CapturedEvaluationTrajectory,
     captured_evaluation_trajectory,
+    current_captured_evaluation_trajectory,
+    pre_red_zone_captured_evaluation_trajectory,
+)
+from tests.red_zone_scene_cases import (
+    RED_ZONE_GEOMETRY_CASES,
+    RedZoneGeometryCase,
+    expected_red_zone,
+    red_zone_env_config,
 )
 
+from marl_battlegrounds.core.env import red_zone_death_mask
+from marl_battlegrounds.core.types import EnvConfig
 from marl_battlegrounds.evaluation.metrics import EvaluationTransitionViewV1
 from marl_battlegrounds.evaluation.models import (
     EvaluationEpisodeContextV1,
     StaticMechanicsCatalogV1,
     canonical_digest_sha256,
+    float32_value,
 )
 from marl_battlegrounds.evaluation.pov import (
     ActorPovActionMaskV1,
@@ -47,6 +72,8 @@ from marl_battlegrounds.rendering.authorized_presentation import (
     AuthorizedClassDocumentationProfileAvailableV1,
     AuthorizedClassDocumentationProfileUnavailableV1,
     AuthorizedClassMechanicsV2,
+    AuthorizedMapV1,
+    AuthorizedMapV2,
     AuthorizedSpawnShieldMechanicsAvailableV2,
     authorized_class_documentation_profile_v1,
     build_oracle_authorized_scene_v1,
@@ -59,6 +86,9 @@ from marl_battlegrounds.rendering.pov_scene import (
 )
 
 _REPOSITORY_ROOT = Path(__file__).resolve().parents[1]
+_compiled_death_mask = cast(
+    Callable[[EnvConfig, Array, Array], Array], jax.jit(red_zone_death_mask)
+)
 
 
 @pytest.fixture(scope="module")
@@ -2048,3 +2078,114 @@ def test_adjacent_scene_revalidates_forged_carrier_before_endpoint_decode() -> N
             authority_session_id="forged-adjacent-scene",
             frame_index=0,
         )
+
+
+@pytest.mark.parametrize(
+    "geometry", RED_ZONE_GEOMETRY_CASES, ids=lambda case: case.label
+)
+def test_oracle_and_no_shared_recipients_record_the_same_red_zone(
+    geometry: RedZoneGeometryCase,
+) -> None:
+    config = red_zone_env_config(geometry)
+    trajectory = current_captured_evaluation_trajectory(
+        transition_count=1, config=config
+    )
+    context = trajectory.context
+    frame = trajectory.frames[0]
+    oracle = build_oracle_authorized_scene_v1(
+        context,
+        build_evaluation_battlefield_scene_v2(context, frame),
+        authority_session_id="red-zone-oracle",
+    )
+    expected = expected_red_zone(config)
+    assert type(oracle.map) is AuthorizedMapV2
+    assert oracle.map.width == geometry.width
+    assert oracle.map.red_zone == expected
+    if expected is not None:
+        # The scoring edges in float32: a strip holds x <= depth on the left and
+        # x >= float32(width - depth) on the right, both inclusive.
+        width = np.float32(geometry.width)
+        depth = np.float32(geometry.depth)
+        for low, high in (expected.team_a_x_range, expected.team_b_x_range):
+            if low == 0.0:
+                assert np.float32(high) == depth
+                assert np.nextafter(np.float32(high), np.float32(np.inf)) > depth
+            else:
+                assert (np.float32(low), np.float32(high)) == (width - depth, width)
+                assert np.nextafter(np.float32(low), np.float32(-np.inf)) < (
+                    width - depth
+                )
+        # Core's classifier must use exactly the recorded ranges. Each team's
+        # newly dead agents stand on both recorded edges, one float32 step
+        # inside each edge (unless the range is collapsed) and one step outside
+        # it (only while still on the map). Edge and inside points are Red Zone
+        # deaths; outside points are not. Slots 0-4 hold Team A's points and
+        # slots 5-9 Team B's.
+        positions = np.ones((10, 2), np.float32)
+        newly_dead = np.zeros(10, np.bool_)
+        inside = np.zeros(10, np.bool_)
+        up, down = np.float32(np.inf), np.float32(-np.inf)
+        recorded = oracle.map.red_zone
+        assert recorded is not None
+        for team, x_range in enumerate(
+            (recorded.team_a_x_range, recorded.team_b_x_range)
+        ):
+            low, high = np.float32(x_range[0]), np.float32(x_range[1])
+            points = [(low, True), (high, True)]
+            if low < high:
+                points += [
+                    (np.nextafter(low, up), True),
+                    (np.nextafter(high, down), True),
+                ]
+            points += [
+                (x, False)
+                for x in (np.nextafter(low, down), np.nextafter(high, up))
+                if 0.0 <= x <= width
+            ]
+            assert len(points) <= 5
+            for row, (x, on_strip) in enumerate(points):
+                slot = 5 * team + row
+                positions[slot, 0] = x
+                newly_dead[slot] = True
+                inside[slot] = on_strip
+        np.testing.assert_array_equal(
+            np.asarray(
+                _compiled_death_mask(
+                    config, jnp.asarray(positions), jnp.asarray(newly_dead)
+                )
+            ),
+            inside,
+        )
+    for slot in (0, 5):
+        current = build_actor_pov_current_slice_v1(context, frame, global_slot=slot)
+        assert len(current.frame.context_features) == 20
+        assert current.frame.context_features[19] == float32_value(geometry.depth)
+        parts = build_no_shared_obs_authorized_scene_v1(
+            current,
+            public_catalog=context.static_mechanics_catalog,
+            authority_session_id="red-zone-pov",
+        )
+        assert type(parts.scene.map) is AuthorizedMapV2
+        assert parts.scene.map.width == float32_value(geometry.width)
+        assert parts.scene.map.red_zone == oracle.map.red_zone
+
+
+def test_nineteen_column_recordings_keep_the_v1_map() -> None:
+    trajectory = pre_red_zone_captured_evaluation_trajectory(transition_count=1)
+    context = trajectory.context
+    frame = trajectory.frames[0]
+    oracle = build_oracle_authorized_scene_v1(
+        context,
+        build_evaluation_battlefield_scene_v2(context, frame),
+        authority_session_id="historical-oracle",
+    )
+    assert type(oracle.map) is AuthorizedMapV1
+    for slot in (0, 5):
+        current = build_actor_pov_current_slice_v1(context, frame, global_slot=slot)
+        assert len(current.frame.context_features) == 19
+        parts = build_no_shared_obs_authorized_scene_v1(
+            current,
+            public_catalog=context.static_mechanics_catalog,
+            authority_session_id="historical-pov",
+        )
+        assert type(parts.scene.map) is AuthorizedMapV1

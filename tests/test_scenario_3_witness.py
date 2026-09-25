@@ -158,10 +158,10 @@ def trajectory(scenario: TDMScenario) -> tuple[WitnessTransition, ...]:
 
 
 def test_scenario_3_binds_the_approved_setup(scenario: TDMScenario) -> None:
-    assert scenario.info.approved_source.revision == 24
-    assert scenario.info.source.revision == 26
+    assert scenario.info.approved_source.revision == 27
+    assert scenario.info.source.revision == 27
     assert scenario.info.source.semantic_digest == (
-        "c5c409e4f64deacc5e54b7c09ee62c59667342138786303b2fc52103a5dc3459"
+        "9d9fe8e94353911ab9fa232784de54767c841fa630aab4e9cb65f931bf5be9bb"
     )
     assert scenario.info.resolved_initial_state_digest == (
         "43bf4bbe5b6f70ff14d85533b9aaec4d626580a55ac6b1cf665e70ded33fea8a"
@@ -216,8 +216,8 @@ def test_all_slots_keep_the_recorded_positions_health_and_actions(
 ) -> None:
     expected = json.loads(_EXPECTED_PATH.read_text())
     assert expected["scenario_id"] == 3
-    assert expected["approved_revision"] == 24
-    assert expected["source_revision"] == 26
+    assert expected["approved_revision"] == 27
+    assert expected["source_revision"] == 27
     slots = jnp.arange(10)
     for transition, row in zip(trajectory, expected["ticks"], strict=True):
         assert_witness_tick(

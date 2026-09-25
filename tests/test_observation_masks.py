@@ -257,6 +257,7 @@ def _deterministic_config(
     return EnvConfig(
         task_mode=0,
         team_deathmatch_score_threshold=0,
+        team_deathmatch_red_zone_depth=0.0,
         max_steps=max_steps,
         map_width=map_width,
         map_height=map_height,

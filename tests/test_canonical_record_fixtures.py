@@ -3,7 +3,9 @@
 The fixtures invent measurements but use actual configs, registrations, spawn
 banks, versioned schedules and CSV schemas. These checks call no action method,
 play no games and perform no rating fit. They establish useful host fixtures,
-not scientific qualification or a released official tournament.
+not scientific qualification or a released official tournament. Source-config
+preparation returns frozen configuration IDs that name exactly the configs in
+its verified cache, and that cache keeps signed zero exact.
 """
 
 from collections.abc import Iterator, Sequence
@@ -112,7 +114,8 @@ def test_verified_configuration_cache_preserves_signed_zero(
     bundle = build_record_bundle(tmp_path, entrants=2, maps=1)
     config = bundle["config"]
     verifier = AssetVerifier(config)
-    _, _, _, prepared = _source_configs(config, verifier)
+    _, _, _, prepared, frozen_ids = _source_configs(config, verifier)
+    assert set(frozen_ids.values()) == set(prepared)
     plan = resolve_reuse_plan(config, bundle["paths"])
     records = TournamentRecords(
         config, plan.games, plan.jobs, verifier, manifest={"run_id": "new"}

@@ -16,6 +16,7 @@ from marl_battlegrounds.evaluation.models import (
     EvaluationFrame,
     EvaluationFrameV1,
     EvaluationFrameV2,
+    EvaluationFrameV3,
     EvaluationTransitionV1,
     StaticMechanicsCatalogV1,
     canonical_digest_sha256,
@@ -47,6 +48,7 @@ from marl_battlegrounds.rendering.evaluation_adapter import (
     SharedObsSourceMaterialProjection,
     SharedObsSourceMaterialProjectionV1,
     SharedObsSourceMaterialProjectionV2,
+    SharedObsSourceMaterialProjectionV3,
 )
 from marl_battlegrounds.rendering.pov_scene import (
     ActorPovAnalyzerProjectionV1,
@@ -618,6 +620,7 @@ def build_replay_no_shared_obs_authorized_presentation_v1(
         if (
             type(previous_global_frame) is not EvaluationFrameV1
             and type(previous_global_frame) is not EvaluationFrameV2
+            and type(previous_global_frame) is not EvaluationFrameV3
         ):
             raise TypeError(
                 "non-initial NoSharedObs replays require the exact prior global frame."
@@ -871,6 +874,8 @@ def build_replay_shared_obs_authorized_presentation_v1(
         is not SharedObsSourceMaterialProjectionV1
         and type(current_recipient_source_material)
         is not SharedObsSourceMaterialProjectionV2
+        and type(current_recipient_source_material)
+        is not SharedObsSourceMaterialProjectionV3
     ):
         raise TypeError("current recipient source must use its exact SharedObs root.")
     if (
@@ -880,6 +885,7 @@ def build_replay_shared_obs_authorized_presentation_v1(
             not in (
                 SharedObsSourceMaterialProjectionV1,
                 SharedObsSourceMaterialProjectionV2,
+                SharedObsSourceMaterialProjectionV3,
             )
             for row in current_active_nonrecipient_source_material
         )
@@ -889,6 +895,7 @@ def build_replay_shared_obs_authorized_presentation_v1(
             not in (
                 SharedObsSourceMaterialProjectionV1,
                 SharedObsSourceMaterialProjectionV2,
+                SharedObsSourceMaterialProjectionV3,
             )
             for row in previous_active_nonrecipient_source_material
         )
@@ -970,6 +977,8 @@ def build_replay_shared_obs_authorized_presentation_v1(
             is not SharedObsSourceMaterialProjectionV1
             and type(previous_recipient_source_material)
             is not SharedObsSourceMaterialProjectionV2
+            and type(previous_recipient_source_material)
+            is not SharedObsSourceMaterialProjectionV3
         ):
             raise TypeError(
                 "non-initial SharedObs frames require an exact prior source."
@@ -992,6 +1001,7 @@ def build_replay_shared_obs_authorized_presentation_v1(
         if (
             type(previous_global_frame) is not EvaluationFrameV1
             and type(previous_global_frame) is not EvaluationFrameV2
+            and type(previous_global_frame) is not EvaluationFrameV3
         ):
             raise TypeError(
                 "non-initial SharedObs replays require the exact prior global frame."
@@ -1178,6 +1188,7 @@ def build_replay_oracle_authorized_presentation_v1(
     if (
         type(current_frame) is not EvaluationFrameV1
         and type(current_frame) is not EvaluationFrameV2
+        and type(current_frame) is not EvaluationFrameV3
     ):
         raise TypeError("current_frame must be the exact EvaluationFrameV1 root.")
     context = evaluation_context_type(context).model_validate(

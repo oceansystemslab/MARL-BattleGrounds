@@ -1,9 +1,21 @@
-"""Check strict validation of versioned evaluation records."""
+"""Check strict validation of versioned evaluation records.
+
+Red Zone records: resolved config V2 always writes its depth (0.0 included), round-trips
+at depths 0, 5 and 6, and refuses negative, -0.0, subnormal, too-wide and neutral-mode
+depths, a map wider than float32 can hold, and a threshold above 16,777,207 at a
+positive depth. The V1 builder refuses a positive depth and, at depth 0, still writes
+the bytes recorded before the rule (the pre-rule replay fixture captured at commit
+59c157c). A V2 record cannot be relabelled V1 or placed in a context V3, and a V1 record
+cannot sit in a context V4. BaseObservationV3 needs 20 context columns and V2 needs 19.
+evaluation_frame_type_for_context pairs contexts V1 and V2 with frame V1, V3 with V2 and
+V4 with V3.
+"""
 
 import inspect
 import json
 from collections import UserDict
 from collections.abc import Iterator, Mapping, Sequence
+from pathlib import Path
 from typing import Any, cast
 
 import numpy as np
@@ -11,8 +23,10 @@ import pytest
 from jax import Array
 from pydantic import ValidationError
 from tests.evaluation_fixtures import (
+    current_evaluation_context,
     evaluation_context,
     evaluation_env_config,
+    pre_red_zone_evaluation_context,
 )
 
 import marl_battlegrounds.evaluation as evaluation_api
@@ -40,6 +54,9 @@ from marl_battlegrounds.core.types import (
     DeathTransitionFacts as CoreDeathTransitionFacts,
 )
 from marl_battlegrounds.core.types import (
+    EnvConfig,
+)
+from marl_battlegrounds.core.types import (
     PhysicalTransitionFacts as CorePhysicalTransitionFacts,
 )
 from marl_battlegrounds.core.types import (
@@ -63,6 +80,7 @@ from marl_battlegrounds.core.types import (
 from marl_battlegrounds.evaluation.catalog import (
     build_code_revision_v1,
     build_resolved_env_config_v1,
+    build_resolved_env_config_v2,
     build_static_mechanics_catalog_v1,
 )
 from marl_battlegrounds.evaluation.models import (
@@ -76,11 +94,17 @@ from marl_battlegrounds.evaluation.models import (
     AssignedPolicySlotV1,
     AuraTransitionFactsV1,
     BaseObservationV1,
+    BaseObservationV2,
+    BaseObservationV3,
     CodeRevisionV1,
     CombatTransitionFactsV1,
     DeathTransitionFactsV1,
     EvaluationEpisodeContextV1,
+    EvaluationEpisodeContextV3,
+    EvaluationEpisodeContextV4,
     EvaluationFrameV1,
+    EvaluationFrameV2,
+    EvaluationFrameV3,
     EvaluationTransitionV1,
     ExecutionInformationMode,
     GlobalAnalysisSnapshotV1,
@@ -90,6 +114,7 @@ from marl_battlegrounds.evaluation.models import (
     PreviousTimestepActionObservationV1,
     RegenerationTransitionFactsV1,
     ResolvedEnvConfigV1,
+    ResolvedEnvConfigV2,
     RespawnTransitionFactsV1,
     SourceDamageOutputEventV1,
     SpawnLifecycleObservationV1,
@@ -101,8 +126,18 @@ from marl_battlegrounds.evaluation.models import (
     VersionedIdentityV1,
     canonical_digest_sha256,
     canonical_json_bytes,
+    evaluation_frame_type_for_context,
 )
+from marl_battlegrounds.evaluation.replay_v2 import context_v2
 from marl_battlegrounds.evaluation.wire_shapes import MAX_OBSTACLE_SLOTS_V1
+
+# Replay V3 recorded before Red Zone from evaluation_env_config(max_steps=2).
+_PRE_RED_ZONE_REPLAY = (
+    Path(__file__).parent
+    / "fixtures"
+    / "historical_scenario_v4"
+    / "no_shared_obs.marlbg-replay.json"
+)
 
 
 def _json_payload(
@@ -638,6 +673,24 @@ def test_package_exports_legacy_and_current_replay_public_functions() -> None:
         "validate_scenario_evaluation_record_v2",
         "validate_scenario_evaluation_record_v3",
         "validate_scenario_evaluation_record_v4",
+        "build_evaluation_episode_context_v4",
+        "build_replay_v4",
+        "build_resolved_env_config_v2",
+        "build_scenario_evaluation_record_v5",
+        "canonical_actor_pov_replay_json_bytes_v3",
+        "capture_evaluation_transition_unit_v3",
+        "capture_initial_evaluation_frame_v3",
+        "export_actor_pov_replay_v3",
+        "load_actor_pov_replay_artifact_v3",
+        "load_scenario_evaluation_record_v5",
+        "replay_reference_v4",
+        "save_actor_pov_replay_artifact_v3",
+        "save_scenario_evaluation_record_v5",
+        "validate_actor_pov_replay_against_replay_v3",
+        "validate_actor_pov_replay_artifact_v3",
+        "validate_official_scenario_evaluation_record_v5",
+        "validate_replay_artifact_v4",
+        "validate_scenario_evaluation_record_v5",
     }
 
 
@@ -1181,3 +1234,172 @@ def test_event_and_transition_reject_identity_order_end_reason_and_emitter_drift
     }
     with pytest.raises(ValidationError, match="only when done"):
         EvaluationTransitionV1.model_validate(transition_payload)
+
+
+def _red_zone_config(depth: float) -> EnvConfig:
+    return evaluation_env_config(
+        task_mode=1,
+        team_deathmatch_score_threshold=25,
+        team_deathmatch_red_zone_depth=depth,
+    )
+
+
+def _rehashed(payload: dict[str, Any]) -> dict[str, Any]:
+    payload["canonical_digest_sha256"] = canonical_digest_sha256(
+        payload,
+        exclude={"canonical_digest_sha256"},
+    )
+    return payload
+
+
+def test_resolved_config_v2_always_records_its_depth_and_roundtrips() -> None:
+    records: list[ResolvedEnvConfigV2] = []
+    for depth in (0.0, 5.0, 6.0):
+        resolved = build_resolved_env_config_v2(_red_zone_config(depth))
+        written = json.loads(resolved.model_dump_json())
+        assert (resolved.schema_version, written["team_deathmatch_red_zone_depth"]) == (
+            2,
+            depth,
+        )
+        assert resolved.canonical_digest_sha256 == canonical_digest_sha256(
+            resolved,
+            exclude={"canonical_digest_sha256"},
+        )
+        assert (
+            ResolvedEnvConfigV2.model_validate_json(resolved.model_dump_json())
+            == resolved
+        )
+        records.append(resolved)
+    historical = build_resolved_env_config_v1(_red_zone_config(0.0))
+    changed = {
+        "schema_version",
+        "team_deathmatch_red_zone_depth",
+        "canonical_digest_sha256",
+    }
+    # Apart from version, depth and digest, V2 records exactly V1's fields.
+    for record in records:
+        assert {
+            key: value
+            for key, value in record.model_dump(mode="python").items()
+            if key not in changed
+        } == {
+            key: value
+            for key, value in historical.model_dump(mode="python").items()
+            if key not in changed
+        }
+    digests = {record.canonical_digest_sha256 for record in (*records, historical)}
+    assert len(digests) == 4
+
+
+def test_v1_builder_refuses_a_depth_and_keeps_its_pre_red_zone_bytes() -> None:
+    with pytest.raises(ValueError, match="cannot record a Red Zone depth"):
+        build_resolved_env_config_v1(_red_zone_config(5.0))
+    recorded = json.loads(_PRE_RED_ZONE_REPLAY.read_bytes())["header"]["context"][
+        "resolved_env_config"
+    ]
+    rebuilt = build_resolved_env_config_v1(evaluation_env_config(max_steps=2))
+    assert recorded["schema_version"] == 1
+    assert canonical_json_bytes(rebuilt) == canonical_json_bytes(recorded)
+
+
+def test_config_and_context_versions_cannot_move_a_red_zone_depth() -> None:
+    config = _red_zone_config(5.0)
+    current = build_resolved_env_config_v2(config)
+    relabelled = json.loads(current.model_dump_json())
+    relabelled["schema_version"] = 1
+    with pytest.raises(ValidationError, match="extra_forbidden"):
+        ResolvedEnvConfigV1.model_validate_json(json.dumps(relabelled))
+    del relabelled["team_deathmatch_red_zone_depth"]
+    with pytest.raises(ValidationError, match="canonical digest mismatch"):
+        ResolvedEnvConfigV1.model_validate_json(json.dumps(relabelled))
+    stripped = json.loads(current.model_dump_json())
+    del stripped["team_deathmatch_red_zone_depth"]
+    with pytest.raises(ValidationError, match="team_deathmatch_red_zone_depth"):
+        ResolvedEnvConfigV2.model_validate_json(json.dumps(_rehashed(stripped)))
+
+    historical = pre_red_zone_evaluation_context(
+        config._replace(team_deathmatch_red_zone_depth=0.0)
+    )
+    for record in (current, current.model_dump(mode="python")):
+        payload = historical.model_dump(mode="python")
+        payload["resolved_env_config"] = record
+        with pytest.raises(ValidationError, match="resolved_env_config"):
+            EvaluationEpisodeContextV3.model_validate(payload)
+    old_record = build_resolved_env_config_v1(
+        config._replace(team_deathmatch_red_zone_depth=0.0)
+    )
+    for record in (old_record, old_record.model_dump(mode="python")):
+        payload = current_evaluation_context(config).model_dump(mode="python")
+        payload["resolved_env_config"] = record
+        with pytest.raises(ValidationError, match="resolved_env_config"):
+            EvaluationEpisodeContextV4.model_validate(payload)
+
+
+def test_resolved_config_v2_refuses_depths_core_would_refuse() -> None:
+    neutral = build_resolved_env_config_v2(evaluation_env_config())
+    assert (neutral.task_mode, neutral.team_deathmatch_red_zone_depth) == (0, 0.0)
+    base = build_resolved_env_config_v2(_red_zone_config(5.0)).model_dump(mode="python")
+    smallest_subnormal = 2.0**-149
+    largest_subnormal = 2.0**-126 - 2.0**-149
+    cases: tuple[tuple[dict[str, object], str], ...] = (
+        ({"team_deathmatch_red_zone_depth": -1.0}, "nonnegative"),
+        ({"team_deathmatch_red_zone_depth": -0.0}, "nonnegative"),
+        ({"team_deathmatch_red_zone_depth": smallest_subnormal}, "normal float32"),
+        ({"team_deathmatch_red_zone_depth": largest_subnormal}, "normal float32"),
+        ({"team_deathmatch_red_zone_depth": 20.5}, "must not exceed map_width"),
+        ({"map_width": 1e39}, "finite after conversion to float32"),
+        ({"team_deathmatch_score_threshold": 2**24 - 8}, "at most 16777207"),
+        (
+            {"task_mode": 0, "team_deathmatch_score_threshold": 0},
+            "0.0 in neutral mode",
+        ),
+    )
+    for changes, message in cases:
+        payload = _rehashed({**base, **changes})
+        with pytest.raises(ValidationError, match=message):
+            ResolvedEnvConfigV2.model_validate(payload)
+    for nonfinite in (float("nan"), float("inf")):
+        with pytest.raises(ValidationError):
+            ResolvedEnvConfigV2.model_validate(
+                {**base, "team_deathmatch_red_zone_depth": nonfinite}
+            )
+
+
+def test_base_observation_v3_needs_twenty_context_columns_and_v2_nineteen() -> None:
+    v2_payload = {
+        **_valid_base_observation().model_dump(mode="python"),
+        "self_ally_index": (0,) * 10,
+    }
+    twenty = cast(tuple[tuple[float, ...], ...], _filled_tuple((10, 20), 0.0))
+    v3_payload = {**v2_payload, "context_features": twenty}
+
+    assert len(BaseObservationV2.model_validate(v2_payload).context_features[0]) == 19
+    assert len(BaseObservationV3.model_validate(v3_payload).context_features[0]) == 20
+    with pytest.raises(ValidationError, match="context_features"):
+        BaseObservationV3.model_validate(v2_payload)
+    with pytest.raises(ValidationError, match="context_features"):
+        BaseObservationV2.model_validate(v3_payload)
+    # A separate class, so a V2-typed field can never hold 20 columns.
+    assert not issubclass(BaseObservationV3, BaseObservationV2)
+
+
+def test_frame_version_follows_the_exact_context_version() -> None:
+    config = evaluation_env_config()
+    legacy = evaluation_context(config=config)
+    cases = (
+        (legacy, EvaluationFrameV1),
+        (context_v2(legacy), EvaluationFrameV1),
+        (pre_red_zone_evaluation_context(config), EvaluationFrameV2),
+        (current_evaluation_context(config), EvaluationFrameV3),
+    )
+    assert [
+        type(context).model_fields["schema_version"].default for context, _ in cases
+    ] == [1, 2, 3, 4]
+    for context, frame_type in cases:
+        assert evaluation_frame_type_for_context(context) is frame_type
+
+    class UnsupportedContext(EvaluationEpisodeContextV4):
+        pass
+
+    with pytest.raises(TypeError, match="exact supported episode-context root"):
+        evaluation_frame_type_for_context(UnsupportedContext.model_construct())

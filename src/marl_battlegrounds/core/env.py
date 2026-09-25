@@ -25,6 +25,7 @@ from marl_battlegrounds.core.axis_mappings import (
     TEAM_A_START,
     TEAM_B_END,
     TEAM_B_START,
+    spawn_bank_on_right,
 )
 from marl_battlegrounds.core.axis_mappings import (
     UNIT_DIRECTION_VECTOR_BY_MOVEMENT_ACTION_ARRAY as _JOINT_ACTION_MOVE_TO_DISPLACEMENT_LOOKUP_TABLE,  # noqa: E501
@@ -88,6 +89,7 @@ from marl_battlegrounds.core.types import (
     CONTEXT_FEATURE_MAP_HEIGHT,
     CONTEXT_FEATURE_TDM_ALLY_SCORE,
     CONTEXT_FEATURE_TDM_ENEMY_SCORE,
+    CONTEXT_FEATURE_TDM_RED_ZONE_DEPTH,
     CONTEXT_FEATURE_TDM_SCORE_THRESHOLD,
     CONTEXT_FEATURES,
     HUNTER_CLASS_ID,
@@ -127,6 +129,8 @@ from marl_battlegrounds.core.types import (
     TASK_MODE_TDM,
     TEAM_A_ID,
     TEAM_B_ID,
+    TEAM_DEATHMATCH_POINTS_PER_DEATH,
+    TEAM_DEATHMATCH_POINTS_PER_RED_ZONE_DEATH,
     UNIT_FEATURES,
     WARRIOR_CLASS_ID,
     Action,
@@ -722,10 +726,12 @@ def _build_move_mask(state: EnvState, config: EnvConfig) -> Array:
 def _build_context_features(state: EnvState, config: EnvConfig) -> Array:
     """Pack public current-step and episode context in each observer's team order.
 
-    Matching state and config produce raw float32 (10, 19) values following
+    Matching state and config produce raw float32 (10, 20) values following
     CONTEXT_FEATURE_* columns. Scores and sizes use own team before opponent;
-    map coordinates are not reflected. Reserved task/objective fields are zero,
-    as are unused observer rows. Configured dead observers retain context.
+    map coordinates are not reflected. Column 19 is the configured Team
+    Deathmatch Red Zone depth, the same for every configured row (0 when the
+    rule is off or the task is neutral). Reserved task/objective fields are
+    zero, as are unused observer rows. Configured dead observers retain context.
     """
 
     team_a_ally_team_size = jnp.sum(
@@ -804,6 +810,11 @@ def _build_context_features(state: EnvState, config: EnvConfig) -> Array:
     # The configured Team Deathmatch threshold is globally public.
     context_features = context_features.at[:, CONTEXT_FEATURE_TDM_SCORE_THRESHOLD].set(
         config.team_deathmatch_score_threshold
+    )
+
+    # The Red Zone depth is globally public, like the threshold.
+    context_features = context_features.at[:, CONTEXT_FEATURE_TDM_RED_ZONE_DEPTH].set(
+        config.team_deathmatch_red_zone_depth
     )
 
     # Global episode facts are policy inputs only for configured actor slots.
@@ -3585,39 +3596,118 @@ def _handle_task_rewards_team_b_win(config: EnvConfig) -> Reward:
 
 
 def _compute_next_team_deathmatch_scores(
-    current_scores: Array, new_deaths: Array
+    current_scores: Array,
+    new_deaths: Array,
+    acting_agent_positions: Array,
+    config: EnvConfig,
 ) -> Array:
-    """Add one point to the opposing team for each newly dead recipient.
+    """Add each newly dead recipient's points to the opposing team.
 
-    current_scores is int32 (2,) in Team A, Team B order. new_deaths is bool
-    (10,) in global slot order, already restricted to new configured deaths.
-    Return int32 (2,) updated scores. Both teams can score in the same step;
-    source attribution and individual killer selection do not affect totals.
+    Parameters
+    ----------
+    current_scores : Array
+        int32 (2,) scores in Team A, Team B order.
+    new_deaths : Array
+        bool (10,) in global slot order, already restricted to new configured
+        deaths.
+    acting_agent_positions : Array
+        float32 (10, 2) body centres at the start of the transition, when combat
+        resolves (before Charge and ordinary movement).
+    config : EnvConfig
+        Supplies the Red Zone depth, map width and spawn pads.
+
+    Returns
+    -------
+    Array
+        int32 (2,) updated scores. A victim inside its own team's Red Zone
+        (red_zone_death_mask) gives TEAM_DEATHMATCH_POINTS_PER_RED_ZONE_DEATH;
+        every other new death gives TEAM_DEATHMATCH_POINTS_PER_DEATH. Both teams
+        can score in the same step; source attribution and individual killer
+        selection do not affect totals.
     """
 
-    team_a_deaths = jnp.sum(new_deaths[TEAM_A_START:TEAM_A_END], dtype=jnp.int32)
-    team_b_deaths = jnp.sum(new_deaths[TEAM_B_START:TEAM_B_END], dtype=jnp.int32)
+    red_zone_deaths = red_zone_death_mask(config, acting_agent_positions, new_deaths)
+    points = new_deaths.astype(jnp.int32) * jnp.where(
+        red_zone_deaths,
+        jnp.int32(TEAM_DEATHMATCH_POINTS_PER_RED_ZONE_DEATH),
+        jnp.int32(TEAM_DEATHMATCH_POINTS_PER_DEATH),
+    )
+    team_a_points = jnp.sum(points[TEAM_A_START:TEAM_A_END], dtype=jnp.int32)
+    team_b_points = jnp.sum(points[TEAM_B_START:TEAM_B_END], dtype=jnp.int32)
 
     return jnp.asarray(
         (
-            current_scores[TEAM_A_ID - 1] + team_b_deaths,
-            current_scores[TEAM_B_ID - 1] + team_a_deaths,
+            current_scores[TEAM_A_ID - 1] + team_b_points,
+            current_scores[TEAM_B_ID - 1] + team_a_points,
         ),
         dtype=jnp.int32,
     )
 
 
-def _not_team_deathmatch(current_scores: Array, new_deaths: Array) -> Array:
+def _not_team_deathmatch(
+    current_scores: Array,
+    new_deaths: Array,
+    acting_agent_positions: Array,
+    config: EnvConfig,
+) -> Array:
     """Return zero int32 Team Deathmatch scores (2,) for another task mode.
 
-    current_scores and new_deaths are unused operands matching the active
-    scoring branch. Neutral play does not accumulate Team Deathmatch scores.
+    The four operands match the active scoring branch and are unused. Neutral
+    play does not accumulate Team Deathmatch scores.
     """
-    del current_scores, new_deaths
+    del current_scores, new_deaths, acting_agent_positions, config
     return jnp.zeros((NUM_TEAMS,), dtype=jnp.int32)
 
 
 # Public ---
+
+
+def red_zone_death_mask(
+    config: EnvConfig,
+    acting_agent_positions: Array,
+    is_newly_dead_by_recipient: Array,
+) -> Array:
+    """Return which new deaths happened inside the victim's own team's Red Zone.
+
+    Each team's Red Zone is a full-height strip on its own spawn side,
+    config.team_deathmatch_red_zone_depth map units deep. The side comes from
+    axis_mappings.spawn_bank_on_right on the team's five pads. Left strip:
+    0 <= x <= depth. Right strip: float32(width - depth) <= x <= width, with the
+    float32 map width. Both bounds are included. Each victim is checked only
+    against its own team's strip, so overlapping strips are allowed. There is
+    no y test.
+
+    Parameters
+    ----------
+    config : EnvConfig
+        Supplies map_width, team_spawn_pad_positions (2, 5, 2) and the depth.
+    acting_agent_positions : Array
+        float32 (10, 2) body centres at the start of the transition, when
+        combat resolves. Later movement never changes a death's value.
+    is_newly_dead_by_recipient : Array
+        bool (10,) new configured deaths in global slot order.
+
+    Returns
+    -------
+    Array
+        bool (10,): True where a new death is inside its own team's strip.
+        All False when the depth is 0.0 (rule off). A respawn is not a death.
+
+    Notes
+    -----
+    Pure JAX with no Python branch on the depth, so it works under jit, vmap
+    and lax.scan, and a changed depth does not recompile. Scoring and the full
+    metrics both call this one owner.
+    """
+    width = jnp.asarray(config.map_width, dtype=jnp.float32)
+    depth = jnp.asarray(config.team_deathmatch_red_zone_depth, dtype=jnp.float32)
+    on_right = jnp.repeat(
+        spawn_bank_on_right(config.team_spawn_pad_positions, width),
+        MAX_AGENTS_PER_TEAM,
+    )
+    x = acting_agent_positions[:, 0]
+    inside = jnp.where(on_right, x >= width - depth, x <= depth)
+    return is_newly_dead_by_recipient & inside & (depth > 0.0)
 
 
 def initialize_scenario_state(
@@ -3807,7 +3897,14 @@ def step(
     vmap for games. Stop or reset when DoneFlags.done becomes True: Core does
     not auto-reset, absorb terminal states or suppress rewards if called again.
     Team Deathmatch can terminate and truncate together. Threshold ties draw;
-    horizon expiry without a threshold winner also draws. Configured agents
+    horizon expiry without a threshold winner also draws. Each new configured
+    death gives the other team 1 point, or 2 when the victim's centre at the
+    start of the tick (when combat resolves, before Charge and ordinary
+    movement) is inside its own team's Red Zone (red_zone_death_mask). Both
+    teams' points apply before the outcome is chosen; a lethally hit agent that
+    then moves across the boundary keeps its value, and a respawn is not a
+    death. The next observation shows the new scores and the same depth.
+    Configured agents
     share their team's +1/-1 result even when dead; unused slots receive zero.
     Ongoing transitions and draws give every slot zero reward.
     Info is global simulator truth and does not grant policy information rights.
@@ -4024,6 +4121,8 @@ def step(
             _not_team_deathmatch,
             current_state.team_deathmatch_scores,
             death_facts.is_newly_dead_by_recipient,
+            current_state.agent_positions,
+            config,
         ),
     )
 

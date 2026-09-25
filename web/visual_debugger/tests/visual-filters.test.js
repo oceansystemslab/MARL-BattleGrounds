@@ -1,6 +1,7 @@
 /**
  * @file Check the filter registry/defaults, immutable updates and each filter's
- * allowed display effect.
+ * allowed display effect: 20 filters, 11 on by default (Cooldown Effects and Red
+ * Zone Floors included), the v3 paint key and the Red Zone floor paint part.
  */
 import assert from "node:assert/strict";
 import test from "node:test";
@@ -40,6 +41,7 @@ const EXPECTED_FILTERS = Object.freeze([
   ["spawn_shield_expiry", "Spawn-Shield Expiry"],
   ["scrolling_battle_text", "Scrolling Battle Text"],
   ["death_announcer", "Death Announcer"],
+  ["red_zone_floors", "Red Zone Floors"],
 ]);
 
 const INITIAL_FILTER_IDS = [
@@ -47,15 +49,17 @@ const INITIAL_FILTER_IDS = [
   "basic_ability_effects",
   "ultimate_ability_effects",
   "regeneration_effects",
+  "cooldown_effects",
   "death_effects",
   "respawn_wave",
   "resurrection_effects",
   "scrolling_battle_text",
   "death_announcer",
+  "red_zone_floors",
 ];
 const ALL_ENABLED = enableAllVisualFilters(DEFAULT_VISUAL_FILTER_STATE);
 
-test("locked registry exposes 19 filters and the nine initial choices", () => {
+test("locked registry exposes 20 filters and the eleven initial choices", () => {
   assert.deepEqual(
     VISUAL_FILTER_REGISTRY.map(({ id, label }) => [id, label]),
     EXPECTED_FILTERS,
@@ -64,7 +68,7 @@ test("locked registry exposes 19 filters and the nine initial choices", () => {
     VISUAL_FILTER_IDS,
     EXPECTED_FILTERS.map(([id]) => id),
   );
-  assert.equal(new Set(VISUAL_FILTER_IDS).size, 19);
+  assert.equal(new Set(VISUAL_FILTER_IDS).size, 20);
   assert.deepEqual(
     VISUAL_FILTER_REGISTRY.filter(({ defaultEnabled }) => defaultEnabled).map(
       ({ id }) => id,
@@ -133,6 +137,8 @@ test("strict reducer accepts only exact set and bulk actions", () => {
     );
   }
   assert.equal(DEFAULT_VISUAL_FILTER_STATE.death_announcer, true);
+  assert.equal(DEFAULT_VISUAL_FILTER_STATE.cooldown_effects, true);
+  assert.equal(DEFAULT_VISUAL_FILTER_STATE.red_zone_floors, true);
   assert.throws(
     () =>
       reduceVisualFilterState(DEFAULT_VISUAL_FILTER_STATE, {
@@ -156,9 +162,12 @@ test("state validation and paint-key serialization are strict and deterministic"
   );
   assert.equal(
     visualFilterPaintKey(DEFAULT_VISUAL_FILTER_STATE),
-    "visual-filters-v2:0001011100000111011",
+    "visual-filters-v3:00010111100001110111",
   );
-  assert.equal(visualFilterPaintKey(disabled), "visual-filters-v2:0001011100000111001");
+  assert.equal(
+    visualFilterPaintKey(disabled),
+    "visual-filters-v3:00010111100001110011",
+  );
   assert.equal(
     visualFilterPaintKey(Object.fromEntries([...Object.entries(disabled)].reverse())),
     visualFilterPaintKey(disabled),
@@ -271,6 +280,10 @@ test("multipart effects retain coherent filter ownership", () => {
       kind: "cooldown_badge",
     }),
     "cooldown_effects",
+  );
+  assert.equal(
+    classifyVisualPaintPart({ surface: "durable", kind: "red_zone_floor" }),
+    "red_zone_floors",
   );
   for (const kind of ["selection_reticle", "selected_pair_legality"]) {
     assert.equal(

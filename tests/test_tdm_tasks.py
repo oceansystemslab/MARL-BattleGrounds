@@ -2,11 +2,19 @@
 
 Map sources retain approved identities, shapes, splits and paired spawn pads.
 The three repaired passages admit a disc with the required 1.05-unit diameter.
-Scenario loading preserves its own approved state and configuration.
+Scenario loading preserves its own approved state and configuration. The
+eight installed scenarios are republished at Red Zone depth 5.0, each approved
+at the revision it installs; the manifest digest equals the resolved config V2
+rebuilt from the loaded config. A tampered, unsealed or version-1 scenario
+configuration is refused.
+Both map factories use DEFAULT_TDM_RED_ZONE_DEPTH (5.0) unless given a depth,
+and forward an explicit one. A custom map narrower than the default depth is
+refused rather than given a smaller depth.
 """
 
 from __future__ import annotations
 
+import json
 import re
 import subprocess
 import sys
@@ -22,6 +30,7 @@ import pytest
 from pydantic import ValidationError
 
 from marl_battlegrounds import _tdm_assets
+from marl_battlegrounds._tdm_assets import ScenarioContent, scenario_content
 from marl_battlegrounds.core.config import (
     resolve_agent_profile,
     validate_env_config,
@@ -50,9 +59,16 @@ from marl_battlegrounds.core.types import (
     Observation,
     Reward,
 )
+from marl_battlegrounds.evaluation.catalog import build_resolved_env_config_v2
+from marl_battlegrounds.evaluation.models import (
+    ResolvedEnvConfigV2,
+    canonical_digest_sha256,
+)
 from marl_battlegrounds.tasks import (
     CANONICAL_TDM_EVALUATION_MAP_IDS,
+    DEFAULT_TDM_RED_ZONE_DEPTH,
     AgentClassName,
+    TDMScenarioInfo,
     balanced_spawn_configs,
     canonical_tournament_rosters,
     list_tdm_maps,
@@ -88,11 +104,19 @@ def test_approved_inventory_and_immutable_provenance() -> None:
     assert tuple(row.scenario_id for row in scenarios) == tuple(range(1, 9))
     assert maps[3].source.revision == 2
     assert maps[33].source.revision == 8
-    assert scenarios[2].source.revision == 26
-    assert scenarios[2].approved_source.revision == 24
-    assert scenarios[2].source.semantic_digest == (
-        scenarios[2].approved_source.semantic_digest
+    assert tuple(row.source.revision for row in scenarios) == (
+        42,
+        20,
+        27,
+        15,
+        16,
+        17,
+        30,
+        19,
     )
+    # Each scenario, Scenario 3 included, is approved at the revision it installs.
+    for row in scenarios:
+        assert row.approved_source == row.source
     with pytest.raises(ValidationError, match="frozen"):
         maps[12].source.revision = 999  # type: ignore[misc]
 
@@ -225,6 +249,7 @@ def test_canonical_factory_fixes_mirrored_class_order_and_rules(map_id: int) -> 
     np.testing.assert_array_equal(config.agent_profile.class_ids, classes * 2)
     assert bool(jnp.all(config.agent_profile.active_mask))
     assert config.team_deathmatch_score_threshold == 20
+    assert config.team_deathmatch_red_zone_depth == DEFAULT_TDM_RED_ZONE_DEPTH
     assert config.max_steps == 300
     assert config.ordinary_movement_distance_scale == 1.0
     assert config.spawn_shield_duration_steps == 3
@@ -234,6 +259,75 @@ def test_canonical_factory_fixes_mirrored_class_order_and_rules(map_id: int) -> 
     positions = np.asarray(state.agent_positions).reshape(2, 5, 2)
     np.testing.assert_array_equal(positions[0, :, 1], positions[1, :, 1])
     np.testing.assert_array_equal(positions[0, :, 0] + positions[1, :, 0], 20)
+
+
+@pytest.mark.parametrize("red_zone_depth", (6.0, 0.0, 20.0))
+def test_factories_default_to_the_shared_red_zone_depth_and_forward_explicit_ones(
+    red_zone_depth: float,
+) -> None:
+    assert DEFAULT_TDM_RED_ZONE_DEPTH == 5.0
+    assert type(DEFAULT_TDM_RED_ZONE_DEPTH) is float
+    standard = make_standard_team_deathmatch_config(
+        map_id=12, team_a_roster=("mage",), team_b_roster=("priest",)
+    )
+    canonical = make_canonical_team_deathmatch_evaluation_config(map_id=47)
+    for config in (standard, canonical):
+        assert type(config.team_deathmatch_red_zone_depth) is float
+        assert config.team_deathmatch_red_zone_depth == DEFAULT_TDM_RED_ZONE_DEPTH
+    explicit_standard = make_standard_team_deathmatch_config(
+        map_id=12,
+        team_a_roster=("mage",),
+        team_b_roster=("priest",),
+        red_zone_depth=red_zone_depth,
+    )
+    explicit_canonical = make_canonical_team_deathmatch_evaluation_config(
+        map_id=47, red_zone_depth=red_zone_depth
+    )
+    for config, default_config in (
+        (explicit_standard, standard),
+        (explicit_canonical, canonical),
+    ):
+        assert config.team_deathmatch_red_zone_depth == red_zone_depth
+        # Nothing else changes.
+        for left, right in zip(
+            jax.tree.leaves(
+                config._replace(
+                    team_deathmatch_red_zone_depth=DEFAULT_TDM_RED_ZONE_DEPTH
+                )
+            ),
+            jax.tree.leaves(default_config),
+            strict=True,
+        ):
+            np.testing.assert_array_equal(left, right)
+
+
+def test_narrow_custom_map_refuses_the_default_depth_instead_of_shrinking_it() -> None:
+    source = make_standard_team_deathmatch_config(
+        map_id=12, team_a_roster=("priest",), team_b_roster=("priest",)
+    )
+    assert source.team_deathmatch_red_zone_depth == 5.0
+    rows = jnp.arange(1.0, 10.0, 2.0, dtype=jnp.float32)
+    narrow = source._replace(
+        map_width=4.5,
+        obstacles=jnp.zeros_like(source.obstacles),
+        team_spawn_pad_positions=jnp.stack(
+            (
+                jnp.stack((jnp.full((5,), 1.0, jnp.float32), rows), axis=-1),
+                jnp.stack((jnp.full((5,), 3.5, jnp.float32), rows), axis=-1),
+            )
+        ),
+    )
+    message = (
+        "team_deathmatch_red_zone_depth must not exceed map_width after conversion "
+        "to float32, not 5.0 with map_width 4.5."
+    )
+    with pytest.raises(ValueError, match=f"^{re.escape(message)}$"):
+        validate_env_config(narrow)
+    with pytest.raises(ValueError, match=f"^{re.escape(message)}$"):
+        prepare_exact_env_config(narrow, num_envs=None)
+    # The same map is valid once its depth fits, so the depth was the only fault.
+    for depth in (4.5, 0.0):
+        validate_env_config(narrow._replace(team_deathmatch_red_zone_depth=depth))
 
 
 def test_canonical_roster_discovery_reuses_the_factory_order() -> None:
@@ -352,6 +446,7 @@ def test_exact_source_does_not_validate_an_unused_invalid_bank_exchange() -> Non
     config = config._replace(
         task_mode=0,
         team_deathmatch_score_threshold=0,
+        team_deathmatch_red_zone_depth=0.0,
         agent_profile=profile,
         obstacles=jnp.zeros_like(config.obstacles),
         team_spawn_pad_positions=config.team_spawn_pad_positions.at[1, :, 0].set(0),
@@ -602,6 +697,13 @@ def test_scenario_load_restores_approved_config_state_and_public_initialization(
     np.testing.assert_array_equal(
         scenario.config.team_respawn_wave_period_step_count, (5, 5)
     )
+    assert scenario.config.team_deathmatch_red_zone_depth == DEFAULT_TDM_RED_ZONE_DEPTH
+    recorded = scenario_content(scenario.info).configuration
+    assert type(recorded) is ResolvedEnvConfigV2
+    assert build_resolved_env_config_v2(scenario.config) == recorded
+    assert recorded.canonical_digest_sha256 == (
+        scenario.info.resolved_configuration_digest
+    )
     assert not bool(scenario.initial_state.has_previous_timestep_joint_action)
     restored, _, mask, _ = initialize_scenario_state(
         scenario.initial_state, scenario.config
@@ -633,6 +735,65 @@ def test_package_loader_detects_changed_content(
             map_id=12, team_a_roster=("mage",), team_b_roster=("mage",)
         )
     with pytest.raises(ValueError, match="content digest mismatch"):
+        load_tdm_scenario(3)
+
+
+def _resealed(configuration: dict[str, object]) -> dict[str, object]:
+    fields = {
+        name: value
+        for name, value in configuration.items()
+        if name != "canonical_digest_sha256"
+    }
+    return {**fields, "canonical_digest_sha256": canonical_digest_sha256(fields)}
+
+
+@pytest.mark.parametrize(
+    ("tamper", "message"),
+    (
+        ("resealed_depth_0", "disagrees with live mechanics"),
+        ("resealed_depth_6", "disagrees with live mechanics"),
+        ("unsealed_depth", "canonical digest mismatch"),
+        ("negative_depth", "must be nonnegative"),
+        ("version_1", "Input should be 2"),
+    ),
+)
+def test_scenario_loader_refuses_tampered_configuration_records(
+    monkeypatch: pytest.MonkeyPatch, tamper: str, message: str
+) -> None:
+    import marl_battlegrounds.tasks as tasks
+
+    info = list_tdm_scenarios()[2]
+    content = scenario_content(info).model_dump(mode="json")
+    configuration = cast(dict[str, object], content["configuration"])
+    changed = {
+        "resealed_depth_0": _resealed(
+            {**configuration, "team_deathmatch_red_zone_depth": 0.0}
+        ),
+        "resealed_depth_6": _resealed(
+            {**configuration, "team_deathmatch_red_zone_depth": 6.0}
+        ),
+        "unsealed_depth": {**configuration, "team_deathmatch_red_zone_depth": 6.0},
+        "negative_depth": _resealed(
+            {**configuration, "team_deathmatch_red_zone_depth": -5.0}
+        ),
+        "version_1": _resealed(
+            {
+                **{
+                    name: value
+                    for name, value in configuration.items()
+                    if name != "team_deathmatch_red_zone_depth"
+                },
+                "schema_version": 1,
+            }
+        ),
+    }[tamper]
+    raw = json.dumps({**content, "configuration": changed}).encode()
+
+    def tampered_content(_info: TDMScenarioInfo) -> ScenarioContent:
+        return ScenarioContent.model_validate_json(raw)
+
+    monkeypatch.setattr(tasks, "scenario_content", tampered_content)
+    with pytest.raises(ValueError, match=message):
         load_tdm_scenario(3)
 
 

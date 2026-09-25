@@ -1,6 +1,8 @@
 /**
  * @file Check saved-draft editing, stable object order, field focus and source/clone
- * ownership.
+ * ownership. Both scenario draft versions are recognized (dev-scenario-draft@2
+ * declares a Red Zone depth, @1 does not), and a problem linked to
+ * task.red_zone_depth focuses the Red Zone Depth field.
  */
 import assert from "node:assert/strict";
 import test from "node:test";
@@ -16,6 +18,7 @@ import {
 import {
   addAuthoringObstacle,
   authoringContentSnapshot,
+  authoringKind,
   authoringObjects,
   deleteAuthoringObstacle,
   duplicateAuthoringObstacle,
@@ -164,6 +167,40 @@ test("linked problems focus the exact inspector field after object selection", (
   );
   assert.equal(focusAuthoringProblemField(form, "agent_states.0.current_health"), true);
   assert.equal(focused, true);
+});
+
+test("both scenario draft versions are scenarios and the depth field is linkable", () => {
+  const legacy = scenarioDraft();
+  const current = {
+    ...structuredClone(legacy),
+    schema: "dev-scenario-draft@2",
+    content: {
+      ...structuredClone(legacy.content),
+      task: { task: "team_deathmatch", score_threshold: 5, red_zone_depth: 5 },
+    },
+  };
+  assert.equal(authoringKind(mapDraft()), "map");
+  assert.equal(authoringKind(legacy), "scenario");
+  assert.equal(authoringKind(current), "scenario");
+  assert.equal(mapContent(current), current.content.embedded_map);
+  assert.throws(
+    () => authoringKind({ ...current, schema: "dev-scenario-draft@3" }),
+    TypeError,
+  );
+  assert.equal(
+    authoringPathMatchesProblem(
+      '["content","task","red_zone_depth"]',
+      "task.red_zone_depth",
+    ),
+    true,
+  );
+  assert.equal(
+    authoringPathMatchesProblem(
+      '["content","task","score_threshold"]',
+      "task.red_zone_depth",
+    ),
+    false,
+  );
 });
 
 test("obstacle edits preserve ordered fixed-slot semantics", () => {

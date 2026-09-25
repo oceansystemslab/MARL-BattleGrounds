@@ -75,6 +75,13 @@ so name a saved nondefault pass explicitly. Evaluation still requires its two
 methods and episode count on resume. Ordered comma-separated lists keep repeats.
 An explicit `--replay-episodes ''` asserts an empty capture selection.
 
+`evaluate --red-zone-depth 6` sets the Red Zone depth in map units (new-run
+default 5.0; `0` keeps one point per death) and reaches `evaluate` as the float
+6.0. Write a plain decimal number: an exponent (`1e3`), `nan`, `inf`,
+underscores or a second point are usage errors. `tournament` and `canonical`
+have no such flag, because their configurations own the rule, and `train`
+sets the depth in its JSON config.
+
 Commands return 0 for success, help or cancellation; 2 for usage errors; 1 for
 handled method, file or API failures; and 130 for interruption. Errors do not
 retry a method or replace its actions. Unexpected programming faults retain their
@@ -195,7 +202,8 @@ Raw traces identify the submitted decision. Pass them to `writer.write(info,
 policy_trace=memory.policy_trace)` to save known component choices alongside the
 same transition. Public evaluation and generic tournaments use this same method
 application authority. Policy identities keep their meanings; new recordings use
-host run schema 2 and scalar schema 14. Historical reports remain readable.
+host run schema 2 and scalar schema 15, which adds 44 Red Zone columns to schema
+14. Historical reports, including schema 14, remain readable.
 
 ## Map ID Change — 2026-09-12
 
@@ -336,8 +344,9 @@ Pandas is not a runtime dependency. For a saved run, read the path in
 full rows in memory. Read selected columns with `usecols` when a full table is
 unnecessarily large. Blank cells mean unavailable measurements, not zero.
 
-Current scalar schema 14 has 16 priority measurements and 11,148 full measurements,
-including priority. A full run CSV adds 30 identity columns; a Viewer CSV adds 49.
+Current scalar schema 15 has 16 priority measurements and 11,192 full measurements,
+including priority and the 44 Red Zone columns. A full run CSV adds 30 identity
+columns; a Viewer CSV adds 49.
 Team returns count shared rewards once. The ten duplicate scalar agent-return
 columns are removed; Core, learner and replay reward vectors remain unchanged.
 Existing files retain their headers; incompatible append/resume is rejected.
@@ -505,8 +514,8 @@ for a complete raw System recording and saved none-mode evaluation example.
 Omitting that option keeps the example's no-file behavior.
 
 Full info arrays are dense even on nonterminal steps or sparse full selection.
-Schema 14 returns 55,740 logical bytes of values/validity per full-result lane;
-retaining 1,024 lanes over 128 steps is about 6.80 GiB for that subtree alone.
+Schema 15 returns 55,960 logical bytes of values/validity per full-result lane;
+retaining 1,024 lanes over 128 steps is about 6.83 GiB for that subtree alone.
 This is a size calculation, not peak-memory measurement. Priority without full
 selection has no full subtree. Empty replay selection has no capture subtree;
 selected scan packets still cost chunk memory. Use bounded chunks. The writer
@@ -1014,6 +1023,40 @@ sources retain their other fields. Use `evaluate_episodes` for exact authored
 conditions. A single authored episode is valid without any counterpart. An
 explicit two-condition authored comparison is custom, not a verified spawn pair.
 
+`red_zone_depth` sets the Red Zone rule of map-built games, in map units. Each
+team's Red Zone is the full-height strip at its own spawn edge. When an agent
+dies with its centre inside its own team's Red Zone, the enemy team gets 2
+points instead of 1; it is still one kill and one death
+([A44](../design/specification_amendments.md#a44-team-deathmatch-red-zone-scoring)).
+The default is 5.0, and `0.0` keeps one point per death:
+
+```python
+deeper = marl_bgs.evaluate(
+    "tdm-alpha", "tdm-beta", num_episodes=10, maps=[47], red_zone_depth=6.0,
+)
+print(deeper.metadata["evaluation_contract"]["options"]["red_zone_depth"])  # 6.0
+```
+
+The pass records the resolved depth there. Map-built games also carry it in
+each saved configuration, so 0.0, 5.0 and 6.0 give different configuration
+IDs. An exact `EnvConfig` in `maps` keeps its own depth when the keyword is
+omitted. A supplied depth is never ignored, even 5.0: it must equal every exact
+source configuration and the saved pass (compared as float32), or the call
+fails before any game runs or any file changes ("red_zone_depth conflicts with
+the exact source configuration" or "red_zone_depth differs from the saved
+evaluation conditions"). Resume inherits an omitted depth.
+
+The recorded option is the depth for map-built games only. An exact source
+plays at its own `team_deathmatch_red_zone_depth`, which its saved
+configuration holds. For example, a pass whose only map is an exact
+configuration at depth 0.0 records 5.0 when the keyword is omitted, yet its
+games score one point per death. Resume such a pass with `red_zone_depth`
+omitted: 0.0 differs from the saved pass, and 5.0 conflicts with the source.
+
+A pass saved before the Red Zone rule stays readable, but this version cannot
+resume it, with or without `maps` or `red_zone_depth`. Resuming it needs the
+source version that recorded it.
+
 Saving remains optional. Use `output_dir` for a new run, `writer` for a supplied
 writer, or `resume_from` for an exact saved run. Saved-first resume inherits only
 **omitted** scientific settings. Explicit defaults are assertions: `seed=0` does
@@ -1069,6 +1112,16 @@ four complete paired blocks per map. This is a workflow check, not enough eviden
 scientific claim. The current generic default of 100 is not the final official
 snapshot budget; that official number remains undecided.
 
+`run_tournament(..., red_zone_depth=6.0)` sets the Red Zone depth for every map
+(default 5.0; `0.0` keeps one point per death). A new run records it as
+`metadata["red_zone_depth"]`, and 0.0 and 6.0 give different
+`configuration_ids_by_map` from 5.0. Resume inherits an omitted depth, and a
+different explicit depth fails before any file changes. A completed run saved
+before the Red Zone rule has no recorded depth: it reads as 0.0 under its
+original configuration IDs and returns its saved results without playing or
+refitting. `run_tournament(config=...)` refuses the keyword, because a
+configuration owns its rules.
+
 Current ratings center on 1,200. The shared fitter and 5,000 matched bootstrap
 resamples run after complete coverage. Missing matches or failed fits are errors;
 insufficient uncertainty evidence stays unavailable. Required outcomes support
@@ -1086,9 +1139,10 @@ measurements; shared team return is counted once. Descriptive values use equal
 game weights, exact medians and population standard deviation. K/D divides total
 kills by total deaths; zero deaths are blank, not infinity. Final scores may
 include an authored starting score, whereas kill measurements count observed
-kills. Adding all participants' step totals counts each game twice. None-mode
-runs skip headline calculation and storage, including when selected full games
-exist. A missing measurement blocks a headline; it never shrinks the sample.
+kills. Scores count points, not kills: a Red Zone death gives 2 points but
+still counts one kill and one death. Adding all participants' step totals
+counts each game twice. None-mode runs skip headline calculation and storage,
+including when selected full games exist. A missing measurement blocks a headline; it never shrinks the sample.
 
 A runner can finish summary publication from complete durable games without
 playing them again. Once summaries are finalized, result access does not refit

@@ -1,4 +1,9 @@
-"""Check that V2 replays retain captured facts and their recorded source identity."""
+"""Check that V2 replays retain captured facts and their recorded source identity.
+
+The current recorder and the live DevClient recording route now write replay
+V4 (context V4 and frame V3, which record the Red Zone depth); the V2 builder,
+reader and viewer handoff checks keep their original meaning.
+"""
 
 import json
 from pathlib import Path
@@ -278,7 +283,7 @@ def test_current_recorder_saves_captured_facts_without_metric_observer(
     recorder.append(trajectory.transitions[0], trajectory.frames[1])
     assert recorder.lifecycle == "sealed"
     assert recorder.finalize_and_save("endpoint") == "saved"
-    assert recorder.begin_review().replay.schema_version == 3
+    assert recorder.begin_review().replay.schema_version == 4
     assert recorder.begin_review().replay.frames == trajectory.frames
     assert recorder.begin_review().replay.transitions == trajectory.transitions
     assert tuple(tmp_path.iterdir()) == (path,)
@@ -458,7 +463,7 @@ def test_current_recording_live_command_hands_off_to_v2_viewer(
     )
     assert handoff.replay_handoff is not None
     assert recorder.saved_bundle is not None
-    assert recorder.begin_review().replay.schema_version == 3
+    assert recorder.begin_review().replay.schema_version == 4
     viewer = handoff.replay_handoff
     result = viewer.apply_command(
         ReplayCommandRequestV1(

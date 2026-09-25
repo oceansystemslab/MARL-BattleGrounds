@@ -5,7 +5,9 @@ bounded calibration, detached launch, status, stop, resume and reporting.
 The ordinary trainer owns learning and recovery. Validation owns opponents,
 games and checkpoint selection. This host driver owns only the fixed recipes,
 timing-based budget, run order and complete-recipe comparison. Import and status
-use no numerical backend. Historical configuration screens are unchanged.
+use no numerical backend. Historical configuration screens are unchanged. The
+study keeps its original scoring: its declaration pins red_zone_depth 0.0 (one
+point per death), and every training run and assessment uses that depth.
 """
 
 from __future__ import annotations
@@ -117,6 +119,9 @@ def declaration() -> Record:
     in direct Python calls. Returned JSON fixes eight recipes, three discovery
     seeds each, 20,054,016 transitions per discovery run and twice that per fresh
     finalist. Timing must fit fourteen hours including margin and reporting.
+    The base config pins red_zone_depth to 0.0, the one-point scoring the
+    study was designed under, so the new 5.0 default does not change it; a Red
+    Zone study would be a new declaration.
     """
     import jax
 
@@ -127,6 +132,7 @@ def declaration() -> Record:
         config = TrainConfig(
             num_envs=512,
             total_env_steps=_MINIMUM_STEPS,
+            red_zone_depth=0.0,
             shaping=True,
             shaping_mode="score_delta",
             shaping_coefficient=0.01,
@@ -709,13 +715,55 @@ def _write_once(path: Path, value: Mapping[str, Any]) -> None:
 def calibrate(root: Path) -> Record:
     """Run bounded engineering probes, then freeze budgets before learning.
 
+    Parameters
+    ----------
+    root : Path
+        A prepared search package directory. It must pass verify_package:
+        unchanged declaration, panels, scripts, source, runtime and GPU.
+
+    Returns
+    -------
+    Record
+        The frozen budgets from resolve_budgets, such as the priced experience
+        per phase, the shuffled discovery order and the minimum free disk
+        bytes. The same record is saved as budgets.json.
+
+    Raises
+    ------
+    RuntimeError
+        A live controller or job exists, the study has started (study.json
+        exists), an interrupted calibration or assessment probe needs a new
+        package, or a worker fails.
+    ValueError
+        The package changed; a calibration result or assessment belongs to
+        another configuration or actor; the fixed work is invalid or does not
+        fit the time target (feasibility.json then records the reason); free
+        disk space is too small; or a frozen record would change.
+    TimeoutError
+        The calibration allowance ended before a needed probe could start.
+    BlockingIOError
+        Another process holds the package's launch lock.
+    subprocess.CalledProcessError
+        nvidia-smi or the package runtime probe fails while the package is
+        verified.
+
+    Notes
+    -----
+    Each recipe gets one bounded training probe with the calibration seed, and
+    the c00 actor gets one assessment probe per opponent (alpha and beta).
+    Probes and assessment requests use the declaration's red_zone_depth (0.0,
+    one point per death), so timing uses the study's own scoring. This writes
+    calibration_clock.json, the calibration/ jobs, calibration.json,
+    budgets.json and qualified.json. Numerical work runs only in supervised
+    GPU child processes; this process loads no learner.
+
     Reuses completed, verified calibration records after an explicit rerun of
     this command. An interrupted timing probe requires a new package: resuming
     its learner would hide part of its cold setup cost. Calibration is never a
-    scientific training prefix.
-    The one-hour calibration allowance starts on its first invocation and does
-    not consume or reset the later study clock. Existing scientific work blocks
-    calibration. Insufficient timing or disk capacity prevents launch.
+    scientific training prefix. The one-hour calibration allowance starts on
+    its first invocation and does not consume or reset the later study clock.
+    Existing scientific work blocks calibration. Insufficient timing or disk
+    capacity prevents launch.
     """
     manifest = verify_package(root)
     with (root / ".launch.lock").open("a+b") as lock:
@@ -787,6 +835,7 @@ def calibrate(root: Path) -> Record:
                     "opponent": opponent,
                     "seed_pairs": pairs,
                     "root_seed": 19_046_090 + (opponent == "beta"),
+                    "red_zone_depth": declared["base_config"]["red_zone_depth"],
                     "scope": "Engineering fresh-process assessment cost only",
                 },
             )
@@ -1078,7 +1127,9 @@ def _assess(root: Path, job: Path) -> None:
     create or recover its writer, then check the returned complete summary.
     Only after both checks write job/result.json with its request digest.
     root supplies the frozen opponent panels. All games use batch 32 and the
-    declared pair count/root; failures leave any existing evidence intact.
+    declared pair count/root, under the request's red_zone_depth (the study
+    declaration's depth, 0.0); the summary records that depth, so it must
+    agree with the request. Failures leave any existing evidence intact.
     """
     from marl_battlegrounds.training.validation import validate_checkpoint
 
@@ -1092,6 +1143,7 @@ def _assess(root: Path, job: Path) -> None:
         seed_pairs=request["seed_pairs"],
         root_seed=request["root_seed"],
         num_envs=32,
+        red_zone_depth=request["red_zone_depth"],
     )
     _check_assessment_summary(request, summary)
     atomic_json(
@@ -1178,10 +1230,54 @@ def _case(root: Path, study: Record, declared: Record, case: Record) -> Record:
 def execute_search(root: Path) -> Record:
     """Complete the frozen study phases through shared workers and saved evidence.
 
+    Parameters
+    ----------
+    root : Path
+        A calibrated, launched search package. It must pass verify_package, its
+        budgets must still match calibration.json and qualified.json, and
+        launch_time.json and study.json must hold the original clock.
+
+    Returns
+    -------
+    Record
+        The study record, also saved as study.json. status is "complete" after
+        discovery, finalists and assessment all finish. It is "incomplete",
+        with the error "Original numerical deadline reached", when that
+        deadline had already passed at the start. A study that is already
+        complete comes back with only its updated_at time refreshed.
+
+    Raises
+    ------
+    ValueError
+        The package, budgets or clock changed; the reference (c00) or a
+        challenger lacks all three discovery seeds; a finalist lacks all three
+        fresh seeds; a completed case lacks a clean worker exit; a completed
+        case's saved result no longer matches its selected row; a saved
+        numerical failure does not match its config and worker; a frozen
+        record (case, config, selection or assessment request) would change
+        on resume; or an assessment is incomplete, belongs to another
+        selection, or its actor or summary differs from the frozen request.
+    RuntimeError
+        A worker fails.
+    TimeoutError
+        The numerical deadline arrives before a needed job can start.
+    subprocess.CalledProcessError
+        nvidia-smi or the package runtime probe fails while the package is
+        verified.
+
+    Notes
+    -----
     This is the detached controller's entry point. Completed cases and assessment
     games are reused on explicit resume. All required seed results precede recipe
     choices; assessment is downstream of the immutable winner and cannot feed
     back. Infrastructure failures stop the study and keep their full error.
+    Every run and assessment uses the declaration's red_zone_depth (0.0, one
+    point per death). This writes discovery_selection.json,
+    final_selection.json, job folders and study.json. Once the clock check
+    passes, study.json is always saved and the report is rebuilt
+    (report_search), even on error; an error is saved as status "incomplete"
+    and then raised again. Numerical work runs only in supervised GPU child
+    processes.
     """
     verify_package(root)
     declared, budgets = _check_budget(root)
@@ -1258,6 +1354,7 @@ def execute_search(root: Path) -> Record:
                     "opponent": opponent,
                     "seed_pairs": pairs,
                     "root_seed": declared["roots"][opponent][0],
+                    "red_zone_depth": declared["base_config"]["red_zone_depth"],
                     "selection_digest": _digest(selection),
                 }
                 _write_once(job / "request.json", request)
@@ -1304,7 +1401,12 @@ def _directory_bytes(root: Path) -> int:
 
 
 def _worker(root: Path, job: Path, *, mode: str, resume: bool = False) -> None:
-    """Execute numerical work only inside its supervised one-GPU child."""
+    """Execute numerical work only inside its supervised one-GPU child.
+
+    mode "assessment" runs _assess; any other mode trains job/config.json (or
+    resumes it). Calibration of recipe c00 also times assessment games under
+    the run config's red_zone_depth, so timing uses the study's own scoring.
+    """
     import jax
 
     from marl_battlegrounds.training.runner import read_config, train
@@ -1463,6 +1565,7 @@ def _worker(root: Path, job: Path, *, mode: str, resume: bool = False) -> None:
                     + (1000 if opponent == "beta" else 0)
                     + repeat,
                     num_envs=32,
+                    red_zone_depth=config.red_zone_depth,
                 )
                 (cold if repeat == 0 else validation)[identifier] = (
                     time.monotonic() - start

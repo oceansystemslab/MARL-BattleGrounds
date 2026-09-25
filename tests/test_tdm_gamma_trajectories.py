@@ -189,7 +189,8 @@ def _compile(
     episode: Mapping[str, object] | None = None,
     global_state: Mapping[str, object] | None = None,
 ) -> CompiledDevScenarioV1:
-    content = new_scenario_draft("gamma_trajectory").content
+    # Controller behaviour, not scoring: keep the original one-point rule.
+    content = new_scenario_draft("gamma_trajectory", red_zone_depth=0.0).content
     rosters = list(content.roster)
     states = list(content.agent_states)
     for first_slot, units in ((0, team_a), (5, team_b)):

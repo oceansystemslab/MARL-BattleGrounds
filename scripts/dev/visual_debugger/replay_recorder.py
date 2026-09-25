@@ -12,9 +12,9 @@ from pathlib import Path
 
 from marl_battlegrounds.evaluation.metrics import ObserverLifecycleState
 from marl_battlegrounds.evaluation.models import (
-    EvaluationEpisodeContextV3,
+    EvaluationEpisodeContextV4,
     EvaluationFrame,
-    EvaluationFrameV2,
+    EvaluationFrameV3,
     EvaluationTransitionV1,
 )
 from marl_battlegrounds.evaluation.replay_io import (
@@ -29,9 +29,9 @@ from marl_battlegrounds.evaluation.replay_io import (
     preflight_replay_destination,
     publish_prepared_replay,
 )
-from marl_battlegrounds.evaluation.replay_v3 import (
-    ReplayArtifactV3,
-    build_replay_v3,
+from marl_battlegrounds.evaluation.replay_v4 import (
+    ReplayArtifactV4,
+    build_replay_v4,
 )
 from scripts.dev.visual_debugger.protocol import (
     RecordingLifecycleV1,
@@ -64,8 +64,8 @@ class DebuggerReplayRecorder:
         *,
         specification: DebuggerRecordingSpecificationV1,
         destination: ReplayDestination,
-        context: EvaluationEpisodeContextV3,
-        initial_frame: EvaluationFrameV2,
+        context: EvaluationEpisodeContextV4,
+        initial_frame: EvaluationFrameV3,
         scenario_name: str | None = None,
     ) -> None:
         """Start an in-memory recording at its episode's initial frame.
@@ -76,9 +76,9 @@ class DebuggerReplayRecorder:
             Exact model declaring action source and runtime provenance.
         destination : ReplayDestination
             Exact preflighted destination for the eventual replay file.
-        context : EvaluationEpisodeContextV3
+        context : EvaluationEpisodeContextV4
             Exact metric-complete context with matching action source and provenance.
-        initial_frame : EvaluationFrameV2
+        initial_frame : EvaluationFrameV3
             Exact frame zero for the context's episode.
         scenario_name : str or None, optional
             Optional display name retained by replacement recordings. Defaults to None.
@@ -102,8 +102,8 @@ class DebuggerReplayRecorder:
                 "recording requires an exact specification and replay destination"
             )
         if (
-            type(context) is not EvaluationEpisodeContextV3
-            or type(initial_frame) is not EvaluationFrameV2
+            type(context) is not EvaluationEpisodeContextV4
+            or type(initial_frame) is not EvaluationFrameV3
         ):
             raise TypeError(
                 "recording requires an exact live context and initial frame"
@@ -141,7 +141,7 @@ class DebuggerReplayRecorder:
         self.close_cause: DebuggerRecordingCloseCauseV1 | None = None
         self._close_reason: str | None = None
         self._failed_append = False
-        self.replay: ReplayArtifactV3 | None = None
+        self.replay: ReplayArtifactV4 | None = None
         self.prepared_replay: PreparedReplay | None = None
         self.saved_bundle: SavedReplay | None = None
         self.verified_loaded_bundle: LoadedReplay | None = None
@@ -298,7 +298,7 @@ class DebuggerReplayRecorder:
         )
 
     def append(
-        self, transition: EvaluationTransitionV1, successor_frame: EvaluationFrameV2
+        self, transition: EvaluationTransitionV1, successor_frame: EvaluationFrameV3
     ) -> None:
         """Retain one transition and its adjacent successor frame.
 
@@ -306,7 +306,7 @@ class DebuggerReplayRecorder:
         ----------
         transition : EvaluationTransitionV1
             Exact next transition for this episode.
-        successor_frame : EvaluationFrameV2
+        successor_frame : EvaluationFrameV3
             Exact next frame. Its IDs and simulator step must follow the current frame.
 
         Raises
@@ -325,7 +325,7 @@ class DebuggerReplayRecorder:
         """
         try:
             status = self.preview_status_after_append_v1(transition)
-            if type(successor_frame) is not EvaluationFrameV2:
+            if type(successor_frame) is not EvaluationFrameV3:
                 raise TypeError("recording append requires an exact successor frame")
             if (
                 transition.start_frame_id != self.current_frame.frame_id
@@ -355,15 +355,15 @@ class DebuggerReplayRecorder:
             self._close_reason = status.completion_reason
 
     def replacement_for(
-        self, context: EvaluationEpisodeContextV3, initial_frame: EvaluationFrameV2
+        self, context: EvaluationEpisodeContextV4, initial_frame: EvaluationFrameV3
     ) -> DebuggerReplayRecorder:
         """Build a new frame-zero recording while leaving this one unchanged.
 
         Parameters
         ----------
-        context : EvaluationEpisodeContextV3
+        context : EvaluationEpisodeContextV4
             Replacement episode context with a supported action source.
-        initial_frame : EvaluationFrameV2
+        initial_frame : EvaluationFrameV3
             Replacement frame zero matching that context.
 
         Returns
@@ -418,7 +418,7 @@ class DebuggerReplayRecorder:
                 and self.close_cause != "processing_failure"
                 else None,
             )
-            self.replay = build_replay_v3(
+            self.replay = build_replay_v4(
                 self.context,
                 self._frames,
                 self._transitions,

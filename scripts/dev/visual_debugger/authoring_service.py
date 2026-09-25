@@ -7,6 +7,14 @@ with a lock and returns field-linked errors. The load service keeps a fixed comp
 snapshot so later edits cannot change a running scenario. Import builds the shared
 read-only mechanics catalog; commands may allocate JAX arrays, read/write local
 drafts, or replace the live endpoint according to their explicit operation.
+
+Scenario drafts: the editor edits only version 2, which declares a Red Zone
+depth. New blank scenarios, scenarios copied from a map and the default map
+preview use ``marl_battlegrounds.tasks.DEFAULT_TDM_RED_ZONE_DEPTH`` (5.0).
+Duplicate keeps the source's depth. Open turns a saved version 1 scenario into
+version 2 at depth 0.0 in memory, keeping its revision; the saved file is not
+changed. Commands still accept version 1 payloads, which Save and Save As store
+as version 1, and Combat can load a saved version 1 revision, which plays at 0.0.
 """
 
 from __future__ import annotations
@@ -36,7 +44,10 @@ from marl_battlegrounds.evaluation.models import (
     AuraMechanicV1,
     ClassMechanicsV1,
     StatusMechanicV1,
+    red_zone_team_on_right,
+    red_zone_x_range,
 )
+from marl_battlegrounds.tasks import DEFAULT_TDM_RED_ZONE_DEPTH
 from scripts.dev.visual_debugger.authoring_compiler import (
     CompiledDevScenarioV1,
     DevAuthoringValidationError,
@@ -50,11 +61,14 @@ from scripts.dev.visual_debugger.authoring_models import (
     DevMapDraftV1,
     DevSavedRevision,
     DevScenarioDraftV1,
+    DevScenarioDraftV2,
     SafeAssetId,
     SemanticDigest,
+    declared_red_zone_depth,
     duplicate_scenario_draft,
     new_map_draft,
     new_scenario_draft,
+    upgrade_scenario_draft,
 )
 from scripts.dev.visual_debugger.authoring_store import (
     DevAssetAlreadyExistsError,
@@ -70,7 +84,10 @@ from scripts.dev.visual_debugger.model import (
     DebuggerScenarioProvenance,
 )
 
-type DevDraftPayload = DevMapDraftV1 | DevScenarioDraftV1
+# Every draft a command may carry or return. A plain union, so each payload's
+# schema tag picks its class: a version 1 scenario with a depth, or a version 2
+# scenario without one, is rejected.
+type DevDraftPayload = DevMapDraftV1 | DevScenarioDraftV1 | DevScenarioDraftV2
 type CommandType = Literal[
     "list",
     "new_map",
@@ -152,7 +169,26 @@ class DevNewScenarioCommandV1(_ServiceModel):
     """Create a blank scenario, copy a saved map, or duplicate a saved scenario.
 
     Blank creation accepts no source. Copy and duplicate modes require an exact
-    saved revision of the corresponding asset kind.
+    saved revision of the corresponding asset kind. The new draft is always
+    version 2: blank and map-copy drafts use Red Zone depth
+    ``DEFAULT_TDM_RED_ZONE_DEPTH`` (5.0), and a duplicate keeps its source's
+    depth (0.0 for a version 1 source).
+
+    Attributes
+    ----------
+    command_type : Literal["new_scenario"]
+        Fixed command tag.
+    asset_id : str, default="untitled_scenario"
+        Safe ID for the new unsaved draft: lowercase letters and digits in
+        words joined by single underscores, 1 to 64 characters.
+    creation_mode : {"blank", "copy_saved_map", "duplicate_saved_scenario"}
+        How the draft is made; default "blank". "blank" starts from a default
+        blank map; "copy_saved_map" copies a saved map; and
+        "duplicate_saved_scenario" copies a saved scenario's content.
+    source : DevPersistedSourceV1 or None, default=None
+        The exact saved revision to copy. It must be None for "blank", a map
+        for "copy_saved_map" and a scenario for "duplicate_saved_scenario";
+        any other combination fails validation.
     """
 
     command_type: Literal["new_scenario"] = "new_scenario"
@@ -182,14 +218,22 @@ class DevNewScenarioCommandV1(_ServiceModel):
 
 
 class DevOpenCommandV1(_ServiceModel):
-    """Open one exact saved asset revision into an editor buffer."""
+    """Open one exact saved asset revision into an editor buffer.
+
+    A saved version 1 scenario opens as version 2 at Red Zone depth 0.0 with the
+    same revision, so the next Save writes the following revision as version 2.
+    The saved file itself is not changed.
+    """
 
     command_type: Literal["open"] = "open"
     source: DevPersistedSourceV1
 
 
 class DevSaveCommandV1(_ServiceModel):
-    """Save a complete draft only if its expected current revision still matches."""
+    """Save a complete draft only if its expected current revision still matches.
+
+    The draft is stored in the version it has.
+    """
 
     command_type: Literal["save"] = "save"
     draft: DevDraftPayload
@@ -197,7 +241,11 @@ class DevSaveCommandV1(_ServiceModel):
 
 
 class DevSaveAsCommandV1(_ServiceModel):
-    """Save a copy under a new safe identity without overwriting an existing draft."""
+    """Save a copy under a new safe identity without overwriting an existing draft.
+
+    The copy keeps the payload's version, so a version 1 scenario payload is
+    stored as version 1.
+    """
 
     command_type: Literal["save_as"] = "save_as"
     draft: DevDraftPayload
@@ -249,11 +297,62 @@ class DevAuthoringCommandRequestV1(RootModel[DevAuthoringCommandV1]):
     model_config = ConfigDict(frozen=True, strict=True)
 
 
+class DevRedZoneStripsV1(_ServiceModel):
+    """Both teams' Red Zone floor strips, for the Scenario Author canvas tint.
+
+    Each team's Red Zone is a full-height strip on its own spawn side. When an
+    agent dies inside its own team's strip, the enemy team gets 2 points. The
+    host computes the strips from the compiled config; the browser only draws
+    them. This is a live service reply, never saved.
+
+    Attributes
+    ----------
+    team_a_x_range : tuple[float, float]
+        Team A strip as inclusive (x_min, x_max) world x bounds, exactly the
+        float32 bounds Core scores with (models.red_zone_x_range). A collapsed
+        range (x_min equal to x_max) is legal and paints nothing.
+    team_b_x_range : tuple[float, float]
+        Team B strip, with the same meaning.
+    """
+
+    team_a_x_range: tuple[float, float]
+    team_b_x_range: tuple[float, float]
+
+
 class DevValidationSummaryV1(_ServiceModel):
     """Report whether a draft is executable, with linked problems and available digests.
 
-    Scenario summaries may include ten effective movement speeds. Missing runtime
-    fields remain None for invalid drafts and map-only validation.
+    Scenario summaries may include ten effective movement speeds and, when the
+    draft declares a positive Red Zone depth, both teams' Red Zone strips
+    (red_zone). Missing runtime fields remain None for invalid drafts and
+    map-only validation; red_zone is also None at depth 0.
+
+    Attributes
+    ----------
+    asset_kind : {"map", "scenario"}
+        Which kind of draft was validated.
+    execution_valid : bool
+        True when a map has no error-level problem, or a scenario compiles.
+        Warnings alone keep it True.
+    semantic_digest : str or None, default=None
+        Lowercase 64-character SHA-256 hex digest of the draft's normalized
+        content. None for an invalid draft.
+    map_semantic_digest : str or None, default=None
+        The same kind of digest for the map content alone; for a valid map it
+        equals semantic_digest. None for an invalid draft.
+    resolved_configuration_digest, resolved_initial_state_digest : str or None
+        Digests of a valid scenario's compiled EnvConfig and initial state.
+        None (the default) for maps and invalid scenarios.
+    effective_movement_speeds : tuple of 10 float or None, default=None
+        For a valid scenario, the distance each global slot (0 to 9) can move
+        in one step at the compiled initial state, in world units. Dead and
+        unused slots are 0.0. None for maps and invalid scenarios.
+    problems : tuple of DevAuthoringProblemV1, default=()
+        Every error and warning found, each linked to a field path.
+    red_zone : DevRedZoneStripsV1 or None, default=None
+        Both teams' Red Zone strips for a valid scenario with a positive
+        depth (map units). None at depth 0.0, for maps and for invalid
+        scenarios.
     """
 
     asset_kind: DevAssetKind
@@ -270,6 +369,7 @@ class DevValidationSummaryV1(_ServiceModel):
         | None
     ) = None
     problems: tuple[DevAuthoringProblemV1, ...] = ()
+    red_zone: DevRedZoneStripsV1 | None = None
 
 
 class DevAssetSummaryV1(_ServiceModel):
@@ -404,7 +504,9 @@ def debugger_scenario_from_snapshot(
     Notes
     -----
     Does not load new source bytes or install the scenario. Future resets use the same
-    compiled source, even when the editor or saved draft changes.
+    compiled source, even when the editor or saved draft changes. A map preview's
+    source identity ends with ``:profile:default-tdm-map-preview@2``; version 2 of
+    the profile plays at Red Zone depth ``DEFAULT_TDM_RED_ZONE_DEPTH``.
     """
     compiled = snapshot.compiled
     source = snapshot.source
@@ -419,7 +521,7 @@ def debugger_scenario_from_snapshot(
             f"revision:{source.revision}"
         )
     if snapshot.summary.debug_profile == "default_tdm_map_preview":
-        source_identity += ":profile:default-tdm-map-preview@1"
+        source_identity += ":profile:default-tdm-map-preview@2"
 
     controlled_slot = next(
         row.global_slot
@@ -488,9 +590,48 @@ def _service_problem(
     )
 
 
+def _red_zone_strips(config: EnvConfig) -> DevRedZoneStripsV1 | None:
+    """Return both teams' Red Zone strips for a compiled scenario config.
+
+    Parameters
+    ----------
+    config : EnvConfig
+        Validated config from compile_dev_scenario. Its depth is a Python float;
+        its spawn pads are float32 (2, 5, 2) in Team A, Team B order.
+
+    Returns
+    -------
+    DevRedZoneStripsV1 | None
+        None when the depth is 0.0 (rule off). Otherwise each team's side comes
+        from models.red_zone_team_on_right on its five pad x values (unused
+        pads included) and its strip from models.red_zone_x_range, the same
+        host rules the Viewer's scene records use.
+
+    Notes
+    -----
+    Host-only NumPy and Python arithmetic; no JAX program runs.
+    """
+    depth = config.team_deathmatch_red_zone_depth
+    if depth == 0.0:
+        return None
+    pads = np.asarray(config.team_spawn_pad_positions, dtype=np.float64)
+    team_a_range, team_b_range = (
+        red_zone_x_range(
+            config.map_width,
+            depth,
+            red_zone_team_on_right(config.map_width, pads[team, :, 0].tolist()),
+        )
+        for team in range(2)
+    )
+    return DevRedZoneStripsV1(team_a_x_range=team_a_range, team_b_x_range=team_b_range)
+
+
 def _validation_summary(draft: DevDraftPayload) -> DevValidationSummaryV1:
     """Validate a map or compile a scenario and return truthful available summary
     fields.
+
+    A valid scenario also reports its Red Zone strips (None at depth 0); map
+    drafts and invalid scenarios report none.
     """
     if isinstance(draft, DevMapDraftV1):
         problems = validate_map_content(draft.content)
@@ -538,6 +679,7 @@ def _validation_summary(draft: DevDraftPayload) -> DevValidationSummaryV1:
         resolved_initial_state_digest=compiled.resolved_initial_state_digest,
         effective_movement_speeds=effective_movement_speeds,
         problems=problems,
+        red_zone=_red_zone_strips(config),
     )
 
 
@@ -602,10 +744,13 @@ class DevScenarioLoadService:
         """Compile a scenario directly or build a temporary default TDM preview of a
         map.
 
-        Preview creation does not modify or save the source map.
+        A scenario of either version compiles at its declared depth (0.0 for
+        version 1). The preview is a version 2 scenario at Red Zone depth
+        ``DEFAULT_TDM_RED_ZONE_DEPTH``. Preview creation does not modify or save the
+        source map.
         """
         if source.asset_kind == "scenario":
-            if not isinstance(opened, DevScenarioDraftV1):
+            if not isinstance(opened, (DevScenarioDraftV1, DevScenarioDraftV2)):
                 raise TypeError("scenario Debug source resolved a non-scenario asset")
             return (
                 compile_dev_scenario(opened),
@@ -621,6 +766,7 @@ class DevScenarioLoadService:
         preview = new_scenario_draft(
             "default_tdm_map_preview",
             source_map=opened,
+            red_zone_depth=DEFAULT_TDM_RED_ZONE_DEPTH,
         )
         preview = preview.model_copy(
             update={
@@ -908,20 +1054,35 @@ class DevClientAuthoringBinding:
             )
         return tuple(summaries)
 
-    def _new_scenario(self, command: DevNewScenarioCommandV1) -> DevScenarioDraftV1:
-        """Resolve the validated creation mode using the shared blank/copy factories."""
+    def _new_scenario(self, command: DevNewScenarioCommandV1) -> DevScenarioDraftV2:
+        """Resolve the validated creation mode using the shared blank/copy factories.
+
+        Blank and map-copy drafts use ``DEFAULT_TDM_RED_ZONE_DEPTH``; a duplicate
+        keeps ``declared_red_zone_depth`` of its source.
+        """
         if command.creation_mode == "blank":
-            return new_scenario_draft(command.asset_id)
+            return new_scenario_draft(
+                command.asset_id,
+                red_zone_depth=DEFAULT_TDM_RED_ZONE_DEPTH,
+            )
         if command.source is None:
             raise AssertionError("validated nonblank creation requires a source")
         source = self._load_persisted(command.source)
         if command.creation_mode == "copy_saved_map":
             if not isinstance(source, DevMapDraftV1):
                 raise TypeError("copy_saved_map resolved a non-map source")
-            return new_scenario_draft(command.asset_id, source_map=source)
-        if not isinstance(source, DevScenarioDraftV1):
+            return new_scenario_draft(
+                command.asset_id,
+                source_map=source,
+                red_zone_depth=DEFAULT_TDM_RED_ZONE_DEPTH,
+            )
+        if isinstance(source, DevMapDraftV1):
             raise TypeError("duplicate_saved_scenario resolved a non-scenario source")
-        return duplicate_scenario_draft(source, asset_id=command.asset_id)
+        return duplicate_scenario_draft(
+            source,
+            asset_id=command.asset_id,
+            red_zone_depth=declared_red_zone_depth(source.content),
+        )
 
     def apply_command(
         self,
@@ -944,7 +1105,9 @@ class DevClientAuthoringBinding:
         -----
         Only the selected operation runs. Save and delete commands change local draft
         files; Open In Debug may replace the live scenario. New and Validate commands do
-        not save content. Unexpected failures are not silently converted into success.
+        not save content. Open returns a saved version 1 scenario as version 2 at Red
+        Zone depth 0.0 without changing the file. Unexpected failures are not silently
+        converted into success.
         """
         with self._lock:
             return self._apply_command(request)
@@ -982,6 +1145,9 @@ class DevClientAuthoringBinding:
                 )
             if isinstance(command, DevOpenCommandV1):
                 opened = self._load_persisted(command.source)
+                if not isinstance(opened, DevMapDraftV1):
+                    # The editor edits only version 2; the saved file is unchanged.
+                    opened = upgrade_scenario_draft(opened)
                 return DevAuthoringCommandResponseV1(
                     ok=True,
                     command_type=command.command_type,

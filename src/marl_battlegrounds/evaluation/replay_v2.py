@@ -3,7 +3,7 @@
 Legacy frames keep their exact V1 observation layout. Builders seal captured
 frames/transitions with source/runtime identity and completion evidence;
 references describe their original canonical bytes. Shared private helpers
-also serve V3 capture while keeping explicit version roots separate.
+also serve V3 and V4 capture while keeping explicit version roots separate.
 """
 
 from __future__ import annotations
@@ -677,7 +677,9 @@ def _frames_from_packets[FrameT: EvaluationFrame](
     next-decision availability from the next acting packet after validation.
     Inputs remain unchanged; returned host lists retain every captured frame/fact.
     """
-    from marl_battlegrounds.evaluation.catalog import build_resolved_env_config_v1
+    from marl_battlegrounds.evaluation.catalog import (
+        _build_resolved_env_config_for,  # pyright: ignore[reportPrivateUsage]
+    )
     from marl_battlegrounds.evaluation.recording_context import restore_recording_config
 
     frames: list[FrameT] = []
@@ -699,7 +701,10 @@ def _frames_from_packets[FrameT: EvaluationFrame](
             if episode_id <= 0:
                 raise ValueError("captured episode IDs must be positive")
             if (
-                build_resolved_env_config_v1(restore_recording_config(packet.config))
+                _build_resolved_env_config_for(
+                    restore_recording_config(packet.config),
+                    context.resolved_env_config,
+                )
                 != context.resolved_env_config
             ):
                 raise ValueError(

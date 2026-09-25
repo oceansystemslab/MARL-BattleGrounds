@@ -177,8 +177,10 @@ def _scenario(
     Returns
     -------
     tuple of EnvConfig and EnvState
-        A 300-step TDM config with the canonical movement scale, edge spawn pads,
-        five-step respawn waves, and the authored starting state.
+        A 300-step neutral-task config (task mode 0, no score threshold and
+        Red Zone depth 0.0, so no Red Zone tint or scoring) with the canonical
+        movement scale, edge spawn pads, five-step respawn waves, and the
+        authored starting state.
 
     Raises
     ------
@@ -210,6 +212,7 @@ def _scenario(
     config = EnvConfig(
         task_mode=0,
         team_deathmatch_score_threshold=0,
+        team_deathmatch_red_zone_depth=0.0,
         max_steps=_MAX_STEPS,
         map_width=map_width,
         map_height=map_height,

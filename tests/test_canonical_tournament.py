@@ -4,9 +4,17 @@ Artificial complete records test the public reuse/save/resume route without game
 Small one-tick CPU games check the fresh path through the real evaluator, writer
 and physical evidence checks. Fixture release pins are isolated test data, not an
 official release or evidence of scientific qualification.
+
+A current bundle pins the current scalar schema, run schema 2 and replay schema
+4 and holds configurations at Red Zone depth 5.0. A bundle saved before the Red
+Zone rule pins (14, 2, 3) and holds 12-key depth-0.0 configurations under their
+original IDs: it loads and reuses every game while running none, and any request
+that needs a new game fails with the reuse-only message before writing anything.
 """
 
 import copy
+import json
+import re
 
 # pyright: reportPrivateUsage=false
 from pathlib import Path
@@ -386,3 +394,109 @@ def test_custom_release_text_cannot_claim_official_protocol(
     assert not resumed.protocol_compliant
     with pytest.raises(ValueError, match="custom"):
         marl_bgs.run_canonical_tournament(resume_from=result.run_dir)
+
+
+_PRE_RED_ZONE_MESSAGE = (
+    "Snapshot configurations were saved before the Red Zone rule; recorded "
+    "games can be reused, but new games need a snapshot prepared with "
+    "current configurations."
+)
+
+
+def _source_contents(bundle: dict[str, Any]) -> list[tuple[dict[str, Any], str]]:
+    return [
+        (
+            json.loads(bundle["paths"][source["source_config_asset"]].read_bytes()),
+            source["source_config_id"],
+        )
+        for source in bundle["config"]["conditions"]["map_sources"]
+    ]
+
+
+def test_current_bundle_pins_current_records_and_the_default_red_zone(
+    tmp_path: Path,
+) -> None:
+    from marl_battlegrounds.evaluation.evaluation_conditions import (
+        restore_recorded_config,
+    )
+    from marl_battlegrounds.evaluation.metric_catalog import METRIC_SCHEMA_VERSION
+
+    bundle = build_record_bundle(tmp_path / "inputs", entrants=2, maps=1)
+    pins = bundle["config"]["compatibility"]
+    assert (pins["scalar_schema"], pins["run_schema"], pins["replay_schema"]) == (
+        METRIC_SCHEMA_VERSION,
+        2,
+        4,
+    )
+    for content, identifier in _source_contents(bundle):
+        assert len(content) == 13
+        assert content["team_deathmatch_red_zone_depth"] == 5.0
+        config, historical = restore_recorded_config(content, identifier)
+        assert not historical
+        assert config.team_deathmatch_red_zone_depth == 5.0
+
+
+def test_pre_red_zone_bundle_reuses_every_game_and_refuses_new_games(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from canonical_record_fixtures import fixture_policy
+    from marl_battlegrounds.evaluation.evaluation_conditions import (
+        restore_recorded_config,
+    )
+
+    bundle = build_record_bundle(
+        tmp_path / "inputs", entrants=2, maps=1, max_steps=1, historical=True
+    )
+    config = bundle["config"]
+    pins = config["compatibility"]
+    assert (pins["scalar_schema"], pins["run_schema"], pins["replay_schema"]) == (
+        14,
+        2,
+        3,
+    )
+    for content, identifier in _source_contents(bundle):
+        assert len(content) == 12
+        assert "team_deathmatch_red_zone_depth" not in content
+        restored, historical = restore_recorded_config(content, identifier)
+        assert historical
+        assert restored.team_deathmatch_red_zone_depth == 0.0
+    assert configs.load_tournament_config(config, official=False) == config
+    inputs = {
+        path: path.read_bytes()
+        for path in (tmp_path / "inputs").rglob("*")
+        if path.is_file()
+    }
+    monkeypatch.setattr(canonical, "_active_pair", _unexpected)
+    reused = marl_bgs.run_tournament(config=config, output_dir=tmp_path / "out")
+    from marl_battlegrounds.evaluation.results import CanonicalTournamentResult
+
+    assert isinstance(reused, CanonicalTournamentResult)
+    assert reused.status == "complete"
+    assert reused.planned_games == reused.reused_games == 2
+    assert reused.executed_games == reused.metadata["executed_this_call"] == 0
+    # A challenger adds games and a rerun replays recorded ones: both need new games.
+    message = f"^{re.escape(_PRE_RED_ZONE_MESSAGE)}$"
+    with pytest.raises(ValueError, match=message):
+        canonical._run_resolved_tournament(
+            config,
+            system=fixture_policy(7),
+            output_dir=tmp_path / "challenger",
+            num_envs=2,
+            chunk_size=1,
+        )
+    with pytest.raises(ValueError, match=message):
+        canonical._run_resolved_tournament(
+            config,
+            rerun_existing=True,
+            output_dir=tmp_path / "rerun",
+            num_envs=2,
+            chunk_size=1,
+        )
+    assert not (tmp_path / "challenger").exists()
+    assert not (tmp_path / "rerun").exists()
+    assert {
+        path: path.read_bytes()
+        for path in (tmp_path / "inputs").rglob("*")
+        if path.is_file()
+    } == inputs

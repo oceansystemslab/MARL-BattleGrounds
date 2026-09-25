@@ -1,4 +1,15 @@
-"""Check small complete tournaments, selected outputs and resumed execution."""
+"""Check small complete tournaments, selected outputs and resumed execution.
+
+Red Zone depth: a new run records its depth (5.0 by default) as
+"red_zone_depth"; 0.0 and 6.0 give different configuration IDs from 5.0; a
+resume that omits the depth inherits it, and a different explicit depth fails
+before any file changes. A completed run saved before the Red Zone rule
+(12-key configurations under their original IDs, no recorded depth, scalar
+schema 14) returns through the saved-result route without running or refitting
+anything: it reads as depth 0.0, accepts its own maps and depth 0.0 explicitly,
+refuses depth 5.0, and leaves every file unchanged. The legacy partial-run case
+builds its configuration at an explicit depth 0.0.
+"""
 
 
 # Historical protocol fixtures exercise the shared private executor directly.
@@ -10,7 +21,7 @@ from collections.abc import Sequence
 from dataclasses import replace
 from importlib import import_module
 from pathlib import Path
-from typing import cast
+from typing import Any, cast
 
 import numpy as np
 import pytest
@@ -408,7 +419,9 @@ def test_compatible_legacy_partial_run_keeps_reversed_teams_and_original_protoco
 
     first, second = _entrants()
     a, b = canonical_tournament_rosters()
-    config = normalize_episode_specs([0], 1, a, b, 20, 1)[0].env_config
+    config = normalize_episode_specs([0], 1, a, b, 20, 1, red_zone_depth=0.0)[
+        0
+    ].env_config
     source_id, _ = config_record(config)
     details: dict[str, object] = {
         "seed": 0,
@@ -476,3 +489,155 @@ def test_compatible_legacy_partial_run_keeps_reversed_teams_and_original_protoco
     assert result.headline_metrics == ()
     assert result.matches[0]["team_a_policy"] == result.matches[1]["team_b_policy"]
     assert result.matches[0]["config_id"] == result.matches[1]["config_id"]
+
+
+def _frozen_source(monkeypatch: pytest.MonkeyPatch) -> None:
+    # Independent workspace edits must not look like a code change between calls.
+    provenance = capture_recording_provenance()
+
+    def same_source(**_: object) -> dict[str, object]:
+        return provenance
+
+    monkeypatch.setattr(
+        import_module("marl_battlegrounds.evaluation.evaluate"),
+        "capture_recording_provenance",
+        same_source,
+    )
+
+
+def _files(directory: Path) -> dict[Path, bytes]:
+    return {path: path.read_bytes() for path in directory.rglob("*") if path.is_file()}
+
+
+def test_new_runs_record_the_red_zone_depth_and_resume_keeps_it(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _frozen_source(monkeypatch)
+    small: dict[str, Any] = {
+        "maps": [12],
+        "episodes_per_pair": 2,
+        "max_steps": 1,
+        "chunk_size": 1,
+    }
+    default = run_tournament(_entrants(), **small)
+    assert default.metadata["red_zone_depth"] == 5.0
+    identities = default.metadata["configuration_ids_by_map"]
+    for depth in (0.0, 6.0):
+        other = run_tournament(_entrants(), red_zone_depth=depth, **small)
+        assert other.metadata["red_zone_depth"] == depth
+        assert other.metadata["configuration_ids_by_map"] != identities
+    saved = run_tournament(
+        _entrants(), red_zone_depth=6.0, output_dir=tmp_path, **small
+    )
+    assert saved.run_dir is not None
+    before = _files(saved.run_dir)
+    resumed = run_tournament(_entrants(), resume_from=saved.run_dir)
+    assert resumed.metadata["red_zone_depth"] == 6.0
+    assert resumed.matches == saved.matches
+    again = run_tournament(
+        _entrants(), maps=[12], red_zone_depth=6.0, resume_from=saved.run_dir
+    )
+    assert again.matches == saved.matches
+    for depth in (5.0, 0.0):
+        with pytest.raises(
+            ValueError,
+            match=r"^red_zone_depth differs from the saved evaluation conditions$",
+        ):
+            run_tournament(_entrants(), red_zone_depth=depth, resume_from=saved.run_dir)
+    assert _files(saved.run_dir) == before
+
+
+def _saved_before_red_zone(run_dir: Path) -> dict[str, str]:
+    # Rewrite a completed depth-0.0 run as the code before Red Zone saved it:
+    # 12-key configurations under their original IDs, no recorded depth and
+    # scalar schema 14. Tables keep their byte sizes (IDs keep 64 characters).
+    from marl_battlegrounds.evaluation.evaluation_conditions import (
+        config_record,
+        restore_recorded_config,
+    )
+    from marl_battlegrounds.evaluation.tournament_headlines import content_digest
+
+    path = run_dir / "run_details.json"
+    manifest = json.loads(path.read_text())
+    renamed: dict[str, str] = {}
+    contents: dict[str, object] = {}
+    for identifier, content in manifest["configurations"].items():
+        config, historical = restore_recorded_config(content, identifier)
+        assert not historical and config.team_deathmatch_red_zone_depth == 0.0
+        old_id, old_content = config_record(config, historical=True)
+        assert len(old_content) == 12
+        renamed[identifier], contents[old_id] = old_id, old_content
+    text = path.read_text()
+    matches = (run_dir / "match_results.csv").read_text()
+    for current, old in renamed.items():
+        text, matches = text.replace(current, old), matches.replace(current, old)
+    manifest = json.loads(text)
+    manifest["configurations"] = contents
+    manifest["metric_schema_version"] = 14
+    old_digest = manifest["details"]["schedule_digest"]
+    new_digest = content_digest(manifest["details"]["schedule"])
+    for details in (
+        manifest["details"],
+        *(entry["details"] for entry in manifest["passes"].values()),
+    ):
+        details.pop("red_zone_depth", None)
+        if "metric_schema_version" in details:
+            details["metric_schema_version"] = 14
+        if "configurations" in details:
+            details["configurations"] = {
+                identifier: contents[identifier]
+                for identifier in details["configurations"]
+            }
+    path.write_text(json.dumps(manifest).replace(old_digest, new_digest))
+    (run_dir / "match_results.csv").write_text(matches)
+    return renamed
+
+
+def test_completed_run_saved_before_red_zone_returns_through_its_saved_result(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    module = import_module("marl_battlegrounds.evaluation.tournament")
+    result = run_tournament(
+        _entrants(),
+        maps=[12],
+        episodes_per_pair=2,
+        max_steps=1,
+        chunk_size=1,
+        red_zone_depth=0.0,
+        output_dir=tmp_path,
+    )
+    assert result.run_dir is not None
+    renamed = _saved_before_red_zone(result.run_dir)
+    before = _files(result.run_dir)
+    loaded: list[Path] = []
+    original = module._saved_tournament
+
+    def observed(run_dir: Path, *args: object) -> object:
+        loaded.append(run_dir)
+        return original(run_dir, *args)
+
+    def forbidden(*args: object, **kwargs: object) -> None:
+        raise AssertionError("a completed saved tournament must not run or refit")
+
+    monkeypatch.setattr(module, "_saved_tournament", observed)
+    monkeypatch.setattr(module, "summarize_tournament", forbidden)
+    evaluator = import_module("marl_battlegrounds.evaluation.evaluate")
+    monkeypatch.setattr(evaluator, "_jax_chunk", forbidden)
+    for explicit in ({}, {"maps": [12], "red_zone_depth": 0.0}):
+        saved = run_tournament(
+            _entrants(), resume_from=result.run_dir, **cast(dict[str, Any], explicit)
+        )
+        assert saved.status == "complete"
+        assert "red_zone_depth" not in saved.metadata
+        assert saved.metadata["configuration_ids_by_map"] == {
+            "12": renamed[result.metadata["configuration_ids_by_map"]["12"]]
+        }
+        assert saved.matches == tuple(
+            {**row, "config_id": renamed[cast(str, row["config_id"])]}
+            for row in result.matches
+        )
+        assert saved.tournament_results == result.tournament_results
+    assert loaded == [result.run_dir, result.run_dir]
+    with pytest.raises(ValueError, match="red_zone_depth differs from the saved"):
+        run_tournament(_entrants(), red_zone_depth=5.0, resume_from=result.run_dir)
+    assert _files(result.run_dir) == before

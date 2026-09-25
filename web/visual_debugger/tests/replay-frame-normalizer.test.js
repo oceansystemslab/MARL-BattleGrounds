@@ -1,6 +1,8 @@
 /**
  * @file Check replay audience schemas, cursor/timeline facts, immutable normalization
- * and unknown-field rejection.
+ * and unknown-field rejection. Replay references admit versions 1 to 4 (version 4
+ * records the Team Deathmatch Red Zone rule) with matching reference and replay
+ * versions; version 5 and mismatched versions are refused.
  */
 import assert from "node:assert/strict";
 import test from "node:test";
@@ -1818,5 +1820,20 @@ test("current replay references keep their recorded V3 identity", () => {
   assert.equal(normalized.artifact_summary.replay_reference.schema_version, 3);
   assert.equal(normalized.artifact_summary.replay_reference.replay_schema_version, 3);
   reference.replay_schema_version = 2;
+  assert.throws(() => normalizeReplayViewerFrameV1(raw), /artifact reference/u);
+});
+
+test("Red Zone replay V4 references are admitted and version 5 is refused", () => {
+  const raw = researcherFrame();
+  const reference = raw.artifact_summary.replay_reference;
+  reference.schema_version = 4;
+  reference.replay_schema_version = 4;
+  const normalized = normalizeReplayViewerFrameV1(raw);
+  assert.equal(normalized.artifact_summary.replay_reference.schema_version, 4);
+  assert.equal(normalized.artifact_summary.replay_reference.replay_schema_version, 4);
+  reference.replay_schema_version = 3;
+  assert.throws(() => normalizeReplayViewerFrameV1(raw), /artifact reference/u);
+  reference.schema_version = 5;
+  reference.replay_schema_version = 5;
   assert.throws(() => normalizeReplayViewerFrameV1(raw), /artifact reference/u);
 });

@@ -20,7 +20,18 @@ refusing inputs without a team axis; mirrored twin rollouts without combat agree
 twenty pre-contact steps; and twins with one authored death per team agree
 through the respawn wave for a full and a padded roster, in both teams. Unused
 observer rows are never flagged, and "world", the removed "right" and any other
-name are refused by the flag helper. Contact and combat under the
+name are refused by the flag helper. Actor input schema 2 is current: 5,165
+features with the Red Zone depth as context column 19 (flat feature 1128),
+and the training state is 920 features with the depth right after the score
+threshold (slice 391 to 392). Historical schema 1 (5,164 features) is reached
+only through schema_1_actor_input, which drops context column 19: its
+encoding equals the schema-2 encoding without feature 1128, eager and under
+jit, and it refuses a view that is not 20 columns wide. The encoder and the
+flag helper pick the schema from the static context width and refuse any
+width other than 20 and 19. The flag's side rule follows the schema: on a
+bank centred exactly at widths 17.3 and 20.3, a schema-2 view reads left
+(Core's exact rule) while a schema-1 view keeps the old float32 mean formula
+and reads right. Contact and combat under the
 mirror are not compared here: Core reproduces a mirrored game only approximately
 after contact, so trained-model checks live in the packet's post-hoc replay.
 """
@@ -40,12 +51,14 @@ from tests.evaluation_fixtures import evaluation_env_config
 from marl_battlegrounds.baselines.inputs import (
     ACTOR_FEATURE_OFFSETS,
     ACTOR_FEATURE_SIZE,
+    ACTOR_FEATURE_SIZES,
     ACTOR_INPUT_SCHEMA_VERSION,
     TRAINING_STATE_FEATURE_OFFSETS,
     TRAINING_STATE_FEATURE_SIZE,
     TRAINING_STATE_SCHEMA_VERSION,
     encode_actor_inputs,
     encode_training_state,
+    schema_1_actor_input,
     spawn_frame_flag,
     team_obstacle_partners,
 )
@@ -55,6 +68,8 @@ from marl_battlegrounds.core.types import (
     AGENT_FEATURE_CLASS_ID,
     AGENT_FEATURE_X,
     CONTEXT_FEATURE_MAP_WIDTH,
+    CONTEXT_FEATURE_TDM_RED_ZONE_DEPTH,
+    CONTEXT_FEATURES,
     OBSTACLE_FEATURE_ACTIVE,
     OBSTACLE_FEATURE_THETA,
     OBSTACLE_FEATURE_TYPE,
@@ -73,6 +88,7 @@ from marl_battlegrounds.policies.input import (
     MOVE_MIRROR,
     ActorInput,
     Observations,
+    _historical_team_on_right,  # pyright: ignore[reportPrivateUsage]
     build_actor_input,
     build_observations,
     build_team_actor_input,
@@ -193,7 +209,7 @@ def test_actor_schema_covers_every_field_with_distinct_values(
         315,
         320,
         96,
-        19,
+        20,
         5,
         5,
         45,
@@ -239,12 +255,18 @@ def test_actor_schema_covers_every_field_with_distinct_values(
             encoded = np.asarray(value)
         expected.append(encoded.reshape(-1))
         offset += width
-    assert ACTOR_INPUT_SCHEMA_VERSION == 1
-    assert offset == ACTOR_FEATURE_SIZE == 5164
+    assert ACTOR_INPUT_SCHEMA_VERSION == 2
+    assert offset == ACTOR_FEATURE_SIZE == 5165
+    assert dict(ACTOR_FEATURE_SIZES) == {1: 5164, 2: 5165}
+    assert CONTEXT_FEATURES == 20
+    assert ACTOR_FEATURE_OFFSETS["observation.context_features"] == slice(1109, 1129)
+    assert 1109 + CONTEXT_FEATURE_TDM_RED_ZONE_DEPTH == 1128
     assert actual.dtype == np.float32
     np.testing.assert_array_equal(actual, np.concatenate(expected).astype(np.float32))
     with pytest.raises(TypeError):
         cast(dict[str, slice], ACTOR_FEATURE_OFFSETS)["new"] = slice(0, 1)
+    with pytest.raises(TypeError):
+        cast(dict[int, int], ACTOR_FEATURE_SIZES)[3] = 1
 
 
 def test_actor_redaction_keeps_missing_categories_absent_and_public_rosters_visible(
@@ -440,8 +462,11 @@ def test_training_schema_covers_every_state_and_config_field(
         assert TRAINING_STATE_FEATURE_OFFSETS[name] == slice(offset, offset + flat.size)
         expected.append(flat)
         offset += flat.size
-    assert TRAINING_STATE_SCHEMA_VERSION == 1
-    assert offset == TRAINING_STATE_FEATURE_SIZE == 919
+    assert TRAINING_STATE_SCHEMA_VERSION == 2
+    assert offset == TRAINING_STATE_FEATURE_SIZE == 920
+    depth = TRAINING_STATE_FEATURE_OFFSETS["config.team_deathmatch_red_zone_depth"]
+    assert depth == slice(391, 392)
+    assert actual[391] == np.float32(config.team_deathmatch_red_zone_depth)
     assert actual.dtype == np.float32
     np.testing.assert_array_equal(actual, np.concatenate(expected).astype(np.float32))
 
@@ -530,13 +555,13 @@ def test_actor_arbitrary_leading_axes_match_mapped_calls_and_reuse_compilation(
     np.testing.assert_array_equal(
         first, jax.vmap(jax.vmap(jax.vmap(encode_actor_inputs)))(inputs)
     )
-    assert first.shape == (2, 3, 5, 5164)
+    assert first.shape == (2, 3, 5, 5165)
     assert traces == [1]
     np.testing.assert_array_equal(first[0], second[0])
     np.testing.assert_array_equal(first[1, 2, :4], second[1, 2, :4])
     assert not np.array_equal(first[1, 2, 4], second[1, 2, 4])
     empty = _batch(actor, 0)
-    assert encode_actor_inputs(empty).shape == (0, 5164)
+    assert encode_actor_inputs(empty).shape == (0, 5165)
 
 
 def test_training_config_broadcast_matches_mapped_calls_and_reuses_compilation(
@@ -567,11 +592,11 @@ def test_training_config_broadcast_matches_mapped_calls_and_reuses_compilation(
         ),
     )
     assert traces == [1]
-    assert first.shape == (2, 3, 919)
+    assert first.shape == (2, 3, 920)
     assert not np.array_equal(first, second)
     constant = encode_training_state(states, config)
     np.testing.assert_array_equal(
-        constant, np.broadcast_to(encode_training_state(state, config), (2, 3, 919))
+        constant, np.broadcast_to(encode_training_state(state, config), (2, 3, 920))
     )
 
 
@@ -602,6 +627,76 @@ def test_actor_shape_mismatches_fail_before_broadcasting_private_rows(
         )
     with pytest.raises(ValueError, match="must have shape"):
         jax.jit(encode_actor_inputs)(actor)
+
+
+def test_schema_1_view_drops_only_the_depth_and_other_widths_are_refused(
+    snapshot: tuple[EnvConfig, EnvState, Observation, ActorInput],
+) -> None:
+    actor = _distinct_actor(snapshot[3])
+    context = actor.observation.context_features
+    old = schema_1_actor_input(actor)
+    np.testing.assert_array_equal(old.observation.context_features, context[:19])
+    assert old.source_bank is actor.source_bank
+    assert old.observation.self_features is actor.observation.self_features
+    current = np.asarray(encode_actor_inputs(actor))
+    historical = np.asarray(encode_actor_inputs(old))
+    assert historical.shape == (ACTOR_FEATURE_SIZES[1],)
+    np.testing.assert_array_equal(np.delete(current, 1128), historical)
+    assert current[1128] == context[CONTEXT_FEATURE_TDM_RED_ZONE_DEPTH]
+
+    @jax.jit
+    def encode_old(value: ActorInput) -> Array:
+        return encode_actor_inputs(schema_1_actor_input(value))
+
+    np.testing.assert_array_equal(cast(Array, encode_old(actor)), historical)
+    with pytest.raises(ValueError, match="20 context columns"):
+        schema_1_actor_input(old)
+    for width in (18, 21):
+        wrong = actor._replace(
+            observation=actor.observation._replace(
+                context_features=jnp.zeros((width,), jnp.float32)
+            )
+        )
+        with pytest.raises(ValueError, match="must have shape"):
+            encode_actor_inputs(wrong)
+        with pytest.raises(ValueError, match="must have shape"):
+            spawn_frame_flag(wrong, "left")
+        with pytest.raises(ValueError, match="20 context columns"):
+            schema_1_actor_input(wrong)
+
+
+@pytest.mark.parametrize("width", (17.3, 20.3))
+def test_the_flag_side_rule_follows_the_view_schema_on_a_centred_bank(
+    width: float,
+) -> None:
+    _, observations, state = _two_lane_reset()
+    actors = system_inputs(observations, state, team=0).actors
+    half = float(np.float32(width)) / 2
+    centred = [float(np.float32(half + step)) for step in (-2.0, -1.0, 0.0, 1.0, 2.0)]
+    lifecycle = actors.observation.spawn_lifecycle
+    pads = lifecycle.spawn_pad_positions_by_agent_by_team.at[..., 0, :, 0].set(
+        jnp.asarray(centred, jnp.float32)
+    )
+    context = actors.observation.context_features.at[
+        ..., CONTEXT_FEATURE_MAP_WIDTH
+    ].set(np.float32(width))
+    actors = actors._replace(
+        observation=actors.observation._replace(
+            context_features=context,
+            spawn_lifecycle=lifecycle._replace(
+                spawn_pad_positions_by_agent_by_team=pads
+            ),
+        )
+    )
+    old = schema_1_actor_input(actors)
+    # Exact arithmetic puts the bank on the centre line, which reads left.
+    assert not np.asarray(team_on_right(actors)).any()
+    assert not np.asarray(spawn_frame_flag(actors, "left")).any()
+    # The frozen float32 mean rounds past the centre and reads right.
+    assert np.asarray(_historical_team_on_right(actors)).all()
+    assert np.asarray(spawn_frame_flag(old, "left")).all()
+    compiled = jax.jit(spawn_frame_flag, static_argnums=1)
+    assert np.asarray(cast(Array, compiled(old, "left"))).all()
 
 
 @pytest.mark.parametrize("field", ("state", "config_suffix", "config_prefix"))

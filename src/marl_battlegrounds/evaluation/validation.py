@@ -16,14 +16,14 @@ from marl_battlegrounds.evaluation.events import (
 )
 from marl_battlegrounds.evaluation.models import (
     EvaluationEpisodeContext,
-    EvaluationEpisodeContextV3,
+    EvaluationEpisodeContextV4,
     EvaluationFrame,
-    EvaluationFrameV1,
-    EvaluationFrameV2,
     EvaluationModel,
     EvaluationTransitionV1,
     TransitionFactsV1,
     evaluation_context_type,
+    evaluation_frame_type_for_context,
+    float32_value,
 )
 
 # These are frozen V1 wire-column coordinates, duplicated intentionally so
@@ -32,6 +32,8 @@ _CONTEXT_FEATURE_CURRENT_TIMESTEP_V1 = 0
 _CONTEXT_FEATURE_EPISODE_HORIZON_V1 = 1
 _CONTEXT_FEATURE_IS_TDM_V1 = 6
 _CONTEXT_FEATURE_TDM_SCORE_THRESHOLD_V1 = 16
+# Frame V3 (context V4) appends the Team Deathmatch Red Zone depth.
+_CONTEXT_FEATURE_TDM_RED_ZONE_DEPTH_V2 = 19
 
 
 def _is_canonical_neutral(value: object) -> bool:
@@ -355,15 +357,12 @@ def _validate_frame_information_regime(
 ) -> None:
     """Require the context's frame version and allowed SharedObs source cells.
 
-    Context V3 requires frame V2; older contexts require frame V1. NoSharedObs omits
-    availability. SharedObs supplies it and forbids self, inactive, and cross-team
-    cells. Other same-team cells may be false. Mismatches raise ValueError.
+    Context V4 requires frame V3, context V3 frame V2 and older contexts frame V1
+    (evaluation_frame_type_for_context). NoSharedObs omits availability. SharedObs
+    supplies it and forbids self, inactive, and cross-team cells. Other same-team
+    cells may be false. Mismatches raise ValueError.
     """
-    expected_frame_type = (
-        EvaluationFrameV2
-        if type(context) is EvaluationEpisodeContextV3
-        else EvaluationFrameV1
-    )
+    expected_frame_type = evaluation_frame_type_for_context(context)
     if type(frame) is not expected_frame_type:
         raise ValueError("frame version does not match the episode context")
     availability = (
@@ -398,8 +397,10 @@ def _validate_task_context_projection(
     """Check policy-visible task fields against recorded snapshot/configuration facts.
 
     For each active slot, verify tick, horizon, mode, team-relative scores, threshold,
-    and unused task padding. Inactive context rows must be neutral. Raise ValueError
-    on disagreement; these frozen wire coordinates keep this reader free of JAX.
+    and unused task padding; for context V4 also check that column 19 equals the
+    float32 value of the recorded Red Zone depth. Inactive context rows must be
+    neutral. Raise ValueError on disagreement; these frozen wire coordinates keep
+    this reader free of JAX.
     """
     config = context.resolved_env_config
     scores = frame.snapshot.team_deathmatch_scores
@@ -446,6 +447,12 @@ def _validate_task_context_projection(
             raise ValueError(
                 "policy context task mode, scores, or threshold conflicts with "
                 "resolved task authority"
+            )
+        if type(context) is EvaluationEpisodeContextV4 and context_row[
+            _CONTEXT_FEATURE_TDM_RED_ZONE_DEPTH_V2
+        ] != float32_value(context.resolved_env_config.team_deathmatch_red_zone_depth):
+            raise ValueError(
+                "policy context Red Zone depth must match resolved configuration"
             )
 
 
@@ -538,11 +545,7 @@ def _validate_context_joined_frame(
         validate_declared_model_tree(
             frame,
             record_name=record_name,
-            expected_type=(
-                EvaluationFrameV2
-                if type(context) is EvaluationEpisodeContextV3
-                else EvaluationFrameV1
-            ),
+            expected_type=evaluation_frame_type_for_context(context),
         ),
     )
     episode_id = context.identity.episode_id
@@ -575,7 +578,8 @@ def validate_context_joined_evaluation_frame_v1(
     context : EvaluationEpisodeContext
         Exact supported episode context with resolved configuration and roster.
     frame : EvaluationFrame
-        Matching frame type: V2 for context V3, otherwise V1.
+        Matching frame type from evaluation_frame_type_for_context: V3 for
+        context V4, V2 for context V3, otherwise V1.
 
     Returns
     -------

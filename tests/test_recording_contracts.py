@@ -471,6 +471,7 @@ def test_valid_single_choice_does_not_validate_unused_exchange(
 
     source = first_info.config._replace(
         task_mode=0,
+        team_deathmatch_red_zone_depth=0.0,
         team_deathmatch_score_threshold=0,
         agent_profile=resolve_agent_profile(
             jnp.array([5] + [0] * 9, jnp.int32), jnp.array([1, 0], jnp.int32)

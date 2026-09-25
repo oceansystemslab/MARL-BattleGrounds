@@ -1,11 +1,29 @@
-"""Compare saved per-turn results for packaged solutions other than Scenario 3.
+"""Check the packaged scenario solutions turn by turn and against the Red Zones.
 
-Scenario 3 uses its own solution and missed-move tests. Older authoring revisions
-and their ablation cases remain separate.
+The replay check compares saved per-turn results for every packaged solution
+except Scenario 3, which uses its own solution and missed-move tests. Older
+authoring revisions and their ablation cases remain separate.
+
+A second check reads all nine witness files, Scenario 3 included, beside the
+installed scenario records, without running the simulator. Each witness names
+its installed scenario's revisions and digests, and the scenario declares Red
+Zone depth 5.0. The check states the Red Zone rule again on its own: a team is
+on the right when the exact sum of its five float32 pad x values is greater
+than five times half the float32 map width; the left strip is x from 0 to d32
+and the right strip is x from float32(w32 - d32) to w32, both ends included.
+A counted position is where an agent alive at the start of a tick stands at
+the start (the authored start, or the last tick's position) and after the
+tick. Every counted position is outside both teams' strips, no newly dead
+agent started inside its own team's strip, and every score change equals
+those deaths' points. The only positions allowed inside a strip belong to
+agents standing on their own spawn pad after a respawn; each line's respawns
+are listed. The restated rule matches the host copy in evaluation.models.
 """
 
 import json
 from collections.abc import Callable
+from fractions import Fraction
+from importlib.resources import files
 from pathlib import Path
 from typing import cast
 
@@ -24,6 +42,10 @@ from marl_battlegrounds.core.types import (
     Info,
     Observation,
     Reward,
+)
+from marl_battlegrounds.evaluation.models import (
+    red_zone_team_on_right,
+    red_zone_x_range,
 )
 from marl_battlegrounds.policies.actor import (
     ActorAction,
@@ -149,3 +171,116 @@ def test_packaged_solution_preserves_every_turn(
         assert bool(done.done) == (tick == len(rows))
 
     np.testing.assert_array_equal(state.team_deathmatch_scores, [20, 19])
+
+
+# Pad respawns in each witness line, by tick: the only Red Zone exemption.
+_PAD_RESPAWNS: dict[str, dict[int, tuple[int, ...]]] = {
+    "scenario_3": {5: (0, 3, 4, 5, 6, 7, 9)},
+    "scenario_5": {5: (2, 3, 6, 7, 9)},
+    "scenario_6": {5: (1, 3, 5, 7, 8, 9)},
+    "scenario_8": {5: (0, 2, 5, 6, 7, 9)},
+}
+
+
+def _float32(value: float) -> float:
+    return float(np.float32(value))
+
+
+@pytest.mark.parametrize(
+    ("scenario_id", "case_name"),
+    [
+        (1, "scenario_1_heal_hunter"),
+        (1, "scenario_1_heal_rogue"),
+        (2, "scenario_2"),
+        (3, "scenario_3"),
+        (4, "scenario_4"),
+        (5, "scenario_5"),
+        (6, "scenario_6"),
+        (7, "scenario_7"),
+        (8, "scenario_8"),
+    ],
+)
+def test_witness_positions_stay_outside_red_zones(
+    scenario_id: int, case_name: str
+) -> None:
+    expected = json.loads((_FIXTURES / f"{case_name}_witness.json").read_text())
+    package = files("marl_battlegrounds").joinpath("data", "tdm")
+    info = json.loads(package.joinpath("manifest.json").read_bytes())["scenarios"][
+        scenario_id - 1
+    ]
+    content = json.loads(
+        package.joinpath("scenarios", f"{scenario_id}.json").read_bytes()
+    )
+    configuration, start = content["configuration"], content["initial_snapshot"]
+    assert expected["scenario_id"] == info["scenario_id"] == scenario_id
+    assert expected["source_revision"] == info["source"]["revision"]
+    assert expected["approved_revision"] == info["approved_source"]["revision"]
+    assert expected["semantic_digest"] == info["source"]["semantic_digest"]
+    assert (
+        expected["configuration_digest"]
+        == info["resolved_configuration_digest"]
+        == configuration["canonical_digest_sha256"]
+    )
+    assert expected["initial_state_digest"] == info["resolved_initial_state_digest"]
+    assert configuration["schema_version"] == 2
+    assert configuration["team_deathmatch_red_zone_depth"] == 5.0
+
+    width = np.float32(configuration["map_width"])
+    depth = np.float32(configuration["team_deathmatch_red_zone_depth"])
+    pads = configuration["team_spawn_pad_positions"]
+    on_right = tuple(
+        sum((Fraction(_float32(x)) for x, _ in bank), Fraction(0))
+        > 5 * Fraction(float(width)) / 2
+        for bank in pads
+    )
+    left_strip = (0.0, float(depth))
+    right_strip = (float(np.float32(width - depth)), float(width))
+    strips = tuple(right_strip if right else left_strip for right in on_right)
+    assert on_right[0] != on_right[1]
+    for bank, right, strip in zip(pads, on_right, strips, strict=True):
+        assert red_zone_team_on_right(float(width), [x for x, _ in bank]) == right
+        assert red_zone_x_range(float(width), float(depth), right) == strip
+
+    def inside(x: float, strip: tuple[float, float]) -> bool:
+        return strip[0] <= _float32(x) <= strip[1]
+
+    alive = list(start["alive_mask"])
+    positions = [list(row) for row in start["agent_positions"]]
+    scores = list(start["team_deathmatch_scores"])
+    respawn_pads: dict[int, list[float]] = {}
+    respawns: dict[int, tuple[int, ...]] = {}
+    for row in expected["ticks"]:
+        tick = int(row["tick"])
+        points = [0, 0]
+        for slot in range(10):
+            team = slot // 5
+            before, after = positions[slot], row["positions"][slot]
+            if row["newly_dead"][slot]:
+                assert alive[slot] and not row["alive"][slot]
+                # A victim scores from its start position; no exemption applies.
+                victim_points = 2 if inside(before[0], strips[team]) else 1
+                assert victim_points == 1, (case_name, tick, slot)
+                points[1 - team] += victim_points
+            if not alive[slot]:
+                if row["alive"][slot]:
+                    # A respawn lands on one of the team's own pads.
+                    assert [_float32(value) for value in after] in [
+                        [_float32(value) for value in pad] for pad in pads[team]
+                    ]
+                    assert inside(after[0], strips[team])
+                    respawn_pads[slot] = after
+                    respawns[tick] = (*respawns.get(tick, ()), slot)
+                continue
+            for position in (before, after):
+                if respawn_pads.get(slot) == position:
+                    continue
+                assert not any(inside(position[0], strip) for strip in strips), (
+                    case_name,
+                    tick,
+                    slot,
+                    position,
+                )
+        scores = [score + gain for score, gain in zip(scores, points, strict=True)]
+        assert row["scores"] == scores, (case_name, tick)
+        alive, positions = list(row["alive"]), [list(p) for p in row["positions"]]
+    assert respawns == _PAD_RESPAWNS.get(case_name, {})

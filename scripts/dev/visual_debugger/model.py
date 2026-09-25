@@ -35,8 +35,8 @@ if TYPE_CHECKING:
     )
     from marl_battlegrounds.evaluation.metrics import EvaluationTransitionViewV1
     from marl_battlegrounds.evaluation.models import (
-        EvaluationEpisodeContextV3,
-        EvaluationFrameV2,
+        EvaluationEpisodeContextV4,
+        EvaluationFrameV3,
     )
     from marl_battlegrounds.rendering.scene import StatusSourceEvidenceStateV2
 
@@ -351,8 +351,8 @@ class DebuggerSession:
     state: EnvState
     observation: Observation
     action_mask: ActionMask
-    evaluation_context: EvaluationEpisodeContextV3
-    current_evaluation_frame: EvaluationFrameV2
+    evaluation_context: EvaluationEpisodeContextV4
+    current_evaluation_frame: EvaluationFrameV3
     incoming_evaluation_view: EvaluationTransitionViewV1 | None
     status_source_evidence_state: StatusSourceEvidenceStateV2
     last_submission_kind: SubmissionKind | None
@@ -378,8 +378,8 @@ class DebuggerSession:
         from marl_battlegrounds.evaluation.metrics import EvaluationTransitionViewV1
         from marl_battlegrounds.evaluation.models import (
             AssignedPolicySlotV2,
-            EvaluationEpisodeContextV3,
-            EvaluationFrameV2,
+            EvaluationEpisodeContextV4,
+            EvaluationFrameV3,
         )
         from marl_battlegrounds.rendering.scene import StatusSourceEvidenceStateV2
 
@@ -410,13 +410,13 @@ class DebuggerSession:
         if type(self.run_generation) is not int or self.run_generation < 0:
             msg = "run_generation must be a non-negative Python int."
             raise ValueError(msg)
-        if type(self.evaluation_context) is not EvaluationEpisodeContextV3:
+        if type(self.evaluation_context) is not EvaluationEpisodeContextV4:
             raise TypeError(
-                "evaluation_context must be the exact EvaluationEpisodeContextV3 root."
+                "evaluation_context must be the exact EvaluationEpisodeContextV4 root."
             )
-        if type(self.current_evaluation_frame) is not EvaluationFrameV2:
+        if type(self.current_evaluation_frame) is not EvaluationFrameV3:
             raise TypeError(
-                "current_evaluation_frame must be the exact EvaluationFrameV2 root."
+                "current_evaluation_frame must be the exact EvaluationFrameV3 root."
             )
         if (
             type(self.scenario_default_movement_scale) is not float

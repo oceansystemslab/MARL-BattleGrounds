@@ -88,8 +88,7 @@ def prepare_reuse_evidence(
         import jax
 
         from marl_battlegrounds.evaluation.evaluation_conditions import (
-            config_record,
-            restore_config,
+            restore_recorded_config,
         )
         from marl_battlegrounds.evaluation.models import canonical_digest_sha256
         from marl_battlegrounds.evaluation.tournament_assets import (
@@ -223,12 +222,14 @@ def prepare_reuse_evidence(
                             )
                         config = prepared[1]
                     else:
-                        config = restore_config(content)
-                        if config_record(config)[0] != identifier:
+                        # Content saved before Red Zone keeps its historical ID.
+                        try:
+                            config, _ = restore_recorded_config(content, identifier)
+                        except ValueError as error:
                             raise ValueError(
                                 "canonical configuration content differs "
                                 "from its identity"
-                            )
+                            ) from error
                     configurations[identifier] = content
                     configuration_bytes[identifier] = encoded
                     restored[identifier] = config

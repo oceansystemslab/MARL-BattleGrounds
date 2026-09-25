@@ -1,4 +1,11 @@
-"""Check recorded actor inputs and rejection of incompatible input versions."""
+"""Check recorded actor inputs and rejection of incompatible input versions.
+
+Current recordings (context V4, frame V3, replay V4) keep every live public input
+leaf exactly, including context column 19 (the Red Zone depth); SharedObs source
+banks rebuild from frame V3; old roots keep their bytes and fail closed; current
+actor POV V3 files keep their exact version and bytes and refuse V1/V2 loaders;
+RunWriter chunks write replay V4 with each chosen source subset.
+"""
 
 from pathlib import Path
 from typing import Literal, cast
@@ -14,22 +21,22 @@ from tests.evaluation_fixtures import (
 )
 
 from marl_battlegrounds.evaluation.actor_projection import (
-    NO_SHARED_OBS_ACTOR_PROJECTION_V2,
+    NO_SHARED_OBS_ACTOR_PROJECTION_V3,
     reconstruct_class_ids_by_agent_by_team_v3,
     reconstruct_shared_obs_sensor_source_bank_v2,
 )
 from marl_battlegrounds.evaluation.models import (
-    BaseObservationV2,
-    EvaluationEpisodeContextV3,
-    EvaluationFrameV2,
+    BaseObservationV3,
+    EvaluationEpisodeContextV4,
+    EvaluationFrameV3,
     canonical_json_bytes,
 )
 from marl_battlegrounds.evaluation.replay_io import load_replay, save_replay
 from marl_battlegrounds.evaluation.replay_v2 import build_replay_v2, context_v2
-from marl_battlegrounds.evaluation.replay_v3 import (
-    ReplayArtifactV3,
-    build_replay_v3,
-    validate_replay_artifact_v3,
+from marl_battlegrounds.evaluation.replay_v4 import (
+    ReplayArtifactV4,
+    build_replay_v4,
+    validate_replay_artifact_v4,
 )
 from marl_battlegrounds.evaluation.runtime_provenance import capture_runtime_provenance
 from marl_battlegrounds.policies.shared_obs import (
@@ -49,7 +56,7 @@ def test_current_replay_preserves_exact_public_input_leaves(
         config=evaluation_env_config(team_sizes=team_sizes, max_steps=1),
         execution_information_mode=mode,
     )
-    replay = build_replay_v3(
+    replay = build_replay_v4(
         trajectory.context,
         trajectory.frames,
         trajectory.transitions,
@@ -58,12 +65,12 @@ def test_current_replay_preserves_exact_public_input_leaves(
     path = tmp_path / "current.marlbg-replay.json"
     save_replay(replay, path)
     loaded = load_replay(path).replay
-    assert type(loaded) is ReplayArtifactV3
+    assert type(loaded) is ReplayArtifactV4
     assert loaded == replay
     assert path.read_bytes() == canonical_json_bytes(replay)
     assert tuple(tmp_path.iterdir()) == (path,)
     for observation, frame in zip(trajectory.observations, loaded.frames, strict=True):
-        assert type(frame) is EvaluationFrameV2
+        assert type(frame) is EvaluationFrameV3
         base = frame.base_observation
         for name in observation._fields:
             live = getattr(observation, name)
@@ -115,12 +122,12 @@ def test_current_recording_rejects_team_ids_wrong_self_rows_and_old_projection()
         ),
     ):
         with pytest.raises(ValidationError):
-            BaseObservationV2.model_validate({**base.model_dump(), field: value})
+            BaseObservationV3.model_validate({**base.model_dump(), field: value})
     with pytest.raises(ValidationError, match="matching relative-input projection"):
-        EvaluationEpisodeContextV3.model_validate(
+        EvaluationEpisodeContextV4.model_validate(
             {
                 **trajectory.context.model_dump(),
-                "actor_projection": NO_SHARED_OBS_ACTOR_PROJECTION_V2,
+                "actor_projection": NO_SHARED_OBS_ACTOR_PROJECTION_V3,
             }
         )
     with pytest.raises(ValueError, match="cannot change"):
@@ -142,10 +149,10 @@ def test_old_and_current_roots_keep_their_original_bytes_and_fail_closed(
     save_replay(old, path)
     assert canonical_json_bytes(load_replay(path).replay) == original
     with pytest.raises(ValueError, match="exact declared root"):
-        validate_replay_artifact_v3(old)  # pyright: ignore[reportArgumentType]
+        validate_replay_artifact_v4(old)  # pyright: ignore[reportArgumentType]
     current = current_captured_evaluation_trajectory()
-    with pytest.raises(TypeError, match="exact frame V2"):
-        build_replay_v3(
+    with pytest.raises(TypeError, match="exact frame V3"):
+        build_replay_v4(
             current.context,
             legacy.frames,  # pyright: ignore[reportArgumentType]
             current.transitions,
@@ -156,31 +163,36 @@ def test_old_and_current_roots_keep_their_original_bytes_and_fail_closed(
 def test_current_actor_pov_persistence_keeps_exact_version_and_bytes(
     tmp_path: Path,
 ) -> None:
-    from marl_battlegrounds.evaluation.pov import export_actor_pov_replay_v2
+    from marl_battlegrounds.evaluation.pov import export_actor_pov_replay_v3
     from marl_battlegrounds.evaluation.replay_io import (
         ReplayLoadError,
         load_actor_pov_replay_artifact_v1,
         load_actor_pov_replay_artifact_v2,
-        save_actor_pov_replay_artifact_v2,
+        load_actor_pov_replay_artifact_v3,
+        save_actor_pov_replay_artifact_v3,
     )
 
     trajectory = current_captured_evaluation_trajectory()
-    replay = build_replay_v3(
+    replay = build_replay_v4(
         trajectory.context,
         trajectory.frames,
         trajectory.transitions,
         runtime_provenance=capture_runtime_provenance("0.0.0"),
     )
-    artifact = export_actor_pov_replay_v2(replay, global_slot=6)
+    artifact = export_actor_pov_replay_v3(replay, global_slot=6)
     path = tmp_path / "actor.marlbg-pov.json"
-    save_actor_pov_replay_artifact_v2(artifact, replay, path)
-    assert load_actor_pov_replay_artifact_v2(path, source_replay=replay) == artifact
-    assert load_actor_pov_replay_artifact_v2(path) == artifact
+    save_actor_pov_replay_artifact_v3(artifact, replay, path)
+    assert load_actor_pov_replay_artifact_v3(path, source_replay=replay) == artifact
+    assert load_actor_pov_replay_artifact_v3(path) == artifact
     assert path.read_bytes() == canonical_json_bytes(artifact)
     assert artifact.content.frames[0].self_ally_index == 1
-    with pytest.raises(ReplayLoadError) as error:
-        load_actor_pov_replay_artifact_v1(path)
-    assert error.value.code == "unsupported_schema_version"
+    for older_loader in (
+        load_actor_pov_replay_artifact_v1,
+        load_actor_pov_replay_artifact_v2,
+    ):
+        with pytest.raises(ReplayLoadError) as error:
+            older_loader(path)
+        assert error.value.code == "unsupported_schema_version"
 
 
 def test_custom_source_subsets_survive_separate_writer_chunks(tmp_path: Path) -> None:
@@ -261,7 +273,7 @@ def test_custom_source_subsets_survive_separate_writer_chunks(tmp_path: Path) ->
     paths = tuple(run_dir.rglob("*.marlbg-replay.json"))
     assert len(paths) == 1
     loaded = load_replay(paths[0]).replay
-    assert isinstance(loaded, ReplayArtifactV3)
+    assert isinstance(loaded, ReplayArtifactV4)
     assert len(loaded.frames) == 4
     for index, (frame, receivers) in enumerate(
         zip(loaded.frames[:-1], delivered, strict=True)

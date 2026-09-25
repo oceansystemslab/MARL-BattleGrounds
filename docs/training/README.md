@@ -350,6 +350,10 @@ declared discounted objective for fixed starts. It does not prove faster
 learning or preservation of an undiscounted win-rate objective. The coefficient
 0.01 is a starting setting, not a qualified learning choice.
 
+Scores are Team Deathmatch points. With a positive `red_zone_depth` (see
+[Red Zone Depth](#red-zone-depth)) a death inside the victim's own Red Zone
+gives 2 points, so it moves the potential by twice the coefficient.
+
 The collector stores one Team A `shaping_reward` per game and keeps native
 `task_rewards` separately. A learner may add the team signal to each active
 Team A value target; dead active agents retain that signal and inactive slots
@@ -358,10 +362,13 @@ Disabled shaping skips the calculation entirely. Shaping never enters actor
 inputs or changes official rewards, scores or metric definitions.
 
 An explicit alternative is `TrainConfig(shaping=True, shaping_mode="score_delta")`.
-It adds `shaping_coefficient` for each new team kill and subtracts the same amount
-for each new team death. The default coefficient is 0.01. Native win/loss reward
-is still added. Simultaneous kills and deaths offset each other. Terminal kills
-count, and there is no cancellation at a real ending. Low-level collection uses
+It adds `shaping_coefficient` for each new point the team scores and subtracts
+the same amount for each new point the enemy scores. An ordinary kill is one
+point; a Red Zone kill is two, so it moves this feedback by twice the
+coefficient. There is no separate Red Zone reward. The default coefficient is
+0.01. Native win/loss reward is still added. Simultaneous points for both teams
+offset each other. Terminal kills count, and there is no cancellation at a real
+ending. Low-level collection uses
 the same `shaping_mode` argument and `team_score_delta_shaping` helper.
 
 **Score-delta shaping changes the training objective.** It can reward combat
@@ -483,7 +490,7 @@ neutral-only action mask. `real_steps` counts rounds, not total transitions.
 The rollout keeps Team A's starting memory and the true final observations,
 masks and ending flags before a pending reset. Use that successor for a cutoff's
 value estimate. A real task ending, including H300, stops the value estimate.
-With `collect_training_state=True`, the separate 919-value physical view is
+With `collect_training_state=True`, the separate 920-value physical view is
 stored once per game, with a matching final view. It never enters the actor.
 Critic values, GAE, complete `PPOBatch` construction, optimization, checkpoint
 selection and durable learner restart remain the learner's responsibility.
@@ -492,10 +499,16 @@ selection and durable learner restart remain the learner's responsibility.
 
 | Encoder | Output Per Record | Purpose |
 | --- | --- | --- |
-| `encode_actor_inputs(ActorInput)` | 5,164 float32 values | Only the receiving actor's permitted information. |
-| `encode_training_state(EnvState, EnvConfig)` | 919 float32 values | Privileged physical state for the training critic. |
+| `encode_actor_inputs(ActorInput)` | 5,165 float32 values | Only the receiving actor's permitted information. |
+| `encode_training_state(EnvState, EnvConfig)` | 920 float32 values | Privileged physical state for the training critic. |
 
-Both schemas start at version 1. `ACTOR_FEATURE_OFFSETS` and
+Both schemas are at version 2. Red Zone scoring added the depth to each: actor
+context column 19 (flat actor feature 1128) and a training-state field right
+after the score threshold. Actors saved before Red Zone use actor input schema
+1 (5,164 features). `load_system` still plays them exactly as before, through
+`schema_1_actor_input` and the old spawn-side rule, but they cannot be
+exported again and their learner checkpoints cannot resume training here.
+`ACTOR_FEATURE_OFFSETS` and
 `TRAINING_STATE_FEATURE_OFFSETS` in [inputs.py](../../src/marl_battlegrounds/baselines/inputs.py)
 map explicit field names to fixed Python slices. Those ordered definitions own
 the layouts; dictionary or PyTree traversal does not choose field order.
@@ -701,7 +714,7 @@ there is no universal threshold that proves or disproves useful learning.
 
 When investigating weak learning, inspect actual task outcomes and fixed-opponent
 validation before increasing the budget. Under native K20/H300, a game without
-a winner at the horizon is a draw even when its kill scores differ. Potential
+a winner at the horizon is a draw even when its scores differ. Potential
 shaping preserves the declared discounted objective for fixed starts; it does
 not turn such draws into wins. Low value loss and a negative actor loss do not
 prove progress: the actor loss also includes its entropy bonus. Compare input
@@ -779,7 +792,7 @@ when a curriculum stage has fewer than five players per team.
 **Model and actors.** One shared local Q-network (256 wide, with a 256-wide
 GRU) turns each actor's permitted inputs and own memory into 198 action
 values. The mixer combines the five chosen values into one team value from the
-919-value physical state; it never reaches an actor. Loaded and exported QMIX
+920-value physical state; it never reaches an actor. Loaded and exported QMIX
 Systems play greedily: epsilon 0, and among equal best values the first legal
 action in the network's own order (mirrored for left-frame games). Details,
 parameter counts and the donor are in the
@@ -819,7 +832,7 @@ curriculum stage, source row and opponent. The runner keeps these totals as
 exact whole numbers; low-level callers of `update_qmix_learner` receive
 per-block counts and must add them up themselves.
 
-**Memory and disk.** One replay row is 29,664 bytes per game: 949,248,000
+**Memory and disk.** One replay row is 29,688 bytes per game: 950,016,000
 bytes for 32 games and 1,000 rows. While a block is checked the learner keeps
 the previous replay (for rollback) and the replay with the new rows, plus
 working space, so plan for up to about three times that; at those sizes XLA
@@ -919,7 +932,7 @@ C-RS). Shaping uses `pqn.gamma`.
 
 **Model and actors.** One shared local Q-network turns each actor's permitted
 inputs and own 512-wide memory into 198 action values: BatchNorm on the input,
-two blocks of Dense 512, BatchNorm and ReLU, a GRU and a Dense head, 4,595,998
+two blocks of Dense 512, BatchNorm and ReLU, a GRU and a Dense head, 4,596,512
 parameters. The team value is the sum of the active actors' values (VDN); there
 is no mixer, critic, physical state, target network or replay. Loaded and
 exported PQN-VDN Systems play greedily: epsilon 0 and, among equal best values,
@@ -981,7 +994,7 @@ block, so used counts are not new experience. The runner keeps exact whole
 numbers; low-level callers of `update_pqn_learner` receive per-block counts and
 add them up themselves.
 
-**Memory and disk.** One kept row is 25,988 bytes per game plus its actors'
+**Memory and disk.** One kept row is 26,008 bytes per game plus its actors'
 memory; the kept rows are about 4.6 MB at 32 games. A whole default window is
 about 110 MB of rows, but only one minibatch's games are expanded to network
 inputs at a time (about 27 MB). The 20-slot opponent history holds about 369 MB
@@ -1217,9 +1230,10 @@ resumed = training.train(resume_from="RUN/checkpoints/CHECKPOINT_ID")
 ```
 
 Omit config to inherit it. Supplying one asserts exact equality; resume cannot
-change the seed, budget, panel or method. Checkpoint and content validation
-happen before any writer rewind. Failures preserve the last published checkpoint
-and report an error; no run silently replaces a seed or increases its budget.
+change the seed, budget, panel, method or Red Zone depth. Checkpoint and content
+validation happen before any writer rewind. Failures preserve the last published
+checkpoint and report an error; no run silently replaces a seed or increases its
+budget.
 
 CLI configuration is a JSON object with `schema_version: 1` and the same
 `TrainConfig` field names. PPO options belong in a nested `ppo` object; a
@@ -1228,9 +1242,10 @@ example `{"method": "qmix", "num_envs": 4, "total_env_steps": 192, "qmix":
 {"rollout_length": 8, "buffer_size": 64, "min_buffer_size": 32}}`, and a
 PQN-VDN config has `"method": "pqn_vdn"` and a nested `pqn` object, for example
 `{"method": "pqn_vdn", "num_envs": 4, "total_env_steps": 176, "pqn":
-{"rollout_length": 4, "memory_window": 2, "epochs": 1, "num_minibatches": 2}}`. Omitted
-fields use the same defaults; unknown fields fail. These commands call the same
-Python functions. For a small CPU development run, save this as `CONFIG.json`:
+{"rollout_length": 4, "memory_window": 2, "epochs": 1, "num_minibatches": 2}}`.
+`"red_zone_depth": 6.0` sets the Red Zone depth (a whole number such as `6`
+also works). Omitted fields use the same defaults; unknown fields fail. These
+commands call the same Python functions. For a small CPU development run, save this as `CONFIG.json`:
 
 ```json
 {
@@ -1269,6 +1284,85 @@ diagnostic games against Random and saves ordinary M8 results. These are wiring
 checks, not useful-learning evidence or checkpoint-selection results. An explicit
 `--method` cannot accompany `--config` or `--resume-from`; those settings already
 name the saved method. The package CLI reads method from the JSON config.
+
+### Red Zone Depth
+
+`TrainConfig.red_zone_depth` sets the Team Deathmatch Red Zone for every
+training game and every validation game of a run. It defaults to
+`DEFAULT_TDM_RED_ZONE_DEPTH`, 5.0 map units. Each team's Red Zone is the
+full-height strip this deep at its own spawn side. When an agent dies with its
+centre inside its own team's Red Zone, the enemy team gets 2 points instead of
+1. It is still one kill and one death. `0.0` turns the rule off and keeps one
+point per death. The rule itself is described in
+[A44](../design/specification_amendments.md#a44-team-deathmatch-red-zone-scoring).
+
+```python
+import marl_battlegrounds as marl_bgs
+from marl_battlegrounds import training
+from marl_battlegrounds.baselines.ppo import PPOConfig
+
+small = dict(num_envs=4, total_env_steps=32, ppo=PPOConfig(rollout_length=4, epochs=1))
+one_point = training.TrainConfig(red_zone_depth=0.0, **small)  # the old rule
+result = training.train(
+    training.TrainConfig(red_zone_depth=6.0, **small),
+    output_dir="artifacts/red-zone-6",
+)
+games = marl_bgs.evaluate(
+    training.load_system(result.final_actor), "random", num_episodes=2,
+    maps=[42], seed=7, num_envs=2, phase="validation", red_zone_depth=6.0,
+    output_dir="artifacts/red-zone-6-games",
+)
+```
+
+Run it on CPU (`JAX_PLATFORMS=cpu`). The tiny budget checks wiring, not play.
+`evaluate` takes the same `red_zone_depth`, so later games can use the depth
+the actor trained under.
+
+The depth must be a Python float that Core accepts: finite, not negative
+(`-0.0` is refused) and, when positive, a normal float32 value. Setup also
+checks it against every map width before any file, including a new validation
+panel, is written. It is fixed for a run. The saved config (still
+`schema_version: 1`), the content binding (version 3) and every validation task
+record it. A resume that declares another depth fails before any file changes:
+"Resume config declares red_zone_depth 6.0, but the saved run uses 5.0. The
+depth is fixed for a run; start a new run to use another depth." A saved config
+without the field was saved before the rule and reads as 0.0.
+
+**Points and kills are different numbers.** Scores, winning thresholds (K20
+and the score-threshold curriculum) and `score_delta` shaping count points.
+Validation cells report both: `mean_team_a_score` in points and
+`mean_team_a_kills` from recorded kills. `mean_kill_difference`, the checkpoint
+selection tiebreak and the kills and deaths shown for Random checks use
+recorded kills. A Red Zone kill therefore adds 2 to a score but 1 to a kill
+difference. Results saved before the rule read kills from their scores, where
+the two were equal. Selection never mixes results recorded under different
+depths.
+
+**Panels.** A panel frozen directly from opponents works at any depth. A panel
+chosen from a tournament ranking records the depth the ranking was played at;
+`train` and `validate_checkpoint` refuse it under another depth (a ranking saved
+before the rule counts as 0.0). Rank again under the new depth, or freeze the
+opponents directly. Validation tasks, Random checks and slot diagnostics all
+play at the run's depth; a task folder saved under another depth is refused
+rather than reused. Called directly, outside a run, they default to 5.0 (see
+the standalone validation example below).
+
+**Old models and old runs.** An actor saved before the rule (actor input
+schema 1, 5,164 features) still loads with `load_system` and can be evaluated
+at any declared depth. It sees its original input and ignores the depth, so it
+is an old model playing a declared task, not a model retrained for Red Zone. Its
+weights cannot be exported again. A learner checkpoint saved before the rule
+cannot resume training in this version: resume refuses it before any file
+changes and says the original source environment that created it (for example
+its launch package) is needed. An exported actor trained before the eight
+scenarios were republished at depth 5.0 can still be a pinned opponent; its
+protected-controller exposure is then recorded as a declared export with
+unknown exposure, so all eight protected scenarios count as familiar for that
+run and its results there are not protected-scenario evidence.
+
+The frozen [MAPPO search](mappo_search.md) and the five-minute screen pin
+`red_zone_depth=0.0`, so their studies keep the one-point scoring they were
+designed under. A Red Zone study needs a new declaration.
 
 ### Progress And Costs
 
@@ -1446,6 +1540,14 @@ validation = validate_checkpoint(
 print(validation["score"], validation["mean_kill_difference"])
 ```
 
+Called directly, `validate_checkpoint`, `validate_random` and
+`run_slot_diagnostic` play at `red_zone_depth=5.0` unless you pass another
+depth. Only `train`, the MAPPO search and the screen pass their own declared
+depth for you. To score an actor
+under the rule it trained with, pass that depth, for example
+`validate_checkpoint(..., red_zone_depth=0.0)` for a model from the pinned MAPPO
+search or the five-minute screen.
+
 `TrainConfig(validation_panel=".../panel.json")` reuses this saved panel. Declare
 opponents once, either in config or in `train`; explicit bindings alongside a
 saved panel may only restore its existing members. `load_panel(path, bindings=...)`
@@ -1503,7 +1605,8 @@ actors and PQN-VDN initial-collection actors, with no optimizer step, are never
 selected.
 The best two routine checkpoints plus final, when distinct, receive fresh
 confirmation. The highest native score wins: win 1, draw 0.5, loss 0. Exact ties
-use mean kill difference, then earlier training step, then checkpoint ID.
+use mean kill difference (recorded kills, not points), then earlier training
+step, then checkpoint ID.
 Incomplete cells cannot select a checkpoint. Maps and opponents have equal weight.
 
 New panels give each opponent its own deterministic root derived from the declared
@@ -1978,10 +2081,12 @@ inference weights and settings. Interrupted games resume through the existing
 M8 evaluator before more training. Native scores always keep K20/H300 and exclude
 shaping. These Random checks are diagnostics, not a claim of competence.
 
-## Kill-Threshold Curriculum
+## Score-Threshold Curriculum
 
-The optional trainer can start with one kill needed to win, then raise the
-threshold while keeping 5v5 teams and all 42 training maps throughout:
+The optional trainer can start with one point needed to win, then raise the
+threshold while keeping 5v5 teams and all 42 training maps throughout.
+Thresholds count points: with the default Red Zone depth one Red Zone kill
+already gives 2. Progress lines say "New Training Games Need K Points To Win":
 
 ```python
 import marl_battlegrounds as marl_bgs
@@ -2015,14 +2120,18 @@ episode stage. A requested stage is not proof that games actually played it.
 This option cannot be combined with `curriculum=True`, which selects the older
 team-size/map schedule. False retains the ordinary K20 path. The trainer checks
 and records each threshold/map source using the existing content authority.
-Direct users of the content helper may pass `score_thresholds=(1, 2, 20)` to
-`prepare_training_content`; default calls retain their original 42-source bank
-and identity. A saved extended binding carries its declared threshold order.
+Direct users of the content helper may pass `score_thresholds=(1, 2, 20)` and
+`red_zone_depth=6.0` to `prepare_training_content`; default calls build the
+42-source K20 bank at depth 5.0. The binding (version 3) records the declared
+threshold order and depth; bindings saved before the Red Zone rule stay
+readable but are not rebuilt.
 Learner resume uses its original frozen source package. Historical frozen actors
 remain usable through `load_system`.
 
 Validation always has its own fixed rules. `validate_random` keeps maps 42–46,
-canonical 5v5 and K20/H300 even when training uses K1. Its optional `root_seed`
+canonical 5v5 and K20/H300 even when training uses K1; it plays at the run's
+`red_zone_depth` (its own `red_zone_depth` argument, default 5.0, when called
+directly). Its optional `root_seed`
 argument selects the actual paired evaluation streams and is part of the saved
 task identity. The default is 19,043,001. For example, a declared fresh check can
 use `seed_pairs=20, root_seed=19_044_791` for 200 games. Merely raising

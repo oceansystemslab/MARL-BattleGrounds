@@ -552,6 +552,10 @@ allowed action, the authoritative result is a draw regardless of score
 differential. Threshold completion sets `terminated`; the horizon sets
 `truncated`; both flags remain true when the two bases coincide.
 
+(Revised by [A44](#a44-team-deathmatch-red-zone-scoring): at a positive Red Zone
+depth, a death inside the victim's own team's Red Zone gives the enemy team 2
+points. It is still one kill and one death.)
+
 The canonical terminal reward is team-shared and sparse: Team A win is
 `[+1, -1]` by team, Team B win is `[-1, +1]`, and draw or ongoing play is
 `[0, 0]`. Every configured active teammate receives its team's terminal value
@@ -1417,6 +1421,9 @@ scores/step/status/cooldown state, and neutral previous-action history. It is
 identified by `default-tdm-map-preview@1`, is visibly distinguished from an
 authored scenario, never mutates or implicitly saves the source map, and leaves
 the current Debug session untouched on any resolution or validation failure.
+
+(Revised by [A44](#a44-team-deathmatch-red-zone-scoring): the preview also
+declares Red Zone depth 5.0 and is identified by `default-tdm-map-preview@2`.)
 
 Spawn pads remain simulator coordinate points with no core radius. DevClient
 authoring renders their validation footprint using the maximum positive body
@@ -2721,6 +2728,10 @@ TDM team totals use authoritative score increments
 or recorded death counts, respecting any nonzero initial score. Selected
 manuscript analyses remain a separate reporting surface.
 
+(Revised by [A44](#a44-team-deathmatch-red-zone-scoring): at a positive Red Zone
+depth one death can add 2 points, so kill and death totals read recorded kills
+and deaths, not score increments.)
+
 ### Implementation boundary
 
 M7's planned sweep includes explicitly identified host/evaluation, transport,
@@ -3342,3 +3353,116 @@ plays Team A gave exactly mirrored results. On all 52 maps GAMMA version 2 won
 Big 12 entrant. It has no route memory, lookahead or prediction of other units.
 Its rules were picked from games that included the test maps. It lost every
 test-map tournament game to BETA.
+
+## A44. Team Deathmatch Red Zone Scoring
+
+**Classification:** approved Core rule change (owner, 24 September 2026).
+**Revises:** A11's one-point scoring rule, A36's kill/death reading of scores
+and A21's default map preview. Earlier amendments, recordings and results keep
+their original meaning.
+
+**The rule.** Each team's Red Zone is a full-height strip on its own spawn
+side, `red_zone_depth` map units deep. When a configured agent newly dies with
+its centre inside its own team's Red Zone, the enemy team gets 2 points. Every
+other new death still gives 1 point. It is still one kill and one death: kill
+and death counts, events and every other rule are unchanged. A depth of 0.0
+turns the rule off (one point per death, as before).
+
+- **Side.** A team's spawn bank is on the right when the mean x of its five
+  ordered pads (unused pads included) is greater than half the float32 map
+  width, computed exactly (`core.axis_mappings.spawn_bank_on_right`: pads and
+  half-width scaled by exactly 1/8, then an error-free float32 sum; the answer
+  does not depend on pad order and no step can overflow). An exactly centred
+  bank is on the left. The host copy
+  `evaluation.models.red_zone_team_on_right` uses exact fractions. Actors
+  trained before this rule keep the old side formula: the float32 mean of the
+  pad x values compared with width / 2, which can read an exactly centred bank
+  as right (for example at widths 17.3 and 20.3). They keep it for both input
+  reflection and returned actions. The public helper
+  `policies.input.team_on_right` now returns `spawn_bank_on_right`; it differs
+  from its old answer only on such near-centre banks (none of the 52 installed
+  maps).
+- **Strip.** Left: `0 <= x <= d`. Right: `float32(w - d) <= x <= w`, with the
+  float32 width `w` and depth `d`. Both bounds are included. Each victim is
+  checked only against its own team's strip, so overlapping strips are allowed.
+- **Timing.** The centre that counts is the one at the start of the tick, when
+  combat resolves, before Charge and ordinary movement. An agent hit lethally
+  that then moves across the boundary keeps its value. A respawn is not a death.
+- **Depth.** `EnvConfig.team_deathmatch_red_zone_depth`, a Python float. It must
+  be finite and nonnegative (-0.0 is refused), 0.0 in neutral mode, and when
+  positive its float32 value must be at least the smallest normal float32 and
+  at most the float32 map width. It is a dynamic JAX input: changing it does
+  not recompile.
+- **Bounds.** At depth 0 one team can gain at most 5 points in one tick, so the
+  largest threshold stays 16,777,212 and scores reach at most K + 4. At a
+  positive depth one team can gain 10 points, so the largest threshold is
+  16,777,207 and scores reach at most K + 9. Scores stay exact in float32.
+- **Public input.** Context column 19 (`CONTEXT_FEATURE_TDM_RED_ZONE_DEPTH`)
+  holds the depth on every configured row in both information modes; columns
+  0-18 are unchanged. Pads and map size were already public.
+
+**Defaults.** 5.0 (`tasks.DEFAULT_TDM_RED_ZONE_DEPTH`) for fresh map-based
+games (`make`, the TDM factories), default `evaluate` and `run_tournament`,
+new training runs, and new DevClient scenario drafts and map previews. An
+explicit 0.0 keeps one-point scoring. Supplying a depth next to an exact
+`env_config`, or one that differs from a recorded depth, raises instead of
+being ignored.
+
+**Records.** New recordings are resolved config V2 (always writes the depth),
+context V4, frame V3 (20 context columns), replay V4, scenario record V5, actor
+POV V3, SharedObs projection 3 and NoSharedObs projection 4. Older records keep
+their original meaning: they scored one point per death and have no depth.
+Saved raw configurations with 12 keys restore at depth 0.0 under their
+original identities. A pass or snapshot saved before the rule stays readable;
+resuming it, or running new games from it, needs the source version that made
+it. Because resolved config V2 always records the depth, a new recording of a
+layout has a new configuration identity, so its episode, match, evaluation and
+matchup IDs differ from older recordings of the same layout. This includes the
+neutral DevClient scenes and sample replays at depth 0.
+
+**Actors.** Actor input schema 2 has 5,165 features (the depth is feature
+1,128) and training-state schema 2 has 920. Actors trained on schema 1 keep
+working: they receive the old 19-column view and the old side formula, so they
+see and act exactly as before. Their weights cannot be re-exported, and old
+training runs cannot be resumed.
+
+**Training.** `TrainConfig.red_zone_depth` defaults to 5.0 and is fixed for a
+run (a resume with another depth is refused); training configs saved without
+it read as 0.0. Validation tasks record the depth (family-1 schema 3, System
+panel schema 4, slot schema 2), and panel ranking evidence gains
+`schema_version` 2 with the ranked depth, so rankings are never reused under
+another rule. The frozen MAPPO search and screen pin 0.0. Score-delta shaping
+follows points, so a Red Zone death moves it by 2. Reports compare recorded
+kills, not points.
+
+**Metrics.** Full metrics schema 15 adds 44 columns: Red Zone kills and deaths
+per team, and per agent Red Zone kill contributions, Red Zone deaths and two
+shares. Priority metrics are unchanged. Kill-difference reports read recorded
+kills, not points.
+
+**DevClient and Viewer.** Authored scenario drafts version 2 declare
+`red_zone_depth` (help: "How far each team's Red Zone reaches in from its own
+spawn edge"). Version-1 drafts mean depth 0.0, their original rule, and keep
+their semantic digests. The map preview is identified by
+`default-tdm-map-preview@2`. The Replay Viewer and DevClient gain the Red Zone
+Floors visual filter, a subtle deep-red floor tint under obstacles, on by
+default; Cooldown Effects is also on by default, giving 11 of 20 filters on.
+The Scenario Author canvas shows the same tint from the host's validation
+reply. PNG export provenance version 2 records all 20 filters.
+
+**Scenarios.** All eight packaged scenarios were republished at depth 5.0: S1
+r42, S2 r20, S3 r27, S4 r15, S5 r16, S6 r17, S7 r30 and S8 r19. Scenario 3 is
+re-approved at r27. S1, S5 and S6 moved sideways by -2.375, +3.5 and -1.625
+map units (every obstacle centre and agent x; pads and y unchanged) so that no
+player in their known solutions enters a Red Zone. Every game fact of the nine
+witness lines is unchanged; S1 positions are bit-exact, S5 and S6 differ by at
+most 0.000002 units of float32 rounding. Other lines of play can differ where
+a controller uses absolute x. Because the scenario identities changed, an
+older exported actor used as a pinned opponent links as a declared export with
+unknown exposure, so all eight scenarios count as familiar-opponent results for
+that run (A26).
+
+**Limits.** This amendment shows the rule is implemented and recorded
+correctly. It does not show that turtling stops: teams could wait just outside
+the strip, spawn camping could pay more, and horizon draws remain possible.
+Those need learning evidence.

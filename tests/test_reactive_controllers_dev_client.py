@@ -21,6 +21,9 @@ also check:
   digest; the Team B ``pressure_protocol`` keys are absent.
 - ALPHA and BETA recordings reopen unchanged, and a retired controller name
   stays valid provenance in a saved replay.
+
+DevClient recordings are current records (replay V4 with context V4 and frame
+V3); the retired controller name case builds a current record too.
 """
 
 import json
@@ -70,8 +73,8 @@ from marl_battlegrounds.core.types import TEAM_A_ID, TEAM_B_ID, EnvConfig, EnvSt
 from marl_battlegrounds.evaluation import policy_execution
 from marl_battlegrounds.evaluation.models import (
     AssignedPolicySlotV2,
-    EvaluationEpisodeContextV3,
-    EvaluationFrameV2,
+    EvaluationEpisodeContextV4,
+    EvaluationFrameV3,
     canonical_digest_sha256,
 )
 from marl_battlegrounds.evaluation.policy_execution import Policy, policy
@@ -83,7 +86,7 @@ from marl_battlegrounds.evaluation.replay_io import (
     preflight_replay_destination,
     save_replay,
 )
-from marl_battlegrounds.evaluation.replay_v3 import ReplayArtifactV3, build_replay_v3
+from marl_battlegrounds.evaluation.replay_v4 import ReplayArtifactV4, build_replay_v4
 from marl_battlegrounds.policies.actor import ActorAction
 from marl_battlegrounds.policies.input import ActorInput, Observations
 from marl_battlegrounds.policies.reactive_tdm_alpha import reactive_tdm_alpha_policy
@@ -97,6 +100,7 @@ from marl_battlegrounds.policies.shared_obs import (
     build_shared_obs_sensor_source_bank,
     execute_shared_obs_team_policy,
 )
+from marl_battlegrounds.tasks import DEFAULT_TDM_RED_ZONE_DEPTH
 
 
 def _scenario(
@@ -440,7 +444,7 @@ def test_saved_context_records_team_a_pressure_controller_beside_manual_team_b(
         execution_information_mode="shared_obs",
     )
     # A saved replay header stores the context as JSON; read it back that way.
-    context = EvaluationEpisodeContextV3.model_validate_json(built.model_dump_json())
+    context = EvaluationEpisodeContextV4.model_validate_json(built.model_dump_json())
     assert context == built
     descriptor = (
         reactive_tdm_beta_controller_descriptor()
@@ -520,7 +524,9 @@ def test_controller_selected_in_default_arena_survives_current_and_saved_loads(
     draft = (
         new_map_draft("renamed_arena")
         if asset_kind == "map"
-        else new_scenario_draft("renamed_scenario")
+        else new_scenario_draft(
+            "renamed_scenario", red_zone_depth=DEFAULT_TDM_RED_ZONE_DEPTH
+        )
     )
     saved = store.save_draft(draft, expected_revision=0)
     for source in (
@@ -775,7 +781,7 @@ def test_reactive_controller_recording_reopens_without_replay_changes(
     advanced = control.submit_interactive(session)
     assert advanced.incoming_evaluation_view is not None
     assert isinstance(
-        advanced.incoming_evaluation_view.successor_frame, EvaluationFrameV2
+        advanced.incoming_evaluation_view.successor_frame, EvaluationFrameV3
     )
     recorder.append(
         advanced.incoming_evaluation_view.transition,
@@ -787,7 +793,7 @@ def test_reactive_controller_recording_reopens_without_replay_changes(
     assert loaded.replay.header.runtime_provenance.policy_execution_included
     assert recorder.saved_bundle is not None
     reopened = load_replay(recorder.saved_bundle.replay_path)
-    assert isinstance(reopened.replay, ReplayArtifactV3)
+    assert isinstance(reopened.replay, ReplayArtifactV4)
     assert reopened.replay.header.context == loaded.replay.header.context
     context = reopened.replay.header.context
     descriptor = (
@@ -836,10 +842,10 @@ def test_reactive_controller_recording_reopens_without_replay_changes(
                 row["value"] = "scenario-3-pressure-controller@1"
             elif row["name"] == "pressure_protocol_digest":
                 row["value"] = "3" * 64
-        legacy_context = EvaluationEpisodeContextV3.model_validate_json(
+        legacy_context = EvaluationEpisodeContextV4.model_validate_json(
             json.dumps(legacy_payload)
         )
-        replay = build_replay_v3(
+        replay = build_replay_v4(
             legacy_context,
             reopened.replay.frames,
             reopened.replay.transitions,

@@ -1,4 +1,16 @@
-"""Check SharedObs composition, actor delivery and recorded input identity."""
+"""Check SharedObs composition, actor delivery and recorded input identity.
+
+The historical SharedObs V1 bank rebuilds from recorded rows. The current
+projection version is 3 (context V4); its per-recipient bank rebuilds from
+frame V3 exactly as the context V3 bank rebuilds from frame V2, and a frame of
+the other version is refused.
+
+In both information modes each actor's policy receives its own observation
+row, which holds the Team Deathmatch Red Zone depth in context column 19 and
+every spawn pad with its own team's bank first; unused slots receive zeros.
+The SharedObs source bank carries no context rows, so neither mode shares
+anything more about the Red Zone.
+"""
 
 from operator import itemgetter
 from typing import cast
@@ -20,6 +32,7 @@ from marl_battlegrounds.core.types import (
     AGENT_FEATURE_ALIVE,
     AGENT_FEATURE_X,
     AGENT_FEATURE_Y,
+    CONTEXT_FEATURE_TDM_RED_ZONE_DEPTH,
     MAX_AGENT_SLOTS,
     MAX_AGENTS_PER_TEAM,
     MAX_OBJECTIVE_SLOTS,
@@ -855,7 +868,7 @@ def test_shared_projection_identity_and_reconstruction_fail_closed() -> None:
         SHARED_OBS_ACTOR_PROJECTION_ID
         == "base-observation-plus-authorized-sensor-source-bank"
     )
-    assert SHARED_OBS_ACTOR_PROJECTION_VERSION == 2
+    assert SHARED_OBS_ACTOR_PROJECTION_VERSION == 3
     assert (
         VersionedIdentityV1(
             identifier="base-observation-plus-authorized-sensor-source-bank",
@@ -926,3 +939,112 @@ def test_shared_projection_identity_and_reconstruction_fail_closed() -> None:
             context,
             without_availability,
         )
+
+
+def test_current_shared_bank_pairs_each_context_with_its_own_frame_version() -> None:
+    from tests.evaluation_fixtures import (
+        current_captured_evaluation_trajectory,
+        pre_red_zone_captured_evaluation_trajectory,
+    )
+
+    from marl_battlegrounds.evaluation.actor_projection import (
+        reconstruct_shared_obs_sensor_source_bank_v2,
+    )
+
+    current = current_captured_evaluation_trajectory(
+        transition_count=1, execution_information_mode="shared_obs"
+    )
+    older = pre_red_zone_captured_evaluation_trajectory(
+        transition_count=1, execution_information_mode="shared_obs"
+    )
+    for slot in (0, 5):
+        _assert_tree_exact(
+            reconstruct_shared_obs_sensor_source_bank_v2(
+                current.context, current.frames[0], slot
+            ),
+            reconstruct_shared_obs_sensor_source_bank_v2(
+                older.context, older.frames[0], slot
+            ),
+        )
+    with pytest.raises(ValueError, match="must match its context version"):
+        reconstruct_shared_obs_sensor_source_bank_v2(
+            current.context,
+            older.frames[0],  # pyright: ignore[reportArgumentType]
+            0,
+        )
+    with pytest.raises(ValueError, match="must match its context version"):
+        reconstruct_shared_obs_sensor_source_bank_v2(
+            older.context, current.frames[0], 0
+        )
+
+
+def _echo_red_zone_inputs(
+    observation: Observation, action_mask: ActionMask, key: Array
+) -> ActorAction:
+    # A probe, not a real policy: it returns the depth and pads it was given.
+    del action_mask, key
+    return ActorAction(
+        move=observation.context_features[CONTEXT_FEATURE_TDM_RED_ZONE_DEPTH],
+        select_target=(
+            observation.spawn_lifecycle.spawn_pad_positions_by_agent_by_team
+        ),
+        use_ultimate=jnp.asarray(0, dtype=jnp.int32),
+    )
+
+
+def _echo_shared_red_zone_inputs(
+    observation: Observation,
+    action_mask: ActionMask,
+    key: Array,
+    source_bank: SharedObsSensorSourceBankV2,
+    recipient_source_availability: Array,
+) -> ActorAction:
+    del source_bank, recipient_source_availability
+    return _echo_red_zone_inputs(observation, action_mask, key)
+
+
+def test_both_information_modes_deliver_the_red_zone_depth_and_pads() -> None:
+    config = _tdm_config()._replace(team_deathmatch_red_zone_depth=5.0)
+    _, observation, action_mask, _ = reset(config, jax.random.key(0))
+    keys = jax.random.split(jax.random.key(1), MAX_AGENT_SLOTS)
+    bank = build_shared_obs_sensor_source_bank(observation)
+    availability = build_default_shared_obs_information_availability(
+        config.agent_profile.active_mask,
+        config.agent_profile.team_ids,
+    )
+    assert not any("context" in name for name in SharedObsSensorSourceBankV2._fields)
+    pads = np.asarray(config.team_spawn_pad_positions)
+    active = np.asarray(config.agent_profile.active_mask).reshape(2, -1)
+    for team_index, team_identity in enumerate((1, 2)):
+        own_bank_first = pads[[team_index, 1 - team_index]]
+        team_active = active[team_index]
+        for delivered in (
+            cast(
+                ActorAction,
+                execute_no_shared_obs_team_policy(
+                    observation, action_mask, keys, _echo_red_zone_inputs, team_identity
+                ),
+            ),
+            cast(
+                ActorAction,
+                execute_shared_obs_team_policy(
+                    observation,
+                    action_mask,
+                    keys,
+                    bank,
+                    availability,
+                    _echo_shared_red_zone_inputs,
+                    team_identity,
+                ),
+            ),
+        ):
+            np.testing.assert_array_equal(
+                np.asarray(delivered.move),
+                np.where(team_active, np.float32(5.0), np.float32(0.0)),
+            )
+            np.testing.assert_array_equal(
+                np.asarray(delivered.select_target),
+                np.where(
+                    team_active[:, None, None, None], own_bank_first, np.float32(0.0)
+                ),
+            )

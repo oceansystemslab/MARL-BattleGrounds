@@ -50,7 +50,7 @@
       }
     },
     {
-      "files": ["dev-client-authoring.spec.js"]
+      "files": ["dev-client-authoring.spec.js", "red-zone-metrics.spec.js"]
     },
     {
       "files": [

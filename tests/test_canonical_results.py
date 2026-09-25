@@ -2,6 +2,10 @@
 
 Synthetic complete records exercise the public saved reader and its memory view.
 No ratings are fitted, no games are played and no official bundle is installed.
+A reuse run of a snapshot saved before the Red Zone rule (pins 14, 2, 3) reads
+its full reports with the schema-14 header and its metadata says
+metric_schema_version 14, on the saved and the in-memory route alike; a current
+snapshot uses schema 15 for both.
 """
 
 # pyright: reportPrivateUsage=false
@@ -25,9 +29,15 @@ from marl_battlegrounds.evaluation.tournament_reuse import resolve_reuse_plan
 
 
 def _saved(
-    tmp_path: Path, *, mode: str = "priority", full: bool = False
+    tmp_path: Path,
+    *,
+    mode: str = "priority",
+    full: bool = False,
+    historical: bool = False,
 ) -> tuple[Path, dict[str, Any], TournamentRecords]:
-    bundle = build_record_bundle(tmp_path / "source", entrants=3, maps=1, full=full)
+    bundle = build_record_bundle(
+        tmp_path / "source", entrants=3, maps=1, full=full, historical=historical
+    )
     config = bundle["config"]
     plan = resolve_reuse_plan(config, bundle["paths"])
     details: dict[str, object] = {
@@ -96,6 +106,38 @@ def test_none_keeps_outcomes_and_only_selected_full_rows(tmp_path: Path) -> None
         == "disabled"
     )
     assert len(list(loaded.iter_table("full_metrics", rows=1))) == 1
+
+
+def test_full_reports_read_with_the_snapshot_pinned_schema_header(
+    tmp_path: Path,
+) -> None:
+    from marl_battlegrounds.evaluation.metric_catalog import (
+        FULL_METRIC_NAMES_BY_SCHEMA_VERSION,
+    )
+    from marl_battlegrounds.evaluation.run_writer import IDENTITY_COLUMNS
+
+    for historical, version in ((True, 14), (False, 15)):
+        root = tmp_path / str(version)
+        root.mkdir()
+        path, manifest, records = _saved(
+            root, mode="full", full=True, historical=historical
+        )
+        assert records.scalar_schema == version
+        header = (*IDENTITY_COLUMNS, *FULL_METRIC_NAMES_BY_SCHEMA_VERSION[version])
+        loaded = load_results(path)
+        # The run's own writer records 15; the result reports the snapshot pin.
+        assert manifest["metric_schema_version"] == 15
+        assert loaded.metadata["metric_schema_version"] == version
+        memory = CanonicalView(
+            manifest, run_dir=None, memory={"_record_access": records}
+        )
+        assert memory.metadata["metric_schema_version"] == version
+        assert memory.metadata["tables"]["full_metrics"]["columns"] == header
+        assert loaded.metadata["tables"]["full_metrics"]["columns"] == header
+        table = loaded.table("full_metrics")
+        assert tuple(table) == header
+        assert len(table["episode_id"]) == 6
+        assert any("red_zone" in name for name in table) is (not historical)
 
 
 def test_missing_source_is_an_error_not_a_partial_table(tmp_path: Path) -> None:

@@ -1,6 +1,7 @@
 /**
- * @file Check map-to-viewport coordinates, bounded status/route layouts and readable
- * dense displays.
+ * @file Check map-to-viewport coordinates, bounded status/route layouts, readable
+ * dense displays and the Red Zone floor strips (clipped to the floor, collapsed
+ * ranges dropped, overlaps merged so no floor is tinted twice).
  */
 import assert from "node:assert/strict";
 import test from "node:test";
@@ -12,6 +13,7 @@ import {
   layoutStatusDocks,
   protectedBodyRect,
   rectanglesIntersect,
+  redZoneFloorIntervals,
   viewportOverflow,
 } from "../src/layout.js";
 import { routeMarkerPose } from "../src/routes.js";
@@ -2689,4 +2691,41 @@ test("cross-phase polyline fallback fails loudly when a durable wall seals the v
       }),
     /no bounded protected-region lane/,
   );
+});
+
+test("Red Zone floor strips are clipped, merged and never painted twice", () => {
+  /** @param {number} width @param {number[]} teamA @param {number[]} teamB */
+  const strips = (width, teamA, teamB) =>
+    redZoneFloorIntervals(width, { team_a_x_range: teamA, team_b_x_range: teamB }).map(
+      ({ start, end }) => [start, end],
+    );
+  assert.deepEqual(strips(20, [0, 5], [15, 20]), [
+    [0, 5],
+    [15, 20],
+  ]);
+  assert.deepEqual(strips(20, [15, 20], [0, 5]), [
+    [0, 5],
+    [15, 20],
+  ]);
+  // Overlapping strips (depth 12 on a width-20 map) become one strip.
+  assert.deepEqual(strips(20, [0, 12], [8, 20]), [[0, 20]]);
+  // Strips that just touch also merge, so the shared edge is not darker.
+  assert.deepEqual(strips(20, [0, 10], [10, 20]), [[0, 20]]);
+  // Both banks on one side record the same strip twice.
+  assert.deepEqual(strips(20, [0, 5], [0, 5]), [[0, 5]]);
+  // A collapsed right strip (depth 1e-8) paints nothing; the left one stays.
+  const tiny = Math.fround(1e-8);
+  assert.deepEqual(strips(20, [0, tiny], [20, 20]), [[0, tiny]]);
+  // A float32 width just above the raw width is clipped to the drawn floor.
+  const width32 = Math.fround(12.1);
+  assert.deepEqual(strips(12.1, [0, width32], [0, width32]), [[0, 12.1]]);
+  assert.deepEqual(strips(12.1, [0, tiny], [width32, width32]), [[0, tiny]]);
+  assert.deepEqual(strips(20, [0, 5], [15, 20]).length, 2);
+  assert.deepEqual(redZoneFloorIntervals(20, null), []);
+  const result = redZoneFloorIntervals(20, {
+    team_a_x_range: [0, 5],
+    team_b_x_range: [15, 20],
+  });
+  assert.equal(Object.isFrozen(result), true);
+  assert.equal(result.every(Object.isFrozen), true);
 });

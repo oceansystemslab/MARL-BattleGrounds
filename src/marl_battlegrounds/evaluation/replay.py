@@ -3,8 +3,8 @@
 A replay stores context once, T+1 frames, and T transitions, including an initial
 frame for an empty prefix. It contains host records, not live EnvState objects,
 renderer images, policy internals, or local paths. Content digests bind the
-trajectory and metric sidecar without a circular reference. Current frame V2
-recording uses replay_v3; these V1 readers preserve historical compatibility.
+trajectory and metric sidecar without a circular reference. Current frame V3
+recording uses replay_v4; these V1 readers preserve historical compatibility.
 """
 
 from __future__ import annotations

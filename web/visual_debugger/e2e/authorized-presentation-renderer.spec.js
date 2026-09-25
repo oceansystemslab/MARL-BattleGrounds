@@ -1,6 +1,14 @@
 /**
- * @file Check real rendered authority boundaries, agent identity, range preferences
- * and the debugger grid.
+ * @file Check real rendered authority boundaries, agent identity, range preferences,
+ * the debugger grid and the Red Zone floor tint (exact recorded strips, clipped and
+ * merged, painted after the floor boundary and before the grid, beneath obstacles).
+ * The expected strips come from expectedRedZoneIntervals, an independent copy of
+ * the display rule: clip each recorded strip to the drawn floor, drop strips with
+ * no width, merge overlaps. The Red Zone Floors test attaches a screenshot of a
+ * depth-6 Oracle with a wall and a pillar on the strip edges for a person to
+ * inspect. The durable visual filters test includes Red Zone Floors: turning it
+ * off removes only the tint (paint with no accessible text) and keeps every
+ * obstacle, agent and agent identity.
  */
 import { readFileSync } from "node:fs";
 import { readFile } from "node:fs/promises";
@@ -286,6 +294,290 @@ test("Debugger unit grid is lowest, exact, click-transparent, and absent from re
   expect(result.replayGridCount).toBe(0);
 });
 
+/** @param {number} width @param {Record<string, any> | null} redZone */
+function expectedRedZoneIntervals(width, redZone) {
+  if (redZone === null) {
+    return [];
+  }
+  const clipped = [redZone.team_a_x_range, redZone.team_b_x_range]
+    .map(([low, high]) => [Math.max(0, low), Math.min(width, high)])
+    .filter(([low, high]) => high > low)
+    .sort((left, right) => left[0] - right[0]);
+  /** @type {number[][]} */
+  const merged = [];
+  for (const [low, high] of clipped) {
+    const last = merged.at(-1);
+    if (last !== undefined && low <= last[1]) {
+      last[1] = Math.max(last[1], high);
+    } else {
+      merged.push([low, high]);
+    }
+  }
+  return merged;
+}
+
+test("Red Zone Floors paint exact recorded strips beneath obstacles", async ({
+  page,
+}, testInfo) => {
+  const caseNames = [
+    "live_oracle_depth_6",
+    "live_oracle_depth_5_5_swapped_banks",
+    "live_oracle_overlapping_strips",
+    "live_oracle_full-width_strips",
+    "live_oracle_both_banks_on_the_left",
+    "live_oracle_depth_0_1_on_width_17_3",
+    "live_oracle_12_x_12_map",
+    "live_oracle_depth_0",
+    "live_oracle_depth_1e-8_on_width_20",
+    "live_oracle_depth_12_1_on_width_12_1",
+    "live_oracle_depth_1e-8_on_width_12_1",
+    "live_oracle_depth_6_obstacles_on_strip_edges",
+    "replay_oracle_depth_5",
+  ];
+  await page.goto(origin);
+  const result = await page.evaluate(
+    async ({ cases, legacyRaw }) => {
+      const moduleRoot = "/src";
+      const { normalizeAuthorizedPresentationFrameV1 } = await import(
+        `${moduleRoot}/authorized-presentation-normalizer.js`
+      );
+      const { BattlefieldRenderer } = await import(`${moduleRoot}/scene.js`);
+      const {
+        DEFAULT_VISUAL_FILTER_STATE,
+        enableAllVisualFilters,
+        setVisualFilterEnabled,
+      } = await import(`${moduleRoot}/visual-filters.js`);
+      const allVisualFilters = enableAllVisualFilters(DEFAULT_VISUAL_FILTER_STATE);
+      const tintOff = setVisualFilterEnabled(
+        allVisualFilters,
+        "red_zone_floors",
+        false,
+      );
+      const battlefield = document.querySelector("#battlefield");
+      const empty = document.querySelector("#empty");
+      if (!(battlefield instanceof SVGSVGElement) || !(empty instanceof HTMLElement)) {
+        throw new Error("Red Zone test surface is unavailable.");
+      }
+      const renderer = new BattlefieldRenderer({ battlefield, empty });
+      /** @param {Element} element */
+      const numbers = (element, /** @type {string[]} */ names) =>
+        Object.fromEntries(
+          names.map((name) => [name, Number(element.getAttribute(name))]),
+        );
+      /** @param {Record<string, any>} presentation @param {any} filters */
+      const paint = (presentation, filters) => {
+        renderer.render(presentation, {
+          showRanges: false,
+          visualFilterState: filters,
+        });
+        const mapLayer = battlefield.querySelector('[data-layer="map"]');
+        const boundary = battlefield.querySelector(".map-boundary");
+        if (
+          !(mapLayer instanceof SVGGElement) ||
+          !(boundary instanceof SVGRectElement)
+        ) {
+          throw new Error("Map layer is unavailable.");
+        }
+        const windows = Array.from(mapLayer.querySelectorAll(".red-zone-floor-clip"));
+        const firstTint = mapLayer.querySelector(".red-zone-floor");
+        return {
+          order: Array.from(mapLayer.children).map((child) =>
+            child.classList.contains("map-grid-line")
+              ? "grid"
+              : child.getAttribute("class"),
+          ),
+          boundary: numbers(boundary, ["x", "y", "width", "height", "rx"]),
+          windows: windows.map((window) => ({
+            x: Number(window.getAttribute("x")),
+            y: Number(window.getAttribute("y")),
+            width: Number(window.getAttribute("width")),
+            height: Number(window.getAttribute("height")),
+            rect: numbers(window.querySelector(".red-zone-floor") ?? window, [
+              "x",
+              "y",
+              "width",
+              "height",
+              "rx",
+            ]),
+            childCount: window.children.length,
+            ids: window.querySelectorAll("[id]").length + (window.id ? 1 : 0),
+          })),
+          fill: firstTint ? getComputedStyle(firstTint).fill : null,
+          clipPointerEvents: windows[0]
+            ? getComputedStyle(windows[0]).pointerEvents
+            : null,
+          tintPointerEvents: firstTint
+            ? getComputedStyle(firstTint).pointerEvents
+            : null,
+          mapLayerFirst: mapLayer === battlefield.querySelector("[data-layer]"),
+        };
+      };
+      /** @param {Element} obstacle */
+      const obstacleLook = (obstacle) => {
+        const style = getComputedStyle(obstacle);
+        return `${style.fill}|${style.stroke}`;
+      };
+      const rows = [];
+      for (const [name, raw] of Object.entries(cases)) {
+        const presentation = await normalizeAuthorizedPresentationFrameV1(raw);
+        const map = presentation.current_endpoint.scene.map;
+        const on = paint(presentation, allVisualFilters);
+        const obstacleRows = Array.from(battlefield.querySelectorAll(".obstacle")).map(
+          (obstacle) => {
+            const box = obstacle.getBoundingClientRect();
+            const hit = document.elementFromPoint(
+              box.left + box.width / 2,
+              box.top + box.height / 2,
+            );
+            return {
+              hitsObstacle: hit?.closest(".obstacle") === obstacle,
+              look: obstacleLook(obstacle),
+            };
+          },
+        );
+        const off = paint(presentation, tintOff);
+        const offLooks = Array.from(battlefield.querySelectorAll(".obstacle")).map(
+          obstacleLook,
+        );
+        rows.push({
+          name,
+          width: map.width,
+          redZone: map.red_zone ?? null,
+          on,
+          off,
+          obstacleRows,
+          offLooks,
+        });
+      }
+      const legacy = await normalizeAuthorizedPresentationFrameV1(legacyRaw);
+      const legacyPaint = paint(legacy, allVisualFilters);
+      return { rows, legacyWindows: legacyPaint.windows.length };
+    },
+    {
+      cases: Object.fromEntries(
+        caseNames.map((name) => [name, fixture.red_zone_cases[name]]),
+      ),
+      legacyRaw: fixture.pairs.replay_oracle.presentation,
+    },
+  );
+
+  const expectedWindowCounts = {
+    live_oracle_depth_6: 2,
+    live_oracle_depth_5_5_swapped_banks: 2,
+    live_oracle_overlapping_strips: 1,
+    "live_oracle_full-width_strips": 1,
+    live_oracle_both_banks_on_the_left: 1,
+    live_oracle_depth_0_1_on_width_17_3: 2,
+    live_oracle_12_x_12_map: 2,
+    live_oracle_depth_0: 0,
+    "live_oracle_depth_1e-8_on_width_20": 1,
+    live_oracle_depth_12_1_on_width_12_1: 1,
+    "live_oracle_depth_1e-8_on_width_12_1": 1,
+    live_oracle_depth_6_obstacles_on_strip_edges: 2,
+    replay_oracle_depth_5: 2,
+  };
+  expect(result.rows.map((row) => row.name)).toEqual(caseNames);
+  expect(result.legacyWindows).toBe(0);
+  for (const row of result.rows) {
+    const expected = expectedRedZoneIntervals(row.width, row.redZone);
+    expect(row.on.windows, row.name).toHaveLength(
+      expectedWindowCounts[/** @type {keyof typeof expectedWindowCounts} */ (row.name)],
+    );
+    expect(row.on.windows).toHaveLength(expected.length);
+    expect(row.off.windows, row.name).toHaveLength(0);
+    expect(row.on.mapLayerFirst).toBe(true);
+    const { x, y, width, height, rx } = row.on.boundary;
+    const scale = width / row.width;
+    for (const [index, [low, high]] of expected.entries()) {
+      const window = row.on.windows[index];
+      expect(window.x, `${row.name} left`).toBeCloseTo(x + low * scale, 6);
+      expect(window.x + window.width, `${row.name} right`).toBeCloseTo(
+        x + high * scale,
+        6,
+      );
+      expect(window.y).toBeCloseTo(y, 6);
+      expect(window.height).toBeCloseTo(height, 6);
+      expect(window.childCount).toBe(1);
+      expect(window.ids).toBe(0);
+      expect(window.rect.x).toBeCloseTo(x - window.x, 6);
+      expect(window.rect.y).toBe(0);
+      expect(window.rect.width).toBeCloseTo(width, 6);
+      expect(window.rect.height).toBeCloseTo(height, 6);
+      expect(window.rect.rx).toBe(rx);
+    }
+    const tintCount = row.on.windows.length;
+    const gridCount = row.on.order.filter((part) => part === "grid").length;
+    expect(row.on.order, row.name).toEqual([
+      "map-boundary",
+      ...Array(tintCount).fill("red-zone-floor-clip"),
+      ...Array(gridCount).fill("grid"),
+    ]);
+    if (tintCount > 0) {
+      expect(row.on.fill).toBe("rgba(127, 29, 29, 0.22)");
+      expect(row.on.clipPointerEvents).toBe("none");
+      expect(row.on.tintPointerEvents).toBe("none");
+    }
+    expect(
+      row.obstacleRows.map((obstacle) => obstacle.look),
+      row.name,
+    ).toEqual(row.offLooks);
+    for (const obstacle of row.obstacleRows) {
+      expect(obstacle.hitsObstacle, row.name).toBe(true);
+    }
+  }
+  const byName = Object.fromEntries(result.rows.map((row) => [row.name, row]));
+  // A wall across x = 6 and a pillar across x = 14 sit on the strip edges; both stay
+  // on top of the tint and keep their fill and stroke.
+  expect(byName.live_oracle_depth_6_obstacles_on_strip_edges.obstacleRows).toHaveLength(
+    2,
+  );
+  // Replay has no grid lines, and the tint still shows.
+  expect(byName.replay_oracle_depth_5.on.order).toEqual([
+    "map-boundary",
+    "red-zone-floor-clip",
+    "red-zone-floor-clip",
+  ]);
+  // A collapsed right strip paints nothing; the thin left strip remains.
+  for (const name of [
+    "live_oracle_depth_1e-8_on_width_20",
+    "live_oracle_depth_1e-8_on_width_12_1",
+  ]) {
+    expect(byName[name].on.windows[0].x).toBeCloseTo(byName[name].on.boundary.x, 6);
+  }
+  // Depth equal to the float32 width paints the whole drawn floor once.
+  const fullNarrow = byName.live_oracle_depth_12_1_on_width_12_1.on;
+  expect(fullNarrow.windows[0].width).toBeCloseTo(fullNarrow.boundary.width, 6);
+
+  await page.evaluate(
+    async ({ raw }) => {
+      const moduleRoot = "/src";
+      const { normalizeAuthorizedPresentationFrameV1 } = await import(
+        `${moduleRoot}/authorized-presentation-normalizer.js`
+      );
+      const { BattlefieldRenderer } = await import(`${moduleRoot}/scene.js`);
+      const { DEFAULT_VISUAL_FILTER_STATE } = await import(
+        `${moduleRoot}/visual-filters.js`
+      );
+      const battlefield = document.querySelector("#battlefield");
+      const empty = document.querySelector("#empty");
+      if (!(battlefield instanceof SVGSVGElement) || !(empty instanceof HTMLElement)) {
+        throw new Error("Red Zone screenshot surface is unavailable.");
+      }
+      new BattlefieldRenderer({ battlefield, empty }).render(
+        await normalizeAuthorizedPresentationFrameV1(raw),
+        { showRanges: false, visualFilterState: DEFAULT_VISUAL_FILTER_STATE },
+      );
+    },
+    { raw: fixture.red_zone_cases.live_oracle_depth_6_obstacles_on_strip_edges },
+  );
+  const screenshotPath = testInfo.outputPath("red-zone-floors-obstacles.png");
+  await page.locator("#battlefield").screenshot({ path: screenshotPath });
+  await testInfo.attach("red-zone-floors", {
+    path: screenshotPath,
+    contentType: "image/png",
+  });
+});
+
 test("Target Selection Visuals hides only reticle and legality paint", async ({
   page,
 }) => {
@@ -466,7 +758,7 @@ test("durable visual filters remove owned paint and restore stable battlefield i
 }) => {
   await page.goto(origin);
   const result = await page.evaluate(
-    async ({ oracleRaw, povRaw }) => {
+    async ({ oracleRaw, povRaw, redZoneRaw }) => {
       const moduleRoot = "/src";
       const { normalizeAuthorizedPresentationFrameV1 } = await import(
         `${moduleRoot}/authorized-presentation-normalizer.js`
@@ -485,9 +777,15 @@ test("durable visual filters remove owned paint and restore stable battlefield i
       }
       const presentation = await normalizeAuthorizedPresentationFrameV1(oracleRaw);
       const povPresentation = await normalizeAuthorizedPresentationFrameV1(povRaw);
+      // The Oracle fixture above has a version 1 map with no strips, so Red Zone
+      // Floors runs on a version 2 Oracle with two strips and obstacles on their edges.
+      const redZonePresentation =
+        await normalizeAuthorizedPresentationFrameV1(redZoneRaw);
       const presentationBytes = JSON.stringify(presentation);
       const povPresentationBytes = JSON.stringify(povPresentation);
+      const redZonePresentationBytes = JSON.stringify(redZonePresentation);
       const renderer = new BattlefieldRenderer({ battlefield, empty });
+      /** @type {Array<{filterId: string, ownerSelector: string, ownsTooltip: boolean, reservesLayout: boolean, layoutAttribute: string | null, accessible?: boolean}>} */
       const filterCases = [
         {
           filterId: "aura_fields",
@@ -526,9 +824,34 @@ test("durable visual filters remove owned paint and restore stable battlefield i
           layoutAttribute: "data-suppressed-cooldown-presentation-keys",
         },
       ];
+      /** @type {typeof filterCases} */
+      const redZoneFilterCases = [
+        {
+          filterId: "red_zone_floors",
+          ownerSelector: ".red-zone-floor-clip, .red-zone-floor",
+          ownsTooltip: false,
+          reservesLayout: false,
+          layoutAttribute: null,
+          // The tint is paint only; it carries no label, role or hidden flag.
+          accessible: false,
+        },
+      ];
       const viewports = [
         { width: 720, height: 480 },
         { width: 1080, height: 720 },
+      ];
+      // The Oracle runs keep their original order; the Red Zone runs follow them.
+      const renderRuns = [
+        ...viewports.map((viewport) => ({
+          viewport,
+          runPresentation: presentation,
+          runCases: filterCases,
+        })),
+        ...viewports.map((viewport) => ({
+          viewport,
+          runPresentation: redZonePresentation,
+          runCases: redZoneFilterCases,
+        })),
       ];
       const rows = [];
       const coreSelectors = [
@@ -573,17 +896,17 @@ test("durable visual filters remove owned paint and restore stable battlefield i
         };
       };
 
-      for (const viewport of viewports) {
+      for (const { viewport, runPresentation, runCases } of renderRuns) {
         battlefield.style.width = `${viewport.width}px`;
         battlefield.style.height = `${viewport.height}px`;
-        renderer.render(presentation, { showRanges: true });
+        renderer.render(runPresentation, { showRanges: true });
         const defaultMarkup = battlefield.outerHTML;
-        renderer.render(presentation, {
+        renderer.render(runPresentation, {
           showRanges: true,
           visualFilterState: DEFAULT_VISUAL_FILTER_STATE,
         });
         const explicitDefaultMatchesImplicit = battlefield.outerHTML === defaultMarkup;
-        renderer.render(presentation, {
+        renderer.render(runPresentation, {
           showRanges: true,
           visualFilterState: allVisualFilters,
         });
@@ -595,7 +918,7 @@ test("durable visual filters remove owned paint and restore stable battlefield i
         }
         const baselineCoreCounts = coreCounts();
 
-        for (const filterCase of filterCases) {
+        for (const filterCase of runCases) {
           const baselineOwned = ownedSnapshot(filterCase.ownerSelector);
           const baselineProtectedKey = protectedKey();
           const baselineAgentAria = originalAgent.getAttribute("aria-label") ?? "";
@@ -611,7 +934,7 @@ test("durable visual filters remove owned paint and restore stable battlefield i
             filterCase.filterId,
             false,
           );
-          renderer.render(presentation, {
+          renderer.render(runPresentation, {
             showRanges: true,
             visualFilterState: disabledState,
           });
@@ -634,7 +957,7 @@ test("durable visual filters remove owned paint and restore stable battlefield i
             originalAgent.hasAttribute("data-tooltip-owner") &&
             disabledAgentAria.length > 0;
 
-          renderer.render(presentation, {
+          renderer.render(runPresentation, {
             showRanges: true,
             visualFilterState: allVisualFilters,
           });
@@ -714,7 +1037,8 @@ test("durable visual filters remove owned paint and restore stable battlefield i
       return {
         presentationUnchanged:
           JSON.stringify(presentation) === presentationBytes &&
-          JSON.stringify(povPresentation) === povPresentationBytes,
+          JSON.stringify(povPresentation) === povPresentationBytes &&
+          JSON.stringify(redZonePresentation) === redZonePresentationBytes,
         stateFrozen: Object.isFrozen(DEFAULT_VISUAL_FILTER_STATE),
         rows,
         povStatusRows,
@@ -723,18 +1047,29 @@ test("durable visual filters remove owned paint and restore stable battlefield i
     {
       oracleRaw: fixture.state_cases.replay_oracle_final_selected,
       povRaw: fixture.state_cases.replay_shared_final,
+      redZoneRaw: fixture.red_zone_cases.live_oracle_depth_6_obstacles_on_strip_edges,
     },
   );
 
   expect(result.presentationUnchanged).toBe(true);
   expect(result.stateFrozen).toBe(true);
-  expect(result.rows).toHaveLength(10);
+  expect(result.rows).toHaveLength(12);
+  // Two separate strips: two clip windows, each holding one tint rect.
+  expect(
+    result.rows
+      .filter((row) => row.filterId === "red_zone_floors")
+      .map((row) => row.baselineOwned),
+  ).toEqual(Array(2).fill({ count: 4, tooltipOwnerCount: 0, ariaOwnerCount: 0 }));
   for (const row of result.rows) {
     expect(row.explicitDefaultMatchesImplicit, row.viewport).toBe(true);
     expect(row.baselineOwned.count, `${row.viewport} ${row.filterId}`).toBeGreaterThan(
       0,
     );
-    expect(row.baselineOwned.ariaOwnerCount, row.filterId).toBeGreaterThan(0);
+    if (row.accessible === false) {
+      expect(row.baselineOwned.ariaOwnerCount, row.filterId).toBe(0);
+    } else {
+      expect(row.baselineOwned.ariaOwnerCount, row.filterId).toBeGreaterThan(0);
+    }
     if (row.ownsTooltip) {
       expect(row.baselineOwned.tooltipOwnerCount, row.filterId).toBeGreaterThan(0);
     }

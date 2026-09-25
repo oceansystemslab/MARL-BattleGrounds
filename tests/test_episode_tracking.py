@@ -336,6 +336,7 @@ def test_unused_invalid_spawn_exchange_does_not_block_tracking() -> None:
 
     source = _source()._replace(
         task_mode=0,
+        team_deathmatch_red_zone_depth=0.0,
         team_deathmatch_score_threshold=0,
         agent_profile=resolve_agent_profile(
             jnp.array([5] + [0] * 9, jnp.int32), jnp.array([1, 0], jnp.int32)
@@ -357,6 +358,7 @@ def test_ambiguous_source_is_known_without_spawn_balance_credit() -> None:
 
     source = _source()._replace(
         task_mode=0,
+        team_deathmatch_red_zone_depth=0.0,
         team_deathmatch_score_threshold=0,
         agent_profile=resolve_agent_profile(
             jnp.zeros(10, jnp.int32), jnp.zeros(2, jnp.int32)

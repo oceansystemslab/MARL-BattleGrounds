@@ -1,5 +1,15 @@
 # pyright: reportPrivateUsage=false
-"""Check conversion of game frames and transition facts into evaluation records."""
+"""Check conversion of game frames and transition facts into evaluation records.
+
+Red Zone capture: V3 capture under context V4 writes frame V3, whose context
+column 19 is the recorded depth on every configured row (alive or dead) and
+0.0 on padded rows, at depths 0, 5 and 6; frames that differ only in depth
+differ only in that column. V1 and V2 capture refuse a live 20-column
+observation, and each capture version refuses the other context versions.
+Frame validation catches a column 19 that disagrees with the recorded depth
+or is nonzero on a padded row; capture under context V4 leaves that check to
+validation and replay admission.
+"""
 
 from __future__ import annotations
 
@@ -13,11 +23,19 @@ import numpy as np
 import pytest
 from numpy.typing import NDArray
 from pydantic import ValidationError
-from tests.evaluation_fixtures import evaluation_context, evaluation_env_config
+from tests.evaluation_fixtures import (
+    current_evaluation_context,
+    evaluation_context,
+    evaluation_env_config,
+    historical_observation,
+    pre_red_zone_evaluation_context,
+    pre_red_zone_observation,
+)
 from tests.evaluation_fixtures import historical_reset as reset
 from tests.evaluation_fixtures import historical_step as step
 
 import marl_battlegrounds.evaluation.capture as capture_module
+from marl_battlegrounds.core import env as core_env
 from marl_battlegrounds.core.types import (
     CONTEXT_FEATURE_CURRENT_TIMESTEP,
     CONTEXT_FEATURE_EPISODE_HORIZON,
@@ -46,7 +64,10 @@ from marl_battlegrounds.evaluation.actor_projection import (
 from marl_battlegrounds.evaluation.capture import (
     _reconstruct_transition_facts,
     capture_evaluation_transition_unit_v1,
+    capture_evaluation_transition_unit_v3,
     capture_initial_evaluation_frame_v1,
+    capture_initial_evaluation_frame_v2,
+    capture_initial_evaluation_frame_v3,
     normalize_transition_facts_v1,
 )
 from marl_battlegrounds.evaluation.events import decode_evaluation_events_v1
@@ -55,6 +76,7 @@ from marl_battlegrounds.evaluation.models import (
     CooldownStartedEventV1,
     EvaluationEpisodeContextV1,
     EvaluationFrameV1,
+    EvaluationFrameV3,
     EvaluationTransitionV1,
     ExecutionInformationMode,
     SpawnLifecycleObservationV1,
@@ -1730,3 +1752,130 @@ def test_transition_capture_rejects_initialization_facts_and_malformed_rewards()
     ).parameters
     assert "canonical_reward_by_team" not in parameter_names
     assert "owning_task_end_reason" not in parameter_names
+
+
+def _red_zone_config(depth: float) -> EnvConfig:
+    return evaluation_env_config(
+        task_mode=TASK_MODE_TDM,
+        team_deathmatch_score_threshold=5,
+        team_deathmatch_red_zone_depth=depth,
+    )
+
+
+def _without_column_19(frame: EvaluationFrameV3) -> dict[str, object]:
+    payload = frame.model_dump(mode="python")
+    observation = payload["base_observation"]
+    observation["context_features"] = tuple(
+        row[:19] for row in observation["context_features"]
+    )
+    return payload
+
+
+def test_current_capture_records_depth_on_alive_dead_and_padded_rows() -> None:
+    frames: dict[float, EvaluationFrameV3] = {}
+    for depth in (0.0, 5.0, 6.0):
+        config = _red_zone_config(depth)
+        context = current_evaluation_context(config)
+        state = core_env.reset(config, jax.random.PRNGKey(0))[0]
+        # Slot 1 is configured but dead; slots 3, 4, 7, 8 and 9 are padding.
+        state = state._replace(
+            alive_mask=state.alive_mask.at[1].set(False),
+            current_health=state.current_health.at[1].set(0.0),
+        )
+        state, observation, action_mask, _ = core_env.initialize_scenario_state(
+            state, config
+        )
+        frame = capture_initial_evaluation_frame_v3(
+            context, state, observation, action_mask
+        )
+        assert type(frame) is EvaluationFrameV3
+        assert frame.snapshot.alive_mask[1] is False
+        assert [row[19] for row in frame.base_observation.context_features] == [
+            depth if row.configured_active else 0.0 for row in context.roster
+        ]
+        frames[depth] = frame
+        if depth == 5.0:
+            successor = core_env.step(
+                config, state, action_mask, _neutral_action(), jax.random.PRNGKey(1)
+            )
+            _, successor_frame = capture_evaluation_transition_unit_v3(
+                context,
+                frame,
+                successor[0],
+                successor[1],
+                successor[4],
+                successor[5].transition_facts,
+                successor[2],
+                successor[3],
+            )
+            assert type(successor_frame) is EvaluationFrameV3
+            assert [
+                row[19] for row in successor_frame.base_observation.context_features
+            ] == [depth if row.configured_active else 0.0 for row in context.roster]
+    assert (
+        _without_column_19(frames[0.0])
+        == _without_column_19(frames[5.0])
+        == _without_column_19(frames[6.0])
+    )
+
+
+def test_historical_captures_refuse_live_twenty_column_observations() -> None:
+    config = evaluation_env_config()
+    state, observation, action_mask, _ = core_env.reset(config, jax.random.PRNGKey(0))
+    assert observation.context_features.shape == (MAX_AGENT_SLOTS, 20)
+    legacy_layout = historical_observation(config, observation)
+    with pytest.raises(ValueError, match="context_features"):
+        capture_initial_evaluation_frame_v1(
+            evaluation_context(config=config),
+            state,
+            legacy_layout._replace(context_features=observation.context_features),
+            action_mask,
+        )
+    with pytest.raises(ValueError, match="context_features"):
+        capture_initial_evaluation_frame_v2(
+            pre_red_zone_evaluation_context(config), state, observation, action_mask
+        )
+    current = current_evaluation_context(config)
+    with pytest.raises(ValueError, match="capture V1 requires matching"):
+        capture_initial_evaluation_frame_v1(current, state, legacy_layout, action_mask)
+    with pytest.raises(ValueError, match="capture V2 requires matching"):
+        capture_initial_evaluation_frame_v2(
+            current, state, pre_red_zone_observation(observation), action_mask
+        )
+    with pytest.raises(ValueError, match="capture V3 requires matching"):
+        capture_initial_evaluation_frame_v3(
+            pre_red_zone_evaluation_context(config), state, observation, action_mask
+        )
+
+
+def test_capture_and_validation_catch_red_zone_column_drift() -> None:
+    config = _red_zone_config(5.0)
+    state, observation, action_mask, _ = core_env.reset(config, jax.random.PRNGKey(0))
+    # Capture under context V4 leaves full checks to validation and replay
+    # admission, which catch a depth-6 record paired with depth-5 inputs.
+    deeper_context = current_evaluation_context(_red_zone_config(6.0))
+    mismatched = capture_initial_evaluation_frame_v3(
+        deeper_context, state, observation, action_mask
+    )
+    with pytest.raises(ValueError, match="Red Zone depth must match"):
+        validate_initial_evaluation_frame_v1(deeper_context, mismatched)
+    context = current_evaluation_context(config)
+    frame = capture_initial_evaluation_frame_v3(
+        context, state, observation, action_mask
+    )
+    validate_initial_evaluation_frame_v1(context, frame)
+    for slot, value, message in (
+        (0, 5.5, "Red Zone depth must match"),
+        (3, 5.0, "inactive slot 3 must be neutral"),
+    ):
+        rows = list(frame.base_observation.context_features)
+        rows[slot] = (*rows[slot][:19], value)
+        drifted = frame.model_copy(
+            update={
+                "base_observation": frame.base_observation.model_copy(
+                    update={"context_features": tuple(rows)}
+                )
+            }
+        )
+        with pytest.raises(ValueError, match=message):
+            validate_initial_evaluation_frame_v1(context, drifted)

@@ -34,8 +34,13 @@ refuses a negative BatchNorm running variance, and a forged export with one
 does not load. A MAPPO learner can pin a PQN-VDN export. Loading a PQN-VDN
 export never imports Flashbax, and its dependency record has none. Saved
 PQN-VDN results must name the method and its optimizer count, each failure
-with its own message. These checks prove software contracts, not learning or
-GPU cost.
+with its own message. A network saved before Red Zone (actor input schema 1,
+5,164 features) loads through the cached schema-1 PQN-VDN hook with its
+inference identity bytes kept, cannot be exported again (the directory stays
+unchanged), and its learner cannot resume: restore refuses it before any
+array is read. The frozen pre-Red-Zone PQN-VDN schema dictionary differs from
+the current one only in actor input 1. These checks prove software contracts,
+not learning or GPU cost.
 """
 
 # pyright: reportPrivateUsage=false, reportUnknownLambdaType=false
@@ -59,7 +64,9 @@ import numpy as np
 import pytest
 from tests.evaluation_fixtures import evaluation_env_config
 from tests.test_training_checkpoints import (
+    _as_schema_1_learner,  # pyright: ignore[reportPrivateUsage]
     _files,  # pyright: ignore[reportPrivateUsage]
+    _schema_1_round_trip,  # pyright: ignore[reportPrivateUsage]
     _writer,  # pyright: ignore[reportPrivateUsage]
 )
 from tests.test_training_pinned_resume import (
@@ -649,6 +656,31 @@ def test_metadata_faults_fail_before_arrays_are_read(
     assert _files(tmp_path) == before
 
 
+def test_a_schema_1_pqn_actor_loads_through_its_old_route_and_is_not_exported(
+    tmp_path: Path,
+) -> None:
+    _schema_1_round_trip(tmp_path, "pqn_vdn", pqn._schema_1_pqn_actor_apply)
+
+
+def test_a_pqn_learner_saved_before_red_zone_cannot_resume(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    collection, template = _learner()
+    historical = _as_schema_1_learner(_save(tmp_path, template), "pqn_vdn")
+    _forbid_arrays(monkeypatch)
+    before = _files(tmp_path)
+    with pytest.raises(ValueError, match="saved before Red Zone"):
+        restore_checkpoint(
+            historical,
+            collection,
+            template,
+            expected_metadata=_expected(_metadata()),
+            method="pqn_vdn",
+            pqn=_CONFIG,
+        )
+    assert _files(tmp_path) == before
+
+
 def _no_check(*args: object, **kwargs: object) -> None:
     del args, kwargs
 
@@ -1087,6 +1119,10 @@ def test_pqn_schemas_and_result_fields() -> None:
     assert checkpoints._schema_method(schemas) == "pqn_vdn"
     with pytest.raises(ValueError):
         checkpoints._schema_method({**schemas, "recent_window": True})
+    # The frozen pre-Red-Zone dictionary differs only in its actor input.
+    historical = checkpoints._ACTOR_INPUT_1_SCHEMAS["pqn_vdn"]
+    assert historical == {**schemas, "actor_input": 1}
+    assert checkpoints._schema_method(historical) == "pqn_vdn"
     actor = {"optimizer_steps": 6}
     io_helpers._check_result_method(
         {"method": "pqn_vdn", "optimizer_steps": 6}, actor, "pqn_vdn"

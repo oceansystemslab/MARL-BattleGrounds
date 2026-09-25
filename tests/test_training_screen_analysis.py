@@ -4,6 +4,9 @@ Known tables prove native scores, kill margins and whole-block paired changes.
 Synthetic run records exercise shared initialization identity, missing evidence,
 unfinished cases, timing scopes and immutable inputs. One report renders real
 headless plots; other cases replace plotting only. M8 loading has its own tests.
+A result that carries a Red Zone depth reads kills from its recorded kill
+columns (two points but one kill for a Red Zone death); an older result reads
+them from its scores, where the two were equal.
 """
 
 # pyright: reportPrivateUsage=false
@@ -260,6 +263,30 @@ def test_all_draws_can_contain_paired_combat_improvement() -> None:
     assert change["score_change_from_initial"] == 0
     assert change["kill_margin_change_from_initial"] == 2
     assert change["kill_margin_change_ci_low"] == 2
+
+
+def test_red_zone_records_count_recorded_kills_not_points() -> None:
+    rows = _rows()
+    for row in rows:
+        # Every kill is a Red Zone kill here: two points, one kill.
+        row["team_a_kills"] = row["team_a_score"]
+        row["team_a_score"] *= 2
+        row["team_b_kills"] = 1
+    record = {
+        **_result("red-zone", 0, rows),
+        "red_zone_depth": 5.0,
+        **analysis.summarize_validation(
+            rows, maps=MAPS, opponents=("Random",), seed_pairs=4, actual_kills=True
+        ),
+    }
+    assert analysis._kill_columns(record) == ("team_a_kills", "team_b_kills")
+    stats = analysis._screen_statistics(rows, record)
+    assert (stats["mean_kills_for"], stats["mean_kills_against"]) == (6.5, 1)
+    assert stats["kill_margin"] == 5.5
+    legacy = _result("legacy", 0, rows)
+    assert analysis._kill_columns(legacy) == ("team_a_score", "team_b_score")
+    points = analysis._screen_statistics(rows, legacy)
+    assert (points["mean_kills_for"], points["mean_kills_against"]) == (13, 2)
 
 
 def test_one_missing_team_score_does_not_hide_invalid_other_score() -> None:

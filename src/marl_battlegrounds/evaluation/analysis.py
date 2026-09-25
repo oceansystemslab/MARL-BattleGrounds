@@ -6,7 +6,10 @@ decoding; ReplayAnalysis keeps only scalar values for each captured frame.
 Seeking and exporting then select stored values without replaying game physics.
 Full metrics require a matching recorded mechanics catalog. This computes the
 current scalar schema from captured facts. Historical stored metric reports
-keep their own recorded schemas and are not overwritten or relabelled.
+keep their own recorded schemas and are not overwritten or relabelled. A
+recording saved before the Red Zone rule (its context does not hold
+ResolvedEnvConfigV2) shows all 44 Red Zone columns as unavailable, never as
+invented zeros.
 """
 
 from __future__ import annotations
@@ -74,13 +77,25 @@ from marl_battlegrounds.evaluation.metric_catalog import (
     metric_topic_text,
 )
 from marl_battlegrounds.evaluation.metrics import EvaluationEpisodeCompletionV1
-from marl_battlegrounds.evaluation.models import EvaluationEpisodeContext
+from marl_battlegrounds.evaluation.models import (
+    EvaluationEpisodeContext,
+    ResolvedEnvConfigV2,
+)
 from marl_battlegrounds.evaluation.replay_io import LoadedReplayBundle
 
 type MetricScope = Literal["cursor", "final"]
 # A common shape reuses one compiled scan across replay lengths. Host decoding is
 # bounded by this block, rather than another full copy of the recorded trajectory.
 _BLOCK_SIZE = 64
+# Full-catalog positions of the 44 Red Zone columns. A recording without a
+# recorded Red Zone rule marks exactly these unavailable.
+_RED_ZONE_COLUMN_INDICES = np.asarray(
+    [
+        index
+        for index, column in enumerate(METRIC_COLUMNS)
+        if column.family == "red_zone"
+    ]
+)
 REPLAY_IDENTITY_COLUMNS = (
     "episode_id",
     "scope",
@@ -440,6 +455,9 @@ class ReplayAnalysis:
         sources contains configured global slots for the metric subject. Recipients
         are not mistaken for their helpers. Preserve rows for capable agents before
         they act, and preserve authored Trap intervals without inventing a caster.
+        Red Zone kill help uses the same rule as other kill help: a team needs an
+        agent who can deal damage, or a Priest with a damaging teammate. Red Zone
+        deaths belong to their victims and always apply.
         This display-only explanation never changes numerical values or CSV masks.
         """
         health_effect = (
@@ -471,6 +489,7 @@ class ReplayAnalysis:
             "trap_breaks",
             "kill_contributions",
             "controlled_kills",
+            "red_zone",
             "coordination",
             "formation",
         ):
@@ -671,7 +690,7 @@ class ReplayAnalysis:
 
         if column.subject_role == "recipient":
             return None
-        if column.family in ("kill_contributions", "controlled_kills"):
+        if column.family in ("kill_contributions", "controlled_kills", "red_zone"):
             solo = column.stem.startswith("solo_")
             ability = (
                 "ultimate"
@@ -969,6 +988,9 @@ def analyze_replay(bundle: LoadedReplayBundle, *, full: bool = False) -> ReplayA
     The final short block uses inert padding that creates no extra prefix.
     No files are written. Later summary/csv calls reuse the stored scalars;
     source-byte digests intentionally change when source documentation changes.
+    With full=True, a context without ResolvedEnvConfigV2 (recorded before the
+    Red Zone rule) has all 44 Red Zone columns marked unavailable in every
+    frame; every older column keeps its computed value and availability.
     """
     replay = bundle.replay
     context = replay.header.context
@@ -1034,6 +1056,10 @@ def analyze_replay(bundle: LoadedReplayBundle, *, full: bool = False) -> ReplayA
         valid_blocks.append(np.asarray(values.valid)[: len(transitions)])
     scalars = np.concatenate(value_blocks)
     valid = np.concatenate(valid_blocks)
+    if full and not isinstance(context.resolved_env_config, ResolvedEnvConfigV2):
+        # No Red Zone rule was recorded; do not report reconstructed depth-0
+        # zeros as evidence.
+        valid[:, _RED_ZONE_COLUMN_INDICES] = False
     scalars.setflags(write=False)
     valid.setflags(write=False)
     if _source_digest() != digest:

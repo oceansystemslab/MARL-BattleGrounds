@@ -1,14 +1,20 @@
 """Check reset-only score curricula, exact sources, recording and disk recovery.
 
-CPU checks cover the 13 declared shares, legacy K20 content serialization,
-threshold-major sources, unchanged map/roster keys, dynamic sampler reuse,
-actor-visible reset timing, actual exposure and map counts, and recorded native
-H300 endings. A real MAPPO save/restore checks the extended source bank and
+CPU checks cover the 13 declared shares, content binding version 3 for both
+the K20-only bank and the 13-score bank (both state score_thresholds and the
+default Red Zone depth), the version 1 binding saved before Red Zone scoring
+(tests/fixtures/training_content_binding_v1.json), which still omits
+score_thresholds, reads back as K20 and serializes to the same canonical bytes
+and digest, threshold-major sources, unchanged map/roster keys, dynamic sampler
+reuse, actor-visible reset timing, actual exposure and map counts, and recorded
+native H300 endings. A real MAPPO save/restore checks the extended source bank and
 rejects changed schedules before numerical restore. These checks establish no
 GPU cost or learned advantage from easier training thresholds.
 """
 
 from __future__ import annotations
+
+import json
 
 # pyright: reportPrivateUsage=false
 from collections.abc import Callable
@@ -65,6 +71,7 @@ from marl_battlegrounds.training.runner import (
 type Tree = Any
 
 THRESHOLDS = (*range(1, 11), 12, 15, 20)
+_V1_FIXTURE = Path(__file__).parent / "fixtures" / "training_content_binding_v1.json"
 
 
 @pytest.fixture(scope="module")
@@ -73,7 +80,7 @@ def prepared() -> PreparedTrainingContent:
 
 
 @pytest.fixture(scope="module")
-def legacy() -> PreparedTrainingContent:
+def k20() -> PreparedTrainingContent:
     return prepare_training_content()
 
 
@@ -134,23 +141,32 @@ def test_exact_schedule_and_config_roundtrip() -> None:
 
 
 def test_content_preserves_old_serialization_and_binds_threshold_order(
-    prepared: PreparedTrainingContent, legacy: PreparedTrainingContent
+    prepared: PreparedTrainingContent, k20: PreparedTrainingContent
 ) -> None:
-    old = legacy.binding.model_dump(mode="json")
+    raw = _V1_FIXTURE.read_bytes()
+    old = json.loads(raw)
     assert old["schema_version"] == 1 and "score_thresholds" not in old
     assert (
         canonical_digest_sha256(old, exclude={"canonical_digest"})
         == old["canonical_digest"]
     )
-    loaded = TrainingContentBinding.model_validate_json(canonical_json_bytes(old))
+    loaded = TrainingContentBinding.model_validate_json(raw)
     assert loaded.score_thresholds == (20,)
     assert canonical_json_bytes(loaded) == canonical_json_bytes(old)
-    assert prepared.binding.schema_version == 2
+    single = k20.binding.model_dump(mode="json")
+    assert single["schema_version"] == 3 and single["score_thresholds"] == [20]
+    assert single["red_zone_depth"] == 5.0
+    assert (
+        canonical_digest_sha256(single, exclude={"canonical_digest"})
+        == single["canonical_digest"]
+    )
+    assert prepared.binding.schema_version == 3
+    assert prepared.binding.red_zone_depth == 5.0
     assert prepared.binding.score_thresholds == THRESHOLDS
     assert len(prepared.binding.source_configurations) == 546
     assert (
         prepared.binding.source_configurations[-42:]
-        == legacy.binding.source_configurations
+        == k20.binding.source_configurations
     )
     for index, threshold in enumerate(THRESHOLDS):
 
@@ -161,9 +177,9 @@ def test_content_preserves_old_serialization_and_binds_threshold_order(
         np.testing.assert_array_equal(block.team_deathmatch_score_threshold, threshold)
         _equal(
             block._replace(
-                team_deathmatch_score_threshold=legacy.source_configs.team_deathmatch_score_threshold
+                team_deathmatch_score_threshold=k20.source_configs.team_deathmatch_score_threshold
             ),
-            legacy.source_configs,
+            k20.source_configs,
         )
     changed = prepared.binding.model_dump(mode="json")
     changed["score_thresholds"] = list(reversed(THRESHOLDS))
@@ -182,7 +198,7 @@ def test_invalid_threshold_declarations_fail(values: Tree) -> None:
 
 
 def test_sampler_keeps_keys_and_reuses_one_trace(
-    prepared: PreparedTrainingContent, legacy: PreparedTrainingContent
+    prepared: PreparedTrainingContent, k20: PreparedTrainingContent
 ) -> None:
     calls = []
     root, generation = jax.random.key(7), jnp.zeros(4, jnp.int32)
@@ -201,7 +217,7 @@ def test_sampler_keeps_keys_and_reuses_one_trace(
 
     compiled = cast(Callable[[Array], SampledTrainingConfigs], jax.jit(sample))
     base = sample_training_configs(
-        legacy.source_configs, root, generation, eligible_maps=maps, team_size=size
+        k20.source_configs, root, generation, eligible_maps=maps, team_size=size
     )
     for index, threshold in enumerate(THRESHOLDS):
         actual = compiled(jnp.int32(threshold))

@@ -6,6 +6,9 @@ facts and ordering; they compute no game metrics. All ten global slots remain
 in the schema even when inactive. Run/roster identity stays separate from
 numeric columns. Import builds immutable catalog tables once on the host.
 Schema versions protect names/order; presentation reuses existing values.
+FULL_METRIC_NAMES_BY_SCHEMA_VERSION owns the saved full-column order of every
+readable current-format scalar schema (14 before the Red Zone columns, 15
+now), so readers never apply new offsets to old files.
 """
 
 import re
@@ -22,7 +25,7 @@ type MetricScope = Literal[
 type MetricDirection = Literal["higher", "lower", "descriptive"]
 
 METRIC_SCHEMA_ID = "marlbg.tdm.scalar"
-METRIC_SCHEMA_VERSION = 14
+METRIC_SCHEMA_VERSION = 15
 
 # Core's terminal codes, in the same Team A/Team B win/draw/loss order as
 # the priority catalog. Packing and host consistency checks share this mapping.
@@ -206,6 +209,14 @@ METRIC_FAMILIES = MappingProxyType(
                 "How many respawn waves each team has had, and the average "
                 "number of agents returned per wave. Also shows how many ticks "
                 "agents waited on average during the recording."
+            ),
+        ),
+        "red_zone": (
+            "Red Zone",
+            (
+                "Kills and deaths inside each team's own Red Zone, the strip at "
+                "its spawn side. Each such death counts once, but it gives the "
+                "enemy team 2 points, so kills and points differ."
             ),
         ),
         "burst": (
@@ -716,6 +727,16 @@ METRIC_TOPICS = (
         ),
     ),
     MetricTopic(
+        "red_zone",
+        "Red Zone",
+        "Kills, Deaths and Respawning",
+        (
+            "Kills and deaths inside each team's own Red Zone, near its spawn. "
+            "Each death counts once but gives the enemy team 2 points. Shows "
+            "team totals, then the agents who helped, then the agents who died."
+        ),
+    ),
+    MetricTopic(
         "coordination",
         "Team Coordination",
         "Teamwork and Positioning",
@@ -924,11 +945,20 @@ class DirectedMetric:
 
 
 def _subject_role(family: str, stem: str, scope: MetricScope) -> str:
-    """Choose a column's attribution role from its actual family/stem/scope."""
+    """Choose a column's attribution role from its actual family/stem/scope.
+
+    Red Zone deaths and death shares belong to the agents who died (recipient).
+    Red Zone kill help and kill shares belong to the helping agent
+    (contributor), and team Red Zone kills to the killing team (team).
+    """
     if scope == "episode":
         return "episode"
     if scope == "ally_pair":
         return "ally_pair"
+    if family == "red_zone":
+        if "death" in stem:
+            return "recipient"
+        return "contributor" if scope == "agent" else "team"
     if family in (
         "damage_received",
         "healing_received",
@@ -5008,6 +5038,95 @@ def _build_columns() -> tuple[MetricColumn, ...]:
                 reuse=True,
             )
 
+    # Red Zone stems are declared last: _measure_order ranks stems by first use,
+    # so every older stem keeps its rank and the schema-14 order is unchanged.
+    # A Red Zone death is counted once; it gives the enemy team 2 points, so
+    # these counts never come from score changes.
+    red_zone_missing = (
+        "the Red Zone rule was not recorded, or the game uses the neutral task"
+    )
+    location_rule = "Location is checked when combat resolves, before movement."
+    add(
+        "red_zone_kills",
+        "Red Zone Kills",
+        "red_zone",
+        "count",
+        (
+            "How many enemies this team killed inside the enemy team's Red Zone, "
+            "near the enemy's spawn. Each enemy death counts once, even though "
+            f"it gives this team 2 points. {location_rule}"
+        ),
+        scopes=("team",),
+        direction="higher",
+        missing=red_zone_missing,
+    )
+    add(
+        "red_zone_kill_contributions",
+        "Red Zone Kill Contributions",
+        "red_zone",
+        "count",
+        (
+            "How many Red Zone kills this agent helped with. Damage on the kill "
+            "tick counts. Useful healing of an attacker on that tick also "
+            "counts. Earlier damage does not count here. Each agent counts once "
+            "per enemy death."
+        ),
+        scopes=("agent",),
+        direction="descriptive",
+        missing=red_zone_missing,
+    )
+    add(
+        "red_zone_kill_participation",
+        "Share of Team Red Zone Kills",
+        "red_zone",
+        "fraction",
+        (
+            "What share of this team's Red Zone kills this agent helped with. "
+            "Each agent's share is at most 100%. Several teammates can help with "
+            "the same kill, so their shares together can exceed 100%."
+        ),
+        scopes=("agent",),
+        direction="descriptive",
+        numerator="Red Zone kills this agent helped with during the selected period",
+        denominator="all Red Zone kills by this team during the same period",
+        missing=red_zone_missing,
+    )
+    add(
+        "red_zone_deaths",
+        "Red Zone Deaths",
+        "red_zone",
+        "count",
+        (
+            "How many times this agent died inside its team's Red Zone, near its "
+            "own spawn. Each death counts once and gives the enemy team 2 "
+            f"points. {location_rule}"
+        ),
+        team_description=(
+            "How many times agents on this team died inside their own team's "
+            "Red Zone, near their own spawn. Each death counts once and gives "
+            f"the enemy team 2 points. {location_rule}"
+        ),
+        scopes=("team", "agent"),
+        direction="lower",
+        missing=red_zone_missing,
+    )
+    add(
+        "red_zone_death_fraction",
+        "Share of Team Red Zone Deaths",
+        "red_zone",
+        "fraction",
+        (
+            "What share of this team's Red Zone deaths were this agent's deaths. "
+            "All teammates use the same team total and recorded period, so their "
+            "shares add up to 100% when that total is greater than zero."
+        ),
+        scopes=("agent",),
+        direction="descriptive",
+        numerator="this agent's Red Zone deaths during the selected period",
+        denominator="all Red Zone deaths on this team during the same period",
+        missing=red_zone_missing,
+    )
+
     return tuple(columns)
 
 
@@ -5020,6 +5139,18 @@ METRIC_COLUMNS = PRIORITY_METRIC_COLUMNS + tuple(
 del _columns
 PRIORITY_METRIC_NAMES = tuple(column.name for column in PRIORITY_METRIC_COLUMNS)
 FULL_METRIC_NAMES = tuple(column.name for column in METRIC_COLUMNS)
+# Saved full-report column order for each readable current-format (host schema
+# 2) scalar schema. Schema 14 is today's order without the 44 Red Zone columns;
+# a later schema bump must add its own entry here. Keys decide which saved
+# scalar versions the result readers accept.
+FULL_METRIC_NAMES_BY_SCHEMA_VERSION: Mapping[int, tuple[str, ...]] = MappingProxyType(
+    {
+        14: tuple(
+            column.name for column in METRIC_COLUMNS if column.family != "red_zone"
+        ),
+        15: FULL_METRIC_NAMES,
+    }
+)
 METRIC_COLUMNS_BY_NAME = MappingProxyType(
     {column.name: column for column in METRIC_COLUMNS}
 )
@@ -6072,6 +6203,7 @@ _SEARCH_KIND_BY_FAMILY = MappingProxyType(
         "coordination": "coordination",
         "kill_contributions": "kill",
         "controlled_kills": "kill",
+        "red_zone": "kill",
         "deaths": "death",
         "respawn": "respawn",
         "formation": "formation",
@@ -6153,7 +6285,7 @@ def metric_search_facts(column: MetricColumn) -> dict[str, object]:
         kind = "damage" if "damage" in stem else "kill"
     else:
         kind = _SEARCH_KIND_BY_FAMILY[family]
-    if family == "controlled_kills" and subject == "recipient":
+    if family in ("controlled_kills", "red_zone") and subject == "recipient":
         kind = "death"
     if kind == "healing":
         if stem.startswith(("regenerated_", "regeneration_")):

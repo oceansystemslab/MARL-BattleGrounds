@@ -3,6 +3,12 @@
 Tests cover strict JSON, immutable content identity, declared asset locations,
 official release pins, field/reference validation and saved-first resume. The
 fixture catalog is isolated and never establishes real official qualification.
+Exactly two schema pin sets load: (14, 2, 3) for snapshots saved before the Red
+Zone rule, such as the shared fixture descriptor, and today's scalar schema
+with run schema 2 and replay schema 4. Any other scalar, run or replay pin is
+refused and names the field. A mix of the two sets, (14, 2, 4) or today's
+scalar schema with replay schema 3, is refused as an unsupported schema
+combination.
 """
 
 import copy
@@ -15,6 +21,7 @@ import pytest
 from tests.canonical_fixtures import config_descriptor
 
 from marl_battlegrounds.evaluation import tournament_config as configs
+from marl_battlegrounds.evaluation.metric_catalog import METRIC_SCHEMA_VERSION
 
 
 def _seal(value: dict[str, Any]) -> dict[str, Any]:
@@ -152,6 +159,44 @@ def test_invalid_nested_conditions_fail_before_any_file_work(
     target[path[-1]] = value
     with pytest.raises((ValueError, TypeError)):
         configs.load_tournament_config(_seal(descriptor))
+
+
+@pytest.mark.parametrize(
+    ("pins", "refused"),
+    [
+        ((14, 2, 3), None),
+        ((METRIC_SCHEMA_VERSION, 2, 4), None),
+        ((13, 2, 3), "scalar_schema"),
+        ((METRIC_SCHEMA_VERSION + 1, 2, 4), "scalar_schema"),
+        ((14, 1, 3), "run_schema"),
+        ((METRIC_SCHEMA_VERSION, 3, 4), "run_schema"),
+        ((14, 2, 2), "replay_schema"),
+        ((METRIC_SCHEMA_VERSION, 2, 5), "replay_schema"),
+        ((14, 2, 4), "schema combination"),
+        ((METRIC_SCHEMA_VERSION, 2, 3), "schema combination"),
+    ],
+)
+def test_only_the_pre_red_zone_and_current_schema_pins_load(
+    pins: tuple[int, int, int], refused: str | None
+) -> None:
+    descriptor = config_descriptor()
+    compatibility = descriptor["compatibility"]
+    # The shared fixture descriptor is a snapshot saved before the Red Zone rule.
+    assert (
+        compatibility["scalar_schema"],
+        compatibility["run_schema"],
+        compatibility["replay_schema"],
+    ) == (14, 2, 3)
+    compatibility.update(
+        scalar_schema=pins[0], run_schema=pins[1], replay_schema=pins[2]
+    )
+    descriptor = _seal(descriptor)
+    if refused is None:
+        loaded = configs.load_tournament_config(descriptor)
+        assert loaded["compatibility"]["replay_schema"] == pins[2]
+        return
+    with pytest.raises(ValueError, match=f"^Unsupported tournament {refused}$"):
+        configs.load_tournament_config(descriptor)
 
 
 def test_unknown_fields_missing_fields_and_tampering_fail() -> None:

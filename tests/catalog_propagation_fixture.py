@@ -19,7 +19,7 @@ from scripts.dev.visual_debugger.scenarios import get_scenario
 from tests.visual_debugger_fixtures import debugger_test_launch_specification
 
 from marl_battlegrounds.evaluation.capture import (
-    capture_initial_evaluation_frame_v2,
+    capture_initial_evaluation_frame_v3,
 )
 from marl_battlegrounds.evaluation.models import (
     EvaluationEpisodeContext,
@@ -195,7 +195,7 @@ def build_catalog_propagation_fixture() -> tuple[
         verbose_logging=False,
     )
     context, expected = derive_catalog_propagation_context(session.evaluation_context)
-    initial_frame = capture_initial_evaluation_frame_v2(
+    initial_frame = capture_initial_evaluation_frame_v3(
         context,
         session.state,
         session.observation,

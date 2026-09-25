@@ -12,6 +12,14 @@ category meanings. This module needs only the ordinary JAX environment install.
 Changing feature order, category meaning, masking or numeric representation
 requires a new version of the affected schema.
 
+Actor input schema 2 (5,165 features) is current: it adds context column 19,
+the Team Deathmatch Red Zone depth. Historical schema 1 (5,164 features) is
+kept only so actors trained before Red Zone still play exactly as before.
+schema_1_actor_input turns a current view into the old 19-column view; the
+encoder and spawn_frame_flag then pick the old layout and the old spawn-side
+formula from that static width. Training state schema 2 (920 features) adds
+the same depth after the score threshold.
+
 Values keep their existing units. Integer conversion uses ordinary float32
 rounding: integers above 16,777,216 are not all represented exactly. Encoding is
 therefore not a lossless serialization of the full supported Core integer range.
@@ -46,17 +54,84 @@ from marl_battlegrounds.core.types import (
 )
 from marl_battlegrounds.policies.input import (
     ActorInput,
+    _historical_team_on_right,  # pyright: ignore[reportPrivateUsage]
     obstacle_mirror_partners,
     team_on_right,
 )
 
-ACTOR_INPUT_SCHEMA_VERSION = 1
-TRAINING_STATE_SCHEMA_VERSION = 1
+ACTOR_INPUT_SCHEMA_VERSION = 2
+TRAINING_STATE_SCHEMA_VERSION = 2
 # A baseline's spawn frame: "world" keeps raw coordinates; "left" reflects the
 # view of any actor whose team starts on the right bank. The position is the
 # frame's saved index, so "world" stays 0 and "left" stays 1. "right" was
 # removed on 22 September 2026; nothing saved outside frozen packages used it.
 SPAWN_FRAMES = ("world", "left")
+# Context columns in each actor input schema. Schema 2 appends column 19, the
+# Team Deathmatch Red Zone depth; columns 0-18 keep their schema-1 meaning.
+_CONTEXT_WIDTHS: Mapping[int, int] = MappingProxyType({1: 19, 2: 20})
+_CONTEXT_FIELD = "observation.context_features"
+
+
+def _view_schema(actors: ActorInput) -> int:
+    """Return the actor input schema that a view's static context width selects.
+
+    actors is any ActorInput. Its context_features must end in 20 columns
+    (current schema 2) or 19 columns (historical schema 1, which only
+    schema_1_actor_input produces). Only the static shape is read, so this
+    works in eager code and while tracing, with no device work. Raises
+    ValueError, naming both accepted shapes, for any other width.
+    """
+    shape = jnp.shape(actors.observation.context_features)
+    for version, width in _CONTEXT_WIDTHS.items():
+        if shape[-1:] == (width,):
+            return version
+    raise ValueError(
+        f"{_CONTEXT_FIELD} must have shape (20,) for actor input schema 2 or "
+        f"(19,) for historical schema 1; received {shape}"
+    )
+
+
+def schema_1_actor_input(actors: ActorInput) -> ActorInput:
+    """Turn a current actor view into the historical 19-column schema-1 view.
+
+    Parameters
+    ----------
+    actors : ActorInput
+        Permitted inputs with any leading shape L and the current 20 context
+        columns (actor input schema 2).
+
+    Returns
+    -------
+    ActorInput
+        The same view with context column 19 (the Red Zone depth) removed, so
+        context_features ends in 19 columns. Every other leaf is the same
+        object. encode_actor_inputs then uses the 5,164-feature schema-1
+        layout, and spawn_frame_flag uses the old spawn-side formula.
+
+    Raises
+    ------
+    ValueError
+        context_features does not end in 20 columns, for example a view that
+        is already in schema 1.
+
+    Notes
+    -----
+    Only actors trained on schema 1 need this: it lets them play exactly as
+    before Red Zone. It removes information and adds none, so it widens no
+    information right. Pure JAX slicing on the static shape; works under jit
+    and vmap. Inputs are unchanged.
+    """
+    context = actors.observation.context_features
+    if jnp.shape(context)[-1:] != (_CONTEXT_WIDTHS[2],):
+        raise ValueError(
+            "schema_1_actor_input needs the current 20 context columns; "
+            f"received shape {jnp.shape(context)}"
+        )
+    return actors._replace(
+        observation=actors.observation._replace(
+            context_features=context[..., : _CONTEXT_WIDTHS[1]]
+        )
+    )
 
 
 def spawn_frame_flag(actors: ActorInput, spawn_frame: str) -> Array:
@@ -65,7 +140,9 @@ def spawn_frame_flag(actors: ActorInput, spawn_frame: str) -> Array:
     Parameters
     ----------
     actors : ActorInput
-        Permitted inputs with any leading shape L, for example (B, 5).
+        Permitted inputs with any leading shape L, for example (B, 5). The
+        static context width picks the side rule: 20 columns (current schema
+        2) or 19 columns (historical schema 1, from schema_1_actor_input).
     spawn_frame : str
         Must be "left": flag actors whose own team starts on the right bank,
         so every game looks like a left start.
@@ -73,20 +150,32 @@ def spawn_frame_flag(actors: ActorInput, spawn_frame: str) -> Array:
     Returns
     -------
     Array
-        Boolean array of shape L: team_on_right, except that unused observer
-        rows, whose permitted view is all zero (map width 0), are never
-        flagged, so padded lanes stay bit-identical to the world frame. Dead
-        actors keep their flag.
+        Boolean array of shape L. A 20-column view uses team_on_right, Core's
+        exact spawn-side rule, under which an exactly centred bank reads left.
+        A 19-column view uses the frozen pre-Red-Zone float32 mean formula,
+        so a schema-1 actor reflects its view and maps its actions back
+        exactly as when it was trained, even on an exactly centred bank that
+        the old formula reads as right. In both, unused observer rows, whose
+        permitted view is all zero (map width 0), are never flagged, so
+        padded lanes stay bit-identical to the world frame. Dead actors keep
+        their flag.
 
     Raises
     ------
     ValueError
         spawn_frame is "world", which reflects nothing and must not reach this
-        helper, or any other value, including the removed "right".
+        helper, or any other value, including the removed "right". Also
+        raised when the context width is neither 20 nor 19.
+
+    Notes
+    -----
+    Pure JAX; works under jit and vmap. Callers compute the flag once per
+    call and use it both to reflect the view and to map the chosen move back.
     """
     if spawn_frame != "left":
         raise ValueError('spawn_frame must be "left" to compute a flag.')
-    on_right = team_on_right(actors)
+    side = _historical_team_on_right if _view_schema(actors) == 1 else team_on_right
+    on_right = side(actors)
     used = actors.observation.context_features[..., CONTEXT_FEATURE_MAP_WIDTH] > 0
     return on_right & used
 
@@ -136,7 +225,9 @@ def team_obstacle_partners(actors: ActorInput) -> Array:
 # Each entry names a source field, its per-record shape and its encoded width.
 type _Layout = tuple[tuple[str, tuple[int, ...], int], ...]
 
-_ACTOR_LAYOUT: _Layout = (
+# Historical actor input schema 1, frozen: 5,164 features with 19 context
+# columns. Only actors trained before Red Zone read it.
+_ACTOR_LAYOUT_1: _Layout = (
     ("observation.self_features", (58,), 63),
     ("observation.ally_unit_features", (5, 58), 315),
     ("observation.enemy_unit_features", (5, 58), 315),
@@ -198,6 +289,17 @@ _ACTOR_LAYOUT: _Layout = (
     ("source_bank.objective_features_by_source", (5, 8, 12), 480),
     ("source_availability", (5,), 5),
 )
+# Current actor input schema 2: schema 1 with the context entry widened to 20
+# columns, so the Red Zone depth is flat feature 1128. Nothing else moves.
+_ACTOR_LAYOUT: _Layout = tuple(
+    (name, (_CONTEXT_WIDTHS[2],), _CONTEXT_WIDTHS[2])
+    if name == _CONTEXT_FIELD
+    else (name, shape, width)
+    for name, shape, width in _ACTOR_LAYOUT_1
+)
+_ACTOR_LAYOUTS: Mapping[int, _Layout] = MappingProxyType(
+    {1: _ACTOR_LAYOUT_1, 2: _ACTOR_LAYOUT}
+)
 
 _TRAINING_STATE_LAYOUT: _Layout = (
     ("state.team_deathmatch_scores", (2,), 2),
@@ -220,6 +322,7 @@ _TRAINING_STATE_LAYOUT: _Layout = (
     ("state.has_previous_timestep_joint_action", (), 1),
     ("config.task_mode", (), 4),
     ("config.team_deathmatch_score_threshold", (), 1),
+    ("config.team_deathmatch_red_zone_depth", (), 1),
     ("config.max_steps", (), 1),
     ("config.map_width", (), 1),
     ("config.map_height", (), 1),
@@ -260,6 +363,13 @@ def _offsets(layout: _Layout) -> Mapping[str, slice]:
 ACTOR_FEATURE_OFFSETS = _offsets(_ACTOR_LAYOUT)
 TRAINING_STATE_FEATURE_OFFSETS = _offsets(_TRAINING_STATE_LAYOUT)
 ACTOR_FEATURE_SIZE = sum(width for _, _, width in _ACTOR_LAYOUT)
+# Encoded actor width per actor input schema: {1: 5164, 2: 5165}. Read-only.
+ACTOR_FEATURE_SIZES: Mapping[int, int] = MappingProxyType(
+    {
+        version: sum(width for _, _, width in layout)
+        for version, layout in _ACTOR_LAYOUTS.items()
+    }
+)
 TRAINING_STATE_FEATURE_SIZE = sum(width for _, _, width in _TRAINING_STATE_LAYOUT)
 
 
@@ -378,7 +488,7 @@ def _pack(
 
 
 def encode_actor_inputs(inputs: ActorInput) -> Array:
-    """Turn each actor's permitted current input into 5,164 float32 features.
+    """Turn each actor's permitted current input into 5,165 float32 features.
 
     Parameters
     ----------
@@ -388,12 +498,18 @@ def encode_actor_inputs(inputs: ActorInput) -> Array:
         L may be empty, (B, 5), or (T, B, 5), for example. Observations and source
         permissions must belong to the same decision. Use the existing input
         builders to enforce information rights; this is not a visibility builder.
+        The static context width picks the schema: 20 columns give the current
+        schema 2; 19 columns, which only schema_1_actor_input produces for
+        historical actors, give schema 1.
 
     Returns
     -------
     Array
-        Float32 shape (*L, ACTOR_FEATURE_SIZE), ordered by ACTOR_FEATURE_OFFSETS
-        under ACTOR_INPUT_SCHEMA_VERSION. Each family keeps row-major order.
+        Float32 shape (*L, F). For a 20-column view F is ACTOR_FEATURE_SIZE
+        (5,165), ordered by ACTOR_FEATURE_OFFSETS under
+        ACTOR_INPUT_SCHEMA_VERSION 2. For a 19-column view F is 5,164, the
+        frozen schema-1 order: the same features without context column 19
+        (flat feature 1128 of schema 2). Each family keeps row-major order.
         Class and obstacle IDs become masked indicators. Other values retain
         their units; existing action-history indicators retain reset absence.
         Public roster facts survive death and occlusion. Unused actors can
@@ -402,7 +518,8 @@ def encode_actor_inputs(inputs: ActorInput) -> Array:
     Raises
     ------
     ValueError
-        A field's static shape disagrees with the shared leading axes or schema.
+        The context width is neither 20 nor 19, or a field's static shape
+        disagrees with the shared leading axes or schema.
 
     Notes
     -----
@@ -413,10 +530,11 @@ def encode_actor_inputs(inputs: ActorInput) -> Array:
     above 16,777,216. Keep expanded features temporary at network application;
     store compact observations in rollouts. Learners own inactive loss masking.
     """
+    layout = _ACTOR_LAYOUTS[_view_schema(inputs)]
     leading = inputs.observation.self_features.shape[:-1]
     fields = {
         name: _checked_array(_read_field(inputs, name), leading, shape, name)
-        for name, shape, _ in _ACTOR_LAYOUT
+        for name, shape, _ in layout
     }
     self_name = "observation.self_features"
     active = fields[self_name][..., AGENT_FEATURE_ACTIVE] > 0
@@ -445,7 +563,7 @@ def encode_actor_inputs(inputs: ActorInput) -> Array:
     fields[objective_name] = jnp.where(
         permission[..., :, None, None], fields[objective_name], 0.0
     )
-    return _pack(fields, _ACTOR_LAYOUT, leading)
+    return _pack(fields, layout, leading)
 
 
 def encode_training_state(state: EnvState, config: EnvConfig) -> Array:
@@ -466,9 +584,10 @@ def encode_training_state(state: EnvState, config: EnvConfig) -> Array:
     Returns
     -------
     Array
-        Float32 (*L, TRAINING_STATE_FEATURE_SIZE), under
-        TRAINING_STATE_SCHEMA_VERSION and TRAINING_STATE_FEATURE_OFFSETS. State
-        fields precede config fields in declaration order. Task IDs have four
+        Float32 (*L, TRAINING_STATE_FEATURE_SIZE), 920 features under
+        TRAINING_STATE_SCHEMA_VERSION 2 and TRAINING_STATE_FEATURE_OFFSETS. State
+        fields precede config fields in declaration order, so the Red Zone
+        depth (map units) follows the score threshold. Task IDs have four
         indicators, including Neutral and reserved KOTH/CTF; profile team IDs
         have three. Class, team and accepted-action indicators for unused slots
         are zero. Dead members keep physical state and history. All ordered
