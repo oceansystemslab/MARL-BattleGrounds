@@ -46,6 +46,14 @@ class IllegalActionError(ValueError):
     """A decoded action has invalid native categories or is masked this turn."""
 
 
+class InvalidActionError(IllegalActionError):
+    """A custom parser returned the wrong record, shape, dtype or native category."""
+
+
+class MaskedActionError(IllegalActionError):
+    """A well-formed native action is forbidden by the current actor masks."""
+
+
 def _host_masks(masks: ActionMask) -> ActionMask:
     """Copy one actor's masks to host and check Boolean shapes and agreement.
 
@@ -142,12 +150,14 @@ def validate_actor_action(action: ActorAction, masks: ActionMask) -> ActorAction
     Raises
     ------
     IllegalActionError
-        The action record, categories or chosen masks are invalid.
+        InvalidActionError means a bad record, shape, dtype or category.
+        MaskedActionError means a valid native category is currently forbidden.
+        Both retain IllegalActionError as their public base.
     ValueError
         The masks themselves violate their contract.
     """
     if not isinstance(action, ActorAction):  # pyright: ignore[reportUnnecessaryIsInstance]
-        raise IllegalActionError("The parser must return an ActorAction")
+        raise InvalidActionError("The parser must return an ActorAction")
     host = _host_masks(masks)
     values: list[int] = []
     for name, value, size in zip(
@@ -155,16 +165,16 @@ def validate_actor_action(action: ActorAction, masks: ActionMask) -> ActorAction
     ):
         array = np.asarray(value)
         if array.shape != () or array.dtype.kind not in "iu":
-            raise IllegalActionError(f"{name} must be a scalar integer category")
+            raise InvalidActionError(f"{name} must be a scalar integer category")
         category = int(array)
         if not 0 <= category < size:
-            raise IllegalActionError(f"{name} must be in 0..{size - 1}")
+            raise InvalidActionError(f"{name} must be in 0..{size - 1}")
         values.append(category)
     move, target, ultimate = values
     if not host.move_mask[move]:
-        raise IllegalActionError(f"Movement {MOVE_NAMES[move]} is not legal this turn")
+        raise MaskedActionError(f"Movement {MOVE_NAMES[move]} is not legal this turn")
     if not host.select_target_use_ultimate_joint_mask[target, ultimate]:
-        raise IllegalActionError(
+        raise MaskedActionError(
             f"Combat {COMBAT_NAMES[target][ultimate]} is not legal this turn"
         )
     return ActorAction(

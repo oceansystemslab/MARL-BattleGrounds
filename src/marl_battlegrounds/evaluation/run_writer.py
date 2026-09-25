@@ -1004,6 +1004,30 @@ class RunWriter:
             if start["verification"] == "pending"
         }
 
+    def record_host_evidence(
+        self, provider: str, attempt_id: str, summary: dict[str, object]
+    ) -> None:
+        """Stage one host provider's current attempt totals for ordinary flush.
+
+        provider and attempt_id are nonempty labels. summary is detached finite
+        JSON containing small counters, never prompts or actor memory. This does
+        not change pass identity or publish games. The next flush saves these
+        facts and binds newly durable games to this attempt in the same atomic
+        manifest. Call only after flushing the provider's separate call files.
+        All recording failures propagate; callers must not submit fallback actions.
+        """
+        self._check_open()
+        if not provider or not attempt_id:
+            raise ValueError("Host evidence needs provider and attempt identifiers")
+        snapshot = _json_value(summary)
+        evidence = (
+            self._details["passes"][self._pass_key]
+            .setdefault("host_evidence", {})
+            .setdefault(provider, {"attempts": {}, "episode_attempts": {}})
+        )
+        evidence["attempts"][attempt_id] = snapshot
+        evidence["current_attempt"] = attempt_id
+
     def mark_pass_result(
         self, status: str, *, schedule_digest: str, reason: str | None = None
     ) -> None:
@@ -1711,6 +1735,20 @@ class RunWriter:
         """
         return frozenset(
             self._details["passes"][self._pass_key]["completed_episode_ids"]
+        )
+
+    @property
+    def host_evidence(self) -> dict[str, object]:
+        """Return detached current-pass provider evidence, including staged totals.
+
+        completed_episode_ids remains the only durable completion authority.
+        Pending totals may include unfinished games and abandoned attempts.
+        """
+        return cast(
+            dict[str, object],
+            _json_value(
+                self._details["passes"][self._pass_key].get("host_evidence", {})
+            ),
         )
 
     @property
@@ -3459,7 +3497,7 @@ class RunWriter:
         self._assignment_open.clear()
         # Flush mutates only publication boundaries; frozen schedules/configs can
         # stay shared during this synchronous operation.
-        candidate = {
+        candidate: dict[str, Any] = {
             **self._details,
             "tables": self._details["tables"].copy(),
             "passes": {
@@ -3467,6 +3505,21 @@ class RunWriter:
                     **entry,
                     "completed_episode_ids": entry["completed_episode_ids"].copy(),
                     "replays": entry["replays"].copy(),
+                    **(
+                        {
+                            "host_evidence": {
+                                name: {
+                                    **value,
+                                    "episode_attempts": value[
+                                        "episode_attempts"
+                                    ].copy(),
+                                }
+                                for name, value in entry["host_evidence"].items()
+                            }
+                        }
+                        if "host_evidence" in entry
+                        else {}
+                    ),
                 }
                 for key, entry in self._details["passes"].items()
             },
@@ -3505,6 +3558,12 @@ class RunWriter:
                     }
             for key, episode_id in self._pending:
                 candidate["passes"][key]["completed_episode_ids"].append(episode_id)
+                for evidence in (
+                    candidate["passes"][key].get("host_evidence", {}).values()
+                ):
+                    evidence["episode_attempts"][str(episode_id)] = evidence[
+                        "current_attempt"
+                    ]
             candidate["passes"][self._pass_key]["replays"].update(self._pending_replays)
             _atomic_json(self.run_dir / "run_details.json", candidate)
             os.fsync(self._lock)

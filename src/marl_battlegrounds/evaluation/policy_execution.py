@@ -19,6 +19,7 @@ from __future__ import annotations
 # Private System adapter fields are shared only by their owning module's helpers.
 # pyright: reportPrivateUsage=false
 from collections.abc import Callable, Sequence
+from contextlib import AbstractContextManager, nullcontext
 from dataclasses import dataclass, field
 from functools import partial
 from numbers import Integral
@@ -31,6 +32,7 @@ from jax import Array
 from jax.core import Tracer
 
 from marl_battlegrounds.core.types import Action, ActionMask
+from marl_battlegrounds.evaluation.host_evidence import team_scope
 from marl_battlegrounds.evaluation.models import canonical_digest_sha256
 from marl_battlegrounds.policies.actor import (
     ActorAction,
@@ -672,6 +674,14 @@ class System:
         IDs returned by apply index this table; None permits only -1 IDs.
     checkpoint : str | None
         Optional caller-supplied checkpoint identity; default None.
+    resource_scope : callable | None
+        Optional host-side factory called with a Boolean recording flag. Validate
+        recording requirements immediately, then return a context manager that
+        acquires and releases runner-owned resources on entry/exit. The factory
+        must not acquire resources or make requests. None is the default. The
+        runner enters only for pending work, outside compiled execution. Nested
+        scopes must share ownership safely; supplied resources stay caller-owned.
+        A resource scope must not change the method's scientific settings.
 
     Notes
     -----
@@ -698,6 +708,7 @@ class System:
     execution: PolicyExecution = "jax"
     components: tuple[dict[str, Any], ...] | None = None
     checkpoint: str | None = None
+    resource_scope: Callable[[bool], AbstractContextManager[None]] | None = None
     _policies: tuple[Policy, ...] = field(default=(), init=False, repr=False)
     _shared: bool = field(default=False, init=False, repr=False)
 
@@ -709,7 +720,7 @@ class System:
             raise TypeError("system apply must be callable")
         if any(
             hook is not None and not callable(hook)
-            for hook in (self.init, self.reset_memory)
+            for hook in (self.init, self.reset_memory, self.resource_scope)
         ):
             raise TypeError("system init and reset_memory must be callable or None")
         if self.execution not in ("jax", "host"):
@@ -1962,18 +1973,19 @@ def _apply_system_pair(
             if execution.init is not None and needs_initialization
             else action_keys
         )
-        output = function(
-            execution,
-            variables,
-            memory.adapter_templates[team],
-            old,
-            inputs,
-            action_keys,
-            init_keys,
-            reset,
-            actor_keys=team_actor_keys,
-            keep_learning_outputs=keep_learning_outputs,
-        )
+        with team_scope(team) if execution.execution == "host" else nullcontext():
+            output = function(
+                execution,
+                variables,
+                memory.adapter_templates[team],
+                old,
+                inputs,
+                action_keys,
+                init_keys,
+                reset,
+                actor_keys=team_actor_keys,
+                keep_learning_outputs=keep_learning_outputs,
+            )
         outputs.append(output)
     valid = _batched(~state.done.done, native)
     trace = PolicyTrace(

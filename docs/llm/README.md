@@ -1,4 +1,133 @@
-# LLM Game Views And Actions
+# LLM Systems, Game Views And Actions
+
+An LLM can act through the ordinary `System` interface. Start a compatible
+model server separately, then create a System:
+
+```python
+import marl_battlegrounds as marl_bgs
+from marl_battlegrounds import llm
+
+system = llm.make_system("my-served-model", "http://127.0.0.1:8000/v1")
+result = marl_bgs.evaluate(
+    system, "random", num_episodes=2, maps=[0], num_envs=2,
+    max_steps=300, output_dir="runs/llm-example",
+)
+
+print(result.table("episodes"))
+print(llm.call_summary(result))
+print(result.paths)
+```
+
+Replace `my-served-model` with the name your server accepts. The evaluator owns
+the managed client and closes its connections and workers, including after an
+error. Reusing the System opens a fresh client when needed. It never stops
+the independent server. Construction does not download weights, make a model
+request or start a server. The simulator needs no new transport dependency.
+
+The default request uses vLLM's Chat Completions and `/tokenize` routes, with
+thinking off, temperature 0 and a 64-token reply allowance. Use
+`server_type="chat"` for standard Chat Completions fields. That mode needs a
+trusted `token_counter` for history; without one it requires `history_turns=0`
+and leaves context rejection to the server. A Chat Completions-compatible
+endpoint is required; this is not a client for every provider's native API.
+
+Try the complete script:
+
+```bash
+JAX_PLATFORMS=cpu python examples/llm.py --model my-served-model \
+  --format default --history-turns 2 --output-dir runs/llm-example
+```
+
+Use `JAX_PLATFORMS=cuda,cpu` for a GPU simulator with CPU host helpers, after
+checking memory available beside the model server. Choose ordinary `num_envs`
+for the simulator and `Client(concurrency=...)` for simultaneous HTTP work.
+The client default is 16 requests, a 60-second complete request deadline and
+no retries. The deadline applies to each HTTP call, not a whole actor decision
+or game; fitting history can make several tokenizer calls. Both teams can borrow one client and share that limit. Finished
+actor requests free their slots without waiting for an earlier slow reply;
+the System returns only after the full team decision is ready.
+
+See [custom formats](custom_formats.md) to change the prompt and use a non-JSON
+reply while keeping the same history, scheduling and action checks.
+
+For a caller-owned connection pool, use `with llm.Client(URL) as client:` and
+pass `client=client` to `make_system`. Runners leave supplied clients open.
+This also lets two Systems share one request limit. For a hand-written loop,
+keep that client context open, or enter `system.resource_scope(False)` around
+the complete loop. A managed System cannot make unowned requests.
+
+## Read Calls And Recovery
+
+Game tables and model calls have different jobs. `llm.call_summary(result)`
+works with a fresh result or `marl_bgs.load_results(run_dir)`. It returns:
+
+- `all_attempts`: recorded calls, tokens and failures from all execution attempts.
+- `completed_games`: counts only from the attempt that saved each completed game.
+  Report both teams' fallback counts beside those games' win rates.
+
+Token totals cover measured usage only. `missing_usage_replies` marks replies
+with incomplete usage. Abrupt interruption can lose unflushed costs; these
+summaries are not a spending guard.
+
+`records="light"` is the default. Rows name the actor, team, game,
+turn and execution attempt. They keep the request hash, reply and checked actions
+when available. Forced choices have no request or reply; a failed choice may
+have no action.
+Use `records="full"` to retain the exact serialized request too, including
+custom prompts and fitted history. A hash cannot reconstruct omitted text.
+`records="none"` skips call files, prompt hashing and reply copies; small failure
+and cost counters remain available. Unsaved runs also keep only these counters.
+
+```python
+for call in llm.read_calls(result.run_dir):
+    print(call["episode_id"], call["team"], call["actor"],
+          call["outcome"], call.get("world_action"))
+```
+
+Call rows say `played`, `abandoned` or `unknown`. Played means the shared game
+step completed. It does not mean the game was saved or the ability hit. A failure
+before a joint step abandons both teams' answers and proposed history. A process
+interruption may leave unknown outcomes or no final row.
+
+The existing game writer alone decides which games are safely on disk. Its
+atomic update saves completed-game IDs with their execution-attempt bindings.
+Call files are flushed before that update. A crash between saving a game and
+writing its separate call-file acknowledgement is resolved from `run_details.json`.
+Completed games are skipped on resume. Unfinished games restart with fresh
+history and a new attempt ID. Earlier call files remain available. `chunk_size`
+limits when finished games reach the writer; its `buffer_size` separately limits
+when completed rows reach disk. Neither setting saves every in-flight request.
+
+## History And Failures
+
+History is off by default. `history_turns=2` keeps at most two earlier living
+turns for each actor. The entries contain that actor's permitted view, masks and
+submitted action. They survive death and respawn and clear when the game resets.
+Dead actors make no request. A living actor with exactly one legal move and one
+legal combat pair also needs no model request; its played choice still counts
+in history. Histories stay separate even when both teams share a client.
+
+The token counter counts the wrapped request and reserves reply space. If needed,
+the adapter removes oldest whole history entries from that request. It never
+shortens the current view, rules or legal menu. The parser receives exactly the
+history used by its request. Retained memory and a request's included history
+are separate: a later, smaller view may fit more retained entries.
+
+Errors stop execution by default. `failure_policy="fallback"` permits a checked
+Stay/no-combat choice for declared malformed or illegal replies and transport
+failures. Configuration errors, context overflow, local cancellation and custom
+code bugs still stop. A parser returning the wrong native shape or type is a
+code bug. A valid native action forbidden by the current masks is an illegal
+reply. Fallback accounting and model-call records must be interpreted with the
+runner's outcome records; game CSV files alone do not explain provider failures.
+
+The HTTP deadline covers waiting for a request slot, DNS, connection, TLS,
+response reading and decoding. It cannot forcibly stop arbitrary Python custom
+functions or prove that the remote server stopped generating. Close interrupts
+owned HTTP work and waits up to its cleanup grace, default 2 seconds. It raises
+if user work survives, retaining that work in the closed client.
+
+## Standalone View And Action Helpers
 
 Turn one actor's permitted input into text, then check its named action before
 submitting it. The helpers run in Python on the host. They do not load a model,
@@ -152,3 +281,51 @@ different reply syntax. A custom decoder should return `ActorAction`, then call
 `validate_actor_action` with retained original masks. Preserve the same actor,
 decision and coordinate frame throughout. A format choice does not grant access
 to private simulator state or another actor's private input.
+
+
+## Measured Development Check
+
+On 25 September 2026, Qwen3.5-4B at revision
+`851bf6e806efd8d0a36b00ddf55e13ccb7b8cd0a` completed two development games on
+map 0 against Random. Each game used seed 19671501 and a 300-tick horizon.
+The first used the default spawn end and no history; the second used the other
+end and two history turns. Both were draws with zero kills and deaths for both
+teams. These check the software routes; they do not compare history quality or
+establish playing strength.
+
+| Measurement | No History | Two Earlier Turns |
+| --- | ---: | ---: |
+| Complete Evaluation Time | 262.4 seconds | 529.7 seconds |
+| Model Calls | 1,496 | 1,499 |
+| Input Tokens | 4,459,359 | 10,536,764 |
+| Output Tokens | 18,040 | 18,014 |
+| Forced Actions Without A Call | 4 | 1 |
+| Reply/Transport Failures | 0 | 0 |
+| Played Fallbacks, Team A / Team B | 0 / 0 | 0 / 0 |
+| Full Run Records And Replay | 43.4 MB | 63.7 MB |
+
+The model ran on the internal RTX 5090 beside unrelated training; the simulator
+ran on CPU. vLLM 0.30.0 used dynamic FP8, thinking off, temperature 0, seed 0,
+64 reply tokens, 16 request slots and prefix caching off. The server became
+healthy after 122.3 seconds. The whole window, including setup and shutdown,
+took 916.8 seconds. One-second samples found peaks of 15,024 MiB owned VRAM and
+7.61 GB summed process RSS for the server and worker. RSS counts resident memory
+for each process and can count shared pages more than once. Samples can miss brief peaks; timings include
+GPU contention and are not isolated speed measurements. These CPU simulation
+runs have no GPU simulator-transfer measurement.
+
+Full records retain exact requests and cost much more disk than the default
+light records. A separate fixed-fake check of 32 games for 8 ticks wrote zero
+call bytes with records off, 0.813 MB with light records and 16.19 MB with full
+records. All three produced the same game results. Its single warmed timings
+were 6.25, 7.51 and 6.59 seconds; that noise does not establish a speed ranking.
+The fake check measures integration and storage, not Qwen performance.
+
+Local raw evidence is under
+`artifacts/m11/qualification/20260925T204612Z-4b-development` and
+`artifacts/m11/packet-2/recording-cost`. The pre-live source receipt and archive
+are in `artifacts/m11/packet-2/pre-live-source.json`; the base is `fa58649`.
+These local artifacts are not bundled with an installation. Saved actions and
+requests support audits; temperature zero does not guarantee identical fresh
+model replies. The fixed model comparison and combined GPU workload are separate
+qualification work.

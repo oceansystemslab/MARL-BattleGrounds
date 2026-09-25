@@ -506,6 +506,10 @@ class _View:
             "configurations": configurations,
             "passes": self.selected,
         }
+        if len(self.selected) == 1:
+            evidence = next(iter(self.selected.values())).get("host_evidence")
+            if evidence:
+                self.metadata["host_evidence"] = evidence
         self.metadata["tables"] = {name: self._describe(name) for name in _TABLES}
         self.metadata["spawn_balance"] = self._spawn_balance()
 

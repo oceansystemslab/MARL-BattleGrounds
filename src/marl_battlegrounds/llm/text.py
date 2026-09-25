@@ -19,6 +19,9 @@ from marl_battlegrounds.llm.actions import MOVE_NAMES, TARGET_NAMES, legal_actio
 from marl_battlegrounds.policies.input import ActorInput
 
 TEXT_VERSION = "actor-text-v1"
+_DEFAULT_REPLY_INSTRUCTION = (
+    'Reply with exactly {"move":"<legal move>","combat":"<legal combat>"}.'
+)
 type _HostArray = npt.NDArray[np.generic]
 
 
@@ -240,6 +243,9 @@ def format_actor_view(
     masks: ActionMask,
     *,
     frame: Literal["left", "world"] = "left",
+    include_static: bool = True,
+    reply_instruction: str
+    | None = 'Reply with exactly {"move":"<legal move>","combat":"<legal combat>"}.',
 ) -> str:
     """Render one permitted current actor view and its complete legal menu.
 
@@ -257,6 +263,15 @@ def format_actor_view(
         Label of the supplied coordinates, not a request to transform them.
         For left-spawn input, call mirror_team_view with team_on_right first.
         A subsequent action must be mapped back exactly once with mirror_move.
+
+    include_static : bool, default=True
+        Include rules and the public map. False is for earlier views in a
+        history block whose current view already supplies the same rules/map.
+        All changing fields, previous actions and legal choices remain present.
+    reply_instruction : str | None
+        Final reply-format instruction. The default asks for named JSON. Pass
+        a different instruction for a custom parser, or None to omit it in a
+        historical view. This changes text only, never the shared action checks.
 
     Returns
     -------
@@ -285,13 +300,15 @@ def format_actor_view(
     host = _host_actor(actor)
     menu = legal_action_names(masks)
     obs = host.observation
-    lines = [f"MARL-BGs {TEXT_VERSION}; Frame: {frame}", _RULES, "Map:"]
-    obstacles = np.asarray(obs.map_obstacle_features)
-    lines.extend(
-        f"Obstacle {index}: {_fields(row, _OBSTACLE_FIELDS)}"
-        for index, row in enumerate(obstacles)
-        if np.any(_nonzero(row))
-    )
+    lines = [f"MARL-BGs {TEXT_VERSION}; Frame: {frame}"]
+    if include_static:
+        lines.extend([_RULES, "Map:"])
+        obstacles = np.asarray(obs.map_obstacle_features)
+        lines.extend(
+            f"Obstacle {index}: {_fields(row, _OBSTACLE_FIELDS)}"
+            for index, row in enumerate(obstacles)
+            if np.any(_nonzero(row))
+        )
     lines.extend(
         [
             f"Context: {_fields(np.asarray(obs.context_features), _CONTEXT_FIELDS)}",
@@ -385,7 +402,8 @@ def format_actor_view(
             "Combat: no_combat means no target and no Ultimate; ultimate means an "
             "untargeted Ultimate. Target names keep their roster meaning. The target "
             "and Ultimate marginal masks are the unions of the listed complete pairs.",
-            'Reply with exactly {"move":"<legal move>","combat":"<legal combat>"}.',
         ]
     )
+    if reply_instruction is not None:
+        lines.append(reply_instruction)
     return "\n".join(lines)

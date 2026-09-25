@@ -795,3 +795,44 @@ def test_resume_rejects_changed_input_contract_before_touching_files(
         if path.is_file()
     }
     assert before == after
+
+
+def test_host_call_evidence_and_game_attempt_publish_at_one_boundary(
+    tmp_path: Path, episodes: _Episodes, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    writer = RunWriter(tmp_path)
+    summary: dict[str, object] = {"teams": {"team_a": {"model_calls": 3}}}
+    writer.record_host_evidence("llm", "old-attempt", summary)
+    summary["teams"] = {"changed": True}
+    writer.flush()
+    writer.record_host_evidence("llm", "new-attempt", {"teams": {"calls": 5}})
+    writer.write(episodes.priority)
+
+    def fail_manifest(path: Path, value: object) -> None:
+        raise OSError("injected evidence boundary failure")
+
+    with monkeypatch.context() as patch:
+        patch.setattr(run_writer, "_atomic_json", fail_manifest)
+        with pytest.raises(OSError, match="evidence boundary"):
+            writer.flush()
+    evidence = cast(dict[str, Any], writer.host_evidence["llm"])
+    assert evidence["episode_attempts"] == {}
+    assert writer.completed_episode_ids == frozenset()
+    assert evidence["attempts"]["old-attempt"]["teams"] == {
+        "team_a": {"model_calls": 3}
+    }
+    writer.close()
+    with RunWriter(resume_from=writer.run_dir) as resumed:
+        evidence = cast(dict[str, Any], resumed.host_evidence["llm"])
+        assert evidence["episode_attempts"] == {}
+        assert "new-attempt" not in evidence["attempts"]
+        resumed.record_host_evidence("llm", "restart", {"calls": 7})
+        resumed.write(episodes.priority)
+        resumed.flush()
+        evidence = cast(dict[str, Any], resumed.host_evidence["llm"])
+        assert evidence["episode_attempts"] == {"4": "restart"}
+        assert evidence["attempts"]["restart"] == {"calls": 7}
+        resumed.record_host_evidence("llm", "restart", {"calls": 9})
+        resumed.flush()
+        evidence = cast(dict[str, Any], resumed.host_evidence["llm"])
+        assert evidence["attempts"]["restart"] == {"calls": 9}

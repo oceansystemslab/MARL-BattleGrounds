@@ -355,6 +355,8 @@ def normalize_system_registration(
             else None,
             "adapter_policies": [],
         }
+        if value.resource_scope is not None:
+            registration["resource_scope"] = _callable_evidence(value.resource_scope)
         adapter_policies: list[dict[str, object]] = []
         for entry in value._policies:  # pyright: ignore[reportPrivateUsage]
             descriptor = policy_description(

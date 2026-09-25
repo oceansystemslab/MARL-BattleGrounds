@@ -11,7 +11,7 @@ does not train methods or use training trackers, automatic resets or collectors.
 # pyright: reportPrivateUsage=false
 
 from collections.abc import Iterable, Mapping, Sequence
-from contextlib import ExitStack
+from contextlib import ExitStack, nullcontext
 from dataclasses import dataclass
 from hashlib import sha256
 from numbers import Integral
@@ -59,6 +59,7 @@ from marl_battlegrounds.evaluation.evaluation_conditions import (
     same_float32,
     saved_specs,
 )
+from marl_battlegrounds.evaluation.host_evidence import HostRun, current_run
 from marl_battlegrounds.evaluation.metric_catalog import (
     FULL_METRIC_NAMES,
     METRIC_SCHEMA_ID,
@@ -642,18 +643,27 @@ def _host_system_chunk(
     retained without array conversion. No provider rollback or retry is attempted.
     """
     captures = []
+    evidence = current_run()
     for _ in range(chunk_size):
-        carry, capture = _system_advance(
-            env,
-            execution_a,
-            execution_b,
-            variables_a,
-            variables_b,
-            carry,
-            root_key,
-            seed_ids,
-            capture_routes,
+        scope = (
+            evidence.decision(carry.state)
+            if evidence is not None
+            else nullcontext(False)
         )
+        with scope as confirm_step:
+            carry, capture = _system_advance(
+                env,
+                execution_a,
+                execution_b,
+                variables_a,
+                variables_b,
+                carry,
+                root_key,
+                seed_ids,
+                capture_routes,
+            )
+            if confirm_step:
+                jax.block_until_ready(carry.state)
         captures.append(capture)
     return carry, jax.tree.map(lambda *values: jnp.stack(values), *captures)
 
@@ -1250,6 +1260,13 @@ def _run_evaluation(
     }
     metadata["systems"] = {key: value for key, value in registrations.values()}
     metadata["system_ids"] = {name: value[0] for name, value in registrations.items()}
+    # Factories validate recording identity without opening resources. Pending
+    # work enters their contexts below, after the writer owns failure reporting.
+    resource_scopes = [
+        team.resource_scope(recording)
+        for team in (team_a, team_b)
+        if isinstance(team, System) and team.resource_scope is not None
+    ]
     if _verify_only:
         if saved is None:
             raise ValueError("Read-only verification requires a saved pass")
@@ -1318,6 +1335,8 @@ def _run_evaluation(
                 )
         pending = tuple(spec for spec in specs if spec.episode_id not in previous)
         if not pending:
+            if writer is not None and writer.host_evidence:
+                metadata["host_evidence"] = writer.host_evidence
             metadata["completion_order"] = []
             if writer is not None and contract is not None:
                 writer.mark_pass_result(
@@ -1331,6 +1350,23 @@ def _run_evaluation(
                 tuple(sorted(previous)),
                 writer.paths if writer is not None else None,
             )
+        evidence = (
+            HostRun(
+                run_id,
+                phase,
+                pass_id,
+                writer.run_dir if writer is not None else None,
+                metadata,
+                writer.record_host_evidence if writer is not None else None,
+                previous,
+            )
+            if resource_scopes
+            else None
+        )
+        if evidence is not None:
+            cleanup.enter_context(evidence.scope())
+        for scope in resource_scopes:
+            cleanup.enter_context(scope)
         effective_batch_size = (
             batch_size if keep_batch_size else min(batch_size, len(pending))
         )
@@ -1514,6 +1550,8 @@ def _run_evaluation(
                         seeds(),
                         chunk_size,
                     )
+                if evidence is not None:
+                    evidence.flush()
                 if writer is not None and assignments is not None:
                     writer._write_collected(
                         evaluation_record_batch(
@@ -1551,6 +1589,8 @@ def _run_evaluation(
                     validate_recording_errors(publication)
                     if packets is not None and collector is not None:
                         replays.extend(collector.write(packets))
+                if evidence is not None and writer is not None:
+                    evidence.completed(writer.completed_episode_ids)
             except BaseException as error:
                 error.add_note(
                     f"Evaluation policies {team_a.name!r}/{team_b.name!r}; "
@@ -1613,12 +1653,18 @@ def _run_evaluation(
                         select_policy_carry(mask, initial_b, carry.policy_b),
                         carry.completed,
                     )
+        if evidence is not None:
+            evidence.flush()
         if writer is not None:
             writer.flush()
+            if evidence is not None:
+                evidence.completed(writer.completed_episode_ids)
             if contract is not None:
                 writer.mark_pass_result(
                     "complete", schedule_digest=str(metadata["schedule_digest"])
                 )
+        if writer is not None and writer.host_evidence:
+            metadata["host_evidence"] = writer.host_evidence
         metadata["completion_order"] = list(results)
         return EvaluationResult(
             priority.columns(spec_by_id, identity, config_ids),
@@ -1626,7 +1672,12 @@ def _run_evaluation(
             tuple(results[value] for value in sorted(results)),
             metadata,
             tuple(sorted(previous | results.keys())),
-            writer.paths if writer is not None else None,
+            {
+                **writer.paths,
+                **(evidence.paths if evidence is not None else {}),
+            }
+            if writer is not None
+            else None,
             tuple(replays),
         )
 
