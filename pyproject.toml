@@ -130,6 +130,7 @@ venv = ".venv"
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 pythonpath = ["."]
+tmp_path_retention_policy = "failed"
 addopts = [
   "-ra",
   "--strict-markers",

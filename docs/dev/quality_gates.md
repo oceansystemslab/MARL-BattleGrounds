@@ -84,7 +84,7 @@ scripts/dev/check_gpu.sh
 contributors need no NVIDIA GPU. Hosted aggregate checks must still pass after
 publication; a local pass cannot guarantee a remote service's result.
 
-## Evidence economics and CI runtime budget
+## Evidence economics and CI runtime
 
 Keep twelve nonempty Python shards and eight nonempty browser profiles. Their
 sole assignment authorities are [pytest_shard.py](../../scripts/dev/pytest_shard.py)
@@ -98,12 +98,25 @@ atomicity, fixture affinity and browser file/serial order. Rebalance measured
 intact units first. Split a proven oversized file only into coherent groups,
 without changing or weakening its assertions.
 
-The current hosted target is about six minutes across the repository-controlled
-critical path at the twenty-job ceiling. Measure from the first job start to the
-last required aggregate completion; report queue delay separately. If safe
-balancing cannot meet that target, document the evidence and raise it by exactly
-one minute. Never omit tests, duplicate them or cancel unchanged valid work to
-meet a timing target. Cancel only when a concrete correction is ready for rerun.
+Hosted CI has no runtime budget (user's rule, 2026-09-26). Jobs have no
+repository-configured time limit, and measured shard and profile times guide
+balancing only. Never omit tests, duplicate them, weaken assertions or cancel
+unchanged valid work for timing. Cancel only when a concrete correction is ready
+for rerun.
+
+Each Python shard runs its tests in one pytest process on a 16 GB hosted runner.
+[tests/conftest.py](../../tests/conftest.py) collects garbage and returns free
+heap pages to the operating system after every test. When the next test comes
+from another file, it first clears the finished file's own caches and JAX's
+compiled programs, so memory no longer carries over from file to file; it can
+still build up within one heavy file. Hosted run `36266129410` lost Python
+shard 3 after 24.6 minutes with exit code 143 and skipped post steps, the
+signature of a runner shutdown, on the first hosted run of the training tests.
+Measured locally on four CPUs, 124 tests from four training files peaked at
+9.4 GiB in one process without this release and 5.5 GiB with it. Do not remove
+it without a replacement that keeps shard memory bounded. For the same reason,
+`tmp_path_retention_policy = "failed"` deletes a passing test's temporary
+directory when the test ends; training tests write hundreds of megabytes each.
 
 The following historical timing and CI records explain the scheduler's evolution.
 Their test counts and individual distributions are historical, not the current
@@ -125,12 +138,10 @@ measured overloaded shards into shards with measured headroom. It fails closed
 if a future collection changes an expected source owner. The resulting local
 12-way proof selects all 3,403 tests exactly once: pytest time ranges from 3:38
 to 4:34 and whole-command wall time from 3:50 to 4:50. Every publication
-candidate must still be checked against hosted timestamps. A material
-regression beyond the approximately six-minute target requires profiling and
-an actionable CI-only follow-up; ordinary timing variance does not. Rebalance
-intact work units within the current twelve-Python/eight-browser, twenty-job
-ceiling while allowing valid work to finish. Do not cancel and rerun unchanged
-work. Never omit tests or weaken assertions to satisfy the timing target.
+candidate must still be checked against hosted timestamps. Rebalance intact
+work units within the current twelve-Python/eight-browser, twenty-job ceiling
+while allowing valid work to finish. Do not cancel and rerun unchanged work.
+Never omit tests or weaken assertions for timing.
 Since 22 September 2026 the scheduler uses measured per-file costs instead of
 those hand-picked moves; see [Rebalancing the test shards](#rebalancing-the-test-shards).
 
@@ -150,20 +161,13 @@ six-minute whole-job ceiling during process shutdown, while Python shard 4
 repeatedly reached 97 percent before crossing the former nine-minute ceiling.
 The DevClient authoring file moved intact from browser profile 5 to the lighter
 profile 4; exact-cover tests still forbid omission or duplication. Current CI
-uses measured timings and shard balancing to enforce the performance target;
-it does not terminate jobs through repository-configured timeouts.
+uses measured timings only to balance shards; it does not terminate jobs through
+repository-configured timeouts.
 
 Main-branch CI runs use `github.run_id` in their concurrency key, so consecutive
 merges cannot replace an older pending or running main check. Non-main refs
 remain grouped by ref with `cancel-in-progress: true`, preserving deliberate
 supersession of stale branch and pull-request work.
-
-If measured evidence proves the current six-minute target unattainable after
-safe balancing at the twelve-plus-eight, twenty-job ceiling, increase the
-documented target by exactly one minute. Record the measurements and the reason
-no further safe redistribution exists. Never omit tests, duplicate execution,
-weaken assertions, or cancel a valid run merely because it crossed the target.
-Cancel only when a concrete corrective change is ready to apply before rerun.
 
 
 ## Rebalancing the test shards
