@@ -98,7 +98,8 @@
         "a stale tab adopts the latest ranges state without replaying its command",
         "a command authorization failure clears the retained battlefield",
         "an accepted Exit cannot retain a scene after sidecar authorization fails",
-        "amended regular and stress scenarios retain Oracle-Agent presentation continuity"
+        "amended regular and stress scenarios retain Oracle-Agent presentation continuity",
+        "declared System loads, accepts one turn and abandons a cancelled late reply"
       ]
     }
   ]

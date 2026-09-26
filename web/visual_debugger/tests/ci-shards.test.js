@@ -106,7 +106,7 @@ test("CI browser manifest is nonempty, exact, and eight-way", () => {
   ]);
   assert.deepEqual(
     manifest.shards.slice(5).map((shard) => shard.test_titles?.length),
-    [12, 4, 10],
+    [12, 4, 11],
   );
 });
 

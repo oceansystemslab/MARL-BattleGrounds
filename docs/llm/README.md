@@ -47,6 +47,9 @@ or game; fitting history can make several tokenizer calls. Both teams can borrow
 actor requests free their slots without waiting for an earlier slow reply;
 the System returns only after the full team decision is ready.
 
+Use the [qualified Qwen recipe](qwen_recipe.md) for pinned server commands,
+measured costs and the fixed 4B/9B comparison.
+
 See [custom formats](custom_formats.md) to change the prompt and use a non-JSON
 reply while keeping the same history, scheduling and action checks.
 
@@ -416,8 +419,8 @@ Local raw evidence is under
 are in `artifacts/m11/packet-2/pre-live-source.json`; the base is `fa58649`.
 These local artifacts are not bundled with an installation. Saved actions and
 requests support audits; temperature zero does not guarantee identical fresh
-model replies. The model comparison and combined GPU workload have separate qualification
-evidence.
+model replies. The [qualified recipe](qwen_recipe.md) reports the completed fixed model
+comparison and combined GPU workload.
 
 ## Play In DevClient
 

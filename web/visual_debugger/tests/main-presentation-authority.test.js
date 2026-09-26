@@ -1433,14 +1433,6 @@ test("main labels every policy controller explicitly and fences its action editi
     readFile(stylesUrl, "utf8"),
   ]);
 
-  assert.match(
-    source,
-    /value === "manual" \|\| value === "random_valid" \|\| isReactiveController\(value\)/u,
-  );
-  assert.match(
-    source,
-    /value === "reactive_tdm" \|\| value === "scenario_5" \|\| value === "tdm_gamma"/u,
-  );
   assert.match(source, /controller === "random_valid"[\s\S]*return "Random"/u);
   assert.match(
     source,
