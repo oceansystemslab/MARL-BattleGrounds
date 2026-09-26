@@ -82,8 +82,11 @@ from marl_battlegrounds.training.curriculum import (
     TrainingProgress,
     TrainingSchedule,
     _advance_training_schedule,
+    _check_training_schedule,
+    _continuation_details,
     _init_training_progress,
-    make_training_schedule,
+    _make_continuation_schedule,
+    _restore_continuation_schedule,
 )
 from marl_battlegrounds.training.distributions import (
     TRAINING_KEY_SCHEMA_VERSION,
@@ -191,7 +194,10 @@ class TrainingTransition(NamedTuple):
     active/alive are bool (B,5); episode_start/ended/valid are bool (B,).
     Completion outcome/length (B,) and final_scores (B,2) are zero unless ended.
     priority is existing MetricValues, masked to real endings, or None.
-    Int32 identity/version fields are (B,); opponent_snapshot=-1 means current.
+    Int32 identity/version fields are (B,); requested_stage and episode_stage
+    name original distribution slots, including in child segments. The former
+    is the latest reset request; the latter names the producing game's reset.
+    opponent_snapshot=-1 means current.
     opponent_update is the learner version the opponent's weights come from;
     for games against a named pinned System (opponent_snapshot 0 when the
     collection has one) it is -2, because that System is not a learner version.
@@ -257,6 +263,7 @@ class TrainingCollection:
     "potential" by default or the explicit "score_delta" combat objective.
     learning_spec/info_spec contain
     shape-only output trees used for finite padding and failure diagnostics.
+    schedule also holds the immutable parent proof for a child segment.
     carry_spec records shapes and static settings without retaining arrays;
     root_bits, key_schema and reward_settings bind in-memory continuation.
     pinned_opponent_share is the static probability that a reset lane meets the
@@ -402,6 +409,7 @@ def _validate_training_continuation(  # pyright: ignore[reportUnusedFunction]
     learner resume. Preserve descriptor and carry together, with lane order
     unchanged. Packet 4 owns serializing and validating a full learner checkpoint.
     """
+    _check_training_schedule(collection.schedule)
     if recheck_installed_content:
         prepare_training_content(expected=collection.binding)
     if carry.tracking.source_configs is None or (
@@ -430,7 +438,11 @@ def _validate_training_continuation(  # pyright: ignore[reportUnusedFunction]
     for actual, expected in zip(
         carry.schedule, collection.schedule.arrays, strict=True
     ):
-        if not np.array_equal(actual, expected):
+        if actual is None or expected is None:
+            matches = actual is expected
+        else:
+            matches = np.array_equal(actual, expected)
+        if not matches:
             raise ValueError("Continuation schedule changed")
     if (float(carry.discount), float(carry.coefficient)) != collection.reward_settings:
         raise ValueError("Continuation reward settings changed")
@@ -443,7 +455,20 @@ def _validate_training_continuation(  # pyright: ignore[reportUnusedFunction]
     _check_carry(carry)
     snapshot = _boundary_snapshot(carry.tracking, carry.state)
     rounds = int(carry.progress.rounds)
-    if not 0 <= rounds <= int(carry.schedule.total_rounds) or not np.all(
+    offset = (
+        0 if carry.schedule.round_offset is None else int(carry.schedule.round_offset)
+    )
+    distribution_offset = (
+        0
+        if carry.schedule.distribution_offset is None
+        else int(carry.schedule.distribution_offset)
+    )
+    distributions = int(
+        carry.schedule.stage_count
+        if carry.schedule.distribution_count is None
+        else carry.schedule.distribution_count
+    )
+    if not offset <= rounds <= int(carry.schedule.total_rounds) or not np.all(
         snapshot["accounted"] == rounds
     ):
         raise ValueError("Continuation progress and tracked experience disagree")
@@ -464,9 +489,7 @@ def _validate_training_continuation(  # pyright: ignore[reportUnusedFunction]
         raise ValueError("Continuation source indices are outside the verified bank")
     actual_thresholds = np.asarray(carry.state.config.team_deathmatch_score_threshold)
     episode_stages = np.asarray(carry.progress.episode_stage)
-    if np.any(episode_stages < 0) or np.any(
-        episode_stages >= int(carry.schedule.stage_count)
-    ):
+    if np.any(episode_stages < 0) or np.any(episode_stages >= distributions):
         raise ValueError("Continuation episode stages are outside the schedule")
     if not np.array_equal(
         actual_thresholds, bank_thresholds[indices]
@@ -485,7 +508,7 @@ def _validate_training_continuation(  # pyright: ignore[reportUnusedFunction]
     budgets = np.asarray(carry.schedule.round_budgets)
     ends = np.asarray(carry.schedule.round_ends)
     stage = min(int(np.searchsorted(ends[:stages], rounds, side="right")), stages - 1)
-    stage_rounds = rounds - (int(ends[stage - 1]) if stage else 0)
+    stage_rounds = rounds - (int(ends[stage - 1]) if stage else offset)
     proof = np.zeros((17, count, 3), np.int64)
     complete = (np.arange(17) < stages) & (ends <= rounds)
     for index in range(stages):
@@ -518,7 +541,7 @@ def _validate_training_continuation(  # pyright: ignore[reportUnusedFunction]
         or np.any(progress.opponent_starts < 0)
         or np.any(progress.opponent_starts > progress.opponent_steps)
         or np.any(progress.episode_stage < 0)
-        or np.any(progress.episode_stage > stage)
+        or np.any(progress.episode_stage > distribution_offset + stage)
         or any(
             sum(int(x) for x in progress.starts[:, lane])
             != sum(int(x) for x in progress.opponent_starts[:, lane])
@@ -538,10 +561,18 @@ def _validate_training_continuation(  # pyright: ignore[reportUnusedFunction]
     )
     used_rounds = captured_rounds[:history_count]
     used_updates = captured_updates[:history_count]
+    threshold_count = (
+        20
+        if carry.schedule.history_threshold_count is None
+        else int(carry.schedule.history_threshold_count)
+    )
+    active_thresholds = np.arange(20) < threshold_count
     expected_mapping = np.searchsorted(
         used_rounds, np.asarray(carry.schedule.history_threshold_rounds), side="left"
     )
-    expected_mapping = np.where(expected_mapping < history_count, expected_mapping, -1)
+    expected_mapping = np.where(
+        active_thresholds & (expected_mapping < history_count), expected_mapping, -1
+    )
     if (
         not 0 <= history_count <= update <= refreshed <= rounds
         or ((update == 0) != (refreshed == 0))
@@ -556,11 +587,224 @@ def _validate_training_continuation(  # pyright: ignore[reportUnusedFunction]
         or not np.array_equal(mapping, expected_mapping)
         or set(int(x) for x in mapping if x >= 0) != set(range(history_count))
         or np.any(
-            (np.asarray(carry.schedule.history_threshold_rounds) <= refreshed)
+            (
+                active_thresholds
+                & (np.asarray(carry.schedule.history_threshold_rounds) <= refreshed)
+            )
             != (mapping >= 0)
         )
     ):
         raise ValueError("Continuation opponent snapshot metadata is inconsistent")
+
+
+def _continuation_history_thresholds(  # pyright: ignore[reportUnusedFunction]
+    carry: TrainingCarry, *, future_rounds: tuple[int, ...]
+) -> tuple[int, ...]:
+    """Keep saved snapshots and pending captures while adding explicit requests.
+
+    carry must already pass its parent's collection check. future_rounds contains
+    strictly increasing Python integers after the actual checkpoint round; the
+    runner checks them against the child's declared end and learner boundaries.
+    Return an ordered active threshold tuple with one marker per existing slot,
+    all distinct pending old thresholds and the added points. Passed duplicate
+    requests are retained in the archived parent proof, not copied into new
+    active slots. Reject invalid points or more than 20 required table entries.
+    Host-only: reads small history arrays and changes no numerical state.
+    """
+    rounds = int(carry.progress.rounds)
+    if (
+        not isinstance(cast(object, future_rounds), tuple)
+        or any(
+            type(value) is not int or not rounds < value <= np.iinfo(np.int32).max
+            for value in future_rounds
+        )
+        or tuple(sorted(set(future_rounds))) != future_rounds
+    ):
+        raise ValueError(
+            "Future captures must be ordered distinct rounds after the checkpoint"
+        )
+    count = int(carry.history.count)
+    active = (
+        20
+        if carry.schedule.history_threshold_count is None
+        else int(carry.schedule.history_threshold_count)
+    )
+    captured = tuple(
+        int(value) for value in np.asarray(carry.history.captured_rounds)[:count]
+    )
+    thresholds = np.asarray(carry.schedule.history_threshold_rounds)[:active]
+    mapping = np.asarray(carry.history.threshold_to_snapshot)[:active]
+    pending = {int(value) for value in thresholds[mapping == -1]}
+    combined = (*captured, *sorted(pending | set(future_rounds)))
+    if len(combined) > 20:
+        raise ValueError(
+            "Added captures cannot fit the 20 history slots and pending requests"
+        )
+    return combined
+
+
+def _begin_training_segment(  # pyright: ignore[reportUnusedFunction]
+    collection: TrainingCollection,
+    carry: TrainingCarry,
+    *,
+    schedule: TrainingSchedule,
+) -> tuple[TrainingCollection, TrainingCarry]:
+    """Start a declared child budget without taking a decision or resetting a game.
+
+    Parameters
+    ----------
+    collection, carry : TrainingCollection, TrainingCarry
+        Exact parent descriptor and latest complete collection boundary. The
+        caller must already have restored and validated the full learner, installed
+        content and checkpoint identity, and kept that parent unchanged.
+    schedule : TrainingSchedule
+        Pending child schedule from curriculum._make_continuation_schedule at
+        this carry's cumulative rounds. An optional learner declaration is kept.
+        Explicit history thresholds may regroup passed duplicate requests, but
+        every existing snapshot must keep a marker and no slot may be removed.
+
+    Returns
+    -------
+    tuple[TrainingCollection, TrainingCarry]
+        Child descriptor with an immutable parent stage proof, and its checked
+        carry. Only schedule, local stage proof, current tracker accounting and
+        an explicitly changed threshold mapping differ. Cumulative experience,
+        exposure, games, observations, memories, random keys and frozen history
+        variables/capture identities are unchanged. Carry both returned values.
+
+    Raises
+    ------
+    ValueError
+        Parent validation fails, the declaration describes another boundary,
+        a history change drops old snapshots, or the child accounting is invalid.
+
+    Notes
+    -----
+    Host-only. Reuses the installed-content check from restore and checks the
+    carried source bank, structure, keys and counters again. Opens
+    no writer, consumes no key, initializes no System and performs no transition.
+    A device-committed parent keeps that placement for every replacement leaf;
+    existing leaves on that device are reused. An uncommitted parent stays
+    uncommitted. The runner binds source/run identity and recording ancestry.
+    """
+    _validate_training_continuation(collection, carry, recheck_installed_content=False)
+    declaration = _continuation_details(schedule)
+    if declaration is None:
+        raise ValueError("A new training segment requires a continuation schedule")
+    rounds = int(carry.progress.rounds)
+    active = (
+        20
+        if schedule.arrays.history_threshold_count is None
+        else int(schedule.arrays.history_threshold_count)
+    )
+    thresholds = tuple(
+        int(value) for value in np.asarray(schedule.arrays.history_threshold_rounds)
+    )
+    same_history = np.array_equal(
+        schedule.arrays.history_threshold_rounds,
+        carry.schedule.history_threshold_rounds,
+    ) and (
+        (
+            None
+            if schedule.arrays.history_threshold_count is None
+            else int(schedule.arrays.history_threshold_count)
+        )
+        == (
+            None
+            if carry.schedule.history_threshold_count is None
+            else int(carry.schedule.history_threshold_count)
+        )
+    )
+    expected = _make_continuation_schedule(
+        collection.schedule,
+        completed_rounds=rounds,
+        additional_env_steps=declaration["additional_env_steps"],
+        history_threshold_rounds=None if same_history else thresholds[:active],
+    )
+    expected_details = _continuation_details(expected)
+    assert expected_details is not None
+    if any(
+        declaration.get(key) != value
+        for key, value in expected_details.items()
+        if key != "parent_stage_proof"
+    ):
+        raise ValueError("Child schedule differs from the actual parent boundary")
+    if (
+        jax.tree.structure(schedule.arrays) != jax.tree.structure(expected.arrays)
+        or any(
+            not np.array_equal(left, right)
+            for left, right in zip(
+                jax.tree.leaves(schedule.arrays),
+                jax.tree.leaves(expected.arrays),
+                strict=True,
+            )
+        )
+        or dict(schedule.rounding_report) != dict(expected.rounding_report)
+    ):
+        raise ValueError("Child schedule arrays differ from its declaration")
+    progress = jax.device_get(carry.progress)
+    snapshot = _boundary_snapshot(carry.tracking, carry.state)
+    proof = {
+        "rounds": rounds,
+        "stage_ordinal": int(snapshot["ordinal"]),
+        "stage_round_budget": int(snapshot["budget"]),
+        "stage_rounds": int(snapshot["rounds"]),
+        "stage_counts": snapshot["counts"].tolist(),
+        "full_batch_rounds_valid": bool(snapshot["full"]),
+        "completed_stage_counts": np.asarray(progress.completed_stage_counts).tolist(),
+        "stage_complete": np.asarray(progress.stage_complete).tolist(),
+        "history_threshold_to_snapshot": np.asarray(
+            carry.history.threshold_to_snapshot
+        ).tolist(),
+    }
+    if (
+        declaration["parent_stage_proof"] is not None
+        and declaration["parent_stage_proof"] != proof
+    ):
+        raise ValueError("Child parent stage proof differs from the actual carry")
+    declaration["parent_stage_proof"] = proof
+    schedule = _restore_continuation_schedule(declaration)
+    history = carry.history
+    if not same_history:
+        count = int(history.count)
+        captures = np.asarray(history.captured_rounds)[:count]
+        mapping = np.searchsorted(
+            captures, np.asarray(thresholds[:active]), side="left"
+        )
+        mapping = np.where(mapping < count, mapping, -1).astype(np.int32)
+        if set(int(value) for value in mapping if value >= 0) != set(range(count)):
+            raise ValueError("Child history requests must retain every saved snapshot")
+        history = history._replace(
+            threshold_to_snapshot=jnp.asarray(
+                np.pad(mapping, (0, 20 - active), constant_values=-1)
+            )
+        )
+    changed = carry._replace(
+        schedule=schedule.arrays,
+        progress=carry.progress._replace(
+            completed_stage_counts=jnp.zeros_like(
+                carry.progress.completed_stage_counts
+            ),
+            stage_complete=jnp.zeros_like(carry.progress.stage_complete),
+        ),
+        tracking=replace(
+            carry.tracking,
+            stage_ordinal=jnp.int32(0),
+            stage_round_budget=schedule.arrays.round_budgets[0],
+            stage_rounds=jnp.int32(0),
+            stage_counts=jnp.zeros_like(carry.tracking.stage_counts),
+            full_batch_rounds_valid=jnp.bool_(True),
+        ),
+        history=history,
+    )
+    if carry.root_key.committed:
+        # A mixed placement would compile again after the first block commits it.
+        changed = jax.device_put(changed, carry.root_key.sharding)
+    child = replace(
+        collection, schedule=schedule, carry_spec=jax.eval_shape(_retain, changed)
+    )
+    _validate_training_continuation(child, changed, recheck_installed_content=False)
+    return child, changed
 
 
 def init_training_collection(
@@ -625,7 +869,8 @@ def init_training_collection(
         before. Otherwise the method that plays every lane assigned to slot 0,
         instead of that snapshot: a System or Policy object, or a reference
         string resolved by ``load_method`` (a built-in name, an absolute
-        actor-export directory, or ``module:function``). Requires a positive
+        actor-export or full learner checkpoint directory, or ``module:function``).
+        Requires a positive
         pinned_opponent_share. It is frozen once with M8's
         ``freeze_evaluation_method`` and registered the way evaluation and
         validation register it. A JAX method runs inside the compiled step,
@@ -649,7 +894,8 @@ def init_training_collection(
     tuple[TrainingCollection, TrainingCarry]
         Stable host descriptor and complete numerical state. Setup reads files
         when preparing content and, for a string pinned_opponent, when loading
-        an actor export and its sibling learner description or importing and
+        an actor export/checkpoint (and an export's sibling learner description),
+        or importing and
         calling a factory once. It places arrays, initializes memory (including
         the pinned method's placeholder memory, with every game marked invalid)
         and traces output shapes. It creates no writer and executes no actor
@@ -670,25 +916,11 @@ def init_training_collection(
         raise TypeError("actor must be a native JAX System")
     if not isinstance(cast(object, schedule), TrainingSchedule):
         raise TypeError("schedule must come from make_training_schedule")
-    checked_schedule = make_training_schedule(
-        total_env_steps=schedule.total_env_steps,
-        num_envs=schedule.num_envs,
-        curriculum=schedule.curriculum,
-        score_threshold_curriculum=schedule.score_threshold_curriculum,
-        early_history_capture=schedule.early_history_capture,
-    )
-    if (
-        jax.tree.structure(schedule.arrays)
-        != jax.tree.structure(checked_schedule.arrays)
-        or any(
-            left.dtype != right.dtype or not np.array_equal(left, right)
-            for left, right in zip(
-                schedule.arrays, checked_schedule.arrays, strict=True
-            )
+    if schedule.continuation is not None:
+        raise ValueError(
+            "Initialize an original schedule, then restore or start its child segment"
         )
-        or dict(schedule.rounding_report) != dict(checked_schedule.rounding_report)
-    ):
-        raise ValueError("schedule arrays and report must match its declared settings")
+    _check_training_schedule(schedule)
     if type(seed) is not int or any(
         type(x) is not bool for x in (shaping, collect_training_state, recording)
     ):
@@ -1034,6 +1266,8 @@ def _reset_pending(
     """
     mask = carry.state.done.done
     stage = carry.tracking.stage_ordinal
+    if carry.schedule.distribution_offset is not None:
+        stage = stage + carry.schedule.distribution_offset
     assert carry.tracking.source_configs is not None
     observations, state, indices, classes = _reset_finished(
         carry.env,
@@ -1156,7 +1390,15 @@ def _real_step(
         priority,
         info.episode_id,
         info.decision_step,
-        jnp.full_like(info.episode_id, carry.tracking.stage_ordinal),
+        jnp.full_like(
+            info.episode_id,
+            carry.tracking.stage_ordinal
+            + (
+                0
+                if carry.schedule.distribution_offset is None
+                else carry.schedule.distribution_offset
+            ),
+        ),
         carry.progress.episode_stage,
         carry.source_indices,
         jnp.full_like(info.episode_id, carry.history.current_update),
@@ -1447,7 +1689,10 @@ def training_summary(
     trajectory. Integers are aggregated with Python precision, not int32 device
     reductions. Failed carry raises ValueError. No learning/sample-use or skill
     claim is inferred; learner_samples is None until a later learner owns it.
-    score_thresholds_by_episode_stage labels active reset-time stages.
+    score_thresholds_by_episode_stage labels the original reset-time stages.
+    In a child, experience/exposure stay cumulative, stage_complete and
+    completed_stage_counts describe only its local segment, and segment_rounds,
+    segment_env_steps and continuation name its new work and archived parent proof.
     exposure_by_score_threshold groups starts, env_steps and actor_decisions by
     the K actually used by each game, including games carried across stage ends.
     With a named pinned opponent the result also holds its record and
@@ -1462,7 +1707,14 @@ def training_summary(
         return [sum(int(x) for x in np.asarray(row).flat) for row in np.asarray(values)]
 
     rounds = int(p.rounds)
-    stages = int(carry.schedule.stage_count)
+    segment_offset = (
+        0 if carry.schedule.round_offset is None else int(carry.schedule.round_offset)
+    )
+    stages = int(
+        carry.schedule.stage_count
+        if carry.schedule.distribution_count is None
+        else carry.schedule.distribution_count
+    )
     thresholds = np.asarray(carry.schedule.score_thresholds)[:stages].tolist()
     starts, steps, decisions = (
         totals(p.starts),
@@ -1504,6 +1756,16 @@ def training_summary(
             for x in np.asarray(~carry.state.done.done & ~carry.state.episode_start)
         ),
         "learner_samples": None,
+        **(
+            {}
+            if collection.schedule.continuation is None
+            else {
+                "continuation": _continuation_details(collection.schedule),
+                "segment_rounds": rounds - segment_offset,
+                "segment_env_steps": (rounds - segment_offset)
+                * collection.schedule.num_envs,
+            }
+        ),
         **(
             {}
             if collection.pinned_opponent is None

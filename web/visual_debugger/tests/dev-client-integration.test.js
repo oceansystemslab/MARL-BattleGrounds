@@ -725,7 +725,7 @@ test("successful Debug loads emit one event into the existing frame reload path"
   );
   assert.match(
     devClient,
-    /async function openInDebug\([\s\S]*await send\(\{ command_type: "open_in_debug", source \}\);[\s\S]*if \(!response\?\.ok\) \{[\s\S]*return;[\s\S]*\}[\s\S]*notifyDebugSessionReplaced\(\);/u,
+    /async function openInDebug\([\s\S]*await send\(\{ command_type: "open_in_debug", source \}\);\s*if \(response\?\.pending_operation_id\) \{[\s\S]*?return;\s*\}\s*if \(!response\?\.ok\) \{[\s\S]*return;[\s\S]*\}[\s\S]*notifyDebugSessionReplaced\(\);/u,
   );
   assert.match(
     devClient,

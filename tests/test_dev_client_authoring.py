@@ -10,8 +10,11 @@ compiler checks the raw depth before float32 rounding and links each problem to
 task.red_zone_depth (negative, -0.0 included; underflow; float32 overflow; wider
 than the map); passing values such as 1e-8 and 12.1 on a 12.1-wide map are stored
 as float32. Core's depth and threshold-maximum messages link to their task fields.
-New, map-copy and preview drafts use the 5.0 default with preview profile
-default-tdm-map-preview@2, and Duplicate keeps the source depth. A version 1
+New and map-copy drafts use the 5.0 default. Map previews keep the existing
+default-tdm-map-preview@2 profile where that depth fits. Narrower maps use the
+explicit red-zone-off-tdm-map-preview@1 profile at 0.0 without loading a policy.
+An invalid playable depth still fails and leaves the prior preview usable.
+Duplicate keeps the source depth. A version 1
 source and its version 2 copy at 0.0 share semantic, map, configuration and state
 digests; the seven version 1 fixtures keep their semantic digests; depths 0, 5
 and 6 give distinct digests. The store never rewrites version 1 bytes: Open gives
@@ -37,6 +40,7 @@ from pathlib import Path
 from threading import Event
 from typing import Any
 
+import jax
 import numpy as np
 import pytest
 import scripts.dev.visual_debugger.authoring_compiler as authoring_compiler
@@ -1377,6 +1381,80 @@ def test_current_and_saved_maps_use_the_exact_default_preview_path(
     assert long_name_response.debug_load is not None
     assert long_name_response.debug_load.source_name == maximum_name
     assert long_name_response.debug_load.scenario_name == "Default TDM map preview"
+
+
+@pytest.mark.parametrize("source_kind", ["current_buffer", "saved_draft"])
+def test_narrow_map_preview_keeps_declared_play_validation_and_prior_snapshot(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, source_kind: str
+) -> None:
+    import marl_battlegrounds._method_loading as method_loading
+    import marl_battlegrounds.training.checkpoints as checkpoints
+
+    def forbid_policy_load(*args: object, **kwargs: object) -> None:
+        raise AssertionError("A map preview must not load a policy")
+
+    monkeypatch.setattr(method_loading, "load_method", forbid_policy_load)
+    monkeypatch.setattr(checkpoints, "load_system", forbid_policy_load)
+    store = _store(tmp_path)
+    narrow_map = DevMapDraftV1(
+        asset_id="narrow_preview",
+        content=DevMapContentV1(
+            name="Narrow preview map",
+            width=4.0,
+            height=10.0,
+            spawn_pads=default_spawn_pads(width=4.0, height=10.0),
+        ),
+    )
+    assert not validate_map_content(narrow_map.content)
+    if source_kind == "saved_draft":
+        narrow_map = store.save_draft(narrow_map, expected_revision=0)
+        assert isinstance(narrow_map, DevMapDraftV1)
+        source = DevSavedDraftSourceV1(
+            asset_kind="map", asset_id=narrow_map.asset_id, revision=narrow_map.revision
+        )
+    else:
+        source = DevCurrentBufferSourceV1(asset_kind="map", draft=narrow_map)
+    original = narrow_map.model_dump_json()
+    installed: list[LoadedDevScenarioSnapshotV1] = []
+    loader = DevScenarioLoadService(store, install_snapshot=installed.append)
+    attempt = loader.load(source)
+    assert attempt.ok, attempt.problems
+    snapshot = loader.current_snapshot
+    assert snapshot is not None
+    assert installed == [snapshot]
+    assert snapshot.compiled.config.map_width == 4.0
+    assert snapshot.compiled.config.team_deathmatch_red_zone_depth == 0.0
+    preview = debugger_scenario_from_snapshot(snapshot)
+    assert preview.title == "TDM Map Preview (Red Zone Off)"
+    assert preview.provenance is not None
+    assert preview.provenance.source_identity.endswith(
+        ":profile:red-zone-off-tdm-map-preview@1"
+    )
+    config_before, state_before = preview.build_scenario()
+
+    playable = new_scenario_draft(
+        "narrow_play", source_map=narrow_map, red_zone_depth=DEFAULT_TDM_RED_ZONE_DEPTH
+    )
+    rejected = loader.load(
+        DevCurrentBufferSourceV1(asset_kind="scenario", draft=playable)
+    )
+    assert not rejected.ok
+    assert any(
+        problem.stable_code == "scenario-red-zone-depth-exceeds-map-width"
+        and problem.field_path == "task.red_zone_depth"
+        for problem in rejected.problems
+    )
+    assert loader.current_snapshot is snapshot
+    assert installed == [snapshot]
+    config_after, state_after = preview.build_scenario()
+    for before, after in zip(
+        jax.tree.leaves((config_before, state_before)),
+        jax.tree.leaves((config_after, state_after)),
+        strict=True,
+    ):
+        assert np.array_equal(before, after)
+    assert playable.content.task.red_zone_depth == 5.0
+    assert narrow_map.model_dump_json() == original
 
 
 def test_failed_map_preview_preserves_current_debug_snapshot(tmp_path: Path) -> None:

@@ -4,15 +4,18 @@ Short real capture packets provide the replay layout. Host-focused cases check
 CSV prefix identity, unfinished replay restoration, bounded copies, pass/schema
 rejection and failure ordering without a long training run. Learner state remains
 caller-owned; the token must be saved with its matching numerical checkpoint.
+Child preflight must reject every corrupt parent boundary before output exists,
+prepare each prefix once, and close owned streams if child setup fails.
 """
 
 import csv
 import json
 import os
 from _hashlib import HASH
+from contextlib import ExitStack
 from hashlib import sha256
 from pathlib import Path
-from typing import Any, cast
+from typing import Any, BinaryIO, cast
 
 import jax
 import jax.numpy as jnp
@@ -29,6 +32,7 @@ from marl_battlegrounds.evaluation.recording_identity import (
 )
 from marl_battlegrounds.evaluation.recording_types import EpisodeStartRecords
 from marl_battlegrounds.evaluation.replay_capture import ReplayPackets
+from marl_battlegrounds.evaluation.replay_io import ReplayLoadError
 from marl_battlegrounds.evaluation.replay_recording import ReplayCollector
 from marl_battlegrounds.evaluation.run_writer import RunWriter
 from marl_battlegrounds.tasks import (
@@ -820,3 +824,316 @@ def test_checkpoint_syncs_new_output_ancestors_before_returning(
             assert token is not None
             assert synced[-len(expected) :] == expected
     writer.close()
+
+
+def test_child_recording_keeps_prefix_and_resumes_without_parent_tables(
+    tmp_path: Path, episode_infos: tuple[EpisodeInfo, ...]
+) -> None:
+    from marl_battlegrounds.evaluation.replay_io import load_replay
+
+    source, start = _sampled_start(episode_infos[0])
+    with RunWriter(tmp_path / "parent", phase="training") as parent:
+        parent.register_episodes(start, source_configs=source)
+        parent.write(episode_infos[0]._replace(episode_start_records=start))
+        token = parent.checkpoint_recording()
+        parent_path = parent.run_dir
+    before = _files(parent_path)
+    with RunWriter(tmp_path / "child", phase="training") as child:
+        cost = recording_checkpoint.fork_recording(
+            child, parent_path, token, episode_ids=[1]
+        )
+        child_path = child.run_dir
+        assert child.run_id != token["run_id"]
+        assert cast(int, cost["copied_prefix_bytes"]) > 0
+        assert cost["inherited_episode_ids"] == [1]
+        assert not (child_path / "episodes.csv").exists()
+        child.write(episode_infos[1])
+        child_token = child.checkpoint_recording()
+    assert _files(parent_path) == before
+    with RunWriter(
+        resume_from=child_path, phase="training", recording_checkpoint=child_token
+    ) as resumed:
+        resumed.write(episode_infos[2])
+    details = _manifest(child_path)
+    entry = details["passes"][child_token["pass_key"]]
+    replay = load_replay(child_path / entry["replays"]["1"]["path"]).replay
+    assert replay.header.context.identity.run_id == token["run_id"]
+    assert details["recording_ancestry"]["1"]["prefix_packets"] >= 1
+    assert len(entry["completed_episode_ids"]) == 1
+    assert _files(parent_path) == before
+    with RunWriter(tmp_path / "reference", phase="training") as reference:
+        reference.register_episodes(start, source_configs=source)
+        reference.write(episode_infos[0]._replace(episode_start_records=start))
+        for info in episode_infos[1:]:
+            reference.write(info)
+        reference_path = reference.run_dir
+    reference_details = _manifest(reference_path)
+    reference_pass = next(iter(reference_details["passes"].values()))
+    expected = load_replay(
+        reference_path / reference_pass["replays"]["1"]["path"]
+    ).replay
+    origin = replay.header.context.identity.run_id
+    reference_id = expected.header.context.identity.run_id
+    # Run-scoped IDs differ; every captured physical value and action must match.
+    for observed, wanted in (
+        (replay.frames, expected.frames),
+        (replay.transitions, expected.transitions),
+    ):
+        assert len(observed) == len(wanted)
+        for actual, target in zip(observed, wanted, strict=True):
+            assert actual.model_dump(mode="json") == json.loads(
+                target.model_dump_json().replace(reference_id, origin)
+            )
+
+
+@pytest.mark.parametrize("fault", ["digest", "missing_game", "duplicate_game"])
+def test_recording_child_rejects_bad_parent_without_mutating_it(
+    tmp_path: Path, episode_infos: tuple[EpisodeInfo, ...], fault: str
+) -> None:
+    source, start = _sampled_start(episode_infos[0])
+    with RunWriter(tmp_path / "parent", phase="training") as parent:
+        parent.register_episodes(start, source_configs=source)
+        parent.write(episode_infos[0]._replace(episode_start_records=start))
+        token = parent.checkpoint_recording()
+        parent_path = parent.run_dir
+    before = _files(parent_path)
+    if fault == "digest":
+        token = {**token, "checkpoint_sha256": "0" * 64}
+    games = (
+        [2] if fault == "missing_game" else [1, 1] if fault == "duplicate_game" else [1]
+    )
+    with RunWriter(tmp_path / "child", phase="training") as child:
+        child_before = _files(child.run_dir)
+        with pytest.raises(ValueError):
+            recording_checkpoint.fork_recording(
+                child, parent_path, token, episode_ids=games
+            )
+        assert _files(child.run_dir) == child_before
+    assert _files(parent_path) == before
+
+
+@pytest.mark.parametrize(
+    "fault",
+    ["token", "bundle", "prefix_bytes", "prefix_count", "csv", "completed_replay"],
+)
+def test_recording_fork_preflight_rejects_corruption_before_child_output(
+    tmp_path: Path, episode_infos: tuple[EpisodeInfo, ...], fault: str
+) -> None:
+    source, start = _sampled_start(episode_infos[0])
+    completed = fault in {"csv", "completed_replay"}
+    with RunWriter(tmp_path / "parent", phase="training") as parent:
+        parent.register_episodes(start, source_configs=source)
+        parent.write(episode_infos[0]._replace(episode_start_records=start))
+        if completed:
+            for info in episode_infos[1:]:
+                parent.write(info)
+        token = parent.checkpoint_recording()
+        parent_path = parent.run_dir
+    bundle_path = _bundle(parent_path, token)
+    bundle = json.loads((bundle_path / "checkpoint.json").read_bytes())
+    if fault == "token":
+        token = {**token, "checkpoint_sha256": "0" * 64}
+    elif fault == "bundle":
+        token = _rewrite_bundle(parent_path, token, {"schema_version": True})
+    elif fault == "prefix_bytes":
+        prefix = bundle_path / bundle["open_replays"][0]["path"]
+        raw = prefix.read_bytes()
+        prefix.write_bytes(raw[:-1] + bytes([raw[-1] ^ 1]))
+    elif fault == "prefix_count":
+        bundle["open_replays"][0]["count"] += 1
+        token = _rewrite_bundle(parent_path, token, bundle)
+    elif fault == "csv":
+        table = parent_path / "episodes.csv"
+        table.write_bytes(table.read_bytes().replace(b"training", b"Training", 1))
+    else:
+        entry = _manifest(parent_path)["passes"][token["pass_key"]]
+        replay = parent_path / entry["replays"]["1"]["path"]
+        raw = replay.read_bytes()
+        replay.write_bytes(bytes([raw[0] ^ 1]) + raw[1:])
+    before = _files(parent_path)
+    child_root = tmp_path / "child"
+    with (
+        pytest.raises((ValueError, OSError, EOFError, ReplayLoadError)),
+        ExitStack() as stack,
+    ):
+        prepared = recording_checkpoint.prepare_recording_fork(
+            parent_path, token, episode_ids=[] if completed else [1], policies=None
+        )
+        stack.callback(prepared.close)
+        child_root.mkdir()
+        with RunWriter(child_root, phase="training") as child:
+            recording_checkpoint.attach_recording_fork(child, prepared)
+    assert not child_root.exists()
+    assert _files(parent_path) == before
+
+
+def test_recording_fork_prepares_prefix_once_and_transfers_stream_ownership(
+    tmp_path: Path,
+    episode_infos: tuple[EpisodeInfo, ...],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    source, start = _sampled_start(episode_infos[0])
+    with RunWriter(tmp_path / "parent", phase="training") as parent:
+        parent.register_episodes(start, source_configs=source)
+        parent.write(episode_infos[0]._replace(episode_start_records=start))
+        token = parent.checkpoint_recording()
+        parent_path = parent.run_dir
+    original_hash = recording_checkpoint._hash_prefix  # pyright: ignore[reportPrivateUsage]
+    original_load = recording_checkpoint._load_packet  # pyright: ignore[reportPrivateUsage]
+    hashed: list[str] = []
+    decoded: list[ReplayPackets] = []
+
+    def hash_once(path: Path, size: int) -> HASH:
+        hashed.append(path.name)
+        return original_hash(path, size)
+
+    def decode_once(stream: BinaryIO, template: ReplayPackets) -> ReplayPackets:
+        packet = original_load(stream, template)
+        decoded.append(packet)
+        return packet
+
+    monkeypatch.setattr(recording_checkpoint, "_hash_prefix", hash_once)
+    monkeypatch.setattr(recording_checkpoint, "_load_packet", decode_once)
+    prepared = recording_checkpoint.prepare_recording_fork(
+        parent_path, token, episode_ids=[1], policies=None
+    )
+    collector = prepared.collector
+    assert collector is not None
+    stream = collector._episodes[1].stream  # pyright: ignore[reportPrivateUsage]
+    assert stream is not None and not stream.closed
+    expected_packets = cast(int, prepared.costs["copied_prefix_packets"])
+    assert len(decoded) == expected_packets
+    assert hashed.count("1.npylog") == 1
+    with RunWriter(tmp_path / "child", phase="training") as child:
+        with monkeypatch.context() as patch:
+            patch.setattr(recording_checkpoint, "_hash_prefix", _never_call)
+            patch.setattr(recording_checkpoint, "_load_packet", _never_call)
+            cost = recording_checkpoint.attach_recording_fork(child, prepared)
+        assert child._collector is collector  # pyright: ignore[reportPrivateUsage]
+        assert prepared.collector is None
+        prepared.close()
+        assert not stream.closed
+        assert cost["checked_open_prefix_bytes"] == cost["copied_prefix_bytes"]
+        for info in episode_infos[1:]:
+            child.write(info)
+    assert stream.closed
+    prepared.close()
+
+
+@pytest.mark.parametrize("failure", ["mkdir", "lock", "writer", "attach"])
+def test_recording_fork_setup_failure_closes_prepared_streams(
+    tmp_path: Path,
+    episode_infos: tuple[EpisodeInfo, ...],
+    monkeypatch: pytest.MonkeyPatch,
+    failure: str,
+) -> None:
+    from marl_battlegrounds.training._run_io import run_lock
+
+    source, start = _sampled_start(episode_infos[0])
+    with RunWriter(tmp_path / "parent", phase="training") as parent:
+        parent.register_episodes(start, source_configs=source)
+        parent.write(episode_infos[0]._replace(episode_start_records=start))
+        token = parent.checkpoint_recording()
+        parent_path = parent.run_dir
+    before = _files(parent_path)
+    prepared = recording_checkpoint.prepare_recording_fork(
+        parent_path, token, episode_ids=[1], policies=None
+    )
+    assert prepared.collector is not None
+    stream = prepared.collector._episodes[1].stream  # pyright: ignore[reportPrivateUsage]
+    assert stream is not None and not stream.closed
+    child_root = tmp_path / "child"
+    original_mkdir = Path.mkdir
+
+    def mkdir(
+        path: Path, mode: int = 0o777, parents: bool = False, exist_ok: bool = False
+    ) -> None:
+        if path == child_root:
+            raise OSError("injected child mkdir failure")
+        original_mkdir(path, mode=mode, parents=parents, exist_ok=exist_ok)
+
+    def fail(*_args: object, **_kwargs: object) -> None:
+        raise OSError("injected child setup failure")
+
+    with pytest.raises((OSError, RuntimeError)), ExitStack() as stack:
+        stack.callback(prepared.close)
+        if failure == "mkdir":
+            monkeypatch.setattr(Path, "mkdir", mkdir)
+        child_root.mkdir()
+        stack.enter_context(run_lock(child_root))
+        if failure == "lock":
+            stack.enter_context(run_lock(child_root))
+        if failure == "writer":
+            monkeypatch.setattr(RunWriter, "__init__", fail)
+        child = stack.enter_context(
+            RunWriter(child_root / "episodes", phase="training")
+        )
+        if failure == "attach":
+            from marl_battlegrounds.evaluation import run_writer as writer_module
+
+            monkeypatch.setattr(writer_module, "_atomic_json", fail)
+        recording_checkpoint.attach_recording_fork(child, prepared)
+    assert stream.closed and prepared.collector is None
+    assert _files(parent_path) == before
+    prepared.close()
+
+
+def test_recording_fork_checks_unselected_prefix_without_copying_it(
+    tmp_path: Path,
+    episode_infos: tuple[EpisodeInfo, ...],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    source, start = _sampled_start(episode_infos[0])
+    with RunWriter(tmp_path / "parent", phase="training") as parent:
+        parent.register_episodes(start, source_configs=source)
+        parent.write(episode_infos[0]._replace(episode_start_records=start))
+        token = parent.checkpoint_recording()
+        parent_path = parent.run_dir
+    monkeypatch.setattr(recording_checkpoint, "TemporaryFile", _never_call)
+    prepared = recording_checkpoint.prepare_recording_fork(
+        parent_path, token, episode_ids=[], policies=None
+    )
+    try:
+        assert prepared.collector is not None
+        assert prepared.collector.pending_episode_ids == frozenset()
+        assert prepared.costs["copied_prefix_bytes"] == 0
+        assert cast(int, prepared.costs["checked_open_prefix_bytes"]) > 0
+    finally:
+        prepared.close()
+    bundle = json.loads((_bundle(parent_path, token) / "checkpoint.json").read_bytes())
+    bundle["open_replays"][0]["count"] += 1
+    bad = _rewrite_bundle(parent_path, token, bundle)
+    with pytest.raises((ValueError, EOFError)):
+        recording_checkpoint.prepare_recording_fork(
+            parent_path, bad, episode_ids=[], policies=None
+        )
+
+
+def test_recording_fork_decode_failure_closes_its_new_stream(
+    tmp_path: Path,
+    episode_infos: tuple[EpisodeInfo, ...],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    source, start = _sampled_start(episode_infos[0])
+    with RunWriter(tmp_path / "parent", phase="training") as parent:
+        parent.register_episodes(start, source_configs=source)
+        parent.write(episode_infos[0]._replace(episode_start_records=start))
+        token = parent.checkpoint_recording()
+        parent_path = parent.run_dir
+    bundle = json.loads((_bundle(parent_path, token) / "checkpoint.json").read_bytes())
+    bundle["open_replays"][0]["count"] += 1
+    token = _rewrite_bundle(parent_path, token, bundle)
+    temporary_file = recording_checkpoint.TemporaryFile
+    streams: list[BinaryIO] = []
+
+    def opened() -> BinaryIO:
+        stream = temporary_file()
+        streams.append(stream)
+        return stream
+
+    monkeypatch.setattr(recording_checkpoint, "TemporaryFile", opened)
+    with pytest.raises((ValueError, EOFError)):
+        recording_checkpoint.prepare_recording_fork(
+            parent_path, token, episode_ids=[1], policies=None
+        )
+    assert len(streams) == 1 and streams[0].closed

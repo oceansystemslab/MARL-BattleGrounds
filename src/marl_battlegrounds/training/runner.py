@@ -15,9 +15,9 @@ import os
 import shutil
 import time
 import uuid
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from contextlib import ExitStack
-from dataclasses import asdict, dataclass, field, fields
+from dataclasses import asdict, dataclass, field, fields, replace
 from datetime import datetime
 from hashlib import sha256
 from pathlib import Path
@@ -67,7 +67,9 @@ from marl_battlegrounds.training.opponents import (
 from marl_battlegrounds.training.shaping import validate_shaping
 
 if TYPE_CHECKING:
+    from marl_battlegrounds.evaluation.recording_checkpoint import PreparedRecordingFork
     from marl_battlegrounds.evaluation.run_writer import RunWriter
+    from marl_battlegrounds.training.checkpoints import RestoredCheckpoint
     from marl_battlegrounds.training.collection import (
         TrainingCarry,
         TrainingCollection,
@@ -154,12 +156,17 @@ default="mappo"
         None keeps the pinned share playing that first-update actor. Otherwise
         a method reference that plays the pinned share instead: a built-in name
         ("random", "tdm-alpha", "tdm-beta", "tdm-gamma"), an absolute path to
-        an exported actor directory (a relative path is rejected), or a
+        an actor export or complete learner checkpoint directory (relative paths fail),
+        or a
         ``module:function`` factory, resolved by
         ``load_method`` when the run is set up and again on resume. Requires a
         positive pinned_opponent_share. JAX methods and host methods (for
-        example LLM agents) are both accepted; a host method with memory cannot
-        be resumed while one of its games is unfinished. The pinned opponent
+        example LLM agents) are both accepted. Training does not enter a pinned
+        System's resource_scope: supply an already open caller-owned LLM client,
+        or keep the System's scope open around training yourself. Automatic
+        managed-client setup is supported by evaluation, not pinned training.
+        A host method with memory cannot be resumed while one of its games is
+        unfinished. The pinned opponent
         is a training opponent: results against it, and its evidence of
         protected-controller exposure, are recorded with the run.
     ppo : PPOConfig, default=PPOConfig()
@@ -184,7 +191,8 @@ default="mappo"
         Existing frozen panel.json path. Use this or validation_opponents.
         Demonstration needs a panel by train setup; development may omit it.
     validation_opponents : tuple[str, ...] or None, default=None
-        Built-in names, absolute actor exports or module:function factories.
+        Built-in names, absolute actor export/checkpoint paths or
+        module:function factories.
         Freeze these once before training. Live methods instead belong in
         train's validation_opponents keyword. Conflicting declarations fail.
     slot_diagnostic_actor : str or None, default=None
@@ -502,7 +510,8 @@ class TrainResult:
     """Return saved paths and exact counts after all declared work succeeds.
 
     run_dir identifies the experiment; final_actor and selected_actor identify
-    frozen exports (selection is None without a panel). completed_env_steps and
+    frozen exports (selection is None without a panel or an eligible trained
+    candidate). completed_env_steps and
     completed_updates exclude padding; for QMIX completed_updates counts
     optimizer steps (epochs per learning block) and for PQN-VDN optimizer
     steps (epochs times minibatches per learning block), not blocks. status is
@@ -769,6 +778,241 @@ def train(
     validation panel is published, and passes it to the learner; a ranked
     panel whose recorded depth differs from the run's is refused.
     """
+    return _train(
+        config,
+        output_dir=output_dir,
+        resume_from=resume_from,
+        validation_opponents=validation_opponents,
+    )
+
+
+def extend_training(
+    checkpoint: str | Path,
+    *,
+    additional_env_steps: int,
+    output_dir: str | Path,
+    changes: Mapping[str, object] | None = None,
+    validation_opponents: Sequence[Any] | None = None,
+) -> TrainResult:
+    """Continue a full learner checkpoint into a separate child run.
+
+    Parameters
+    ----------
+    checkpoint : str or Path
+        Complete post-Red-Zone learner folder, ``checkpoints/<id>``. Actor
+        exports and pruned learner folders cannot continue training. All saved
+        learner state, game memory and random streams are restored first.
+    additional_env_steps : int
+        Positive number of real environment transitions to add to the saved
+        step, divisible by the unchanged environment batch. This does not
+        restart the parent's curriculum or stretch its learning-rate decay.
+    output_dir : str or Path
+        Exact new or empty child folder outside the parent run. The parent is
+        read only. The child can later use ordinary exact-config resume.
+    changes : mapping or None, default=None
+        Optional future declarations named validation, learning_rate,
+        exploration and history_capture_env_steps. Other keys fail. Existing
+        settings remain unchanged by default. PQN needs an explicit rate choice
+        if any added optimizer update would use its terminal rate. See the
+        continuation example for each supported declaration. A changed validation
+        panel may have runtime-only ``bindings``; those clients are checked by
+        their saved identities and are never serialized into the declaration.
+    validation_opponents : sequence of System, Policy or str, optional
+        Runtime bindings for the parent's frozen validation panel, as in train.
+        Live-only members must be supplied again. Membership and saved identities
+        must match. To change the future panel, use changes.validation.panel and
+        its own optional bindings. Neither route changes the parent's panel.
+
+    Returns
+    -------
+    TrainResult
+        Child paths, cumulative counts and the best eligible saved actor. A
+        run without a validation panel or eligible trained candidate has no
+        selected actor. A child ending during warmup still exports its actor;
+        status.json explains why no checkpoint was selected.
+
+    Raises
+    ------
+    ValueError, TypeError
+        The budget, declaration, full checkpoint or source transition is not
+        supported. Actor loading remains independent of this training rule.
+    RuntimeError, OSError
+        A lock, numerical operation or file operation fails. Complete saved
+        child boundaries remain available for explicit resume.
+
+    Notes
+    -----
+    Runs synchronously on the caller's selected device. Saves the parent
+    identity and future declaration before taking another training step.
+    Parent and child are one training lineage, not independent training seeds.
+    """
+    if type(additional_env_steps) is not int or additional_env_steps <= 0:
+        raise ValueError("additional_env_steps must be a positive integer")
+    if changes is not None and not isinstance(cast(object, changes), Mapping):
+        raise TypeError("changes must be a mapping or None")
+    declared = {} if changes is None else dict(changes)
+    allowed = {
+        "validation",
+        "learning_rate",
+        "exploration",
+        "history_capture_env_steps",
+    }
+    if unknown := set(declared) - allowed:
+        raise ValueError(f"Unsupported continuation changes: {sorted(unknown)}")
+    future_bindings = None
+    validation_changes = declared.get("validation")
+    if isinstance(validation_changes, Mapping):
+        validation_changes = dict(cast(Mapping[str, object], validation_changes))
+        future_bindings = validation_changes.pop("bindings", None)
+        if future_bindings is not None:
+            if "panel" not in validation_changes:
+                raise ValueError(
+                    "Use validation_opponents for the parent's panel; "
+                    "changes.validation.bindings requires a declared future panel"
+                )
+            if isinstance(future_bindings, (str, bytes)) or not isinstance(
+                future_bindings, Sequence
+            ):
+                raise TypeError("Validation bindings must be a sequence of methods")
+        declared["validation"] = validation_changes
+    # Runtime clients stay outside JSON. Scientific settings remain finite data.
+    declared = json.loads(json.dumps(declared, allow_nan=False))
+    return _train(
+        output_dir=output_dir,
+        resume_from=checkpoint,
+        validation_opponents=validation_opponents,
+        extension={
+            "additional_env_steps": additional_env_steps,
+            "changes": declared,
+            "validation_bindings": future_bindings,
+        },
+    )
+
+
+def _child_config(
+    value: dict[str, Any], *, total_env_steps: int, root_total_env_steps: int
+) -> TrainConfig:
+    """Validate inherited settings while allowing a child to end during warmup.
+
+    value contains ordinary saved settings. root_total_env_steps is the verified
+    original fresh-run budget; total_env_steps is the child's declared absolute
+    end. Fresh-run minimum warmup/curriculum lengths do not apply to a child
+    segment. All method, batch, scientific and integer-limit checks still apply.
+    This constructs a new frozen config and never mutates a caller's object.
+    """
+    if type(total_env_steps) is not int or total_env_steps <= 0:
+        raise ValueError("Child total_env_steps must be a positive integer")
+    if type(root_total_env_steps) is not int or root_total_env_steps <= 0:
+        raise ValueError("Continuation requires its original valid training budget")
+    checked = config_from_dict(
+        {**value, "total_env_steps": max(total_env_steps, root_total_env_steps)}
+    )
+    if total_env_steps % checked.num_envs or any(
+        step > total_env_steps for step in checked.checkpoint_env_steps
+    ):
+        raise ValueError("Child budget and save points must contain valid whole rounds")
+    # Only the fresh-run minimum is different for a checked child. Construct its
+    # declared total after the remaining fields passed the ordinary validator.
+    object.__setattr__(checked, "total_env_steps", total_env_steps)
+    return checked
+
+
+def _saved_config(details: dict[str, Any]) -> TrainConfig:
+    """Read ordinary settings or verify a child's parent before its config.
+
+    Learner descriptions are content identified. A child keeps the parent's
+    original budget and actual saved boundary; arbitrary changed settings do
+    not gain the child-only warmup allowance. Parent descriptions must remain
+    at their recorded paths, even when old payloads are pruned. An unreadable
+    parent raises ValueError naming that path. No payload or run file is changed.
+    """
+    from marl_battlegrounds.training import checkpoints
+
+    value = checkpoints.saved_training_config(details)
+    context = details["metadata"].get("continuation")
+    if context is None:
+        return config_from_dict(value)
+    if not isinstance(context, dict) or context.get("schema_version") != 1:
+        raise ValueError("Unsupported continuation declaration")
+    context = cast(dict[str, Any], context)
+    parent_path = Path(context["parent_checkpoint"])
+    try:
+        parent = checkpoints.read_checkpoint_description(parent_path)
+    except ValueError as error:
+        raise ValueError(
+            f"Cannot read the continuation parent at {parent_path}: {error}. "
+            "Keep its saved checkpoint folder and description at that path."
+        ) from error
+    previous = parent["metadata"].get("continuation")
+    root = context["segment"]["root_schedule"]
+    expected_root = (
+        parent["metadata"]["config"]["total_env_steps"]
+        if previous is None
+        else previous["segment"]["root_schedule"]["total_env_steps"]
+    )
+    if (
+        parent["kind"] != "learner"
+        or parent["checkpoint_id"] != context["parent_checkpoint_id"]
+        or parent["metadata"]["run_id"] != context["parent_run_id"]
+        or parent["metadata"]["source"] != context["parent_source"]
+        or context["child_source"] != details["metadata"]["source"]
+        or parent["counters"]["env_steps"] != context["start_env_steps"]
+        or context["start_env_steps"] + context["additional_env_steps"]
+        != value["total_env_steps"]
+        or context["resulting_total_env_steps"] != value["total_env_steps"]
+        or root["total_env_steps"] != expected_root
+        or context["root_run_id"]
+        != (
+            parent["metadata"]["run_id"]
+            if previous is None
+            else previous["root_run_id"]
+        )
+    ):
+        raise ValueError("Continuation differs from its saved parent boundary")
+    parent_config = checkpoints.saved_training_config(parent)
+    inherited_fields = set(parent_config) - {
+        "total_env_steps",
+        "checkpoint_env_steps",
+        "validation_panel",
+        "validation_opponents",
+    }
+    expected_points = [
+        point
+        for point in parent_config["checkpoint_env_steps"]
+        if context["start_env_steps"] < point <= value["total_env_steps"]
+    ]
+    if (
+        set(value) != set(parent_config)
+        or any(value[name] != parent_config[name] for name in inherited_fields)
+        or value["checkpoint_env_steps"] != expected_points
+        or value["validation_panel"]
+        != details["metadata"]["validation_declaration"]["panel_path"]
+        or value["validation_opponents"]
+        != (
+            None if value["validation_panel"] else parent_config["validation_opponents"]
+        )
+    ):
+        raise ValueError("Continuation changed an inherited training setting")
+    return _child_config(
+        value,
+        total_env_steps=value["total_env_steps"],
+        root_total_env_steps=expected_root,
+    )
+
+
+def _train(
+    config: TrainConfig | None = None,
+    *,
+    output_dir: str | Path | None = None,
+    resume_from: str | Path | None = None,
+    validation_opponents: Sequence[Any] | None = None,
+    extension: dict[str, Any] | None = None,
+) -> TrainResult:
+    """Share setup, checked restore and execution for training and a declared fork.
+
+    Public callers use train or extend_training. extension is their normalized
+    added budget and future-only changes; it never relaxes ordinary resume.
+    """
     attempt_started = time.monotonic()
     started_at = utc_now()
     from marl_battlegrounds.training import checkpoints, learner, validation
@@ -776,18 +1020,35 @@ def train(
     from marl_battlegrounds.training._content import prepare_training_content
     from marl_battlegrounds.training.curriculum import make_training_schedule
 
-    if (output_dir is None) == (resume_from is None):
+    if extension is None and (output_dir is None) == (resume_from is None):
         raise ValueError("Supply exactly one of output_dir or resume_from")
+    if extension is not None and (output_dir is None or resume_from is None):
+        raise ValueError("Continuation requires a parent checkpoint and child output")
     saved: dict[str, Any] | None = None
     checkpoint = None if resume_from is None else Path(resume_from).resolve()
     if checkpoint is not None:
-        saved = checkpoints.read_checkpoint_details(checkpoint)
+        try:
+            saved = checkpoints.read_checkpoint_details(checkpoint)
+        except (ValueError, FileNotFoundError) as error:
+            if extension is None:
+                raise
+            raise ValueError(
+                "Continuation requires a complete learner checkpoint at "
+                "checkpoints/<id>, including actor and learner payloads; "
+                "actor exports and pruned folders cannot continue training"
+            ) from error
         if saved["kind"] != "learner":
-            raise ValueError("Resume requires a complete learner checkpoint")
+            raise ValueError(
+                "Continuation requires a complete learner checkpoint at "
+                "checkpoints/<id>; "
+                "actors/<id> contains inference weights only"
+                if extension is not None
+                else "Resume requires a complete learner checkpoint"
+            )
         # A checkpoint saved before Red Zone cannot resume here; refuse it
         # before any file (lock, panel or log) is touched.
         checkpoints._require_current_schemas(saved)  # pyright: ignore[reportPrivateUsage]
-        inherited = config_from_dict(checkpoints.saved_training_config(saved))
+        inherited = _saved_config(saved)
         if config is not None and config.red_zone_depth != inherited.red_zone_depth:
             raise ValueError(
                 f"Resume config declares red_zone_depth {config.red_zone_depth}, "
@@ -810,6 +1071,15 @@ def train(
         if root.exists() and (not root.is_dir() or any(root.iterdir())):
             raise ValueError("output_dir must be new or empty")
     assert config is not None
+    parent_root = root
+    if extension is not None:
+        root = Path(str(output_dir)).resolve()
+        if root == parent_root or parent_root in root.parents:
+            raise ValueError("Child output_dir must be outside the parent training run")
+        if root.exists() and (not root.is_dir() or any(root.iterdir())):
+            raise ValueError("output_dir must be new or empty")
+        if extension["additional_env_steps"] % config.num_envs:
+            raise ValueError("additional_env_steps must divide by num_envs exactly")
     if (
         saved is None
         and validation_opponents is not None
@@ -821,12 +1091,19 @@ def train(
         if validation_opponents is not None
         else config.validation_opponents
     )
-    schedule = make_training_schedule(
-        total_env_steps=config.total_env_steps,
-        num_envs=config.num_envs,
-        curriculum=config.curriculum,
-        score_threshold_curriculum=config.score_threshold_curriculum,
-        early_history_capture=config.pinned_opponent_share > 0,
+    saved_continuation = (
+        None if saved is None else saved["metadata"].get("continuation")
+    )
+    schedule = (
+        make_training_schedule(
+            total_env_steps=config.total_env_steps,
+            num_envs=config.num_envs,
+            curriculum=config.curriculum,
+            score_threshold_curriculum=config.score_threshold_curriculum,
+            early_history_capture=config.pinned_opponent_share > 0,
+        )
+        if saved_continuation is None
+        else make_training_schedule(**saved_continuation["segment"]["root_schedule"])
     )
     # Prepare the content (every map checks the depth against its width)
     # before a new panel can be published, so a bad setting leaves no file.
@@ -837,7 +1114,7 @@ def train(
     panel_path = (
         Path(config.validation_panel)
         if config.validation_panel
-        else root / "validation_panel" / "panel.json"
+        else parent_root / "validation_panel" / "panel.json"
     )
     if config.validation_panel or (saved is not None and panel_path.exists()):
         panel = validation.load_panel(
@@ -916,6 +1193,27 @@ def train(
             pinned_opponent_share=config.pinned_opponent_share,
             pinned_opponent=config.pinned_opponent,
         )
+    if saved_continuation is not None:
+        import jax
+
+        from marl_battlegrounds.training.curriculum import (
+            _restore_continuation_schedule,  # pyright: ignore[reportPrivateUsage]
+        )
+
+        schedule = _restore_continuation_schedule(saved_continuation["segment"])
+        carry = state.carry._replace(schedule=schedule.arrays)
+        state = state._replace(carry=carry)
+        collection = replace(
+            collection, schedule=schedule, carry_spec=jax.eval_shape(_identity, carry)
+        )
+        from marl_battlegrounds.training._continuation_schedules import (
+            continuation_collection,
+            schedule_continuation,
+        )
+
+        collection = continuation_collection(
+            collection, schedule_continuation(schedule)
+        )
     if config.random_initialization_result is not None:
         from marl_battlegrounds.baselines.qmix import QMIX_TIE_RULE
         from marl_battlegrounds.evaluation.recording_identity import tree_digest
@@ -956,8 +1254,72 @@ def train(
     dependencies = identity["dependencies"]
     runtime = _runtime_details(str(source["package_version"]), config.num_envs)
     execution_identity_now = execution_identity(runtime=runtime["provenance"])
-    root.mkdir(parents=True, exist_ok=True)
-    with run_lock(root), ExitStack() as stack:
+    extension_state = None
+    if extension is not None:
+        assert checkpoint is not None and saved is not None
+        import jax
+
+        compatibility = checkpoints.continuation_source_compatibility(
+            saved["metadata"]["source"], source
+        )
+        template = jax.eval_shape(_identity, state)
+        state = None
+        parent_restore = checkpoints.restore_checkpoint(
+            checkpoint,
+            collection,
+            template,
+            expected_metadata={
+                "config": config_to_dict(config),
+                "source": source,
+                "dependencies": dependencies,
+                "execution": execution_identity_now,
+            },
+            ppo=config.ppo,
+            method=config.method,
+            qmix=config.qmix,
+            pqn=config.pqn,
+            _source_compatibility=compatibility,
+        )
+        validate_host_state(parent_root, parent_restore.details, panel=panel)
+        config, collection, state, panel, declarations = _prepare_extension(
+            config,
+            collection,
+            parent_restore,
+            panel,
+            extension,
+            source,
+        )
+        declarations["continuation"]["source_compatibility"] = compatibility
+        extension_state = parent_restore, declarations
+    with ExitStack() as stack:
+        prepared_recording = None
+        if extension_state is not None and config.recording:
+            prepared_recording = _prepare_extension_recording(extension_state[0], state)
+            stack.callback(prepared_recording.close)
+        # A child recording is fully checked before even its folder is created.
+        root.mkdir(parents=True, exist_ok=True)
+        stack.enter_context(run_lock(root))
+        if extension_state is not None:
+            parent_restore, declarations = extension_state
+            owner = _start_extension(
+                root=root,
+                config=config,
+                collection=collection,
+                state=state,
+                panel=panel,
+                restored=parent_restore,
+                declarations=declarations,
+                source=source,
+                dependencies=dependencies,
+                execution=execution_identity_now,
+                runtime=runtime,
+                started_at=started_at,
+                attempt_started=attempt_started,
+                stack=stack,
+                prepared_recording=prepared_recording,
+            )
+            state = parent_restore = extension_state = None
+            return owner.execute()
         writer = None
         metadata: dict[str, Any]
         restored: checkpoints.RestoredCheckpoint | None = None
@@ -1181,6 +1543,337 @@ def train(
         # (for QMIX, a whole replay) is freed once the run moves past it.
         state = restored = None
         return execution.execute()
+
+
+def _prepare_extension(
+    config: TrainConfig,
+    collection: TrainingCollection,
+    restored: RestoredCheckpoint,
+    panel: FrozenPanel | None,
+    request: dict[str, Any],
+    source: dict[str, Any],
+) -> tuple[TrainConfig, TrainingCollection, Any, FrozenPanel | None, dict[str, Any]]:
+    """Check and build a child boundary without writing or taking a real step.
+
+    restored has passed full parent restore and host checks. All numerical
+    changes are limited to declared segment accounting and future schedules.
+    The result contains checked declarations; the runner publishes them before
+    calling the existing execution loop. Parent files remain read only.
+    """
+    from copy import deepcopy
+
+    import numpy as np
+
+    from marl_battlegrounds.training import validation
+    from marl_battlegrounds.training._continuation_schedules import (
+        continuation_collection,
+        continuation_state,
+        learner_continuation,
+        resolve_learner_continuation,
+    )
+    from marl_battlegrounds.training._selection_evidence import (
+        freeze_inherited_candidates,
+    )
+    from marl_battlegrounds.training.collection import (
+        _begin_training_segment,  # pyright: ignore[reportPrivateUsage]
+        _continuation_history_thresholds,  # pyright: ignore[reportPrivateUsage]
+    )
+    from marl_battlegrounds.training.curriculum import (
+        _continuation_details,  # pyright: ignore[reportPrivateUsage]
+        _make_continuation_schedule,  # pyright: ignore[reportPrivateUsage]
+        _restore_continuation_schedule,  # pyright: ignore[reportPrivateUsage]
+    )
+
+    state = restored.state
+    saved = restored.details
+    parent = saved["metadata"]
+    prior = parent.get("continuation")
+    start = saved["counters"]["env_steps"]
+    total = start + request["additional_env_steps"]
+    changes = request["changes"]
+    history = state.carry.history
+    occupied = int(history.count)
+    frozen_epsilon = (
+        ()
+        if is_ppo_method(config.method)
+        else tuple(
+            float(value)
+            for value in np.asarray(history.historical_variables.epsilon)[:occupied]
+        )
+    )
+    learner_context = resolve_learner_continuation(
+        method=config.method,
+        settings=config_to_dict(config)[method_settings_field(config.method)],
+        counters=saved["counters"],
+        num_envs=config.num_envs,
+        total_env_steps=total,
+        changes=changes,
+        parent=None if prior is None else prior["learner"],
+        frozen_epsilon=frozen_epsilon,
+        original_total_env_steps=config.total_env_steps,
+    )
+    parent_validation = validation.saved_validation_declaration(
+        parent, panel
+    ) or validation.run_validation_declaration(config_to_dict(config), panel)
+    validation_changes: Any = changes.get("validation", {})
+    if not isinstance(validation_changes, Mapping):
+        raise ValueError("validation changes must be a mapping")
+    validation_changes = cast(dict[str, Any], validation_changes)
+    if "panel" in validation_changes:
+        panel = validation.load_panel(
+            Path(validation_changes["panel"]).resolve(),
+            bindings=request.get("validation_bindings"),
+            red_zone_depth=config.red_zone_depth,
+        )
+    root_total = (
+        config.total_env_steps
+        if prior is None
+        else prior["segment"]["root_schedule"]["total_env_steps"]
+    )
+    config = _child_config(
+        {
+            **config_to_dict(config),
+            "validation_panel": None if panel is None else str(panel.path.absolute()),
+            "validation_opponents": config.validation_opponents
+            if panel is None
+            else None,
+            "checkpoint_env_steps": [
+                value for value in config.checkpoint_env_steps if start < value <= total
+            ],
+        },
+        total_env_steps=total,
+        root_total_env_steps=root_total,
+    )
+    context: dict[str, Any] = {
+        "schema_version": 1,
+        "parent_checkpoint": str(restored.path),
+        "parent_checkpoint_id": saved["checkpoint_id"],
+        "parent_run_id": parent["run_id"],
+        "root_run_id": parent["run_id"] if prior is None else prior["root_run_id"],
+        "parent_source": parent["source"],
+        "child_source": source,
+        "start_env_steps": start,
+        "additional_env_steps": request["additional_env_steps"],
+        "resulting_total_env_steps": total,
+        "changes": changes,
+        "learner": learner_context,
+        "parent_validation_declaration": parent_validation,
+        "parent_statistics": deepcopy(parent["host_state"]),
+        "inherited_candidates": [],
+    }
+    declared = validation.run_validation_declaration(
+        config_to_dict(config), panel, continuation=context
+    )
+    context["inherited_candidates"] = freeze_inherited_candidates(
+        restored.path, declaration=declared
+    )
+    thresholds = None
+    if "history_capture_env_steps" in changes:
+        wanted_raw = changes["history_capture_env_steps"]
+        if not isinstance(wanted_raw, list):
+            raise ValueError("history_capture_env_steps must be a list")
+        wanted = cast(list[object], wanted_raw)
+        if any(type(value) is not int for value in wanted):
+            raise ValueError("history_capture_env_steps must contain whole numbers")
+        steps = cast(list[int], wanted)
+        if any(
+            not start < value <= total or value % config.num_envs for value in steps
+        ):
+            raise ValueError(
+                "History targets must follow the saved step, fit the child end, "
+                "and contain whole environment rounds"
+            )
+        thresholds = _continuation_history_thresholds(
+            state.carry,
+            future_rounds=tuple(value // config.num_envs for value in steps),
+        )
+    schedule = _make_continuation_schedule(
+        collection.schedule,
+        completed_rounds=start // config.num_envs,
+        additional_env_steps=request["additional_env_steps"],
+        history_threshold_rounds=thresholds,
+    )
+    collection, carry = _begin_training_segment(
+        collection, state.carry, schedule=schedule
+    )
+    segment = _continuation_details(collection.schedule)
+    assert segment is not None
+    segment["learner"] = learner_context
+    schedule = _restore_continuation_schedule(segment)
+    collection = replace(collection, schedule=schedule)
+    rules = learner_continuation(learner_context)
+    collection = continuation_collection(collection, rules)
+    state = state._replace(carry=carry)
+    if "exploration" in changes:
+        state = continuation_state(
+            state,
+            rules,
+            num_envs=config.num_envs,
+            initial_rounds=0 if config.pqn is None else config.pqn.initial_rounds,
+        )
+    context["segment"] = _continuation_details(schedule)
+    return (
+        config,
+        collection,
+        state,
+        panel,
+        {
+            "continuation": context,
+            "validation_declaration": declared,
+            "training_lineage": {
+                "root_run_id": context["root_run_id"],
+                "parent_run_id": parent["run_id"],
+            },
+        },
+    )
+
+
+def _prepare_extension_recording(
+    restored: RestoredCheckpoint,
+    state: Any,  # noqa: ANN401
+) -> PreparedRecordingFork:
+    """Check a parent's full recording boundary and retain only unfinished games.
+
+    restored is the checked full parent checkpoint; state is its prepared child
+    state before another action. This reads the parent's files and uses owned
+    temporary streams but creates no child path. The caller must close the
+    returned preparation, including when child folder or lock setup fails.
+    """
+    import numpy as np
+
+    from marl_battlegrounds.evaluation.recording_checkpoint import (
+        prepare_recording_fork,
+    )
+
+    record = restored.details["metadata"]["recording"]
+    mask = np.asarray(
+        ~state.carry.state.done.done & state.carry.tracking.first_transition_seen
+    )
+    episodes = np.asarray(state.carry.state.episode_id)[mask].tolist()
+    return prepare_recording_fork(
+        restored.path.parent.parent / record["relative_path"],
+        restored.details["recording_token"],
+        episode_ids=episodes,
+        policies=record["policies"],
+    )
+
+
+def _start_extension(
+    *,
+    root: Path,
+    config: TrainConfig,
+    collection: TrainingCollection,
+    state: Any,  # noqa: ANN401
+    panel: FrozenPanel | None,
+    restored: RestoredCheckpoint,
+    declarations: dict[str, Any],
+    source: dict[str, Any],
+    dependencies: object,
+    execution: dict[str, Any],
+    runtime: dict[str, Any],
+    started_at: str,
+    attempt_started: float,
+    stack: ExitStack,
+    prepared_recording: PreparedRecordingFork | None = None,
+) -> _Run:
+    """Publish one checked child setup and enter the shared execution owner.
+
+    All declarations, parent numerical state and recording were checked before
+    creating root. prepared_recording owns checked unfinished replay streams;
+    stack owns it and any child recording writer. This never opens the parent
+    writer for mutation or copies its completed replay/log history.
+    """
+    from copy import deepcopy
+
+    from marl_battlegrounds.training import checkpoints
+
+    host = deepcopy(restored.details["metadata"]["host_state"])
+    host.update(
+        routine_results=[],
+        confirmation_results=[],
+        random_results=[],
+        validation_games=0,
+        validation_seconds=0.0,
+        actors={},
+        pending=None,
+        selected_actor=None,
+        final_actor=None,
+        slot_complete=False,
+        selection=None,
+        recovery_checkpoints=[],
+    )
+    # These totals use each game's original reset-time stage, like cumulative
+    # exposure. Keep them across child accounting segments and add new finishes.
+    metadata: dict[str, Any] = {
+        "run_id": uuid.uuid4().hex,
+        "attempt_id": uuid.uuid4().hex,
+        "parent_checkpoint": None,
+        "config": config_to_dict(config),
+        "source": source,
+        "dependencies": dependencies,
+        "execution": execution,
+        "host_state": host,
+        "recording": None,
+        **declarations,
+    }
+    writer = None
+    if config.recording:
+        from marl_battlegrounds.evaluation.recording_checkpoint import (
+            attach_recording_fork,
+        )
+        from marl_battlegrounds.evaluation.run_writer import RunWriter
+
+        if prepared_recording is None:
+            raise ValueError("Child recording must be checked before creating output")
+        record = restored.details["metadata"]["recording"]
+        writer = RunWriter(
+            root / "episodes",
+            phase="training",
+            pass_id=record["pass_id"],
+            policies=record["policies"],
+            checkpoint_id=record["checkpoint_id"],
+            details=record["details"] or None,
+        )
+        stack.callback(writer.close)
+        metadata["continuation"]["recording"] = attach_recording_fork(
+            writer, prepared_recording
+        )
+        metadata["recording"] = {
+            **record,
+            "relative_path": writer.run_dir.relative_to(root).as_posix(),
+        }
+    atomic_json(
+        root / "run_details.json",
+        {
+            "schema_version": 1,
+            "run_id": metadata["run_id"],
+            "created_at": started_at,
+            "initial_setup_seconds": time.monotonic() - attempt_started,
+            "config": metadata["config"],
+            "source": source,
+            "dependencies": dependencies,
+            "schemas": checkpoints.checkpoint_schemas(config.method),
+            "execution": execution,
+            "runtime": runtime,
+            "content_binding": collection.binding.model_dump(mode="json"),
+            "schedule": dict(collection.schedule.rounding_report),
+            "panel_digest": None if panel is None else panel.digest,
+            "process": process_identity(),
+            **declarations,
+        },
+    )
+    return _Run(
+        root,
+        config,
+        collection,
+        state,
+        metadata,
+        writer,
+        panel,
+        None,
+        attempt_started=attempt_started,
+        runtime=runtime,
+    )
 
 
 def _crosses_interval(before: int, after: int, interval: int) -> bool:
@@ -1472,9 +2165,39 @@ class _Run:
         import jax
 
         from marl_battlegrounds.training._compilation import training_compiler_options
+        from marl_battlegrounds.training._continuation_schedules import (
+            continuation_config,
+            schedule_continuation,
+        )
+        from marl_battlegrounds.training._selection_evidence import (
+            read_inherited_candidates,
+        )
         from marl_battlegrounds.training.learner import update_learner
-        from marl_battlegrounds.training.validation import resolve_validation_schedule
+        from marl_battlegrounds.training.validation import (
+            resolve_validation_schedule,
+            saved_validation_declaration,
+        )
 
+        self.continuation = schedule_continuation(collection.schedule)
+        self.validation_declaration = saved_validation_declaration(metadata, panel)
+        self.inherited: dict[str, Any] = (
+            {"records": [], "actors": {}, "used_roots": []}
+            if self.validation_declaration is None
+            else read_inherited_candidates(
+                metadata["continuation"]["inherited_candidates"],
+                declaration=self.validation_declaration,
+            )
+        )
+        self.ppo_reporting = (
+            continuation_config(config.ppo, self.continuation)
+            if is_ppo_method(config.method)
+            else config.ppo
+        )
+        self.qmix_reporting = (
+            None
+            if config.qmix is None
+            else continuation_config(config.qmix, self.continuation)
+        )
         self.qmix = config.qmix
         self.pqn = config.pqn
         self.rollout_length = (
@@ -1487,9 +2210,14 @@ class _Run:
         self.planned_learning_blocks = (
             0
             if self.pqn is None
+            else cast(int, self.continuation.pqn_planned_learning_blocks)
+            if self.continuation is not None
             else pqn_planned_learning_blocks(
                 config.total_env_steps // config.num_envs, self.pqn
             )
+        )
+        update_context = (
+            {} if self.continuation is None else {"continuation": self.continuation}
         )
         self.root, self.config = root, config
         self.collection, self.state = collection, state
@@ -1577,7 +2305,7 @@ class _Run:
             self.updater = cast(
                 "_Updater",
                 jax.jit(
-                    partial(update_qmix_learner, qmix=self.qmix),
+                    partial(update_qmix_learner, qmix=self.qmix, **update_context),
                     compiler_options=training_compiler_options(),
                 ),
             )
@@ -1592,6 +2320,7 @@ class _Run:
                         update_pqn_learner,
                         pqn=self.pqn,
                         planned_learning_blocks=self.planned_learning_blocks,
+                        **update_context,
                     ),
                     compiler_options=training_compiler_options(),
                 ),
@@ -1600,12 +2329,19 @@ class _Run:
             self.updater = cast(
                 "_Updater",
                 jax.jit(
-                    partial(update_learner, ppo=config.ppo, method=config.method),
+                    partial(
+                        update_learner,
+                        ppo=config.ppo,
+                        method=config.method,
+                        **update_context,
+                    ),
                     compiler_options=training_compiler_options(),
                 ),
             )
         self.validation_steps: set[int] = (
-            {
+            {point["env_steps"] for point in self.validation_declaration["points"]}
+            if self.validation_declaration is not None
+            else {
                 point.env_steps
                 for point in resolve_validation_schedule(
                     config.total_env_steps,
@@ -1623,6 +2359,12 @@ class _Run:
             if config.random_diagnostic_seed_pairs is not None
             else set()
         )
+        if self.continuation is not None:
+            self.random_steps = {
+                value
+                for value in self.random_steps
+                if value > metadata["continuation"]["start_env_steps"]
+            }
         self.status: dict[str, Any] = {}
         if config.random_diagnostic_seed_pairs is not None:
             self.status["random_validation"] = _random_progress(
@@ -1707,7 +2449,31 @@ class _Run:
         """
         if not self.host["saves"] or self.host["report_seconds"] is None:
             return None
-        if self.pqn is not None:
+        if self.continuation is not None:
+            from marl_battlegrounds.training._continuation_schedules import (
+                continuation_counts,
+            )
+
+            _, learning = continuation_counts(
+                self.config.total_env_steps // self.config.num_envs,
+                continuation=self.continuation,
+                rollout_length=self.rollout_length,
+                initial_rounds=0 if self.pqn is None else self.pqn.initial_rounds,
+                minimum=0 if self.qmix is None else self.qmix.min_buffer_size,
+            )
+            if self.pqn is not None:
+                remaining_updates = (
+                    (learning - self.host["learning_blocks"])
+                    * self.pqn.epochs
+                    * self.pqn.num_minibatches
+                )
+            elif self.qmix is not None:
+                remaining_updates = (
+                    learning - self.host["learning_blocks"]
+                ) * self.qmix.epochs
+            else:
+                remaining_updates = learning - self.host["completed_updates"]
+        elif self.pqn is not None:
             remaining_updates = (
                 self.planned_learning_blocks - self.host["learning_blocks"]
             ) * (self.pqn.epochs * self.pqn.num_minibatches)
@@ -1887,20 +2653,44 @@ class _Run:
         assert self.panel is not None
         self.set_status("validation")
         started = time.monotonic()
+        validation_options: dict[str, Any] = {}
+        declared_pairs = None
+        if self.validation_declaration is not None:
+            from marl_battlegrounds.training.validation import check_confirmation_roots
+
+            root = self.validation_declaration["roots"][purpose]
+            if purpose == "confirmation":
+                check_confirmation_roots(
+                    root,
+                    self.host["routine_results"] + self.inherited["records"],
+                    used_roots=self.inherited["used_roots"],
+                )
+            if self.panel.schema_version == 2:
+                validation_options["root_seed"] = root
+            declared_pairs = self.validation_declaration[
+                "routine_seed_pairs"
+                if purpose == "routine"
+                else "confirmation_seed_pairs"
+            ]
         summary = validate_checkpoint(
             actor,
             self.panel,
             output_dir=self.root / "validation" / f"{purpose}-{actor.name}",
             purpose=purpose,
-            seed_pairs=self.config.routine_seed_pairs
-            if purpose == "routine"
-            else self.config.confirmation_seed_pairs,
+            seed_pairs=declared_pairs
+            if declared_pairs is not None
+            else (
+                self.config.routine_seed_pairs
+                if purpose == "routine"
+                else self.config.confirmation_seed_pairs
+            ),
             num_envs=32
             if jax.default_backend() == "gpu"
             else min(32, self.config.num_envs),
             chunk_size=128,
             event_callback=lambda record: self.event("validation_segment", **record),
             red_zone_depth=self.config.red_zone_depth,
+            **validation_options,
         )
         key = "routine_results" if purpose == "routine" else "confirmation_results"
         if not any(item["task_id"] == summary["task_id"] for item in self.host[key]):
@@ -1912,9 +2702,13 @@ class _Run:
             seconds = time.monotonic() - started
             self.host["validation_seconds"] += seconds
             pairs = (
-                self.config.routine_seed_pairs
-                if purpose == "routine"
-                else self.config.confirmation_seed_pairs
+                declared_pairs
+                if declared_pairs is not None
+                else (
+                    self.config.routine_seed_pairs
+                    if purpose == "routine"
+                    else self.config.confirmation_seed_pairs
+                )
             )
             self.host["validation_games"] += 5 * len(self.panel.members) * 2 * pairs
             self.event(
@@ -2058,6 +2852,10 @@ class _Run:
         from marl_battlegrounds.training.collection import (
             collect_training_rollout,
             training_summary,
+        )
+        from marl_battlegrounds.training.validation import (
+            selection_validation_results,
+            validation_root_comparison,
         )
 
         self.event(
@@ -2211,7 +3009,7 @@ class _Run:
                     )
                     if np.any(metrics.actor_samples)
                     else None,
-                    "learning_rate": self.config.ppo.actor_lr,
+                    "learning_rate": self.ppo_reporting.actor_lr,
                     "value_loss_units": "normalized_squared"
                     if self.config.ppo.value_normalization
                     else "reward_squared",
@@ -2284,16 +3082,67 @@ class _Run:
                 )
             if self.panel is not None:
                 final = Path(self.host["final_actor"])
-                for identifier in confirmation_candidates(
-                    self.host["routine_results"], final_checkpoint_id=final.name
-                ):
-                    self.validate(Path(self.host["actors"][identifier]), "confirmation")
-                selected = select_checkpoint(self.host["confirmation_results"])
-                self.host["selection"] = selected
-                self.host["selected_actor"] = self.host["actors"][
-                    selected["checkpoint_id"]
-                ]
-                atomic_json(self.root / "selection.json", selected)
+                actor_paths = {
+                    **{
+                        key: value["actor_path"]
+                        for key, value in self.inherited["actors"].items()
+                    },
+                    **self.host["actors"],
+                }
+                routine = self.host["routine_results"]
+                if self.validation_declaration is None:
+                    candidate_ids = confirmation_candidates(
+                        self.host["routine_results"], final_checkpoint_id=final.name
+                    )
+                    confirmations = self.host["confirmation_results"]
+                else:
+                    _, confirmations, candidate_ids = selection_validation_results(
+                        self.host["routine_results"],
+                        self.host["confirmation_results"],
+                        self.inherited,
+                        declaration=self.validation_declaration,
+                        panel=self.panel,
+                        final_checkpoint_id=final.name,
+                    )
+                completed = {row["checkpoint_id"] for row in confirmations}
+                for identifier in candidate_ids:
+                    if identifier not in completed:
+                        self.validate(Path(actor_paths[identifier]), "confirmation")
+                if self.validation_declaration is not None:
+                    routine, confirmations, _ = selection_validation_results(
+                        self.host["routine_results"],
+                        self.host["confirmation_results"],
+                        self.inherited,
+                        declaration=self.validation_declaration,
+                        panel=self.panel,
+                        final_checkpoint_id=final.name,
+                    )
+                if candidate_ids:
+                    selected = select_checkpoint(confirmations)
+                    if self.validation_declaration is not None:
+                        selected.update(
+                            routine_comparison=validation_root_comparison(
+                                routine,
+                                allow_different_roots=self.validation_declaration[
+                                    "allow_different_roots"
+                                ],
+                            ),
+                            confirmation_comparison=validation_root_comparison(
+                                confirmations,
+                                allow_different_roots=self.validation_declaration[
+                                    "allow_different_roots"
+                                ],
+                            ),
+                        )
+                    self.host["selection"] = selected
+                    self.host["selected_actor"] = actor_paths[selected["checkpoint_id"]]
+                    atomic_json(self.root / "selection.json", selected)
+                else:
+                    # A declared child may end before its first learning update.
+                    # Its final actor still loads, but it is not selected evidence.
+                    reason = "No eligible trained checkpoint"
+                    self.status["selection_unavailable_reason"] = reason
+                    self.event("selection_unavailable", reason=reason)
             if self.config.slot_diagnostic:
                 self.run_slot_check()
             exposure = training_summary(self.collection, self.state.carry)
@@ -2479,10 +3328,13 @@ class _Run:
             "loss": mean(metrics.loss),
             "mean_q": mean(metrics.mean_q),
             "mean_target": mean(metrics.mean_target),
-            "epsilon": epsilon_reference(
+            "epsilon": self.continuation.exploration.at(self.host["env_steps"])
+            if self.continuation is not None
+            and self.continuation.exploration is not None
+            else epsilon_reference(
                 rounds, self.config.num_envs, self.qmix.eps_min, self.qmix.eps_decay
             ),
-            "learning_rate": self.qmix.q_lr,
+            "learning_rate": cast(QMIXConfig, self.qmix_reporting).q_lr,
         }
 
     def _count_pqn_block(self, result: Any) -> None:  # noqa: ANN401
@@ -2605,9 +3457,17 @@ class _Run:
             "mean_target": mean(metrics.mean_target),
             "epsilon": 1.0
             if rounds < self.pqn.initial_rounds
+            else self.continuation.exploration.at(self.host["learning_blocks"])
+            if self.continuation is not None
+            and self.continuation.exploration is not None
             else pqn_epsilon_reference(self.host["learning_blocks"], planned, self.pqn),
-            "learning_rate": pqn_learning_rate(
-                self.host["completed_updates"] - 1, planned, self.pqn
+            "learning_rate": (
+                self.continuation.pqn_rate.at(self.host["completed_updates"] - 1)
+                if self.continuation is not None
+                and self.continuation.pqn_rate is not None
+                else pqn_learning_rate(
+                    self.host["completed_updates"] - 1, planned, self.pqn
+                )
             )
             if learned
             else None,

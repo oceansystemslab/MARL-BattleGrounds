@@ -87,6 +87,7 @@ from marl_battlegrounds.training.distributions import TRAINING_KEY_SCHEMA_VERSIO
 if TYPE_CHECKING:
     from marl_battlegrounds.evaluation.policy_execution import System
     from marl_battlegrounds.evaluation.run_writer import RunWriter
+    from marl_battlegrounds.training._continuation_schedules import LearnerContinuation
     from marl_battlegrounds.training.collection import TrainingCollection
     from marl_battlegrounds.training.learner import LearnerState
     from marl_battlegrounds.training.pqn_learner import PQNLearnerState
@@ -825,7 +826,12 @@ def _check_qmix_counters(counters: object, qmix: QMIXConfig, games: int) -> None
 
 
 def _check_pqn_counters(
-    counters: object, pqn: PQNConfig, games: int, total_rounds: int
+    counters: object,
+    pqn: PQNConfig,
+    games: int,
+    total_rounds: int,
+    *,
+    continuation: LearnerContinuation | None = None,
 ) -> None:
     """Check saved PQN-VDN counters from metadata alone, before arrays are read.
 
@@ -866,6 +872,26 @@ def _check_pqn_counters(
     rounds, remainder = divmod(value["env_steps"], games)
     if remainder or rounds > total_rounds:
         raise ValueError("PQN-VDN checkpoint counters are impossible")
+    if continuation is not None:
+        from marl_battlegrounds.training._continuation_schedules import (
+            continuation_boundary,
+        )
+
+        reachable, ordinal, learning = continuation_boundary(
+            rounds,
+            total_rounds=total_rounds,
+            continuation=continuation,
+            rollout_length=pqn.rollout_length,
+            initial_rounds=pqn.initial_rounds,
+        )
+        if (
+            reachable != rounds
+            or value["completed_blocks"] != ordinal
+            or value["learning_blocks"] != learning
+            or value["updates"] != learning * pqn.epochs * pqn.num_minibatches
+        ):
+            raise ValueError("PQN-VDN continuation checkpoint counters are impossible")
+        return
     reachable, ordinal = _collection_boundary(
         rounds,
         total_env_steps=total_rounds,
@@ -1366,6 +1392,7 @@ def restore_checkpoint(
     device: object | None = None,
     qmix: QMIXConfig | None = None,
     pqn: PQNConfig | None = None,
+    _source_compatibility: Mapping[str, object] | None = None,
 ) -> RestoredCheckpoint:
     """Fully validate and restore numerical state without changing any files.
 
@@ -1436,6 +1463,12 @@ default="mappo"
         must match the checked execution identity. Use frozen actor loading for
         independent inference on another backend.
 
+    _source_compatibility : mapping or None, default=None
+        Private checked continuation transition. None keeps exact source
+        equality. The separate continuation route supplies a record from
+        continuation_source_compatibility; this function verifies it again.
+        Dependencies, execution, scientific config and payload checks stay exact.
+
     Returns
     -------
     RestoredCheckpoint
@@ -1488,8 +1521,17 @@ default="mappo"
                 nested.setdefault("value_normalization", False)
                 normalized["ppo"] = nested
             record["config"] = normalized
-    if any(saved_metadata.get(key) != value for key, value in expected.items()):
-        raise ValueError("Checkpoint execution metadata differs")
+    if _source_compatibility is not None:
+        checked_transition = continuation_source_compatibility(
+            saved_metadata["source"], expected["source"]
+        )
+        if dict(_source_compatibility) != checked_transition:
+            raise ValueError("Continuation source compatibility evidence differs")
+    for key, value in expected.items():
+        if saved_metadata.get(key) != value and not (
+            key == "source" and _source_compatibility is not None
+        ):
+            raise ValueError("Checkpoint execution metadata differs")
     _check_method_settings(method, qmix, pqn)
     settings = DEFAULT_QMIX_CONFIG if qmix is None else qmix
     chosen = DEFAULT_PQN_CONFIG if pqn is None else pqn
@@ -1508,11 +1550,16 @@ default="mappo"
         if _actor_spawn_frame(details) != chosen.spawn_frame:
             raise ValueError("Checkpoint spawn_frame differs from PQN settings")
         _check_pqn_settings(details["metadata"]["config"], chosen)
+        from marl_battlegrounds.training._continuation_schedules import (
+            schedule_continuation,
+        )
+
         _check_pqn_counters(
             details["counters"],
             chosen,
             collection.schedule.num_envs,
             collection.schedule.total_env_steps // collection.schedule.num_envs,
+            continuation=schedule_continuation(collection.schedule),
         )
     else:
         if _actor_input_scale(details) != ppo.input_scale:
@@ -2026,7 +2073,8 @@ def load_system(checkpoint: str | Path) -> System:
         actor samples legal masked actions; a QMIX or PQN-VDN actor plays
         greedily (epsilon 0, first legal maximum), PQN-VDN with its saved
         BatchNorm statistics. No critic, mixer, target, replay, optimizer,
-        kept row or training-only input is loaded, and no map preparation or
+        kept row or training-only input array is restored. Integrity checks still
+        read every saved payload, including learner state. No map preparation or
         full run directory is needed.
 
     Raises
@@ -2185,4 +2233,88 @@ def runtime_identity(method: str = "mappo") -> dict[str, object]:
     return {
         "source": discover_code_revision_v2().model_dump(mode="json"),
         "dependencies": checkpoint_dependencies(method),
+    }
+
+
+def continuation_source_compatibility(
+    parent_source: object, current_source: object
+) -> dict[str, object]:
+    """Check exact source equality or one retained, qualified source transition.
+
+    Parameters
+    ----------
+    parent_source, current_source : object
+        Saved source identity and the current runtime's independently discovered
+        identity. Both must be nonempty JSON objects. Exact equality needs no
+        migration. A different source must match the packaged qualification
+        record and every target file hash; arbitrary edited installs fail.
+
+    Returns
+    -------
+    dict[str, object]
+        Both actual identities and the named qualification, when applicable.
+        The caller still checks dependencies, schemas and execution separately.
+
+    Raises
+    ------
+    ValueError
+        No exact qualified transition supports these source bytes. This writes
+        no file and never substitutes the parent's identity for the current one.
+    """
+    parent = _object(parent_source, "Parent source")
+    current = _object(current_source, "Current source")
+    if not parent or not current:
+        raise ValueError("Continuation needs complete source identities")
+    if parent == current:
+        return {
+            "parent_source": parent,
+            "child_source": current,
+            "qualification": "Exact source",
+        }
+    record_path = Path(__file__).with_name("continuation_compatibility.json")
+    if not record_path.is_file():
+        raise ValueError(
+            "This parent source has no qualified continuation transition to the "
+            "current source. Its actor remains loadable for inference."
+        )
+    record = _read_json(record_path)
+    if (
+        record.get("schema_version") != 1
+        or not isinstance(record.get("parent_sources"), list)
+        or parent not in record["parent_sources"]
+    ):
+        raise ValueError(
+            "Parent source is outside the qualified continuation transition"
+        )
+    targets = _object(record.get("target_files"), "Qualified target files")
+    package = Path(__file__).resolve().parents[1]
+    if not targets or any(
+        Path(name).is_absolute()
+        or ".." in Path(name).parts
+        or not isinstance(digest, str)
+        or not (package / name).is_file()
+        or sha256((package / name).read_bytes()).hexdigest() != digest
+        for name, digest in targets.items()
+    ):
+        raise ValueError(
+            "Current source differs from the qualified continuation target"
+        )
+    expected_names = {
+        path.relative_to(package).as_posix()
+        for path in package.rglob("*")
+        if path.is_file()
+        and "__pycache__" not in path.parts
+        and path.suffix != ".pyc"
+        and path != record_path
+        and path.relative_to(package).parts[:2] != ("viewer", "web")
+    }
+    if set(targets) != expected_names:
+        raise ValueError(
+            "Qualified continuation target has missing or extra package files"
+        )
+    return {
+        "parent_source": parent,
+        "child_source": current,
+        "qualification": record["qualification"],
+        "qualification_sha256": sha256(record_path.read_bytes()).hexdigest(),
     }

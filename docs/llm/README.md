@@ -89,6 +89,11 @@ printed by the command. Keep the model, revision, history and format settings
 unchanged. Completed games need no new model requests. Changes to the declared
 method are rejected before play.
 
+Pinned training opponents need an already open caller-owned client, or a System
+resource scope that your code keeps open around training. The training runner
+does not yet open managed LLM clients for pinned opponents. See the
+[training guide](../training/README.md) for the host-opponent limits.
+
 ## Run Tournaments
 
 Pass the same System to the ordinary tournament functions:
@@ -99,7 +104,7 @@ from marl_battlegrounds import llm
 
 system = llm.make_system("my-served-model", "http://127.0.0.1:8000/v1")
 result = marl_bgs.run_tournament(
-    [system, "random", "tdm-alpha"], maps=[0], episodes_per_pair=2,
+    [system, "random", "tdm-alpha"], maps=[0], games_per_opponent=2,
     num_envs=2, max_steps=300, output_dir="runs/llm-tournament",
 )
 print(result.table("tournament_rankings"))

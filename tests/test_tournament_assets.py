@@ -3,7 +3,9 @@
 These tests use temporary local files and a loopback HTTP server. They check
 bounded integrity reads, missing/corrupt data, custom caches, metadata closure,
 truthful controller evidence and failure before actions. No released Big 12,
-external downloads, games or public catalog mutation are needed.
+external downloads, games or public catalog mutation are needed. Reference
+loading keeps saved sampling facts; client scope checks live in the cached
+tournament execution tests.
 """
 
 from __future__ import annotations
@@ -312,27 +314,6 @@ def test_loaded_method_matches_registration_without_an_action(tmp_path: Path) ->
     changed = replace(method, variables={"wrong": 3})
     with pytest.raises(ValueError, match=r"registration\.variables_digest"):
         assets.validate_loaded_controller(changed, participant, verifier)
-
-
-def test_active_pair_loads_only_two_and_propagates_failure(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    participant, verifier = _participant(tmp_path)
-    original = assets.load_tournament_controller
-    calls: list[str] = []
-
-    def measured(value: dict[str, Any], check: assets.AssetVerifier) -> object:
-        calls.append(value["name"])
-        return original(value, check)
-
-    monkeypatch.setattr(assets, "load_tournament_controller", measured)
-    with (
-        pytest.raises(RuntimeError, match="caller failed"),
-        assets.active_tournament_pair(participant, participant, verifier) as methods,
-    ):
-        assert len(methods) == 2
-        raise RuntimeError("caller failed")
-    assert calls == [participant["name"], participant["name"]]
 
 
 def test_assets_import_keeps_numerical_runtime_unloaded() -> None:
@@ -844,36 +825,92 @@ def test_verification_scope_nested_failure_aborts_outer_read(tmp_path: Path) -> 
         assert verifier.verify("weights") == tmp_path / "weights"
 
 
-def test_second_loader_failure_closes_the_first_owned_system_scope(
+def _inline(value: object, role: str = "registration") -> dict[str, Any]:
+    from marl_battlegrounds.evaluation.tournament_config import canonical_json
+
+    encoded = canonical_json(value)
+    return {
+        "role": role,
+        "sha256": sha256(encoded).hexdigest(),
+        "size_bytes": len(encoded),
+        "inline": value,
+    }
+
+
+def test_inline_metadata_is_verified_without_cache_and_returned_as_owned_copy(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    from marl_battlegrounds.evaluation.policy_execution import Policy, shared_policy
+    _identity_resolver(monkeypatch)
+    config = {"version": 2, "assets": {"registration": _inline({"name": "random"})}}
+    cache = tmp_path / "cache"
+    verifier = assets.AssetVerifier(config, cache_dir=cache)
+    value = verifier.read_json("registration")
+    assert value == {"name": "random"}
+    assert isinstance(value, dict)
+    value["name"] = "edited"
+    assert verifier.read_json("registration") == {"name": "random"}
+    with pytest.raises(ValueError, match="inline metadata"):
+        verifier.require(["registration"])
+    result = assets.prepare_tournament_assets(config, cache_dir=cache, download=True)
+    assert result["verified"] == ["registration"]
+    assert result["missing"] == []
+    assert result["bytes_downloaded"] == result["bytes_missing"] == 0
+    assert "path" not in result["config"]["assets"]["registration"]
+    assert not cache.exists()
+    verifier.assets["registration"]["inline"]["name"] = "changed"
+    with pytest.raises(ValueError, match="size or digest"):
+        verifier.read_json("registration")
 
-    participant, verifier = _participant(tmp_path)
-    loaded = assets.load_tournament_controller(participant, verifier)
-    assert isinstance(loaded, Policy)
-    base = shared_policy(loaded)
-    events: list[str] = []
 
-    @contextmanager
-    def scope(recording: bool) -> Generator[None]:
-        events.append("open")
-        try:
-            yield
-        finally:
-            events.append("close")
+def test_inline_metadata_checks_nested_dependencies_and_cycles(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _identity_resolver(monkeypatch)
+    config: dict[str, Any] = {
+        "version": 2,
+        "assets": {
+            "a": _inline({"next_asset": "b"}),
+            "b": _inline({"next_asset": "a"}),
+        },
+    }
+    with pytest.raises(ValueError, match="dependency cycle"):
+        assets.prepare_tournament_assets(config, cache_dir=tmp_path / "cache")
+    config["assets"].pop("b")
+    with pytest.raises(ValueError, match="undeclared assets"):
+        assets.prepare_tournament_assets(config, cache_dir=tmp_path / "cache")
+    assert not (tmp_path / "cache").exists()
 
-    owned = replace(base, resource_scope=scope)
 
-    def load(*args: object) -> object:
-        if events:
-            raise RuntimeError("Second load failed")
-        return owned
+def test_reference_controller_uses_shared_loader_once(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from marl_battlegrounds import _method_loading
+    from marl_battlegrounds.evaluation.policy_execution import policy
 
-    monkeypatch.setattr(assets, "load_tournament_controller", load)
-    with (
-        pytest.raises(RuntimeError, match="Second load failed"),
-        assets.active_tournament_pair(participant, participant, verifier),
-    ):
-        raise AssertionError("A failed pair must not reach execution")
-    assert events == ["open", "close"]
+    method = policy("random")
+    registration = assets.loaded_controller_registration(method)
+    config = {"version": 2, "assets": {"registration": _inline(registration)}}
+    verifier = assets.AssetVerifier(config, cache_dir=tmp_path / "cache")
+    controller = {
+        "kind": "reference",
+        "reference": "/saved/actor",
+        "content": {name: None for name in assets._CONTENT_FIELDS},
+    }
+    identifier, _ = assets.controller_content_identity(controller, verifier)
+    participant = {
+        "name": "random",
+        "controller": controller,
+        "controller_id": identifier,
+        "registration_asset": "registration",
+    }
+    calls: list[str] = []
+
+    def load(reference: str) -> object:
+        calls.append(reference)
+        return method
+
+    monkeypatch.setattr(_method_loading, "load_method", load)
+    restored = assets.load_tournament_controller(participant, verifier)
+    assert restored.name == "random"
+    assert calls == ["/saved/actor"]
+    assert not (tmp_path / "cache").exists()

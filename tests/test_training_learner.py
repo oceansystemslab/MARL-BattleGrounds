@@ -13,9 +13,11 @@ view, mask and stored index the way the actor did, the stored log probabilities
 match that recomputation before any optimizer update, the update is accepted,
 and a stored index left in the reflected frame is rejected by the admission
 guard. No test claims useful
-learning or GPU performance.
+learning or GPU performance. All three learner validators must reject a bad
+content-recheck flag before reading any state.
 """
 
+from collections.abc import Callable
 from dataclasses import replace
 from functools import partial
 from typing import Any, cast
@@ -84,6 +86,8 @@ from marl_battlegrounds.training.learner import (
     update_learner,
     validate_learner,
 )
+from marl_battlegrounds.training.pqn_learner import validate_pqn_learner
+from marl_battlegrounds.training.qmix_learner import validate_qmix_learner
 
 type Tree = Any
 type Context = tuple[TrainingCollection, LearnerState, PPOConfig]
@@ -644,12 +648,15 @@ def test_restore_rejects_impossible_value_statistics(
         validate_learner(collection, state._replace(value_norm=invalid), ppo=ppo)
 
 
+@pytest.mark.parametrize(
+    "validate", (validate_learner, validate_qmix_learner, validate_pqn_learner)
+)
 @pytest.mark.parametrize("value", (None, 0, 1, "False", np.bool_(True)))
 def test_content_recheck_requires_python_bool_before_reading_state(
-    value: object,
+    value: object, validate: Callable[..., None]
 ) -> None:
     with pytest.raises(TypeError, match=r"recheck_installed_content.*Python bool"):
-        validate_learner(
+        validate(
             cast(TrainingCollection, None),
             cast(LearnerState, None),
             recheck_installed_content=cast(bool, value),

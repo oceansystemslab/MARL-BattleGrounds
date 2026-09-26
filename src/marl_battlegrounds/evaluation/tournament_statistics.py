@@ -19,6 +19,10 @@ import numpy as np
 from numpy.typing import NDArray
 from scipy import linalg, optimize, special  # pyright: ignore[reportMissingTypeStubs]
 
+from marl_battlegrounds.evaluation.sampling_evidence import (
+    combine_sampling_facts,
+    summarize_sampling_evidence,
+)
 from marl_battlegrounds.evaluation.tournament_schedule import (
     TournamentMatch,
     valid_policy_name,
@@ -472,6 +476,102 @@ def _rate_fields(rates: FloatArray) -> ResultRow:
     }
 
 
+def _sampling_report(
+    schedule: Sequence[TournamentMatch],
+    facts: Mapping[str, Mapping[str, Any]],
+) -> dict[str, Any]:
+    """Describe native fixed-condition games using their declared whole groups.
+
+    Each deterministic pairing contributes no random sampling unit. Known
+    stochastic pairings keep their declared coupling; unknown methods leave
+    support unknown. Merely equal scores never change these counts.
+    """
+    pair_facts = {
+        pair: combine_sampling_facts([facts[pair[0]], facts[pair[1]]])
+        for pair in sorted(
+            {tuple(sorted((match.team_a, match.team_b))) for match in schedule}
+        )
+    }
+    overall = combine_sampling_facts(tuple(pair_facts.values()))
+    units = {
+        match.episode_id: (
+            None
+            if pair_facts[tuple(sorted((match.team_a, match.team_b)))]["determinism"]
+            == "deterministic"
+            else ("declared", match.bootstrap_group)
+            if match.bootstrap_group is not None
+            else ("block", match.block_id)
+        )
+        for match in schedule
+    }
+    return summarize_sampling_evidence(
+        [match.episode_id for match in schedule],
+        scheduled_games=len(schedule),
+        sampling_units=units,
+        determinism=overall["determinism"],
+        basis=overall["basis"]
+        + "; Fixed native initial conditions; only declared sampling keys vary",
+    )
+
+
+def _sampling_fields(report: Mapping[str, Any]) -> ResultRow:
+    """Expose supported counts separately from the historical block assumption."""
+    return {
+        "scheduled_games": report["scheduled_games"],
+        "completed_games": report["completed_games"],
+        "supported_independent_sampling_units": report[
+            "supported_independent_sampling_units"
+        ],
+        "determinism": report["determinism"],
+        "sampling_interval_status": report["interval_status"],
+    }
+
+
+def _qualify_intervals(
+    row: ResultRow,
+    report: Mapping[str, Any],
+    *,
+    rating_report: Mapping[str, Any] | None = None,
+) -> None:
+    """Keep usable unknown-sampling ranges with an explicit conditional label.
+
+    Joint Elo depends on the complete field, so rating_report supplies that
+    population's support even when this entrant's own matchups are all known.
+    Deterministic work and failed estimator checks still withhold bounds. The
+    historical independent_blocks count continues to count declared groups.
+    """
+    row.update(_sampling_fields(report))
+    row["declared_blocks"] = row["independent_blocks"]
+    supported = report["interval_status"] == "Available"
+    any_unsupported = not supported
+    for metric in ("elo", "expected_score"):
+        if f"{metric}_ci_low" not in row:
+            continue
+        metric_report = (
+            rating_report if metric == "elo" and rating_report is not None else report
+        )
+        supported = metric_report["interval_status"] == "Available"
+        any_unsupported |= not supported
+        for end in ("low", "high"):
+            key = f"{metric}_ci_{end}"
+            row[f"conditional_{key}"] = None if supported else row[key]
+            if not supported and metric_report["determinism"] != "Determinism Unknown":
+                row[key] = None
+        if not supported:
+            if metric_report["determinism"] == "Determinism Unknown":
+                if row[f"{metric}_interval_status"] == "Available":
+                    row[f"{metric}_interval_status"] = (
+                        "Conditional: Sampling not verified"
+                    )
+            else:
+                row[f"{metric}_interval_status"] = metric_report["interval_status"]
+    row["conditional_interval_assumption"] = (
+        None
+        if not any_unsupported
+        else "Assumes declared game groups are independent; sampling is not verified"
+    )
+
+
 def _summarize(
     schedule: Sequence[TournamentMatch],
     outcomes: Mapping[int, int],
@@ -479,12 +579,13 @@ def _summarize(
     seed: int,
     opponent_weights: Mapping[str, float] | None,
     replicates: int,
+    method_sampling: Mapping[str, Mapping[str, Any]] | None = None,
 ) -> TournamentStatistics:
     """Fit one complete population and its paired-block resampling distribution.
 
     The public wrapper fixes replicates=5000; tests may supply a smaller count.
     Validate seed and population first, reuse the point fit as bootstrap start,
-    and retain unsupported intervals as None with a reason. Return host summary
+    and label conditional or unavailable intervals explicitly. Return host summary
     rows and exact method metadata; failed fits stop qualification.
     """
     if (
@@ -495,6 +596,10 @@ def _summarize(
         raise ValueError("The bootstrap seed must be a uint32 integer")
     population = _population(schedule, outcomes, opponent_weights)
     names, maps, pairs = population.names, population.maps, population.pairs
+    if method_sampling is not None:
+        if set(method_sampling) != set(names):
+            raise ValueError("Sampling facts must name every tournament entrant")
+        combine_sampling_facts(tuple(method_sampling.values()))
     contrasts = cast(FloatArray, linalg.helmert(len(names), full=False)).T
     pair_indices = np.asarray(pairs, np.int64)
     observed_counts = population.cell_counts.reshape(len(pairs), len(maps), 3).sum(
@@ -661,6 +766,60 @@ def _summarize(
                 ),
             }
         )
+    sampling: dict[str, Any] = {}
+    if method_sampling is not None:
+        supported_strata: list[int | None] = []
+        for units in population.strata:
+            random_units = 0
+            unknown_unit = False
+            for unit in units:
+                pair_ids = {
+                    int(cell) // len(maps) for cell in population.block_cells[unit]
+                }
+                fact = combine_sampling_facts(
+                    [
+                        method_sampling[names[index]]
+                        for pair_id in pair_ids
+                        for index in pairs[pair_id]
+                    ]
+                )
+                unknown_unit |= fact["determinism"] == "unknown"
+                random_units += int(fact["determinism"] == "stochastic")
+            supported_strata.append(None if unknown_unit else random_units)
+        sampling = {
+            "sampling_evidence": _sampling_report(schedule, method_sampling),
+            "method_sampling": {name: dict(method_sampling[name]) for name in names},
+            "conditional_independent_unit_counts": [
+                len(units) for units in population.strata
+            ],
+            "independent_unit_counts": supported_strata,
+        }
+        for row in tournament_rows:
+            matches = [
+                match
+                for match in schedule
+                if row["policy"] in (match.team_a, match.team_b)
+            ]
+            _qualify_intervals(
+                row,
+                _sampling_report(matches, method_sampling),
+                rating_report=sampling["sampling_evidence"],
+            )
+        for row in matchup_rows:
+            matches = [
+                match
+                for match in schedule
+                if {match.team_a, match.team_b} == {row["policy"], row["opponent"]}
+            ]
+            _qualify_intervals(row, _sampling_report(matches, method_sampling))
+        for row in map_rows:
+            matches = [
+                match
+                for match in schedule
+                if match.map_id == row["map_id"]
+                and row["policy"] in (match.team_a, match.team_b)
+            ]
+            _qualify_intervals(row, _sampling_report(matches, method_sampling))
     return TournamentStatistics(
         tuple(tournament_rows),
         tuple(matchup_rows),
@@ -702,6 +861,7 @@ def _summarize(
             },
             "map_weights": "equal",
             "constant_resampling_distribution": not varying,
+            **sampling,
         },
     )
 
@@ -712,6 +872,7 @@ def summarize_tournament(
     *,
     seed: int = 0,
     opponent_weights: Mapping[str, float] | None = None,
+    method_sampling: Mapping[str, Mapping[str, Any]] | None = None,
 ) -> TournamentStatistics:
     """Summarize a complete paired tournament using the fixed 5,000-resample method.
 
@@ -729,6 +890,13 @@ def summarize_tournament(
     opponent_weights : Mapping[str, float] | None
         Finite positive weights naming every entrant, or None for
         equal opponent weights. Maps always receive equal rate weighting.
+    method_sampling : mapping or None, default=None
+        Per-entrant facts with determinism and source basis from the actual frozen
+        method. Native fixed initial conditions are required. Unknown methods
+        stay unknown. None marks every method unknown. Calculated bounds remain
+        in ordinary and conditional columns with "Conditional: Sampling not
+        verified". They assume independent declared groups, not proven sampling.
+        Deterministic work and failed estimator checks still withhold bounds.
 
     Returns
     -------
@@ -754,10 +922,20 @@ def summarize_tournament(
     tail scores, not the count-based rating fit. These intervals concern fixed
     entrants and maps; they do not measure training-run variation.
     """
+    if method_sampling is None:
+        method_sampling = {
+            name: {
+                "determinism": "unknown",
+                "basis": "No sampling facts were recorded for this tournament",
+            }
+            for match in schedule
+            for name in (match.team_a, match.team_b)
+        }
     return _summarize(
         schedule,
         outcomes,
         seed=seed,
         opponent_weights=opponent_weights,
         replicates=_BOOTSTRAP_REPLICATES,
+        method_sampling=method_sampling,
     )

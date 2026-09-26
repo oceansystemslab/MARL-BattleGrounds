@@ -1,5 +1,9 @@
 """Check small complete tournaments, selected outputs and resumed execution.
 
+Early interrupted runs retain unplayed map contents and registrations. Older
+pass snapshots can supply missing coordinator contents; missing, altered or
+conflicting evidence fails before recovery writes.
+
 Completed full-metric tournaments resume without execution, refitting or file
 changes. Every matchup records all of its full-metric episode IDs even when
 the explicit selection is empty or partial; tampered saved selections fail
@@ -30,7 +34,9 @@ from typing import Any, cast
 
 import numpy as np
 import pytest
+from tests.tournament_legacy_fixtures import create_legacy_tournament
 
+from marl_battlegrounds.environment import EpisodeInfo
 from marl_battlegrounds.evaluation.evaluate import EpisodeSpec, EvaluationResult
 from marl_battlegrounds.evaluation.metric_catalog import FULL_METRIC_NAMES
 from marl_battlegrounds.evaluation.policy_execution import (
@@ -112,12 +118,15 @@ def test_twenty_match_canonical_smoke_has_complete_balanced_evidence_without_fil
 def test_three_entrants_preserve_global_ids_and_sparse_diagnostic_independence(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    module = import_module("marl_battlegrounds.evaluation.tournament")
 
     def forbidden_headline(*args: object, **kwargs: object) -> None:
         raise AssertionError("none mode must skip headline aggregation")
 
-    monkeypatch.setattr(module, "summarize_headlines", forbidden_headline)
+    monkeypatch.setattr(
+        import_module("marl_battlegrounds.evaluation.tournament_headlines"),
+        "summarize_headlines",
+        forbidden_headline,
+    )
     result = run_tournament(
         _entrants(3),
         maps=[list_tdm_maps()[12]],
@@ -176,12 +185,15 @@ def test_persisted_tournament_resumes_without_reexecution_or_repeated_summary_ro
     durable = {
         name: path.read_bytes() for name, path in paths.items() if name != "run_details"
     }
-    module = import_module("marl_battlegrounds.evaluation.tournament")
 
     def forbidden_fit(*args: object, **kwargs: object) -> None:
         raise AssertionError("a completed saved tournament must not refit")
 
-    monkeypatch.setattr(module, "summarize_tournament", forbidden_fit)
+    monkeypatch.setattr(
+        import_module("marl_battlegrounds.evaluation.tournament_statistics"),
+        "summarize_tournament",
+        forbidden_fit,
+    )
     resumed = run_tournament(
         tuple(reversed(entrants)),
         maps=[12],
@@ -204,7 +216,8 @@ def test_persisted_tournament_resumes_without_reexecution_or_repeated_summary_ro
     repaired = run_tournament(entrants, resume_from=paths["run_details"].parent)
     assert repaired.status == "complete"
     assert repaired.tournament_results == result.tournament_results
-    original_maps = module.normalize_episode_specs
+    inputs = import_module("marl_battlegrounds.evaluation.tournament_inputs")
+    original_maps = inputs.normalize_episode_specs
 
     def changed_maps(*args: object, **kwargs: object) -> tuple[EpisodeSpec, ...]:
         specs = cast(tuple[EpisodeSpec, ...], original_maps(*args, **kwargs))
@@ -218,7 +231,7 @@ def test_persisted_tournament_resumes_without_reexecution_or_repeated_summary_ro
             for spec in specs
         )
 
-    monkeypatch.setattr(module, "normalize_episode_specs", changed_maps)
+    monkeypatch.setattr(inputs, "normalize_episode_specs", changed_maps)
     with pytest.raises(ValueError, match="explicit map contents"):
         run_tournament(entrants, maps=[12], resume_from=paths["run_details"].parent)
     assert (
@@ -229,7 +242,11 @@ def test_persisted_tournament_resumes_without_reexecution_or_repeated_summary_ro
         assert paths[name].read_bytes() == data
     with paths["full_metrics"].open(newline="") as stream:
         assert [row["episode_id"] for row in csv.DictReader(stream)] == ["1"]
-    with pytest.raises(ValueError, match="identity differs"):
+    monkeypatch.setattr(inputs, "normalize_episode_specs", original_maps)
+    with pytest.raises(
+        ValueError,
+        match=r"Loaded controller differs from registration\.variables_digest",
+    ):
         run_tournament(
             (replace(entrants[0], variables=np.asarray(2.0)), entrants[1]),
             maps=[12],
@@ -265,7 +282,8 @@ def test_completed_full_metrics_resume_keeps_all_matchup_rows_and_checks_saved_i
     schedule = manifest["passes"]['["tournament","schedule"]']
     assert schedule["details"]["full_metrics_episodes"] == list(full_selection)
     pairs = [
-        manifest["passes"][f'["tournament","pair-{index}"]'] for index in (1, 2, 3)
+        manifest["passes"][f'["tournament","canonical-job-{index}"]']
+        for index in (0, 1, 2)
     ]
     assert [entry["details"]["full_metrics_episodes"] for entry in pairs] == [
         [1, 2],
@@ -282,14 +300,25 @@ def test_completed_full_metrics_resume_keeps_all_matchup_rows_and_checks_saved_i
             "6",
         ]
     before = _files(directory)
-    module = import_module("marl_battlegrounds.evaluation.tournament")
 
     def forbidden(*args: object, **kwargs: object) -> None:
         raise AssertionError("a completed tournament must not run or refit")
 
-    monkeypatch.setattr(module, "evaluate_episodes", forbidden)
-    monkeypatch.setattr(module, "summarize_tournament", forbidden)
-    monkeypatch.setattr(module, "summarize_headlines", forbidden)
+    monkeypatch.setattr(
+        import_module("marl_battlegrounds.evaluation.evaluate"),
+        "_evaluate_tournament_episodes",
+        forbidden,
+    )
+    monkeypatch.setattr(
+        import_module("marl_battlegrounds.evaluation.tournament_statistics"),
+        "summarize_tournament",
+        forbidden,
+    )
+    monkeypatch.setattr(
+        import_module("marl_battlegrounds.evaluation.tournament_headlines"),
+        "summarize_headlines",
+        forbidden,
+    )
     saved = run_tournament(entrants, resume_from=directory)
     assert saved.status == "complete"
     assert saved.matches == result.matches
@@ -321,8 +350,8 @@ def test_interrupted_pair_pass_resumes_only_missing_episodes(
         "capture_recording_provenance",
         same_source,
     )
-    module = import_module("marl_battlegrounds.evaluation.tournament")
-    original = module.evaluate_episodes
+    evaluator = import_module("marl_battlegrounds.evaluation.evaluate")
+    original = evaluator._evaluate_tournament_episodes
     executions: list[tuple[int, ...]] = []
 
     def stop_after_first_pass(
@@ -337,7 +366,9 @@ def test_interrupted_pair_pass_resumes_only_missing_episodes(
         executions.append(tuple(row.episode_id for row in result.episodes))
         return result
 
-    monkeypatch.setattr(module, "evaluate_episodes", stop_after_first_pass)
+    monkeypatch.setattr(
+        evaluator, "_evaluate_tournament_episodes", stop_after_first_pass
+    )
     with pytest.raises(RuntimeError, match="interrupted tournament"):
         run_tournament(
             _entrants(3),
@@ -368,7 +399,7 @@ def test_interrupted_pair_pass_resumes_only_missing_episodes(
         executions.append(tuple(row.episode_id for row in result.episodes))
         return result
 
-    monkeypatch.setattr(module, "evaluate_episodes", observe_resumption)
+    monkeypatch.setattr(evaluator, "_evaluate_tournament_episodes", observe_resumption)
     result = run_tournament(
         _entrants(3),
         maps=[12],
@@ -377,7 +408,7 @@ def test_interrupted_pair_pass_resumes_only_missing_episodes(
         chunk_size=2,
         resume_from=run_dir,
     )
-    assert executions == [(1, 2, 3, 4), (), (5, 6, 7, 8), (9, 10, 11, 12)]
+    assert executions == [(1, 2, 3, 4), (5, 6, 7, 8), (9, 10, 11, 12)]
     assert [row["episode_id"] for row in result.matches] == list(range(1, 13))
 
 
@@ -419,11 +450,22 @@ def test_system_and_policy_tournament_has_complete_uniform_views() -> None:
     assert result.matches[0]["team_a_policy"] == result.matches[1]["team_a_policy"]
 
 
+@pytest.mark.parametrize("recorded_sampling", [True, False])
 def test_complete_games_finalize_once_without_replaying_and_inherit_saved_options(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
+    recorded_sampling: bool,
 ) -> None:
-    module = import_module("marl_battlegrounds.evaluation.tournament")
+    provenance = capture_recording_provenance()
+
+    def same_source(**_: object) -> dict[str, object]:
+        return provenance
+
+    monkeypatch.setattr(
+        import_module("marl_battlegrounds.evaluation.evaluate"),
+        "capture_recording_provenance",
+        same_source,
+    )
     result = run_tournament(
         _entrants(), maps=[0], episodes_per_pair=2, max_steps=1, output_dir=tmp_path
     )
@@ -432,6 +474,11 @@ def test_complete_games_finalize_once_without_replaying_and_inherit_saved_option
     path = directory / "run_details.json"
     manifest = json.loads(path.read_bytes())
     manifest.pop("tournament_summary")
+    if not recorded_sampling:
+        manifest["details"]["input_metadata"].pop("method_sampling")
+        for entry in manifest["passes"].values():
+            entry["details"].pop("method_sampling", None)
+            entry["details"].get("input_metadata", {}).pop("method_sampling", None)
     for name in (
         "tournament_results.csv",
         "matchup_results.csv",
@@ -440,7 +487,8 @@ def test_complete_games_finalize_once_without_replaying_and_inherit_saved_option
     ):
         manifest["tables"].pop(name)
     path.write_text(json.dumps(manifest))
-    original = module.summarize_tournament
+    statistics = import_module("marl_battlegrounds.evaluation.tournament_statistics")
+    original = statistics.summarize_tournament
     fits: list[int] = []
 
     def counted_fit(*args: object, **kwargs: object) -> object:
@@ -450,19 +498,27 @@ def test_complete_games_finalize_once_without_replaying_and_inherit_saved_option
     def forbidden_execution(*args: object, **kwargs: object) -> None:
         raise AssertionError("saved completed games must not run again")
 
-    monkeypatch.setattr(module, "summarize_tournament", counted_fit)
+    monkeypatch.setattr(statistics, "summarize_tournament", counted_fit)
     evaluator = import_module("marl_battlegrounds.evaluation.evaluate")
     monkeypatch.setattr(evaluator, "_jax_chunk", forbidden_execution)
     resumed = run_tournament(_entrants(), resume_from=directory)
     assert len(fits) == 1
     assert resumed.matches == result.matches
     assert resumed.headline_metrics == result.headline_metrics
+    if not recorded_sampling:
+        for row in resumed.tournament_results:
+            assert row["determinism"] == "Determinism Unknown"
+            assert row["independent_blocks"] == 1
+            assert row["supported_independent_sampling_units"] is None
+            assert row["elo_ci_low"] is row["expected_score_ci_low"] is None
     again = run_tournament(_entrants(), resume_from=directory)
     assert len(fits) == 1
     assert again.headline_metrics == result.headline_metrics
     changed = json.loads(path.read_bytes())
     pair = next(
-        entry for entry in changed["passes"].values() if entry["pass_id"] == "pair-1"
+        entry
+        for entry in changed["passes"].values()
+        if entry["pass_id"] == "canonical-job-0"
     )
     pair["details"]["seed"] = 999
     path.write_text(json.dumps(changed))
@@ -471,96 +527,11 @@ def test_complete_games_finalize_once_without_replaying_and_inherit_saved_option
     snapshot = {
         file: file.read_bytes() for file in directory.rglob("*") if file.is_file()
     }
-    with pytest.raises(ValueError, match="scientific conditions"):
+    with pytest.raises(
+        ValueError, match="Saved tournament pass scientific conditions differ"
+    ):
         run_tournament(_entrants(), resume_from=directory)
     assert {file: file.read_bytes() for file in snapshot} == snapshot
-
-
-def test_compatible_legacy_partial_run_keeps_reversed_teams_and_original_protocol(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    from marl_battlegrounds.evaluation.evaluate import (
-        _run_evaluation,
-        normalize_episode_specs,
-        policy_description,
-    )
-    from marl_battlegrounds.evaluation.evaluation_conditions import config_record
-    from marl_battlegrounds.evaluation.run_writer import RunWriter
-    from marl_battlegrounds.tasks import canonical_tournament_rosters
-
-    first, second = _entrants()
-    a, b = canonical_tournament_rosters()
-    config = normalize_episode_specs([0], 1, a, b, 20, 1, red_zone_depth=0.0)[
-        0
-    ].env_config
-    source_id, _ = config_record(config)
-    details: dict[str, object] = {
-        "seed": 0,
-        "rng_protocol": "episode-fold-in-v1",
-        "policies": [
-            policy_description(p, p.variables, p.initial_carry, include_digests=True)
-            for p in (first, second)
-        ],
-        "map_ids": [0],
-        "episodes_per_pair": 4,
-        "num_matches": 4,
-        "score_threshold": 20,
-        "max_steps": 1,
-        "metrics": "priority",
-        "full_metrics_episodes": [],
-        "replay_episodes": [],
-        "opponent_weights": None,
-        "configuration_ids_by_map": {"0": source_id},
-        "schedule_digest": "legacy-fixture-schedule",
-    }
-    specs = [
-        EpisodeSpec(
-            i,
-            config,
-            0,
-            (i + 1) // 2,
-            metadata={
-                "block_id": (i + 1) // 2,
-                "bootstrap_group": None,
-                "paired_comparison_key": f"block-{(i + 1) // 2}",
-            },
-        )
-        for i in (1, 3)
-    ]
-    with RunWriter(
-        tmp_path, phase="tournament", pass_id="schedule", details=details
-    ) as writer:
-        _run_evaluation(
-            first,
-            second,
-            specs,
-            writer=writer,
-            phase="tournament",
-            pass_id="pair-side-1",
-            num_envs=2,
-            chunk_size=1,
-        )
-        directory = writer.run_dir
-    evaluator = import_module("marl_battlegrounds.evaluation.evaluate")
-    original = evaluator._run_evaluation
-    executions: list[tuple[int, ...]] = []
-
-    def observed_legacy(*args: object, **kwargs: object) -> EvaluationResult:
-        assert kwargs.get("contract") is None
-        result = cast(EvaluationResult, original(*args, **kwargs))
-        executions.append(tuple(row.episode_id for row in result.episodes))
-        return result
-
-    monkeypatch.setattr(evaluator, "_run_evaluation", observed_legacy)
-    result = run_tournament(
-        (first, second), resume_from=directory, num_envs=2, chunk_size=1
-    )
-    assert executions == [(), (2, 4)]
-    assert result.status == "complete"
-    assert result.headline_metrics == ()
-    assert result.matches[0]["team_a_policy"] == result.matches[1]["team_b_policy"]
-    assert result.matches[0]["config_id"] == result.matches[1]["config_id"]
 
 
 def _frozen_source(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -669,15 +640,8 @@ def test_completed_run_saved_before_red_zone_returns_through_its_saved_result(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     module = import_module("marl_battlegrounds.evaluation.tournament")
-    result = run_tournament(
-        _entrants(),
-        maps=[12],
-        episodes_per_pair=2,
-        max_steps=1,
-        chunk_size=1,
-        red_zone_depth=0.0,
-        output_dir=tmp_path,
-    )
+    directory = create_legacy_tournament(tmp_path, _entrants(), completed_passes=1)
+    result = run_tournament(_entrants(), resume_from=directory, chunk_size=1)
     assert result.run_dir is not None
     renamed = _saved_before_red_zone(result.run_dir)
     before = _files(result.run_dir)
@@ -713,3 +677,170 @@ def test_completed_run_saved_before_red_zone_returns_through_its_saved_result(
     with pytest.raises(ValueError, match="red_zone_depth differs from the saved"):
         run_tournament(_entrants(), red_zone_depth=5.0, resume_from=result.run_dir)
     assert _files(result.run_dir) == before
+
+
+@pytest.mark.parametrize(
+    ("completed_games", "old_snapshot", "historical_map"),
+    [(0, False, False), (1, False, False), (1, True, False), (1, True, True)],
+)
+def test_early_resume_preserves_unplayed_maps_without_current_lookup(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    completed_games: int,
+    old_snapshot: bool,
+    historical_map: bool,
+) -> None:
+    from marl_battlegrounds.evaluation.run_writer import RunWriter
+
+    _frozen_source(monkeypatch)
+    module = import_module("tests.tournament_legacy_fixtures")
+    original_execute = module._evaluate_tournament_episodes
+    original_write = RunWriter.write
+    original_maps = module.list_tdm_maps
+    if historical_map:
+        import jax.numpy as jnp
+
+        from marl_battlegrounds._tdm_assets import map_history
+
+        historical = next(
+            entry
+            for entry in map_history()
+            if entry.info.map_id == 12 and entry.info.source.revision == 7
+        )
+        original_specs = module.normalize_episode_specs
+
+        def old_specs(*args: object, **kwargs: object) -> tuple[EpisodeSpec, ...]:
+            specs = cast(tuple[EpisodeSpec, ...], original_specs(*args, **kwargs))
+            geometry = historical.geometry
+            return tuple(
+                replace(
+                    spec,
+                    env_config=spec.env_config._replace(
+                        map_width=geometry.map_width,
+                        map_height=geometry.map_height,
+                        obstacles=jnp.asarray(geometry.obstacles, dtype=jnp.float32),
+                        team_spawn_pad_positions=jnp.asarray(
+                            geometry.team_spawn_pad_positions, dtype=jnp.float32
+                        ),
+                    ),
+                )
+                if spec.map_id == 12
+                else spec
+                for spec in specs
+            )
+
+        monkeypatch.setattr(module, "normalize_episode_specs", old_specs)
+        monkeypatch.setattr(
+            module,
+            "list_tdm_maps",
+            lambda: tuple(
+                historical.info if info.map_id == 12 else info
+                for info in original_maps()
+            ),
+        )
+
+    def stop_before_pair(*args: object, **kwargs: object) -> EvaluationResult:
+        raise RuntimeError("injected early interruption")
+
+    def stop_after_game(writer: RunWriter, info: EpisodeInfo) -> None:
+        original_write(writer, info)
+        writer.flush()
+        raise RuntimeError("injected early interruption")
+
+    if completed_games:
+        monkeypatch.setattr(RunWriter, "write", stop_after_game)
+    else:
+        monkeypatch.setattr(module, "_evaluate_tournament_episodes", stop_before_pair)
+    with pytest.raises(RuntimeError, match="injected early interruption"):
+        create_legacy_tournament(
+            tmp_path,
+            _entrants(),
+            maps=(12, 13),
+            episodes_per_pair=4,
+            metrics="none",
+            red_zone_depth=0.0,
+            completed_passes=1,
+        )
+    run_dir = next(tmp_path.iterdir())
+    monkeypatch.setattr(RunWriter, "write", original_write)
+    monkeypatch.setattr(module, "_evaluate_tournament_episodes", original_execute)
+    monkeypatch.setattr(module, "list_tdm_maps", original_maps)
+    saved = json.loads((run_dir / "run_details.json").read_bytes())
+    source_ids = saved["details"]["configuration_ids_by_map"]
+    if old_snapshot:
+        path = run_dir / "run_details.json"
+        manifest = json.loads(path.read_bytes())
+        for details in (
+            manifest["details"],
+            manifest["passes"]['["tournament","schedule"]']["details"],
+        ):
+            details.pop("configurations")
+            details.pop("registered_maps")
+        path.write_text(json.dumps(manifest))
+
+    def unavailable(*args: object, **kwargs: object) -> None:
+        raise AssertionError("Resume consulted current map selection")
+
+    monkeypatch.setattr(
+        import_module("marl_battlegrounds.evaluation.tournament"),
+        "normalize_episode_specs",
+        unavailable,
+    )
+    monkeypatch.setattr(
+        import_module("marl_battlegrounds.evaluation.map_identity"),
+        "registered_map_metadata",
+        unavailable,
+    )
+    result = run_tournament(
+        _entrants(),
+        resume_from=run_dir,
+        num_envs=1,
+        chunk_size=1,
+    )
+    assert [row["episode_id"] for row in result.matches] == [1, 2, 3, 4]
+    assert result.metadata["configuration_ids_by_map"] == source_ids
+    assert all(
+        match["source_config_id"] == source_ids[str(match["map_id"])]
+        for match in result.metadata["schedule"]
+    )
+    with (run_dir / "match_results.csv").open(newline="") as stream:
+        assert len(list(csv.DictReader(stream))) == 4
+
+
+@pytest.mark.parametrize("failure", ["missing", "changed", "registration"])
+def test_incomplete_source_snapshot_fails_before_resume_writes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, failure: str
+) -> None:
+    module = import_module("tests.tournament_legacy_fixtures")
+
+    def stop(*args: object, **kwargs: object) -> EvaluationResult:
+        raise RuntimeError("before first pair")
+
+    monkeypatch.setattr(module, "_evaluate_tournament_episodes", stop)
+    with pytest.raises(RuntimeError, match="before first pair"):
+        create_legacy_tournament(
+            tmp_path,
+            _entrants(),
+            maps=(12, 13),
+            episodes_per_pair=4,
+            completed_passes=1,
+        )
+    directory = next(tmp_path.iterdir())
+    path = directory / "run_details.json"
+    manifest = json.loads(path.read_bytes())
+    for details in (
+        manifest["details"],
+        manifest["passes"]['["tournament","schedule"]']["details"],
+    ):
+        identifier = details["configuration_ids_by_map"]["13"]
+        if failure == "missing":
+            details["configurations"].pop(identifier)
+        elif failure == "changed":
+            details["configurations"][identifier]["max_steps"] = 99
+        else:
+            details["registered_maps"]["13"]["name"] = "invented-map"
+    path.write_text(json.dumps(manifest))
+    before = {p: p.read_bytes() for p in directory.rglob("*") if p.is_file()}
+    with pytest.raises(ValueError, match=r"configuration|identity"):
+        run_tournament(_entrants(), resume_from=directory)
+    assert before == {p: p.read_bytes() for p in directory.rglob("*") if p.is_file()}

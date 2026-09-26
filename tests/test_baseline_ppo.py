@@ -12,10 +12,13 @@ that the factory's default is the unscaled "left" hook while an explicit "world"
 System uses the direct actor hook, and prove that a "left" System equals the
 actor run on explicitly reflected features with its world-frame actions and
 stored indices agreeing while its unflagged lanes stay bit-identical to an
-explicit "world" System. They do not establish GPU speed, learning
+explicit "world" System. The fixed-input benchmark reference must follow the
+same spawn frame over repeated calls, including padded lanes. They do not
+establish GPU speed, learning
 quality or full learner recovery.
 """
 
+# pyright: reportPrivateUsage=false
 from dataclasses import replace
 from typing import Any, cast
 
@@ -874,3 +877,31 @@ def test_reflected_system_matches_explicit_reflected_features_and_world_actions(
         np.asarray(output.next_memory)[np.asarray(unflagged)],
         np.asarray(plain.next_memory)[np.asarray(unflagged)],
     )
+
+
+@pytest.mark.parametrize("padding", [False, True])
+def test_benchmark_reference_keeps_left_frame_actions_and_memory(
+    networks: PPOTrainState, padding: bool
+) -> None:
+    from scripts.dev import benchmark_baseline as benchmark
+
+    env, observations, state = _balanced_setup()
+    inputs = env.policy_inputs(observations, state)
+    flags = spawn_frame_flag(inputs.actors, "left")
+    assert bool(flags.any()) and not bool(flags.all())
+    if padding:
+        inputs = inputs._replace(valid=inputs.valid.at[1].set(False))
+    system = make_recurrent_mappo_system(networks.actor_params, spawn_frame="left")
+    memory = jnp.full((2, 5, HIDDEN_SIZE), 0.1, jnp.float32)
+    keys = jax.random.split(jax.random.key(148), 2)
+    outputs: list[Tree] = []
+    for actor in (system.apply, benchmark._direct_actor):
+        outputs.append(
+            jax.jit(benchmark._scan(cast(benchmark.ActorCall, actor), 3))(
+                networks.actor_params, memory, inputs, keys
+            )
+        )
+    benchmark._compare(*outputs)
+    if padding:
+        for result in outputs:
+            np.testing.assert_array_equal(result[0][1], memory[1])

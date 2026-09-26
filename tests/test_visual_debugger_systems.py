@@ -314,14 +314,12 @@ def _send(service: DebuggerService, command: DebuggerCommandV1) -> ServiceComman
     )
 
 
-def _finish(service: DebuggerService, *, timeout: float = 30) -> None:
+def _finish(service: DebuggerService) -> None:
     import time
 
     from scripts.dev.visual_debugger.protocol import FinishSystemCommandV1
 
-    until = time.monotonic() + timeout
     while service.current_frame().system_operation is not None:
-        assert time.monotonic() < until
         operation = service.current_frame().system_operation
         assert operation is not None
         assert operation.state != "failed"

@@ -3,16 +3,20 @@
 Artificial complete records test the public reuse/save/resume route without games.
 Small one-tick CPU games check the fresh path through the real evaluator, writer
 and physical evidence checks. Fixture release pins are isolated test data, not an
-official release or evidence of scientific qualification.
+official release or evidence of scientific qualification. Saved release and
+budget copies must agree before resume or read-only result construction.
 
 A current bundle pins the current scalar schema, run schema 2 and replay schema
 4 and holds configurations at Red Zone depth 5.0. A bundle saved before the Red
 Zone rule pins (14, 2, 3) and holds 12-key depth-0.0 configurations under their
 original IDs: it loads and reuses every game while running none, and any request
 that needs a new game fails with the reuse-only message before writing anything.
+Default and custom LLM formats also run through local canonical snapshots with
+matching identity, call records, saved-action playback and completed resume.
 """
 
 import copy
+import hashlib
 import json
 import re
 
@@ -82,7 +86,18 @@ def test_twelve_only_reuse_saves_and_resumes_without_models_or_refitting(
     from marl_battlegrounds.evaluation import tournament_statistics
 
     monkeypatch.setattr(tournament_statistics, "summarize_tournament", _unexpected)
+    monkeypatch.setattr(configs, "_installed_catalog", _unexpected)
     resumed = marl_bgs.run_canonical_tournament(resume_from=result.run_dir)
+    assert result.run_dir is not None
+    loaded = marl_bgs.load_results(result.run_dir)
+    assert resumed.protocol_compliant is True
+    assert resumed.metadata["protocol_compliant"] is True
+    assert loaded.metadata["official_snapshot_verified"] is True
+    assert loaded.metadata["protocol_compliant"] is True
+    assert (
+        loaded.metadata["qualification_reason"]
+        == resumed.metadata["qualification_reason"]
+    )
     assert resumed.matches == result.matches
     assert resumed.tournament_results == result.tournament_results
     assert resumed.metadata["executed_this_call"] == 0
@@ -587,3 +602,145 @@ def test_local_canonical_llm_uses_pinned_records_and_resumes_without_calls(
         with pytest.raises(ValueError):
             marl_bgs.run_canonical_tournament(changed, resume_from=result.run_dir)
         assert len(model.generations()) == 600
+
+
+@pytest.mark.parametrize("reader", ["resume", "load"])
+@pytest.mark.parametrize("change", ["flag", "budget", "release"])
+def test_conflicting_saved_qualification_fails_without_mutation(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, reader: str, change: str
+) -> None:
+    bundle = build_record_bundle(tmp_path / "inputs")
+    selected = _pin(monkeypatch, bundle["config"])
+    monkeypatch.setattr(canonical, "_active_pair", _unexpected)
+    result = marl_bgs.run_canonical_tournament(
+        config=selected, output_dir=tmp_path / "out"
+    )
+    assert result.run_dir is not None
+    path = result.run_dir / "run_details.json"
+    manifest = json.loads(path.read_bytes())
+    details = manifest["passes"]['["tournament","schedule"]']["details"]
+    if change == "flag":
+        details["official_snapshot_verified"] = False
+    elif change == "budget":
+        manifest["tournament_reuse"]["budget"]["protocol_compliant"] = False
+    else:
+        for record in (manifest["details"], details):
+            record["canonical_config"]["release"]["approval_id"] = "edited-approval"
+            record["canonical_config"]["snapshot_id"] = configs.snapshot_identity(
+                record["canonical_config"]
+            )
+    path.write_text(json.dumps(manifest))
+    before = {p: p.read_bytes() for p in result.run_dir.rglob("*") if p.is_file()}
+    with pytest.raises(ValueError, match="qualification"):
+        if reader == "resume":
+            marl_bgs.run_canonical_tournament(resume_from=result.run_dir)
+        else:
+            marl_bgs.load_results(result.run_dir)
+    assert before == {
+        p: p.read_bytes() for p in result.run_dir.rglob("*") if p.is_file()
+    }
+
+
+def test_saved_official_budget_override_keeps_verification_and_reason(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    bundle = build_record_bundle(tmp_path / "inputs", pairs_per_map=2)
+    selected = _pin(monkeypatch, bundle["config"])
+    monkeypatch.setattr(canonical, "_active_pair", _unexpected)
+    result = marl_bgs.run_canonical_tournament(
+        config=selected, games_per_opponent=10, output_dir=tmp_path / "out"
+    )
+    assert result.run_dir is not None
+    monkeypatch.setattr(configs, "_installed_catalog", _unexpected)
+    resumed = marl_bgs.run_canonical_tournament(resume_from=result.run_dir)
+    assert result.protocol_compliant is resumed.protocol_compliant is False
+    for value in (result, resumed, marl_bgs.load_results(result.run_dir)):
+        assert value.metadata["official_snapshot_verified"] is True
+        assert value.metadata["protocol_compliant"] is False
+        assert value.metadata["qualification_reason"] == (
+            "Released snapshot verified; game budget changed"
+        )
+
+
+@pytest.mark.parametrize(
+    "location",
+    ("pass", "inputs", "summary", "missing", "wrong_identity", "conflict", "invalid"),
+)
+def test_reuse_reads_sampling_only_from_verified_original_method_identities(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, location: str
+) -> None:
+    from marl_battlegrounds.evaluation.tournament_config import canonical_json
+    from marl_battlegrounds.evaluation.tournament_reuse import record_source_identity
+
+    bundle = build_record_bundle(tmp_path / "inputs", entrants=2, maps=1)
+    config, manifest = bundle["config"], bundle["manifest"]
+    names = {value["name"]: key for key, value in manifest["systems"].items()}
+    fact = {"determinism": "deterministic", "basis": "Recorded fixture declaration"}
+    if location in {"pass", "conflict", "invalid"}:
+        for entry in manifest["passes"].values():
+            entry["details"]["method_sampling"] = {
+                team: "invalid" if location == "invalid" else fact
+                for team in ("team_a", "team_b")
+            }
+    if location in {"inputs", "wrong_identity", "conflict"}:
+        manifest["details"] = {
+            "input_metadata": {
+                "participants": {
+                    name: "wrong" if location == "wrong_identity" else value
+                    for name, value in names.items()
+                },
+                "method_sampling": {
+                    name: {**fact, "determinism": "stochastic"}
+                    if location == "conflict"
+                    else fact
+                    for name in names
+                },
+            }
+        }
+    if location == "summary":
+        manifest["tournament_summary"] = {
+            "metadata": {"method_sampling": {name: fact for name in names}},
+            "qualification": {
+                "evidence": {
+                    "systems": {
+                        name: {"name": name, "registration_ids": [identifier]}
+                        for name, identifier in names.items()
+                    }
+                }
+            },
+        }
+
+    def replace_asset(name: str, payload: bytes) -> None:
+        bundle["paths"][name].write_bytes(payload)
+        config["assets"][name].update(
+            size_bytes=len(payload), sha256=hashlib.sha256(payload).hexdigest()
+        )
+
+    replace_asset("run_details.json", canonical_json(manifest))
+    source = config["record_sources"][0]
+    source["source_id"] = record_source_identity(source, config["assets"])
+    for game in bundle["games"]:
+        game["origin"]["source_id"] = source["source_id"]
+    replace_asset(
+        "games.jsonl",
+        b"".join(canonical_json(game) + b"\n" for game in bundle["games"]),
+    )
+    config["snapshot_id"] = configs.snapshot_identity(config)
+    before = {path: path.read_bytes() for path in bundle["paths"].values()}
+    monkeypatch.setattr(canonical, "_active_pair", _unexpected)
+    result = marl_bgs.run_tournament(config=config, output_dir=tmp_path / "out")
+    expected = (
+        "deterministic" if location in {"pass", "inputs", "summary"} else "unknown"
+    )
+    assert {
+        value["determinism"] for value in result.metadata["method_sampling"].values()
+    } == {expected}
+    assert result.metadata["executed_this_call"] == 0
+    assert before == {path: path.read_bytes() for path in before}
+    assert result.run_dir is not None
+    saved = {
+        path: path.read_bytes() for path in result.run_dir.rglob("*") if path.is_file()
+    }
+    resumed = marl_bgs.run_tournament(resume_from=result.run_dir)
+    assert resumed.metadata["method_sampling"] == result.metadata["method_sampling"]
+    assert saved == {path: path.read_bytes() for path in saved}

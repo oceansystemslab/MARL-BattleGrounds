@@ -17,7 +17,10 @@ Short UTC lifecycle messages keep full process and cleanup facts in saved JSON.
 PPO packages keep their exact import probe; QMIX packages use a probe that also
 records Flashbax, and PQN-VDN packages use PPO's probe, whose dependency record
 has no Flashbax. They do not install real training dependencies or start a
-learning experiment.
+learning experiment. Shared launch clocks keep their first deadlines after a
+resume; shared locks reject a duplicate launch. Detached commands keep the
+caller's environment and wait for durable process identity before executing.
+Failed identity publication starts no command.
 
 The tests' own readiness waits fail instead of hanging when the process they
 wait on dies. A readiness wait checks readiness first, keeps waiting with no
@@ -1630,3 +1633,223 @@ def test_qmix_packages_probe_flashbax_while_ppo_keeps_its_probe_bytes(
 
     assert "flashbax" not in checkpoint_dependencies("pqn_vdn")
     assert checkpoint_dependencies("pqn_vdn") == checkpoint_dependencies("mappo")
+
+
+def test_shared_launch_clock_keeps_first_deadline_and_original_bytes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    path = tmp_path / "launch_time.json"
+    monkeypatch.setattr(launch.time, "time", lambda: 100.0)
+    with launch.launch_lock(tmp_path):
+        original = launch.launch_clock(
+            path,
+            durations={"numerical_deadline": 20, "hard_deadline": 30},
+            binding={"budget_digest": "original"},
+            create=True,
+        )
+    assert original == {
+        "started_at_seconds": 100.0,
+        "numerical_deadline": 120.0,
+        "hard_deadline": 130.0,
+        "budget_digest": "original",
+    }
+    path.write_text(json.dumps(original, indent=4) + "\n")
+    before = path.read_bytes()
+    monkeypatch.setattr(launch.time, "time", lambda: 200.0)
+    assert (
+        launch.launch_clock(
+            path,
+            durations={"numerical_deadline": 20, "hard_deadline": 30},
+            binding={"budget_digest": "original"},
+            create=True,
+            recorded={"status": "stopped", **original},
+        )
+        == original
+    )
+    assert path.read_bytes() == before
+    for durations, binding, recorded in (
+        (
+            {"numerical_deadline": 21, "hard_deadline": 30},
+            {"budget_digest": "original"},
+            None,
+        ),
+        (
+            {"numerical_deadline": 20, "hard_deadline": 30},
+            {"budget_digest": "changed"},
+            None,
+        ),
+        (
+            {"numerical_deadline": 20, "hard_deadline": 30},
+            {"budget_digest": "original"},
+            {**original, "hard_deadline": 131},
+        ),
+    ):
+        with pytest.raises(ValueError, match="clock"):
+            launch.launch_clock(
+                path, durations=durations, binding=binding, recorded=recorded
+            )
+        assert path.read_bytes() == before
+
+
+@pytest.mark.parametrize("duration", [True, 0, -1, float("inf"), float("nan")])
+def test_shared_launch_clock_rejects_invalid_duration_without_writing(
+    tmp_path: Path, duration: float
+) -> None:
+    path = tmp_path / "launch_time.json"
+    with pytest.raises(ValueError, match="duration"):
+        launch.launch_clock(
+            path, durations={"deadline_at": duration}, binding={}, create=True
+        )
+    assert not path.exists()
+
+
+def test_shared_launch_lock_rejects_a_duplicate_holder(tmp_path: Path) -> None:
+    with (
+        launch.launch_lock(tmp_path),
+        pytest.raises(BlockingIOError),
+        launch.launch_lock(tmp_path),
+    ):
+        pytest.fail("A second launch must not enter the critical section")
+    with launch.launch_lock(tmp_path):
+        launch.launch_clock(
+            tmp_path / "clock.json", durations={}, binding={"id": "case"}, create=True
+        )
+
+
+def test_shared_detached_spawn_publishes_identity_before_inherited_command(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("MARL_LAUNCH_TEST_VALUE", "preserved")
+    monkeypatch.setenv("PYTHONPATH", str(tmp_path / "researcher-modules"))
+    output = tmp_path / "observed.json"
+    code = (
+        "import json,os,pathlib; root=pathlib.Path.cwd(); "
+        "record=json.loads((root/'process.json').read_text()); "
+        "assert record['process']['pid']==os.getpid(); "
+        "assert record['command'][0]; print('Detached command ran',flush=True); "
+        "(root/'observed.json').write_text(json.dumps({"
+        "'custom':os.environ['MARL_LAUNCH_TEST_VALUE'],"
+        "'pythonpath':os.environ['PYTHONPATH'], 'stdin':os.read(0,1).decode()}))"
+    )
+    with launch.launch_lock(tmp_path):
+        record = launch.spawn_detached(
+            tmp_path,
+            [sys.executable, "-c", code],
+            log_path=tmp_path / "process.log",
+            mode="start",
+            cwd=tmp_path,
+        )
+    pid = record["process"]["pid"]
+    try:
+        while not output.exists():
+            if not launch._alive({"process": record["process"]}):
+                assert output.exists(), (
+                    "The saved child exited before writing its output.\n"
+                    + _log_tail(tmp_path)
+                )
+                break
+            time.sleep(0.01)
+        assert json.loads(output.read_text()) == {
+            "custom": "preserved",
+            "pythonpath": str(tmp_path / "researcher-modules"),
+            "stdin": "",
+        }
+    finally:
+        if launch._alive({"process": record["process"]}):
+            os.kill(pid, signal.SIGTERM)
+        os.waitpid(pid, 0)
+    assert record["mode"] == "start"
+    assert "Detached command ran" in (tmp_path / "process.log").read_text()
+
+
+def test_shared_detached_spawn_does_not_execute_after_publication_failure(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    marker = tmp_path / "should-not-exist"
+
+    def fail(path: Path, value: object) -> None:
+        raise OSError("Injected publication failure")
+
+    monkeypatch.setattr(launch, "atomic_json", fail)
+    with launch.launch_lock(tmp_path), pytest.raises(OSError, match="publication"):
+        launch.spawn_detached(
+            tmp_path,
+            [
+                sys.executable,
+                "-c",
+                f"from pathlib import Path; Path({str(marker)!r}).touch()",
+            ],
+            log_path=tmp_path / "process.log",
+            mode="start",
+        )
+    assert not marker.exists()
+    assert not (tmp_path / "process.json").exists()
+
+
+def test_shared_stop_rechecks_live_owner_and_leaves_stale_identity_alone(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    live = tmp_path / "live.json"
+    stale = tmp_path / "stale.json"
+    atomic_json(live, {"process": {"pid": 123, "start_ticks": "live"}})
+    atomic_json(stale, {"process": {"pid": 456, "start_ticks": "stale"}})
+
+    def is_alive(record: dict[str, Any]) -> bool:
+        return record["process"]["start_ticks"] == "live"
+
+    calls: list[tuple[int, int]] = []
+
+    def stop(pid: int, sig: int) -> None:
+        calls.append((pid, sig))
+
+    monkeypatch.setattr(launch, "_alive", is_alive)
+    monkeypatch.setattr(launch.os, "kill", stop)
+    assert launch.live_process_records([live, stale, tmp_path / "absent.json"]) == [
+        live
+    ]
+    role = tmp_path / "active-role.json"
+    atomic_json(role, launch._read(live))
+    assert launch.request_stop([stale, live, role, live]) == [123]
+    assert calls == [(123, signal.SIGTERM)]
+
+
+def test_shared_detached_spawn_cleans_owned_session_when_release_is_interrupted(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    marker = tmp_path / "started"
+    original_write = launch.os.write
+
+    def interrupted(fd: int, data: bytes) -> int:
+        original_write(fd, data)
+        record = launch._read(tmp_path / "process.json")
+        while not marker.exists():
+            if not launch._alive({"process": record["process"]}):
+                assert marker.exists(), (
+                    "The gated child exited before writing its marker.\n"
+                    + _log_tail(tmp_path)
+                )
+                break
+            time.sleep(0.01)
+        raise KeyboardInterrupt("Interrupted after releasing the child")
+
+    monkeypatch.setattr(launch.os, "write", interrupted)
+    with (
+        launch.launch_lock(tmp_path),
+        pytest.raises(KeyboardInterrupt, match="releasing"),
+    ):
+        launch.spawn_detached(
+            tmp_path,
+            [
+                sys.executable,
+                "-c",
+                "from pathlib import Path; import time; "
+                f"Path({str(marker)!r}).touch(); time.sleep(60)",
+            ],
+            log_path=tmp_path / "process.log",
+            mode="start",
+        )
+    record = launch._read(tmp_path / "process.json")
+    assert not launch._alive(record)
+    assert launch._group_members(record["process"]["pid"]) == []
+    with pytest.raises(ChildProcessError):
+        os.waitpid(record["process"]["pid"], os.WNOHANG)

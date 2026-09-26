@@ -8,7 +8,10 @@ Every new task records the Team Deathmatch Red Zone depth its games use (task
 schemas 3, 4 and slot 2) and reports recorded kills beside points; a task
 description built without a depth keeps its original layout and identity, so
 saved tasks from before the Red Zone rule stay valid but are never reused under
-the new rule. load_panel refuses a panel ranked under another depth.
+the new rule. Ranked actors remain loadable under another depth; the ranking keeps its
+original conditions. Child runs freeze their future validation points and roots
+before execution. Their selection combines only checked compatible ancestry and
+keeps every actor's original identity.
 """
 
 from __future__ import annotations
@@ -28,6 +31,11 @@ from hashlib import sha256
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, cast
 
+from marl_battlegrounds.evaluation.sampling_evidence import (
+    combine_sampling_facts,
+    method_sampling_fact,
+    summarize_sampling_evidence,
+)
 from marl_battlegrounds.tasks import DEFAULT_TDM_RED_ZONE_DEPTH
 from marl_battlegrounds.training.analysis import (
     _KILL_COLUMNS,  # pyright: ignore[reportPrivateUsage]
@@ -358,6 +366,375 @@ class FrozenPanel:
     methods: tuple[Any, ...] = field(default=(), repr=False, compare=False)
 
 
+def run_validation_declaration(
+    config: Mapping[str, Any],
+    panel: FrozenPanel | None,
+    *,
+    continuation: Mapping[str, Any] | None = None,
+) -> Record:
+    """Resolve one run's exact validation points and expected task settings.
+
+    config is the saved training config. panel is already verified, or None.
+    continuation is the checked child context, with the actual start, the
+    parent's small validation declaration, learner boundary rules and optional
+    changes.validation. Parent absolute targets and effective roots are kept by
+    default; child final is always included. Explicit env_steps replaces future
+    targets only. Returned JSON-ready facts belong in run and checkpoint metadata.
+
+    This host-only helper runs no games and writes nothing. It rejects unknown
+    changes, invalid roots/counts, old targets and incompatible historical root
+    overrides with ValueError. It never uses an observed result as an expected
+    root. The caller verifies the parent checkpoint and supplied panel first.
+    """
+    from marl_battlegrounds.baselines.methods import method_settings_field
+
+    method = config.get("method", "mappo")
+    settings = config[method_settings_field(method)]
+    total = _integer(config["total_env_steps"], "total_env_steps", minimum=1)
+    batch = _integer(config["num_envs"], "num_envs", minimum=1)
+    length = _integer(settings["rollout_length"], "rollout_length", minimum=1)
+    initial = settings["memory_window"] + length if method == "pqn_vdn" else 0
+    if total % batch:
+        raise ValueError("total_env_steps must be divisible by num_envs")
+    roots = (
+        {}
+        if panel is None
+        else dict(panel.roots)
+        if panel.schema_version == 2
+        else {key: _ROOTS[key] for key in ("routine", "initialization", "confirmation")}
+    )
+    changes: Record = {}
+    parent: Mapping[str, Any] | None = None
+    start = 0
+    if continuation is not None:
+        parent = continuation.get("parent_validation_declaration")
+        if not isinstance(parent, Mapping):
+            raise ValueError("Continuation needs its parent's validation declaration")
+        start = _integer(continuation.get("start_env_steps"), "start_env_steps")
+        if start >= total or start % batch:
+            raise ValueError("Continuation validation start must precede its end")
+        raw = continuation.get("changes", {}).get("validation", {})
+        if not isinstance(raw, Mapping):
+            raise ValueError("validation changes must be an object")
+        changes = dict(cast(Mapping[str, Any], raw))
+        allowed = {
+            "panel",
+            "env_steps",
+            "roots",
+            "routine_seed_pairs",
+            "confirmation_seed_pairs",
+            "inherit_parent_candidates",
+            "allow_different_roots",
+            "bindings",
+        }
+        if set(changes) - allowed:
+            raise ValueError("Unknown continuation validation changes")
+        if panel is not None and parent.get("panel_digest") == panel.digest:
+            roots = dict(parent["roots"])
+    if "roots" in changes:
+        supplied = changes["roots"]
+        if panel is None or panel.schema_version != 2:
+            raise ValueError("Historical or disabled panels cannot override roots")
+        if not isinstance(supplied, Mapping):
+            raise ValueError("Validation roots need known purpose names")
+        supplied = cast(Mapping[str, Any], supplied)
+        if set(supplied) - set(roots):
+            raise ValueError("Validation roots need known purpose names")
+        roots.update({key: _root_seed(value) for key, value in supplied.items()})
+    if roots:
+        roots = _panel_roots(roots)
+    pairs = {}
+    for name in ("routine_seed_pairs", "confirmation_seed_pairs"):
+        value = changes.get(
+            name, parent.get(name, config[name]) if parent else config[name]
+        )
+        pairs[name] = _integer(value, name, minimum=1)
+    flags = {}
+    for name, default in (
+        ("inherit_parent_candidates", True),
+        ("allow_different_roots", False),
+    ):
+        value = changes.get(name, parent.get(name, default) if parent else default)
+        if type(value) is not bool:
+            raise ValueError(f"{name} must be Boolean")
+        flags[name] = value
+    points: list[Record] = []
+    if panel is not None and continuation is None:
+        points = [
+            {
+                "requested_steps": list(point.requested_steps),
+                "env_steps": point.env_steps,
+                "update_index": point.update_index,
+            }
+            for point in resolve_validation_schedule(
+                total,
+                batch,
+                length,
+                config["validation_fractions"],
+                initial_rounds=initial,
+            )
+        ]
+    elif panel is not None:
+        from marl_battlegrounds.training._continuation_schedules import (
+            continuation_boundary,
+            learner_continuation,
+        )
+
+        assert parent is not None and continuation is not None
+        wanted = changes.get("env_steps")
+        if wanted is None:
+            wanted = [
+                point["env_steps"]
+                for point in parent["points"]
+                if start < point["env_steps"] <= total
+            ]
+        if not isinstance(wanted, (list, tuple)):
+            raise ValueError("Validation env_steps must be a list of absolute targets")
+        requests = [
+            _integer(value, "validation env_steps", minimum=1)
+            for value in cast(Sequence[Any], wanted)
+        ]
+        if requests != sorted(set(requests)) or any(
+            not start < value <= total for value in requests
+        ):
+            raise ValueError(
+                "Future validation targets must increase after start through final"
+            )
+        if not requests or requests[-1] != total:
+            requests.append(total)
+        context = learner_continuation(continuation.get("learner"))
+        if context is None:
+            raise ValueError("Continuation validation needs its learner boundary rules")
+        resolved: dict[int, Record] = {}
+        for requested in requests:
+            rounds, ordinal, _ = continuation_boundary(
+                -(-requested // batch),
+                total_rounds=total // batch,
+                continuation=context,
+                rollout_length=length,
+                initial_rounds=initial,
+                minimum=settings.get("min_buffer_size", 0),
+            )
+            actual = rounds * batch
+            row = resolved.setdefault(
+                actual,
+                {"requested_steps": [], "env_steps": actual, "update_index": ordinal},
+            )
+            row["requested_steps"].append(requested)
+        points = list(resolved.values())
+    return {
+        "schema_version": 1,
+        "panel_path": None if panel is None else str(panel.path.absolute()),
+        "panel_digest": None if panel is None else panel.digest,
+        "panel_schema_version": None if panel is None else panel.schema_version,
+        "start_env_steps": start,
+        "total_env_steps": total,
+        "points": points,
+        "roots": roots,
+        **pairs,
+        "red_zone_depth": config.get("red_zone_depth"),
+        **flags,
+    }
+
+
+def saved_validation_declaration(
+    run: Mapping[str, Any], panel: FrozenPanel | None
+) -> Record | None:
+    """Check a child run's frozen validation facts against its saved inputs.
+
+    run is verified run or checkpoint metadata and panel is its checked panel.
+    Historical runs without validation_declaration return None and keep their
+    existing task rules. Child declarations must equal the result rebuilt from
+    config and continuation; mismatches raise ValueError before writer recovery.
+    This helper reads no files and changes no input.
+    """
+    saved = run.get("validation_declaration")
+    if saved is None:
+        if run.get("continuation") is not None:
+            raise ValueError("Continuation is missing its validation declaration")
+        return None
+    if not isinstance(saved, Mapping):
+        raise ValueError("Saved validation declaration must be an object")
+    expected = run_validation_declaration(
+        run["config"], panel, continuation=run.get("continuation")
+    )
+    if _digest(dict(cast(Mapping[str, Any], saved))) != _digest(expected):
+        raise ValueError("Saved validation declaration differs from its frozen inputs")
+    return expected
+
+
+def declared_panel_task(
+    declaration: Mapping[str, Any],
+    panel: FrozenPanel,
+    *,
+    checkpoint_id: str,
+    actor_digest: str,
+    env_steps: int,
+    purpose: str,
+) -> Record:
+    """Build an expected task from saved facts rather than observed result fields.
+
+    declaration is run_validation_declaration's saved result and panel is its
+    checked frozen panel. Actor fields identify the verified originating learner.
+    purpose is routine, initialization or confirmation. Schema 1 keeps fixed
+    roots and old task hashes. Return panel_task_description's complete task;
+    mismatched panels, malformed roots or unsupported purposes raise ValueError.
+    No file or model is read and no game runs.
+    """
+    if (
+        type(declaration.get("schema_version")) is not int
+        or declaration.get("schema_version") != 1
+        or declaration.get("panel_digest") != panel.digest
+        or declaration.get("panel_schema_version") != panel.schema_version
+        or purpose not in ("routine", "initialization", "confirmation")
+    ):
+        raise ValueError(
+            "Saved validation declaration differs from its panel or purpose"
+        )
+    roots = _panel_roots(declaration.get("roots"))
+    if panel.schema_version == 1 and roots != {key: _ROOTS[key] for key in roots}:
+        raise ValueError("Historical panels retain their original roots")
+    return panel_task_description(
+        checkpoint_id=checkpoint_id,
+        actor_digest=actor_digest,
+        env_steps=env_steps,
+        panel=panel,
+        purpose=purpose,
+        seed_pairs=declaration[
+            "confirmation_seed_pairs"
+            if purpose == "confirmation"
+            else "routine_seed_pairs"
+        ],
+        root_seed=roots[purpose] if panel.schema_version == 2 else None,
+        red_zone_depth=declaration.get("red_zone_depth"),
+    )
+
+
+def selection_validation_results(
+    routine_results: Sequence[Mapping[str, Any]],
+    confirmation_results: Sequence[Mapping[str, Any]],
+    inherited: Mapping[str, Any],
+    *,
+    declaration: Mapping[str, Any],
+    panel: FrozenPanel,
+    final_checkpoint_id: str,
+) -> tuple[list[Record], list[Record], tuple[str, ...]]:
+    """Join checked ancestor candidates with child work for one final shortlist.
+
+    The first two inputs are child-owned results. inherited is the checked
+    ancestry reader's records/actors/used_roots result. declaration and panel are
+    the child's frozen task rules. final_checkpoint_id is always the child final.
+    Return combined routine rows, matching confirmations and required candidate
+    IDs. A child with no eligible trained actor returns empty confirmations and
+    candidate IDs; malformed rows still fail. Missing confirmations stay missing
+    so the runner can play them. Original
+    identities and paths remain unchanged. Incompatible inherited confirmations
+    are ignored; incompatible local confirmations and ambiguous tasks raise.
+    This helper runs no games, changes no input and delegates ranking to analysis.
+    """
+    from marl_battlegrounds.training.analysis import (
+        _candidates,  # pyright: ignore[reportPrivateUsage]
+        confirmation_candidates,
+    )
+
+    inherited_rows = inherited.get("records", [])
+    routine = [dict(row) for row in inherited_rows if row["purpose"] == "routine"]
+    routine.extend(dict(row) for row in routine_results)
+    validation_root_comparison(
+        routine, allow_different_roots=declaration["allow_different_roots"]
+    )
+    check_confirmation_roots(
+        declaration["roots"]["confirmation"],
+        routine,
+        used_roots=inherited.get("used_roots", []),
+    )
+    try:
+        _candidates(routine)
+    except ValueError as error:
+        if error.args != ("No eligible trained checkpoint is available",):
+            raise
+        if confirmation_results:
+            raise ValueError(
+                "Untrained checkpoints cannot have selection confirmations"
+            ) from error
+        return routine, [], ()
+    candidates = confirmation_candidates(
+        routine, final_checkpoint_id=final_checkpoint_id
+    )
+    confirmed: dict[str, Record] = {}
+    for local, rows in ((False, inherited_rows), (True, confirmation_results)):
+        for row in rows:
+            if row["purpose"] != "confirmation":
+                continue
+            identifier = row["checkpoint_id"]
+            if identifier not in candidates:
+                if local:
+                    raise ValueError(
+                        "Saved confirmation includes an unselected candidate"
+                    )
+                continue
+            expected = declared_panel_task(
+                declaration,
+                panel,
+                checkpoint_id=identifier,
+                actor_digest=row["actor_digest"],
+                env_steps=row["env_steps"],
+                purpose="confirmation",
+            )
+            if any(row.get(name) != value for name, value in expected.items()):
+                if local:
+                    raise ValueError(
+                        "Saved confirmation differs from its declared task"
+                    )
+                continue
+            if identifier in confirmed:
+                raise ValueError("Selection has more than one matching confirmation")
+            confirmed[identifier] = dict(row)
+    return routine, list(confirmed.values()), candidates
+
+
+def validation_root_comparison(
+    records: Sequence[Mapping[str, Any]], *, allow_different_roots: bool
+) -> str:
+    """Label checked task roots and reject undeclared mixed-root comparisons.
+
+    records contains one phase's routine or confirmation results. Return a
+    plain-English label suitable for a saved decision. Different roots require
+    allow_different_roots=True and remain explicitly unpaired. This host-only
+    helper changes no records, performs no ranking and reads no files.
+    """
+    different = len({row["root"] for row in records}) > 1
+    if different and not allow_different_roots:
+        raise ValueError(
+            "Different validation roots require allow_different_roots=True"
+        )
+    return "Unpaired: Different Declared Roots" if different else "Common Declared Root"
+
+
+def check_confirmation_roots(
+    root: int, records: Sequence[Mapping[str, Any]], *, used_roots: Sequence[int] = ()
+) -> None:
+    """Reject confirmation root reuse across all supplied candidate-family evidence.
+
+    root is the declared confirmation root. records contain already verified
+    routine/initialization tasks, including inherited tasks. used_roots retains
+    verified roots whose incompatible score was excluded. Candidates may share
+    one fresh confirmation root. Invalid roots or reuse raise ValueError; no I/O.
+    """
+    checked = _root_seed(root)
+    previous = {_root_seed(value) for value in used_roots}
+    previous.update(
+        _root_seed(row["root"])
+        for row in records
+        if row.get("purpose") in ("routine", "initialization")
+    )
+    if checked in previous:
+        raise ValueError(
+            "Confirmation root must differ from every routine "
+            "and initialization root used"
+        )
+
+
 def _artifact(path: str | Path) -> Record:
     """Verify an artifact and retain both its ID and originating learner checkpoint.
 
@@ -410,7 +787,7 @@ def create_panel(
     ----------
     opponents : sequence of System, Policy or str, optional
         Ordered methods with distinct names. Strings are built-in names,
-        absolute actor-export paths or installed module:function factories.
+        absolute actor export/checkpoint paths or installed module:function factories.
         Factories run once; live methods are retained without serialization.
     output_dir : str or Path
         Folder for immutable panel.json. Conflicting contents are refused.
@@ -423,8 +800,8 @@ def create_panel(
         opponents then supplies its entire current candidate pool. Canonical
         current maps 42-46, 5v5, K20/H300 and paired ends are required. The
         tournament's Red Zone depth (read from its recorded configurations) is
-        saved in the ranking evidence; load_panel later refuses the panel for
-        a run or validation at another depth.
+        saved in the ranking evidence. Actors remain loadable at another depth;
+        the new validation task records its own actual depth.
     size : int or None, default=None
         Positive selected count, required with ranking and forbidden otherwise.
         Highest saved Elo wins; registration IDs break exact ties.
@@ -521,7 +898,7 @@ def create_panel(
 def _method_snapshot(value: object) -> tuple[Any, str, Record, str | None]:
     """Freeze one valid method and record exactly M8's normal registration.
 
-    Strings use the shared built-in/export/factory loader. A factory is called
+    Strings use the shared built-in/actor-folder/factory loader. A factory is called
     once. Numerical values are frozen; opaque provider state stays declared as
     unknown. Return the live method, registration ID, description and reload
     reference. This performs no policy decision and serializes no client object.
@@ -588,7 +965,7 @@ def _rank_panel(
     it, and their identities must equal the canonical configurations at that
     depth. Elo is read from existing results, never refitted. Ties use
     registration IDs. The returned evidence has "schema_version": 2 and the
-    ranked "red_zone_depth", which load_panel checks against each use.
+    ranked "red_zone_depth", which stays attached to that historical ranking.
     """
     from marl_battlegrounds.evaluation.evaluation_conditions import (
         config_record,
@@ -861,13 +1238,10 @@ def _load_system_panel(
     Supplied bindings replace reload references only when their normal M8 identity
     matches. Missing live-only methods fail before any writer is opened. Factories
     are called once on load; later validation rechecks these live snapshots.
-    red_zone_depth, when given, must have the same float32 value as the depth
-    the panel's ranking was played under (0.0 for a ranking saved before the
-    Red Zone rule); the check runs before any method is loaded, and a panel
-    without a ranking passes at every depth. Raise ValueError otherwise.
+    red_zone_depth names the new task, not an actor-admission rule. Ranking
+    evidence retains its own depth and is checked for valid saved structure.
+    No saved ranking or game is relabelled or reused under different rules.
     """
-    from marl_battlegrounds.evaluation.evaluation_conditions import same_float32
-
     entries = content.get("members")
     if (
         content.get("panel_digest") != _panel_digest(content)
@@ -877,18 +1251,9 @@ def _load_system_panel(
         or any(not isinstance(row, dict) for row in cast(list[object], entries))
     ):
         raise ValueError("Invalid System panel schema or digest")
-    ranked = _ranked_depth(content.get("ranking_evidence"))
-    if (
-        ranked is not None
-        and red_zone_depth is not None
-        and not same_float32(ranked, red_zone_depth)
-    ):
-        raise ValueError(
-            f"This panel was ranked with red_zone_depth {ranked}, but this use "
-            f"declares red_zone_depth {red_zone_depth}. Rank the candidates "
-            "again under this depth, or freeze the opponents directly without "
-            "a ranking."
-        )
+    _ranked_depth(content.get("ranking_evidence"))
+    if red_zone_depth is not None:
+        _checked_depth(red_zone_depth)
     entries = cast(list[Record], entries)
     roots = _panel_roots(content.get("roots"))
     if roots != content.get("roots"):
@@ -1118,6 +1483,140 @@ def _verify_panel_pass(
     )
 
 
+def _record_pass_sampling(
+    parent: Path,
+    *,
+    task_id: str,
+    pass_id: str,
+    first: object,
+    second: object,
+    run_dir: Path | None,
+) -> None:
+    """Save checked method facts once, before a newly created validation pass.
+
+    The compact sidecar belongs to validation, outside the RunWriter directory.
+    Existing passes without it remain unknown. Existing facts must match the
+    actual frozen registration IDs and their task/pass before reuse. Registration
+    hashing occurs once here at setup; no policy or learner is run.
+    """
+    path = parent / "sampling_facts.json"
+    if run_dir is not None and not path.exists():
+        return
+    methods = [_method_snapshot(value) for value in (first, second)]
+    content = {
+        "schema_version": 1,
+        "task_id": task_id,
+        "pass_id": pass_id,
+        "system_ids": {
+            team: value[1]
+            for team, value in zip(("team_a", "team_b"), methods, strict=True)
+        },
+        "methods": {
+            team: method_sampling_fact(value[0])
+            for team, value in zip(("team_a", "team_b"), methods, strict=True)
+        },
+    }
+    if path.exists():
+        if _json(path) != content:
+            raise ValueError(
+                "Saved sampling facts differ from the task or actual frozen methods"
+            )
+    else:
+        _publish(path, content)
+
+
+def _read_pass_sampling(run_dir: Path, *, task_id: str, pass_id: str) -> Record:
+    """Read method facts only when bound to the completed pass's recorded identities.
+
+    Missing historical evidence stays unknown. Mismatched task, pass or actual
+    recorded registration IDs raise ValueError. This reads small metadata only;
+    it does not load actors, infer behavior from labels or alter old results.
+    """
+    path = run_dir.parent / "sampling_facts.json"
+    if not path.exists():
+        return {
+            "determinism": "unknown",
+            "basis": "No sampling facts were recorded for this pass",
+        }
+    from marl_battlegrounds.evaluation.results import load_results
+
+    saved = _json(path)
+    result = load_results(run_dir, phase="validation", pass_id=pass_id)
+    entries = list(result.metadata["passes"].values())
+    if (
+        len(entries) != 1
+        or saved.get("schema_version") != 1
+        or isinstance(saved.get("schema_version"), bool)
+        or saved.get("task_id") != task_id
+        or saved.get("pass_id") != pass_id
+        or saved.get("system_ids") != entries[0]["system_ids"]
+    ):
+        raise ValueError(
+            "Sampling facts do not match the saved task/pass registrations"
+        )
+    methods = saved.get("methods")
+    if not isinstance(methods, dict) or set(cast(Record, methods)) != {
+        "team_a",
+        "team_b",
+    }:
+        raise ValueError("Sampling facts must cover both recorded teams")
+    return combine_sampling_facts(tuple(cast(Record, methods).values()))
+
+
+def _preserve_summary_sampling(
+    directory: Path, evidence: Mapping[str, Any]
+) -> Mapping[str, Any] | None:
+    """Keep an existing historical summary's fields and interpretation unchanged.
+
+    New summaries, including summaries of older passes, report available facts
+    or unknowns. Resuming an already published summary without this extension
+    keeps its old conditional calculation; later read-only analysis can qualify
+    those assumptions without rewriting the saved result.
+    """
+    previous = directory / "validation_summary.json"
+    if previous.exists() and "sampling_evidence" not in _json(previous):
+        return None
+    return evidence
+
+
+def validation_sampling_evidence(
+    rows: Sequence[Mapping[str, Any]],
+    *,
+    facts: Mapping[str, Mapping[str, Any]],
+    scheduled_games: int,
+    independent_opponents: bool,
+) -> Record:
+    """Describe saved validation rows with their actual per-opponent sampling facts.
+
+    facts maps each opponent to the combined method fact for its pass. Whole
+    groups use map/seed and, for independent roots, opponent identity. Fixed
+    deterministic pairs contribute no random unit. This pure reporting helper
+    captures no actions and is also used when checking saved decisions.
+    """
+    overall = combine_sampling_facts(tuple(facts.values()))
+    identifiers = [
+        (row["map_id"], row["seed_id"], row["opponent"], row["spawn_locations"])
+        for row in rows
+    ]
+    units = {
+        identifier: (
+            None
+            if facts[row["opponent"]]["determinism"] == "deterministic"
+            else (row["map_id"], row["opponent"], row["seed_id"])
+            if independent_opponents
+            else (row["map_id"], row["seed_id"])
+        )
+        for identifier, row in zip(identifiers, rows, strict=True)
+    }
+    return summarize_sampling_evidence(
+        identifiers,
+        scheduled_games=scheduled_games,
+        sampling_units=units,
+        determinism=overall["determinism"],
+        basis=overall["basis"] + "; Fixed native initial conditions and declared roots",
+    )
+
+
 def _validate_system_panel(
     checkpoint: str | Path,
     panel: FrozenPanel,
@@ -1169,6 +1668,7 @@ def _validate_system_panel(
     actor = load_system(checkpoint)
     rows: list[Record] = []
     paths: list[str] = []
+    sampling_facts: dict[str, Record] = {}
     for index, (member, opponent) in enumerate(
         zip(panel.members, panel.methods, strict=True)
     ):
@@ -1185,6 +1685,14 @@ def _validate_system_panel(
                 num_envs=num_envs,
                 chunk_size=chunk_size,
             )
+        _record_pass_sampling(
+            parent,
+            task_id=task["task_id"],
+            pass_id=pass_id,
+            first=actor,
+            second=opponent,
+            run_dir=run_dir,
+        )
         pending = _pending(
             run_dir, pass_id=pass_id, total=len(VALIDATION_MAPS) * seed_pairs * 2
         )
@@ -1233,6 +1741,11 @@ def _validate_system_panel(
                 )
         assert run_dir is not None
         paths.append(str(run_dir))
+        sampling_facts[member.name] = _read_pass_sampling(
+            run_dir,
+            task_id=task["task_id"],
+            pass_id=pass_id,
+        )
         rows.extend(_rows(run_dir, pass_id=pass_id, opponent=member.name, kills=True))
     result = {
         **task,
@@ -1243,11 +1756,25 @@ def _validate_system_panel(
             seed_pairs=seed_pairs,
             independent_opponents=True,
             actual_kills=True,
+            sampling_evidence=_preserve_summary_sampling(
+                directory,
+                validation_sampling_evidence(
+                    rows,
+                    facts=sampling_facts,
+                    scheduled_games=len(VALIDATION_MAPS)
+                    * len(panel.members)
+                    * seed_pairs
+                    * 2,
+                    independent_opponents=True,
+                ),
+            ),
         ),
         "pass_paths": paths,
         **_method_fields(identity),
     }
-    _publish(directory / "validation_summary.json", result)
+    summary_path = directory / "validation_summary.json"
+    if not summary_path.exists() or _json(summary_path) != result:
+        _publish(summary_path, result)
     if event_callback is not None:
         event_callback(
             {
@@ -1504,14 +2031,14 @@ def load_panel(
         relative to the panel directory; historical paths keep their old rule.
     bindings : sequence or None, default=None
         The existing new-panel methods in saved order; each normal M8 identity
-        must match. None reloads built-in/export/factory references once.
+        must match. None reloads built-in/actor-folder/factory references once.
         Live-only members require bindings. Historical panels take none.
     red_zone_depth : float or None, default=None
         The Red Zone depth (map units) the caller will validate under. When
-        given, a System panel chosen from a ranking must have been ranked at
-        the same float32 depth; ranking evidence without a version counts as
-        0.0 (one point per death). None skips this check. Panels frozen
-        directly (no ranking) and historical panels pass at every depth.
+        given, it must be a valid task depth. Actors may load regardless of the
+        ranking's depth. That ranking keeps its original conditions and identity;
+        validation records the new task's depth separately. None declares no new
+        task depth. Loading grants no permission to reuse games under new rules.
 
     Returns
     -------
@@ -1521,10 +2048,8 @@ def load_panel(
     Raises
     ------
     ValueError
-        Changed identities, malformed content, missing bindings, or a ranking
-        played under another depth (the message suggests ranking again under
-        this depth or freezing the opponents directly). The depth check runs
-        before any method is loaded.
+        Changed identities, malformed content, missing bindings or an invalid
+        new task depth. System-panel checks run before any method is loaded.
 
     Notes
     -----
@@ -1708,6 +2233,15 @@ def _execute_request(request: Mapping[str, Any]) -> Path:
         opponent = load_system(request["opponent"])
     parent = Path(request["output_parent"])
     run_dir = _saved_run(parent, request["pass_id"])
+    reverse = request["kind"] == "slot" and int(request["focal_team"]) == 1
+    _record_pass_sampling(
+        parent,
+        task_id=request["task_id"],
+        pass_id=request["pass_id"],
+        first=opponent if reverse else actor,
+        second=actor if reverse else opponent,
+        run_dir=run_dir,
+    )
     options: Record = {
         "seed": request["root"],
         "num_envs": request["num_envs"],
@@ -1931,6 +2465,7 @@ def _validate(
     )
     rows: list[Record] = []
     paths: list[str] = []
+    sampling_facts: dict[str, Record] = {}
     for index, (name, opponent, digest) in enumerate(members):
         pass_id = validation_pass_id(task["task_id"], name)
         request: Record = {
@@ -1952,6 +2487,11 @@ def _validate(
         }
         path = _run_pass(request, event_callback=event_callback)
         paths.append(str(path))
+        sampling_facts[name] = _read_pass_sampling(
+            path,
+            task_id=task["task_id"],
+            pass_id=pass_id,
+        )
         rows.extend(_rows(path, pass_id=pass_id, opponent=name, kills=True))
     result = {
         **task,
@@ -1961,11 +2501,25 @@ def _validate(
             opponents=[name for name, _, _ in members],
             seed_pairs=seed_pairs,
             actual_kills=True,
+            sampling_evidence=_preserve_summary_sampling(
+                directory,
+                validation_sampling_evidence(
+                    rows,
+                    facts=sampling_facts,
+                    scheduled_games=len(VALIDATION_MAPS)
+                    * len(members)
+                    * seed_pairs
+                    * 2,
+                    independent_opponents=False,
+                ),
+            ),
         ),
         "pass_paths": paths,
         **_method_fields(identity),
     }
-    _publish(directory / "validation_summary.json", result)
+    summary_path = directory / "validation_summary.json"
+    if not summary_path.exists() or _json(summary_path) != result:
+        _publish(summary_path, result)
     if event_callback is not None:
         event_callback(
             {
@@ -2029,7 +2583,7 @@ def validate_checkpoint(
         screen models. The task records it (schema 4 for new panels, 3 for
         historical panels), so an output_dir saved under another depth, or
         before the rule, is refused before any game. A panel chosen from a
-        ranking must have been ranked at the same depth (see load_panel).
+        ranking keeps its original depth; its actors may play at this task depth.
 
     Returns
     -------
@@ -2048,7 +2602,7 @@ def validate_checkpoint(
     ValueError
         red_zone_depth breaks Core's scalar rules (not finite, negative, -0.0,
         or a positive value that is not a normal float32 number) or is wider
-        than a validation map; a panel ranked under another depth; other
+        than a validation map; other
         invalid settings; or identities that conflict with the saved task.
         File and method failures keep their own cause.
 
@@ -2407,7 +2961,10 @@ def _verified_random_result(
     Notes
     -----
     Read-only host work. Verify actor file hashes and reduce saved M8 rows through
-    summarize_validation. For a QMIX or PQN-VDN actor the M8 focal variables
+    summarize_validation. New sampling metadata is rebuilt from the saved pass's
+    checked method facts; its public and conditional bounds must match. Historical
+    summaries without that metadata keep their original conditional calculation.
+    For a QMIX or PQN-VDN actor the M8 focal variables
     digest is compared with the digest of the loaded greedy System's variables
     (the Q-network plus epsilon 0; for PQN-VDN the network is its parameters
     plus its frozen normalization statistics, so a statistics-only change
@@ -2585,6 +3142,18 @@ def _verified_random_result(
     ):
         raise ValueError("Random M8 actor or native evaluation settings changed")
     rows = _rows(run_dir, pass_id=pass_id, opponent="Random", kills=depth is not None)
+    sampling = None
+    if "sampling_evidence" in original:
+        sampling = validation_sampling_evidence(
+            rows,
+            facts={
+                "Random": _read_pass_sampling(
+                    run_dir, task_id=expected["task_id"], pass_id=pass_id
+                )
+            },
+            scheduled_games=games,
+            independent_opponents=False,
+        )
     reduced = {
         **expected,
         **summarize_validation(
@@ -2593,6 +3162,7 @@ def _verified_random_result(
             opponents=("Random",),
             seed_pairs=seed_pairs,
             actual_kills=depth is not None,
+            sampling_evidence=sampling,
         ),
         "pass_paths": paths,
         **_method_fields(actor),

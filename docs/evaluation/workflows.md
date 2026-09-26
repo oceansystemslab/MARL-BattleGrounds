@@ -33,8 +33,9 @@ python -m marl_battlegrounds models download --help
 python -m marl_battlegrounds replay --help
 ```
 
-No command saves a run unless you ask for `--output-dir`. Before exiting, an
-unsaved evaluation prints up to 32 outcome rows; tournaments print up to 32
+Commands save a run only when you supply `--output-dir` or a tournament config
+with `output_dir`. Before exiting, an unsaved evaluation prints up to 32 outcome
+rows; tournaments print up to 32
 ranking rows. The terminal's Python result does not remain available after exit.
 Use Python for further in-memory analysis, or save the run for later access.
 Selected newly captured replays also need a saved run to have persistent paths.
@@ -73,13 +74,22 @@ saved run. For example, omitting `--seed` may inherit a saved seed of 42; writin
 `--seed 0` then rejects that conflict. `--phase` and `--pass-id` select the pass,
 so name a saved nondefault pass explicitly. Evaluation still requires its two
 methods and episode count on resume. Ordered comma-separated lists keep repeats.
+
+A new list-based tournament saves all planned map contents and source identities
+before its first game. An interruption before an unplayed map can therefore
+resume from those saved contents. Older runs may recover the contents from their
+saved matchup declarations. If the original content is absent or inconsistent,
+resume names the missing map or conflicting evidence and stops before changing
+files; restore the original files or start a new tournament. It never substitutes
+a new map merely because its integer ID matches.
 An explicit `--replay-episodes ''` asserts an empty capture selection.
 
 `evaluate --red-zone-depth 6` sets the Red Zone depth in map units (new-run
 default 5.0; `0` keeps one point per death) and reaches `evaluate` as the float
 6.0. Write a plain decimal number: an exponent (`1e3`), `nan`, `inf`,
-underscores or a second point are usage errors. `tournament` and `canonical`
-have no such flag, because their configurations own the rule, and `train`
+underscores or a second point are usage errors. `tournament` accepts the same
+flag for a list or short config. It must agree with an explicitly configured or
+saved depth. `canonical` takes its rules from the released snapshot; `train`
 sets the depth in its JSON config.
 
 Commands return 0 for success, help or cancellation; 2 for usage errors; 1 for
@@ -1099,28 +1109,128 @@ retain their meanings, including only the games executed by the current call.
 `metadata["spawn_balance"]` reports scoped game/step coverage and whether required
 pairs are complete. Completion of a valid fixed-mode pass does not claim a pair.
 
-## Run a tournament
+## Run A Tournament
 
-```bash
-JAX_PLATFORMS=cuda .venv/bin/python examples/evaluation.py tournament \
-  --episodes 40 --num-envs 32 --output-dir runs/tournament
+Use one call for your own round robin:
+
+```python
+import marl_battlegrounds as marl_bgs
+
+result = marl_bgs.run_tournament(
+    ["random", "tdm-alpha"], maps=[47], games_per_opponent=4,
+    max_steps=16, seed=7,
+)
+print(result.table("tournament_rankings"))
 ```
 
-Here the budget is per unordered policy pair, covering every chosen map and both
-spawn locations, with team assignments fixed. Forty games across five maps gives
-four complete paired blocks per map. This is a workflow check, not enough evidence for a broad
-scientific claim. The current generic default of 100 is not the final official
-snapshot budget; that official number remains undecided.
+This plays four games, including both spawn ends. The small horizon makes it a
+workflow check, not evidence of learned skill. Each entrant may be a live System
+or Policy, a built-in name, a supported actor export or learner checkpoint
+folder, or a trusted `module:factory` reference. Live objects stay in the caller's
+process. Different entrants need different names.
 
-`run_tournament(..., red_zone_depth=6.0)` sets the Red Zone depth for every map
-(default 5.0; `0.0` keeps one point per death). A new run records it as
-`metadata["red_zone_depth"]`, and 0.0 and 6.0 give different
-`configuration_ids_by_map` from 5.0. Resume inherits an omitted depth, and a
-different explicit depth fails before any file changes. A completed run saved
-before the Red Zone rule has no recorded depth: it reads as 0.0 under its
-original configuration IDs and returns its saved results without playing or
-refitting. `run_tournament(config=...)` refuses the keyword, because a
-configuration owns its rules.
+The matching command uses the same runner:
+
+```bash
+JAX_PLATFORMS=cpu python -m marl_battlegrounds tournament \
+  --entrants random,tdm-alpha --maps 47 --games-per-opponent 4 \
+  --max-steps 16 --seed 7 --output-dir runs/tournament
+```
+
+The budget is the total games per unordered pair across all chosen maps and both
+spawn ends. It must divide evenly across them. New lists default to 100 games
+per pair on maps 47–51. `episodes_per_pair` remains an alias for
+`games_per_opponent`; supplying both is allowed only when the values agree.
+The CLI also keeps `--episodes-per-pair`. Generic and canonical tournaments run
+one matchup at a time, with parallel games through the existing compiled
+evaluator. Both default to `num_envs=128`. An explicit positive integer changes
+the parallel game count, never the total game budget. `evaluate()` also defaults
+to 128. `chunk_size` remains 16 ticks and explicit values are honored.
+
+Entrants load when needed and are reused within the run. Each active System's
+resource scope stays open across unfinished matchups and closes before the writer.
+Completed resume opens no client. Caller-supplied clients and independent model
+servers remain caller-owned. Backend allocation errors propagate without
+retry. Lowering `num_envs` reduces game-state work but does not shrink model
+weights. Dropping a model reference does not guarantee JAX returns its memory
+pool to the system. Resume preserves games already written to disk. The same
+call works on a workstation, cloud server or allocated cluster node; MARL-BGs
+does not manage a cluster or automatically distribute work across devices.
+
+For a reusable field, save this as `field.json`:
+
+```json
+{
+  "entrants": ["random", "tdm-alpha"],
+  "maps": [47],
+  "games_per_opponent": 4,
+  "seed": 7,
+  "max_steps": 16
+}
+```
+
+```python
+import marl_battlegrounds as marl_bgs
+
+field = marl_bgs.run_tournament(config="field.json")
+challenged = marl_bgs.run_tournament(config="field.json", challenger="tdm-beta")
+print(challenged.table("matchup_results"))
+```
+
+```bash
+JAX_PLATFORMS=cpu python -m marl_battlegrounds tournament --config field.json
+JAX_PLATFORMS=cpu python -m marl_battlegrounds tournament \
+  --config field.json --challenger tdm-beta --output-dir runs/challenge
+```
+
+MARL-BGs prepares the method identities and balanced schedule. A short config
+needs no hand-written hashes or schedule file. Relative entrant-folder and output
+paths resolve beside the JSON file; a Python mapping uses the current directory.
+Use a list or a config as the population source, not both.
+
+A short config accepts these fields:
+
+| Fields | Meaning |
+| --- | --- |
+| `entrants` | Required list of method references. Live objects use the Python list route. |
+| `maps`, `rosters` | Map IDs and optional ordered `team_a`/`team_b` class lists supported by the methods. |
+| `games_per_opponent`, `episodes_per_pair` | One budget and its retained alias. |
+| `seed`, `seeds` | One execution root, or distinct roots sharing the same total budget. The total also divides evenly across those roots. `seed` sets the summary resampling root. |
+| `score_threshold`, `max_steps`, `red_zone_depth` | Score target, maximum ticks and Red Zone depth in map units. |
+| `opponent_weights` | Optional positive weight for every entrant when reporting rates. For a weighted field, include the challenger in the entrant list with its weight; a separate `challenger=` would leave its weight undeclared and fails before games. |
+| `metrics`, `full_metrics_episodes`, `replay_episodes`, `save_replays` | Optional measurements and captures. |
+| `output_dir` | Optional parent folder for a saved run. |
+
+Unknown fields fail. An explicit call argument may fill an omitted short-config
+setting; if both supply a value, they must agree. Equal list and tuple forms
+count as the same setting. A complete saved descriptor
+already pins its scientific settings. Pass it to the same `config=` argument;
+do not separately replace its maps or rules. An explicit generic budget must
+match that descriptor.
+
+`challenger=` adds one method against every field member and keeps it as Team A,
+while exchanging spawn ends. The canonical shortcut keeps the stable `system=`
+argument: `run_canonical_tournament(my_system)` prepares the released field and
+uses the same runner. Its matching command is `canonical --system REF`. Running
+a released field locally does not publish results or admit a submission. See
+[canonical tournaments](canonical_tournaments.md) for released snapshots and
+verified game reuse. Both tournament commands accept `--rerun-existing` to
+request fresh games from a reusable field, or `--no-rerun-existing` to keep reuse.
+Omission inherits the saved choice on resume; changing that choice requires a new
+run, just as with the Python `rerun_existing=` argument.
+
+`run_tournament(..., red_zone_depth=6.0)` sets the depth for every list map
+(default 5.0; `0.0` keeps one point per death). Short configs can declare the same
+field. List and short-config results retain `metadata["red_zone_depth"]` and
+`configuration_ids_by_map`, including when opened with `load_results`. Direct
+results, completed resume and saved-result access share the same population
+metadata: `policies`, `participants`, `method_sampling`, `schedule` and
+`num_matches` describe the complete field, including the challenger. The original
+field declaration remains under `input_metadata`. Missing sampling evidence stays
+unknown. Resume inherits omitted settings and refuses an
+explicit conflict before changing files. A completed run saved before Red Zone
+has no recorded depth: it retains depth 0.0, its original configuration IDs and
+its saved results. Historical folders are not migrated to the new plan format.
 
 Current ratings center on 1,200. The shared fitter and 5,000 matched bootstrap
 resamples run after complete coverage. Missing matches or failed fits are errors;
@@ -1129,9 +1239,40 @@ rankings and matchup/map summaries even with optional metrics disabled.
 
 `result.table("tournament_rankings")` gives competition ranks from unrounded Elo:
 exact ties use ranks such as 1, 1, 3. Sorting another table does not change official
-rank. Existing rating and matchup CSV columns keep their meanings. New generic
-schedules keep matchup owners fixed across both spawn games. Old team-swapped
+rank. Saved historical CSV files keep their original meaning and bytes. New
+generic schedules keep matchup owners fixed across both spawn games. Old team-swapped
 records retain their own version and are not relabelled as verified spawn pairs.
+
+### Sampling Evidence And Uncertainty
+
+New tournament summaries distinguish scheduled games from evidence about random
+variation. `independent_blocks` keeps its original meaning: the number of declared
+paired groups used in the calculation. `declared_blocks` reports the same count.
+`supported_independent_sampling_units` reports how many groups the known sampling
+facts support: zero for a known deterministic pairing, or blank in CSV (`null` in
+JSON) when sampling is unknown. These fields do not count different scores.
+Observed repeated action or trajectory histories are reported separately;
+matching histories alone cannot prove dependence.
+
+When sampling is unknown, the ordinary confidence columns retain the calculated
+ranges and say **Conditional: Sampling not verified**. The calculation assumes
+that the declared groups are independent samples. The records do not establish
+that assumption. Known deterministic pairings, too few groups, lack of variation
+and failed fits retain their existing safeguards; the conditional label does not
+make an otherwise unavailable range valid. Joint Elo ranges depend on sampling
+facts for the whole field, not just one sampled entrant.
+
+New recorded passes save facts for recognized methods beside the actual System
+identities. Opaque providers remain unknown. Resume and game reuse read verified
+facts belonging to the original games; missing or conflicting facts stay unknown.
+Facts are never guessed from a method name. Already completed historical summaries
+are returned with their original meaning and are not rewritten.
+
+These intervals describe repeated evaluation of fixed Systems. Variation between
+separately trained Systems uses whole training-run vectors, with shared seeds
+and related continuations accounted for. See the
+[training analysis guide](../training/README.md#re-select-from-saved-results)
+for saved choices and declared training comparisons.
 
 Priority/full tournaments publish `tournament_headline_metrics.csv` automatically
 from complete, verified games. Each participant receives its actual team's
@@ -1149,12 +1290,14 @@ playing them again. Once summaries are finalized, result access does not refit
 statistics. Whole-population summaries require whole-population scope; a filtered
 matchup cannot appear to be a completed tournament.
 
-The accepted official design is a monthly frozen Big 12 snapshot, optionally
-with one challenger. The wider baseline library can grow independently. Verified
-reuse, uniform budget overrides and promotion rules require Step 7. Generic
-tournaments already produce the automatic headline report under priority/full. Local generic
-results do not admit or publish an entrant. See the
-[protocol](protocol.md#big-12-tournament-and-baseline-library) for scientific rules.
+The official design uses a monthly frozen Big N snapshot, with N taken from its
+pinned participant list. The canonical call compares an optional challenger
+against that released field and can reuse verified compatible games. Historical
+version-1 twelve-entry snapshots keep their original rules and meaning. The wider
+baseline library can grow independently. Priority/full tournaments produce the
+automatic headline report. Running a local tournament does not admit or publish
+an entrant; maintainer admission is separate. See the
+[protocol](protocol.md#big-n-tournament-and-baseline-library) for scientific rules.
 
 ## Resume and combine results
 
@@ -2078,3 +2221,41 @@ Raw checks and workload details are in
 `artifacts/m8-api-commands/20260917-implementation/`. Later changes to numerical
 execution need their own matched measurements. Startup, saving and optional
 analysis remain separate costs and should not be called simulation speed.
+
+
+### Load An Actor Export Or Checkpoint
+
+The command line accepts a built-in name, an existing actor export or complete
+learner checkpoint folder, or a trusted `module:function` factory. Python callers
+can load the same saved actor explicitly:
+
+```python
+from marl_battlegrounds import training
+import marl_battlegrounds as marl_bgs
+
+system = training.load_system("RUN/checkpoints/CHECKPOINT_ID")
+result = marl_bgs.evaluate(system, "tdm-alpha", maps=[47], num_episodes=2)
+```
+
+Use an existing saved folder in this matching command:
+
+```bash
+python -m marl_battlegrounds evaluate --system RUN/checkpoints/CHECKPOINT_ID --opponent tdm-alpha --maps 47 --episodes 2
+```
+
+Supported historical actor inputs retain their original behavior. How the actor
+was trained does not block loading it. Its old ranking keeps its original rules;
+new games record the rules chosen now. Loading does not permit resuming an old
+learner or reusing games under different conditions. Only actor arrays are
+restored, but full-folder integrity checks read every payload file. Use the
+original valid export when a learner folder has been pruned.
+
+## Select A Declared Population
+
+Add `selection` to a short validation tournament config before its games, then
+call `marl_bgs.select_initial_population(result, output_dir="population")`.
+The tool reads the complete field's existing ratings, freezes its chosen members,
+and keeps a selected-field refit and later test games separate. Failed or
+incomplete fields select no substitute members. This does not admit a release.
+See [Select A Population](population_selection.md) for the complete declaration,
+Python example, `select-population` command and failure behavior.

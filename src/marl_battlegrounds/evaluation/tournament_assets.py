@@ -17,7 +17,7 @@ import stat
 import sys
 import tempfile
 from collections.abc import Callable, Generator, Iterator, Mapping, Sequence
-from contextlib import ExitStack, contextmanager
+from contextlib import contextmanager
 from dataclasses import dataclass
 from dataclasses import field as dataclass_field
 from graphlib import CycleError, TopologicalSorter
@@ -28,7 +28,10 @@ from typing import TYPE_CHECKING, Any, NoReturn, cast
 from urllib.parse import urlparse
 from urllib.request import HTTPRedirectHandler, Request, build_opener
 
-from marl_battlegrounds.evaluation.tournament_config import ASSET_ROLES
+from marl_battlegrounds.evaluation.tournament_config import (
+    ASSET_ROLES,
+    validate_inline_asset,
+)
 
 if TYPE_CHECKING:
     from marl_battlegrounds.evaluation.policy_execution import Policy, System
@@ -128,8 +131,10 @@ def _make_cache_directory(path: Path) -> None:
         _sync_directory(directory.parent)
 
 
-def _asset_descriptor(value: object, identifier: str) -> dict[str, Any]:
-    """Check one format-1 asset declaration without opening it or importing code."""
+def _asset_descriptor(
+    value: object, identifier: str, *, version: int = 1
+) -> dict[str, Any]:
+    """Check a file or v2 inline declaration without opening it or importing code."""
     if not isinstance(value, Mapping):
         raise ValueError(f"Asset {identifier!r} needs a descriptor")
     result = dict(cast(Mapping[str, Any], value))
@@ -141,13 +146,19 @@ def _asset_descriptor(value: object, identifier: str) -> dict[str, Any]:
         or not isinstance(size, int)
         or size < 0
         or result.get("role") not in ASSET_ROLES
-        or set(result) - {"sha256", "size_bytes", "role", "path", "url"}
+        or set(result)
+        - (
+            {"sha256", "size_bytes", "role", "path", "url", "inline"}
+            if version == 2
+            else {"sha256", "size_bytes", "role", "path", "url"}
+        )
     ):
         raise ValueError(f"Asset {identifier!r} has invalid identity, size or role")
     for name in ("path", "url"):
         location = result.get(name)
         if location is not None and (not isinstance(location, str) or not location):
             raise ValueError(f"Asset {identifier!r} has an invalid {name}")
+    validate_inline_asset(result, version=version)
     return result
 
 
@@ -160,7 +171,8 @@ class AssetVerifier:
         Resolved tournament configuration with an assets mapping. Relative paths
         need its absolute source_location. Config-relative paths may not escape
         that directory, including through symlinks. Explicit absolute paths are
-        caller-selected files.
+        caller-selected files. Version-2 inline metadata has no physical path;
+        read_json verifies and copies it in memory.
     cache_dir : path-like or None
         Content-cache root. None uses default_cache_dir(). This constructor
         creates no files, imports no controllers and uses no network.
@@ -186,7 +198,9 @@ class AssetVerifier:
         if not isinstance(assets, Mapping):
             raise ValueError("Tournament config needs an assets mapping")
         self.assets = {
-            str(key): _asset_descriptor(value, str(key))
+            str(key): _asset_descriptor(
+                value, str(key), version=self.config.get("version", 1)
+            )
             for key, value in cast(Mapping[str, Any], assets).items()
         }
         self.cache_dir = (
@@ -283,6 +297,7 @@ class AssetVerifier:
     def verify(self, asset_id: str) -> Path | None:
         """Return a verified absolute path, or None when the declared asset is absent.
 
+        Inline metadata has no path and raises ValueError; use read_json for it.
         Unknown IDs and incorrect bytes raise ValueError. Missing data is never
         downloaded. Unchanged previously checked files reuse their digest within
         this verifier; mutable file changes invalidate that result. Inside a
@@ -291,6 +306,10 @@ class AssetVerifier:
         """
         if asset_id not in self.assets:
             raise ValueError(f"Tournament asset {asset_id!r} is not declared")
+        if "inline" in self.assets[asset_id]:
+            raise ValueError(
+                f"Tournament asset {asset_id!r} is inline metadata; use read_json"
+            )
         if self._scope_depth and asset_id in self._scope_paths:
             return self._scope_paths[asset_id][0]
         path = self._candidate(asset_id)
@@ -349,10 +368,18 @@ class AssetVerifier:
     def read_json(self, asset_id: str) -> object:
         """Read a verified JSON evidence asset, checking duplicate keys and NaN.
 
-        Returns the stored JSON value. Hash verification precedes parsing and a
+        Returns an owned copy of the stored JSON value. Version-2 inline
+        metadata is checked against canonical JSON bytes without file access.
+        For file assets, hash verification precedes parsing and a
         second file stamp rejects a concurrent change. Numerical payload files
         and game JSONL streams must use their own bounded readers instead.
         """
+        if asset_id not in self.assets:
+            raise ValueError(f"Tournament asset {asset_id!r} is not declared")
+        descriptor = self.assets[asset_id]
+        if "inline" in descriptor:
+            validate_inline_asset(descriptor, version=self.config.get("version", 1))
+            return copy.deepcopy(descriptor["inline"])
         path = self.require((asset_id,))[asset_id]
         before = _file_stamp(path)
         if self._verified[path][0] != before:
@@ -638,23 +665,28 @@ class _AssetPreparation:
             )
         return result
 
-    def _check_metadata(self, key: str, path: Path) -> None:
+    def _check_metadata(self, key: str, path: Path | None) -> None:
         """Check new metadata once; unchanged verified bytes reuse its references.
 
         Schedule game lists are bounded first-row checks, never expanded JSONL.
         Source-run manifests retain their historical dependency interpretation.
         """
-        stamp = _file_stamp(path)
-        if self._checked_metadata.get(key) == (path, stamp):
-            return
-        self._checked_metadata[key] = path, stamp
+        if path is not None:
+            stamp = _file_stamp(path)
+            if self._checked_metadata.get(key) == (path, stamp):
+                return
+            self._checked_metadata[key] = path, stamp
         if self.verifier.assets[key]["role"] == "run_manifest":
             return
         if key in self._game_lists or (
-            self.verifier.assets[key]["role"] == "schedule" and _is_game_list(path)
+            path is not None
+            and self.verifier.assets[key]["role"] == "schedule"
+            and _is_game_list(path)
         ):
             return
         value = self.verifier.read_json(key)
+        if self.verifier.assets[key]["role"] == "schedule" and isinstance(value, list):
+            return
         if isinstance(value, dict):
             self._game_lists.update(
                 str(cast(dict[str, object], value)[name])
@@ -690,6 +722,10 @@ class _AssetPreparation:
         missing_sizes: dict[str, int] = {}
         with self.verifier.verification_scope():
             for key in self._selected:
+                if "inline" in self.verifier.assets[key]:
+                    self._check_metadata(key, None)
+                    verified.append(key)
+                    continue
                 path = self.verifier.verify(key)
                 if path is None and download:
                     self._downloaded += _download_asset(
@@ -808,7 +844,9 @@ def prepare_tournament_assets(
         config (copied with verified absolute paths), verified and missing asset
         ID lists, bytes_missing, bytes_downloaded and absolute cache_dir. Missing
         bytes count each physical content digest once, even when several asset
-        IDs name it. Missing files remain explicit; corrupt files raise instead
+        IDs name it. Version-2 inline metadata is verified in memory; it does not
+        create cache files or acquire artificial file paths. Missing files remain
+        explicit; corrupt files raise instead
         of becoming missing.
 
     Raises
@@ -1120,14 +1158,18 @@ def _installed_callable(reference: str) -> Callable[..., object]:
 
 
 def load_tournament_controller(
-    participant: Mapping[str, Any], verifier: AssetVerifier
+    participant: Mapping[str, Any],
+    verifier: AssetVerifier,
 ) -> System | Policy:
     """Load and freeze one declared competitor, then verify its actual evidence.
 
-    Builtins use the existing registry. Factories take no arguments. Bundle
+    Builtins use the existing registry. Factories take no arguments. Version-2
+    references use the shared built-in/factory/actor-folder loader. Bundle
     loaders receive a read-only asset-ID-to-path mapping. Factories are trusted
     installed code and may have their own effects; exceptions propagate without
-    retries. This function never chooses an action or downloads a missing model.
+    retries. Construction stays on the calling thread. Researchers own provider
+    processes and memory. This function never chooses an action or downloads a
+    missing model.
     """
     from marl_battlegrounds.evaluation.system_evaluation import freeze_evaluation_method
 
@@ -1139,6 +1181,12 @@ def load_tournament_controller(
         method = freeze_evaluation_method(
             cast("System | Policy", _installed_callable(controller["factory"])())
         )
+    elif kind == "reference":
+        if verifier.config.get("version", 1) != 2:
+            raise ValueError("Reference controllers need descriptor version 2")
+        from marl_battlegrounds._method_loading import load_method
+
+        method = freeze_evaluation_method(load_method(controller["reference"]))
     elif kind == "bundle":
         paths = verifier.require(controller["asset_ids"])
         method = freeze_evaluation_method(
@@ -1151,53 +1199,6 @@ def load_tournament_controller(
         raise ValueError(f"Unknown tournament controller kind: {kind!r}")
     validate_loaded_controller(method, participant, verifier)
     return method
-
-
-@contextmanager
-def active_tournament_pair(
-    first: Mapping[str, Any], second: Mapping[str, Any], verifier: AssetVerifier
-) -> Generator[tuple[System | Policy, System | Policy]]:
-    """Own two loaded competitors for one matchup without an all-model cache.
-
-    The caller runs all required games inside this context and must not retain
-    returned methods afterward. It must finish/synchronize its result before
-    leaving the context: this helper cannot discover caller-owned output trees.
-    On exit, pending method-array creation and JAX callback effects finish before
-    local references are released. Compilation caches stay; JAX may retain its
-    device allocation pool. Managed System scopes remain open across the pair and
-    close even if the second loader fails. Supplied external clients remain
-    caller-owned under that System's resource contract.
-    """
-    from marl_battlegrounds.evaluation.policy_execution import System
-
-    with ExitStack() as cleanup:
-        first_method: System | Policy | None = None
-        second_method: System | Policy | None = None
-        try:
-            first_method = load_tournament_controller(first, verifier)
-            if (
-                isinstance(first_method, System)
-                and first_method.resource_scope is not None
-            ):
-                cleanup.enter_context(first_method.resource_scope(False))
-            second_method = load_tournament_controller(second, verifier)
-            if (
-                isinstance(second_method, System)
-                and second_method.resource_scope is not None
-            ):
-                cleanup.enter_context(second_method.resource_scope(False))
-            yield first_method, second_method
-        finally:
-            if first_method is not None or second_method is not None:
-                import jax
-
-                for method in (first_method, second_method):
-                    if method is not None:
-                        for leaf in jax.tree.leaves(method.variables):
-                            if isinstance(leaf, jax.Array):
-                                leaf.block_until_ready()
-                jax.effects_barrier()
-            first_method = second_method = None
 
 
 def asset_location_config(

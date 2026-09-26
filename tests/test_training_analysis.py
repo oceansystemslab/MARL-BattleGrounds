@@ -1,7 +1,9 @@
 """Check fixed-panel scores, dependent uncertainty, selection and saved reports.
 
 Known outcome tables establish expected scores without the production reducer.
-Reports must keep reward sources and panels separate, preserve incomplete states
+Reports keep training/validation Red Zone labels and separate depth curves.
+Missing depths stay unknown, distinct from zero. They keep reward sources and
+panels separate, preserve incomplete states
 and leave original records untouched. No learner or environment runs here.
 Reports name saved artifacts and sum only phase-owner timing records. An open
 checkpoint recovery must hide stale completion and results until recovery ends.
@@ -593,3 +595,62 @@ def test_a_pqn_report_uses_its_settings_summary_line_and_figure(
     report = analyze([root], output_dir=tmp_path / "early-report")
     summary = Path(report["artifacts"]["summary"]).read_text()
     assert "Initial random transitions generated but never learned: 8." in summary
+
+
+def test_reports_keep_training_and_validation_red_zone_depths_separate(
+    tmp_path: Path,
+) -> None:
+    import csv
+
+    runs: list[Path] = []
+    for index, depth in enumerate((None, 0.0, 5.0)):
+        root = tmp_path / f"run-{index}"
+        root.mkdir()
+        config: dict[str, Any] = {"method": "mappo", "seed": index}
+        if depth is not None:
+            config["red_zone_depth"] = depth
+        (root / "run_details.json").write_text(
+            json.dumps({"run_id": root.name, "config": config})
+        )
+        (root / "training_updates.jsonl").write_text(
+            json.dumps({"env_steps": 4, "elapsed_seconds": 1.0}) + "\n"
+        )
+        records = [
+            _result(
+                f"actor-{index}-{step}",
+                step,
+                0.5,
+                **({"red_zone_depth": value} if value is not None else {}),
+                cells=[{"map_id": 42, "score": 0.5}],
+            )
+            for step, value in ((4, depth), (8, 6.0))
+        ]
+        (root / "validation_results.json").write_text(json.dumps(records))
+        (root / "selection.json").write_text(
+            json.dumps(
+                {
+                    "checkpoint_id": records[-1]["checkpoint_id"],
+                    "score": 0.5,
+                    **({"red_zone_depth": 6.0} if index else {}),
+                }
+            )
+        )
+        runs.append(root)
+    before = {path: path.read_bytes() for root in runs for path in root.iterdir()}
+    report = analyze(runs, output_dir=tmp_path / "report")
+    assert [row["red_zone_depth"] for row in report["runs"]] == [None, 0.0, 5.0]
+    summary = Path(report["artifacts"]["summary"]).read_text()
+    svg = Path(report["artifacts"]["svg"]).read_text()
+    for label in ("Unknown (not recorded)", "0.0 map units", "5.0 map units"):
+        assert label in summary and label in svg
+    assert "Validation Red Zone: 6.0 map units" in svg
+    assert "Training Red Zone Depth:" in summary
+    assert "Recorded Validation Red Zone Depths:" in summary
+    assert "Confirmation Red Zone Depth: 6.0 map units" in summary
+    assert "Confirmation Red Zone Depth: Unknown (not recorded)" in summary
+    for artifact in ("curve", "cells"):
+        with Path(report["artifacts"][artifact]).open() as stream:
+            rows = list(csv.DictReader(stream))
+        assert {row["red_zone_depth"] for row in rows} == {"", "0.0", "5.0", "6.0"}
+        assert {row["training_red_zone_depth"] for row in rows} == {"", "0.0", "5.0"}
+    assert {path: path.read_bytes() for path in before} == before

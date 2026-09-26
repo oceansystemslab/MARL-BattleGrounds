@@ -9,8 +9,14 @@ panel/task hashes and selection covered. A PQN-VDN export is validated against
 a panel holding a host-execution System; its summary names the method and its
 optimizer count. A panel chosen from a ranking saves the ranking's Red Zone
 depth (read from its recorded configurations, 5.0 or 6.0) with evidence schema
-2, and load_panel admits it only at that depth. Tests that stop at learner
+2. load_panel keeps that ranking evidence while admitting actors for validation
+at a separately declared depth. Tests that stop at learner
 setup also skip content preparation, which the runner now does first.
+Continuation binding tests complete real short CPU training and one-step M8
+validation, then resume with retained clients. They omit inherited candidate
+discovery; separate H300 tests verify inherited games and parent ranking. Their
+runtime identity and recording provenance stay fixed while other packet files
+change, so these checks do not qualify source compatibility.
 """
 
 # pyright: reportPrivateUsage=false
@@ -647,6 +653,7 @@ def _ranking_fixture(
 
 def test_ranked_panel_checks_actual_pool_maps_pairs_and_stable_ties(
     tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     from copy import deepcopy
 
@@ -672,8 +679,43 @@ def test_ranked_panel_checks_actual_pool_maps_pairs_and_stable_ties(
         )
         == selected
     )
-    with pytest.raises(ValueError, match=r"ranked with red_zone_depth 5\.0"):
-        validation.load_panel(selected.path, red_zone_depth=6.0)
+    before_panel = selected.path.read_bytes()
+    assert (
+        validation.load_panel(
+            selected.path, bindings=selected.methods, red_zone_depth=6.0
+        )
+        == selected
+    )
+    assert selected.path.read_bytes() == before_panel
+
+    def identity(path: object) -> dict[str, Any]:
+        del path
+        return {"checkpoint_id": "checkpoint", "actor_digest": "actor", "env_steps": 32}
+
+    def actor(path: object) -> Policy:
+        del path
+        return policy("random")
+
+    monkeypatch.setattr(validation, "_artifact", identity)
+    monkeypatch.setattr(checkpoints, "load_system", actor)
+    evaluator = import_module("marl_battlegrounds.evaluation.evaluate")
+    original_evaluate = evaluator.evaluate
+
+    def short(*args: Any, **kwargs: Any) -> Any:  # noqa: ANN401
+        return original_evaluate(*args, max_steps=1, **kwargs)
+
+    monkeypatch.setattr(evaluator, "evaluate", short)
+    result = validation.validate_checkpoint(
+        "unused",
+        selected,
+        output_dir=tmp_path / "foreign-rule-task",
+        red_zone_depth=6.0,
+        seed_pairs=1,
+        num_envs=2,
+    )
+    assert result["complete"] and result["red_zone_depth"] == 6.0
+    assert result["panel_digest"] == selected.digest
+    assert selected.path.read_bytes() == before_panel
     deeper = validation.create_panel(
         opponents=pool.methods,
         ranking=_ranking_fixture(pool, red_zone_depth=6.0),
@@ -818,7 +860,11 @@ def test_resume_can_rebind_the_same_client_from_a_saved_config_reference(
 
     def details(path: object) -> dict[str, object]:
         del path
-        return {"kind": "learner", "schemas": checkpoints.checkpoint_schemas()}
+        return {
+            "kind": "learner",
+            "schemas": checkpoints.checkpoint_schemas(),
+            "metadata": {"config": runner.config_to_dict(config)},
+        }
 
     def saved_config(saved: object) -> dict[str, Any]:
         del saved
@@ -831,3 +877,257 @@ def test_resume_can_rebind_the_same_client_from_a_saved_config_reference(
     with pytest.raises(SetupReachedError):
         runner.train(resume_from=checkpoint, validation_opponents=(method,))
     assert panel.path.read_bytes() == before and client.calls == []
+
+
+def test_extension_separates_runtime_bindings_without_mutating_input(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    client = Client()
+    method = System("Future", client.apply, execution="host")
+    parent = System("Parent", Client().apply, execution="host")
+    bindings = [method]
+    future = {
+        "panel": str(tmp_path / "future/panel.json"),
+        "bindings": bindings,
+        "env_steps": [12],
+    }
+    changes: dict[str, object] = {"validation": future}
+    captured: dict[str, Any] = {}
+    marker = object()
+
+    def train(**kwargs: Any) -> Any:  # noqa: ANN401
+        captured.update(kwargs)
+        return marker
+
+    monkeypatch.setattr(runner, "_train", train)
+    result = runner.extend_training(
+        tmp_path / "parent/checkpoints/id",
+        additional_env_steps=4,
+        output_dir=tmp_path / "child",
+        changes=changes,
+        validation_opponents=(parent,),
+    )
+    assert result is marker
+    assert captured["validation_opponents"] == (parent,)
+    assert captured["extension"]["validation_bindings"] is bindings
+    assert captured["extension"]["changes"] == {
+        "validation": {"panel": str(tmp_path / "future/panel.json"), "env_steps": [12]}
+    }
+    assert changes["validation"] is future and future["bindings"] is bindings
+    assert future["env_steps"] == [12] and bindings[0] is method
+    assert not (tmp_path / "child").exists()
+    for invalid, error, match in (
+        ({"bindings": bindings}, ValueError, "requires a declared future panel"),
+        ({"panel": "unused", "bindings": "bad"}, TypeError, "sequence of methods"),
+    ):
+        captured.clear()
+        with pytest.raises(error, match=match):
+            runner.extend_training(
+                tmp_path / "parent/checkpoints/id",
+                additional_env_steps=4,
+                output_dir=tmp_path / "child",
+                changes={"validation": invalid},
+            )
+        assert not captured
+
+
+@pytest.mark.parametrize("parent_reference", (False, True), ids=("live", "factory"))
+def test_live_panel_continuation_rebinds_clients_and_keeps_json_clean(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    parent_reference: bool,
+) -> None:
+    import hashlib
+
+    from marl_battlegrounds.baselines.ppo import PPOConfig
+    from marl_battlegrounds.evaluation.recording_context import (
+        capture_recording_provenance,
+    )
+    from marl_battlegrounds.training import _selection_evidence
+
+    identity = checkpoints.runtime_identity()
+    monkeypatch.setattr(checkpoints, "runtime_identity", lambda: identity)
+    evaluator = import_module("marl_battlegrounds.evaluation.evaluate")
+    provenance = capture_recording_provenance()
+
+    def fixed_provenance(**_: object) -> dict[str, object]:
+        return provenance
+
+    monkeypatch.setattr(evaluator, "capture_recording_provenance", fixed_provenance)
+    original_evaluate = evaluator.evaluate
+    original_verify = evaluator._verify_evaluation
+
+    def short(*args: Any, **kwargs: Any) -> Any:  # noqa: ANN401
+        return original_evaluate(*args, max_steps=1, **kwargs)
+
+    def short_verify(*args: Any, **kwargs: Any) -> Any:  # noqa: ANN401
+        return original_verify(*args, max_steps=1, **kwargs)
+
+    def no_candidates(checkpoint: Path, *, declaration: object) -> list[object]:
+        return []
+
+    # This checks client wiring with real saved one-step M8 games. The separate
+    # H300 continuation test owns inherited-game verification and parent ranking.
+    monkeypatch.setattr(evaluator, "evaluate", short)
+    monkeypatch.setattr(evaluator, "_verify_evaluation", short_verify)
+    monkeypatch.setattr(
+        _selection_evidence, "freeze_inherited_candidates", no_candidates
+    )
+    client = Client()
+    method = System("Parent Live", client.apply, execution="host")
+    wrong = System("Wrong Live", Client().apply, execution="host")
+    factory_calls: list[str] = []
+
+    def factory(reference: str) -> System:
+        factory_calls.append(reference)
+        assert reference == "local_fixture:parent"
+        return method
+
+    if parent_reference:
+        monkeypatch.setattr(
+            import_module("marl_battlegrounds._method_loading"), "load_method", factory
+        )
+    config = runner.TrainConfig(
+        method="ff_ippo",
+        num_envs=4,
+        total_env_steps=8,
+        seed=817,
+        ppo=PPOConfig(rollout_length=2, epochs=1),
+        checkpoint_interval_updates=1,
+        validation_fractions=(1.0,),
+        routine_seed_pairs=1,
+        confirmation_seed_pairs=1,
+        validation_opponents=("local_fixture:parent",) if parent_reference else None,
+        metrics="none",
+        verbose=False,
+    )
+    parent = runner.train(
+        config,
+        output_dir=tmp_path / "parent",
+        validation_opponents=None if parent_reference else (method,),
+    )
+    assert client.calls and all(
+        mask.shape == (config.num_envs,) for mask in client.calls
+    )
+    parent_panel = parent.run_dir / "validation_panel/panel.json"
+    saved_panel = json.loads(parent_panel.read_text())
+    assert saved_panel["members"][0]["reference"] == (
+        "local_fixture:parent" if parent_reference else None
+    )
+    assert factory_calls == (["local_fixture:parent"] if parent_reference else [])
+
+    def files(root: Path) -> dict[str, str]:
+        return {
+            str(path.relative_to(root)): hashlib.sha256(path.read_bytes()).hexdigest()
+            for path in root.rglob("*")
+            if path.is_file()
+        }
+
+    def latest(root: Path) -> Path:
+        pointer = json.loads((root / "latest_checkpoint.json").read_text())
+        return root / pointer["relative_path"]
+
+    before = files(parent.run_dir)
+    parent_checkpoint = latest(parent.run_dir)
+    calls_before = len(client.calls)
+    if not parent_reference:
+        with pytest.raises(ValueError, match="live-only"):
+            runner.extend_training(
+                parent_checkpoint,
+                additional_env_steps=4,
+                output_dir=tmp_path / "missing-parent-binding",
+            )
+        assert not (tmp_path / "missing-parent-binding").exists()
+    with pytest.raises(ValueError, match="frozen M8 identity"):
+        runner.extend_training(
+            parent_checkpoint,
+            additional_env_steps=4,
+            output_dir=tmp_path / "wrong-parent-binding",
+            validation_opponents=(wrong,),
+        )
+    assert not (tmp_path / "wrong-parent-binding").exists()
+    assert len(client.calls) == calls_before and files(parent.run_dir) == before
+    changes: dict[str, object] = {"validation": {"env_steps": [12]}}
+    child = runner.extend_training(
+        parent_checkpoint,
+        additional_env_steps=4,
+        output_dir=tmp_path / "child",
+        changes=changes,
+        validation_opponents=(method,),
+    )
+    assert changes == {"validation": {"env_steps": [12]}}
+    assert len(client.calls) > calls_before
+    child_details = json.loads((child.run_dir / "run_details.json").read_text())
+    assert child_details["config"]["validation_panel"] == str(parent_panel)
+    assert child_details["config"]["validation_opponents"] is None
+    assert child_details["continuation"]["changes"] == changes
+    calls_before = len(client.calls)
+    restored = runner.train(
+        resume_from=latest(child.run_dir), validation_opponents=(method,)
+    )
+    assert restored.final_actor == child.final_actor
+    assert restored.selected_actor == child.selected_actor
+    assert len(client.calls) == calls_before
+    assert files(parent.run_dir) == before
+    assert factory_calls == (["local_fixture:parent"] if parent_reference else [])
+    if parent_reference:
+        return
+
+    future_client = Client()
+    future_method = System("Future Live", future_client.apply, execution="host")
+    future_panel = validation.create_panel(
+        opponents=(future_method,), output_dir=tmp_path / "future-panel"
+    )
+    future_bindings = [future_method]
+    future_changes: dict[str, object] = {
+        "panel": str(future_panel.path),
+        "bindings": future_bindings,
+        "env_steps": [12],
+    }
+    request: dict[str, object] = {"validation": future_changes}
+    with pytest.raises(ValueError, match="frozen M8 identity"):
+        runner.extend_training(
+            parent_checkpoint,
+            additional_env_steps=4,
+            output_dir=tmp_path / "wrong-future-binding",
+            validation_opponents=(method,),
+            changes={
+                "validation": {"panel": str(future_panel.path), "bindings": [method]}
+            },
+        )
+    assert not (tmp_path / "wrong-future-binding").exists()
+    assert len(client.calls) == calls_before and not future_client.calls
+    future = runner.extend_training(
+        parent_checkpoint,
+        additional_env_steps=4,
+        output_dir=tmp_path / "future-child",
+        validation_opponents=(method,),
+        changes=request,
+    )
+    assert future_client.calls and len(client.calls) == calls_before
+    assert request["validation"] is future_changes
+    assert (
+        future_changes["bindings"] is future_bindings
+        and future_bindings[0] is future_method
+    )
+    assert future_changes["env_steps"] == [12]
+    future_details = json.loads((future.run_dir / "run_details.json").read_text())
+    assert future_details["config"]["validation_panel"] == str(future_panel.path)
+    assert future_details["continuation"]["changes"]["validation"] == {
+        "panel": str(future_panel.path),
+        "env_steps": [12],
+    }
+    assert '"bindings"' not in (future.run_dir / "run_details.json").read_text()
+    assert '"calls"' not in (future.run_dir / "run_details.json").read_text()
+    future_calls = len(future_client.calls)
+    resumed = runner.train(
+        resume_from=latest(future.run_dir), validation_opponents=(future_method,)
+    )
+    assert (
+        resumed.final_actor == future.final_actor
+        and resumed.selected_actor == future.selected_actor
+    )
+    assert (
+        len(future_client.calls) == future_calls and len(client.calls) == calls_before
+    )
+    assert files(parent.run_dir) == before

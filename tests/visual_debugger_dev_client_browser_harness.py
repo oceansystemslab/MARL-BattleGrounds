@@ -1,4 +1,8 @@
-"""Run the real DevClient for browser tests with an isolated authoring directory."""
+"""Run the real DevClient with an isolated authoring store and declared Systems.
+
+Repeated --offer-system values use the launcher's trusted factory route. Tests
+keep their own asset directory and never change the ordinary developer store.
+"""
 
 from __future__ import annotations
 
@@ -18,6 +22,7 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--port", type=int, default=0)
     parser.add_argument("--seed-map-count", type=int, default=0)
     parser.add_argument("--seed-scenario-count", type=int, default=0)
+    parser.add_argument("--offer-system", action="append", default=[])
     return parser
 
 
@@ -78,6 +83,11 @@ def main(argv: Sequence[str] | None = None) -> int:
             "--no-open",
             "--port",
             str(options.port),
+            *(
+                part
+                for value in options.offer_system
+                for part in ("--offer-system", value)
+            ),
         )
     )
 

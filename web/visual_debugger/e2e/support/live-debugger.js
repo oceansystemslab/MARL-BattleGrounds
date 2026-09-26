@@ -636,11 +636,12 @@ export function startScriptedDebugger({ scenario = "aura_crossfire" } = {}) {
   ]);
 }
 
-/** @param {{artifactRoot: string, seedMapCount?: number, seedScenarioCount?: number}} options */
+/** @param {{artifactRoot: string, seedMapCount?: number, seedScenarioCount?: number, offeredSystems?: string[]}} options */
 export function startIsolatedDevClient({
   artifactRoot,
   seedMapCount = 0,
   seedScenarioCount = 0,
+  offeredSystems = [],
 }) {
   if (typeof artifactRoot !== "string" || artifactRoot.length === 0) {
     throw new TypeError("Isolated DevClient tests require an artifact root.");
@@ -662,6 +663,7 @@ export function startIsolatedDevClient({
     String(seedMapCount),
     "--seed-scenario-count",
     String(seedScenarioCount),
+    ...offeredSystems.flatMap((value) => ["--offer-system", value]),
     "--port",
     "0",
   ]);

@@ -43,10 +43,16 @@ from marl_battlegrounds.baselines.actions import (
     action_log_prob,
     categorical_action_mask,
     decode_actions,
+    mirror_action_indices,
     sample_actions,
 )
-from marl_battlegrounds.baselines.inputs import encode_actor_inputs
+from marl_battlegrounds.baselines.inputs import (
+    encode_actor_inputs,
+    spawn_frame_flag,
+    team_obstacle_partners,
+)
 from marl_battlegrounds.core.types import CONTEXT_FEATURE_CURRENT_TIMESTEP
+from marl_battlegrounds.policies.input import mirror_team_view
 from marl_battlegrounds.types import ActorAction, System, SystemInput, SystemOutput
 
 type Tree = Any
@@ -75,8 +81,17 @@ def _direct_actor(
     inputs is the same permitted SystemInput, and keys contains 32 lane keys.
     Return the same native actions, carry and learning values. This comparison
     reuses algorithm authorities; it is not a separate correctness reference.
+    Match the declared left spawn frame: reflect permitted inputs and move masks,
+    then return world-frame actions and learning indices.
     """
-    features = encode_actor_inputs(inputs.actors)
+    flag = spawn_frame_flag(inputs.actors, "left")
+    actors, frame_mask = mirror_team_view(
+        inputs.actors,
+        inputs.action_mask,
+        flag,
+        obstacle_partners=team_obstacle_partners(inputs.actors),
+    )
+    features = encode_actor_inputs(actors)
     valid = jnp.broadcast_to(inputs.valid[:, None], inputs.active_mask.shape)
     starts = jnp.broadcast_to(inputs.episode_start[:, None], inputs.active_mask.shape)
     memory, logits = cast(
@@ -86,7 +101,7 @@ def _direct_actor(
         ),
     )
     logits = logits[0]
-    mask = categorical_action_mask(inputs.action_mask)
+    mask = categorical_action_mask(frame_mask)
 
     def split(key: Array) -> Array:
         """Derive the same five actor streams as the public System adapter."""
@@ -94,11 +109,12 @@ def _direct_actor(
 
     actor_keys = jax.vmap(split)(keys)
     indices = sample_actions(logits, mask, actor_keys)
+    world = mirror_action_indices(indices, flag)
     return SystemOutput(
-        decode_actions(indices),
+        decode_actions(world),
         memory,
         learning_outputs=ppo.PPOLearningOutputs(
-            indices, action_log_prob(logits, mask, indices)
+            world, action_log_prob(logits, mask, indices)
         ),
     )
 
@@ -302,7 +318,7 @@ def main() -> None:
     }
     setup_started = time.perf_counter()
     weights = ppo.initialize_ppo(jax.random.key(42)).actor_params
-    system = ppo.make_recurrent_mappo_system(weights)
+    system = ppo.make_recurrent_mappo_system(weights, spawn_frame="left")
     env = marl_bgs.make("tdm", map_id=0, num_envs=_BATCH, metrics="none")
     observations, state = env.reset(jax.random.key(43))
     inputs = env.policy_inputs(observations, state)
@@ -451,6 +467,7 @@ def main() -> None:
         "batch": _BATCH,
         "steps": options.steps,
         "actors_per_game": 5,
+        "spawn_frame": "left",
         "seed": 42,
         "setup_seconds": setup_seconds,
         "setup_includes": (

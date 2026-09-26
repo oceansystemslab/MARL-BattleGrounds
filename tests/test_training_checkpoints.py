@@ -62,6 +62,7 @@ import pytest
 
 import marl_battlegrounds.training.checkpoints as checkpoints
 import marl_battlegrounds.training.collection as collection_module
+from marl_battlegrounds._method_loading import load_method
 from marl_battlegrounds.baselines import ppo
 from marl_battlegrounds.baselines.ppo import (
     PPOConfig,
@@ -69,7 +70,11 @@ from marl_battlegrounds.baselines.ppo import (
     make_ppo_system,
     make_recurrent_mappo_system,
 )
-from marl_battlegrounds.evaluation.policy_execution import apply_systems, init_systems
+from marl_battlegrounds.evaluation.policy_execution import (
+    System,
+    apply_systems,
+    init_systems,
+)
 from marl_battlegrounds.evaluation.recording_identity import (
     normalize_system_registration,
     tree_digest,
@@ -237,7 +242,7 @@ def _schema_1_round_trip(
     current = {**details, "schemas": checkpoints.checkpoint_schemas(method)}
     assert identity["actor_digest"] == checkpoints._inference_digest(current)  # pyright: ignore[reportPrivateUsage]
     assert identity["weight_digest"] == tree_digest(weights)
-    system = load_system(path)
+    system = cast(System, load_method(str(path)))
     assert system.apply is hook(0.01, "left")
     assert system.checkpoint == identity["actor_digest"]
     variables: Any = system.variables
@@ -471,9 +476,43 @@ def test_save_reuses_content_check_but_restore_rechecks_before_recovery(
             writer.close()
     assert calls == []
     before = _files(tmp_path)
-    restore_checkpoint(
+    restored = restore_checkpoint(
         path, collection, state, expected_metadata=_expected(metadata), ppo=PPO
     )
+    assert calls == [{"expected": collection.binding}]
+    from marl_battlegrounds.training.curriculum import (
+        _make_continuation_schedule,  # pyright: ignore[reportPrivateUsage]
+    )
+
+    carry = restored.state.carry
+    schedule = _make_continuation_schedule(
+        collection.schedule,
+        completed_rounds=int(carry.progress.rounds),
+        additional_env_steps=4,
+    )
+    collection_module._begin_training_segment(  # pyright: ignore[reportPrivateUsage]
+        collection, carry, schedule=schedule
+    )
+    assert calls == [{"expected": collection.binding}]
+    bank = carry.tracking.source_configs
+    assert bank is not None
+    bad_bank = carry._replace(
+        tracking=replace(
+            carry.tracking,
+            source_configs=bank._replace(
+                max_steps=jnp.asarray(bank.max_steps).at[0].add(1)
+            ),
+        )
+    )
+    with pytest.raises(ValueError, match="source bank"):
+        collection_module._begin_training_segment(  # pyright: ignore[reportPrivateUsage]
+            collection, bad_bank, schedule=schedule
+        )
+    bad_key = carry._replace(root_key=jax.random.key(1))
+    with pytest.raises(ValueError, match="random root"):
+        collection_module._begin_training_segment(  # pyright: ignore[reportPrivateUsage]
+            collection, bad_key, schedule=schedule
+        )
     assert calls == [{"expected": collection.binding}]
 
     def changed_content(**kwargs: object) -> None:
@@ -1558,7 +1597,7 @@ def test_variants_resume_partial_updates_and_load_only_actor_arrays(
     )
     identities = []
     for saved in (path, export):
-        actor = load_system(saved)
+        actor = cast(System, load_method(str(saved)))
         actual = apply_systems(
             actor, original, memory, observations, env_state, jax.random.key(72)
         )
@@ -1784,3 +1823,44 @@ def test_a_learner_saved_before_red_zone_is_readable_but_cannot_resume(
         )
     assert _files(tmp_path) == before
     assert not (tmp_path / "checkpoint_recovery.json").exists()
+
+
+@pytest.mark.parametrize("fault", [None, "parent", "target", "extra"])
+def test_source_transition_checks_exact_qualified_package(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, fault: str | None
+) -> None:
+    from hashlib import sha256
+
+    from marl_battlegrounds.training import checkpoints
+
+    package = tmp_path / "package"
+    training = package / "training"
+    training.mkdir(parents=True)
+    module = training / "checkpoints.py"
+    module.write_text("# Checked source fixture\n")
+    parent = {"commit": "declared-parent"}
+    current = {"commit": "actual-current"}
+    record = {
+        "schema_version": 1,
+        "parent_sources": [parent],
+        "target_files": {
+            "training/checkpoints.py": sha256(module.read_bytes()).hexdigest()
+        },
+        "qualification": {"proof": "Test fixture only"},
+    }
+    (training / "continuation_compatibility.json").write_text(json.dumps(record))
+    monkeypatch.setattr(checkpoints, "__file__", str(module))
+    if fault == "parent":
+        parent = {"commit": "different-parent"}
+    elif fault == "target":
+        module.write_text("# Edited source\n")
+    elif fault == "extra":
+        (package / "extra.py").write_text("# Extra source\n")
+    if fault is None:
+        result = checkpoints.continuation_source_compatibility(parent, current)
+        assert result["parent_source"] == parent
+        assert result["child_source"] == current
+        assert result["qualification_sha256"]
+    else:
+        with pytest.raises(ValueError, match=r"[Qq]ualified continuation"):
+            checkpoints.continuation_source_compatibility(parent, current)

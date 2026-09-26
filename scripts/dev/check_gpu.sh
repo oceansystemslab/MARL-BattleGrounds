@@ -4,7 +4,8 @@
 # Usage: scripts/dev/check_gpu.sh [--allow-dirty | --help]. The default rejects
 # staged, unstaged and nonignored untracked changes. --allow-dirty runs diagnostics
 # only; it cannot qualify publication. Requires a working NVIDIA driver,
-# nvidia-smi and the prepared CUDA uv environment. The script disables JAX memory
+# nvidia-smi and the prepared CUDA uv environment. A single GPU UUID in
+# CUDA_VISIBLE_DEVICES also limits the status query to that card. The script disables JAX memory
 # preallocation, verifies synchronized GPU matrix work, then runs 32-lane tests.
 # It rechecks the committed source identity and cleanliness before qualification.
 # This is a correctness check, not a throughput benchmark. It never commits.
@@ -120,7 +121,12 @@ export UV_NO_SYNC=1
 export XLA_PYTHON_CLIENT_PREALLOCATE=false
 
 cd -- "${REPO_ROOT}"
-nvidia-smi
+# A single explicit UUID also limits the status query to that selected card.
+if [[ "${CUDA_VISIBLE_DEVICES:-}" == GPU-* && "${CUDA_VISIBLE_DEVICES}" != *,* ]]; then
+  nvidia-smi --id="${CUDA_VISIBLE_DEVICES}"
+else
+  nvidia-smi
+fi
 uv run --no-sync python - <<'PY'
 """Verify CUDA is the only active backend and complete one checked GPU workload."""
 

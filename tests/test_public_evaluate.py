@@ -75,6 +75,15 @@ def test_public_evaluate_cycles_one_total_budget_and_creates_no_files(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.chdir(tmp_path)
+
+    def unexpected_sampling(*args: object) -> None:
+        raise AssertionError("Recording-disabled evaluation inspected sampling")
+
+    monkeypatch.setattr(
+        import_module("marl_battlegrounds.evaluation.sampling_evidence"),
+        "method_sampling_fact",
+        unexpected_sampling,
+    )
     result = evaluate(
         "random",
         "random",
@@ -581,9 +590,11 @@ def test_persistence_keeps_scalar_tables_and_replays_independently(
     assert record["canonical_digest_sha256"] in replays[0].name
 
 
+@pytest.mark.parametrize("keep_sampling", [False, True])
 def test_resume_skips_durable_episodes_and_rejects_changed_inputs(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
+    keep_sampling: bool,
 ) -> None:
     # Freeze source identity for this test: independent workspace edits must not
     # impersonate a deliberate code change between our two evaluation calls.
@@ -638,6 +649,22 @@ def test_resume_skips_durable_episodes_and_rejects_changed_inputs(
     run_dir = next(tmp_path.iterdir())
     manifest = json.loads((run_dir / "run_details.json").read_text())
     assert next(iter(manifest["passes"].values()))["completed_episode_ids"] == [1, 2]
+    details = next(iter(manifest["passes"].values()))["details"]
+    saved_sampling = details["method_sampling"]
+    assert saved_sampling["team_a"]["determinism"] == "unknown"
+    assert saved_sampling["team_b"]["determinism"] == "stochastic"
+    if not keep_sampling:
+        details.pop("method_sampling")
+        (run_dir / "run_details.json").write_text(json.dumps(manifest))
+
+    def unexpected_sampling(*args: object) -> None:
+        raise AssertionError("Resume inferred past sampling from a current actor")
+
+    monkeypatch.setattr(
+        import_module("marl_battlegrounds.evaluation.sampling_evidence"),
+        "method_sampling_fact",
+        unexpected_sampling,
+    )
     failures = (run_dir / "failures.jsonl").read_text().splitlines()
     assert len(failures) == 1
     assert json.loads(failures[0])["message"] == "interrupted after durable chunk"
@@ -654,6 +681,11 @@ def test_resume_skips_durable_episodes_and_rejects_changed_inputs(
     )
     assert [row.episode_id for row in resumed.episodes] == [3, 4]
     assert resumed.completed_episode_ids == (1, 2, 3, 4)
+    saved_after = json.loads((run_dir / "run_details.json").read_text())
+    details_after = next(iter(saved_after["passes"].values()))["details"]
+    assert details_after.get("method_sampling") == (
+        saved_sampling if keep_sampling else None
+    )
     assert resumed.paths is not None
     with resumed.paths["priority_metrics"].open(newline="") as stream:
         rows = list(csv.DictReader(stream))

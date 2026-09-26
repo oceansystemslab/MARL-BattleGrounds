@@ -801,7 +801,7 @@ def default_schema_versions_v1() -> tuple[SchemaVersionEntryV1, ...]:
     Notes
     -----
     These bindings describe the legacy serialized roots. They are not the
-    current context V3/frame V2 bindings.
+    current context V4/frame V3 bindings.
     """
     return tuple(
         SchemaVersionEntryV1(schema_id=schema_id)

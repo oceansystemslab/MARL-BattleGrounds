@@ -2,7 +2,9 @@
 
 The real validation and M8 schedule builders pass roots to a stubbed numerical
 executor. Known game rows cover task hashes, native options, strict saved-result
-checks, and unchanged shared initialization. CPU JAX key derivation checks the
+checks, and unchanged shared initialization. The stub supplies a real frozen
+Policy and its shared registration so sampling facts keep their identity checks.
+CPU JAX key derivation checks the
 routine and confirmation schedules use distinct reset/game/policy start keys.
 A new Random record carries red_zone_depth 5.0 in its schema 3 task and M8
 options and verifies only at that depth. The same games rewritten as a record
@@ -17,6 +19,7 @@ caller passes red_zone_depth=None.
 import hashlib
 import json
 from copy import deepcopy
+from dataclasses import replace
 from importlib import import_module
 from pathlib import Path
 from types import SimpleNamespace
@@ -27,6 +30,8 @@ import jax.numpy as jnp
 import numpy as np
 import pytest
 
+from marl_battlegrounds.evaluation.policy_execution import Policy, policy
+from marl_battlegrounds.evaluation.recording_identity import tree_digest
 from marl_battlegrounds.training import checkpoints, validation
 
 
@@ -120,10 +125,13 @@ def fake_m8(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> dict[str, Any]:
     results = import_module("marl_battlegrounds.evaluation.results")
     actor_path = tmp_path / "actor"
     actor_path.mkdir()
+    actor = replace(
+        policy("random"), name="Fixed Test Actor", checkpoint="fixed-inference"
+    )
     identity = {
         "checkpoint_id": "initial-checkpoint",
         "actor_digest": "fixed-inference",
-        "weight_digest": "fixed-weights",
+        "weight_digest": tree_digest(actor.variables),
         "env_steps": 0,
         "run_id": "original-run",
         "seed": 42,
@@ -142,20 +150,13 @@ def fake_m8(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> dict[str, Any]:
             {"map_id": spec.map_id} for spec in options["source_choices"]
         ]
         contract = json.loads(json.dumps(contract))
+        methods = {
+            "team_a": validation._method_snapshot(_actor),
+            "team_b": validation._method_snapshot(opponent),
+        }
         entry = {
-            "policies": {
-                "team_a": {
-                    "checkpoint": identity["actor_digest"],
-                    "variables_digest": identity["weight_digest"],
-                    "variables_frozen": True,
-                },
-                "team_b": {
-                    "name": "random",
-                    "callable_name": (
-                        "marl_battlegrounds.evaluation.policy_execution._random_apply"
-                    ),
-                },
-            },
+            "system_ids": {team: method[1] for team, method in methods.items()},
+            "policies": {team: method[2] for team, method in methods.items()},
             "details": {
                 "evaluation_contract": contract,
                 "phase": "validation",
@@ -191,8 +192,8 @@ def fake_m8(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> dict[str, Any]:
     def artifact(_path: str | Path) -> dict[str, Any]:
         return identity.copy()
 
-    def load_system(_path: str | Path) -> object:
-        return object()
+    def load_system(_path: str | Path) -> Policy:
+        return actor
 
     def load_results(path: str | Path, **_kwargs: object) -> SimpleNamespace:
         return saved[Path(path)]
@@ -279,6 +280,33 @@ def test_confirmation_root_reaches_native_m8_and_verifies_saved_evidence(
             actor_digest="fixed-inference",
             seed_pairs=20,
             root_seed=19_044_791,
+        )
+
+
+def test_saved_random_sampling_bounds_rebuild_from_bound_pass_facts(
+    fake_m8: dict[str, Any],
+) -> None:
+    record = _capture(fake_m8, 19_043_001, pairs=1)
+    assert record["ci_low"] is record["ci_high"] is None
+    assert record["conditional_ci_low"] == record["conditional_ci_high"] == 0.5
+    assert record["independent_blocks"] == record["declared_blocks"] == 5
+    assert "stratum" in record["interval_status"]
+    before = {
+        path: path.read_bytes() for path in fake_m8["root"].rglob("*") if path.is_file()
+    }
+    verified = validation.verify_random_result(
+        record, actor_digest="fixed-inference", seed_pairs=1
+    )
+    assert verified["sampling_evidence"] == record["sampling_evidence"]
+    assert verified["ci_low"] is verified["ci_high"] is None
+    assert all(path.read_bytes() == content for path, content in before.items())
+    facts_path = Path(record["pass_paths"][0]).parent / "sampling_facts.json"
+    facts = json.loads(facts_path.read_text())
+    facts["system_ids"]["team_a"] = "different-actor"
+    facts_path.write_text(json.dumps(facts))
+    with pytest.raises(ValueError, match="Sampling facts"):
+        validation.verify_random_result(
+            record, actor_digest="fixed-inference", seed_pairs=1
         )
 
 
@@ -405,3 +433,155 @@ def test_random_records_verify_only_under_their_own_scoring_rule(
     )
     with pytest.raises(ValueError, match="summary or task"):
         validation.read_random_initialization(reference, **options)
+
+
+def _continuation_panel(tmp_path: Path) -> validation.FrozenPanel:
+    return validation.FrozenPanel(
+        tmp_path / "panel.json",
+        "panel",
+        (validation.PanelMember("Opponent", registration_id="opponent"),),
+        True,
+        schema_version=2,
+        roots={"routine": 11, "initialization": 12, "confirmation": 13},
+    )
+
+
+def _continuation_config(total: int) -> dict[str, Any]:
+    return {
+        "method": "mappo",
+        "num_envs": 2,
+        "total_env_steps": total,
+        "ppo": {"rollout_length": 4},
+        "validation_fractions": (0.5, 1.0),
+        "routine_seed_pairs": 2,
+        "confirmation_seed_pairs": 3,
+        "red_zone_depth": 5.0,
+    }
+
+
+def test_continuation_validation_keeps_absolute_points_and_partial_block_origin(
+    tmp_path: Path,
+) -> None:
+    from dataclasses import asdict
+
+    from marl_battlegrounds.training._continuation_schedules import LearnerContinuation
+
+    panel = _continuation_panel(tmp_path)
+    parent = validation.run_validation_declaration(_continuation_config(10), panel)
+    context = {
+        "start_env_steps": 10,
+        "parent_validation_declaration": parent,
+        "learner": {
+            "schema_version": 1,
+            **asdict(LearnerContinuation("mappo", 5, 2, 2)),
+        },
+        "changes": {
+            "validation": {"env_steps": [11, 17, 20], "roots": {"routine": 21}}
+        },
+    }
+    config = _continuation_config(20)
+    declared = validation.run_validation_declaration(
+        config, panel, continuation=context
+    )
+    assert declared["points"] == [
+        {"requested_steps": [11, 17], "env_steps": 18, "update_index": 3},
+        {"requested_steps": [20], "env_steps": 20, "update_index": 4},
+    ]
+    assert declared["roots"] == {
+        "routine": 21,
+        "initialization": 12,
+        "confirmation": 13,
+    }
+    task = validation.declared_panel_task(
+        declared,
+        panel,
+        checkpoint_id="actor",
+        actor_digest="weights",
+        env_steps=18,
+        purpose="routine",
+    )
+    assert task["root"] == 21 and task["seed_pairs"] == 2
+    assert (
+        validation.saved_validation_declaration(
+            {
+                "config": config,
+                "continuation": context,
+                "validation_declaration": declared,
+            },
+            panel,
+        )
+        == declared
+    )
+    altered = {**declared, "roots": {**declared["roots"], "routine": 22}}
+    with pytest.raises(ValueError, match="frozen inputs"):
+        validation.saved_validation_declaration(
+            {
+                "config": config,
+                "continuation": context,
+                "validation_declaration": altered,
+            },
+            panel,
+        )
+    context["changes"] = {"validation": {"env_steps": []}}
+    final_only = validation.run_validation_declaration(
+        config, panel, continuation=context
+    )
+    assert [point["env_steps"] for point in final_only["points"]] == [20]
+
+
+@pytest.mark.parametrize("points", [[10], [21], [19, 18], [True]])
+def test_continuation_validation_rejects_invalid_future_targets(
+    tmp_path: Path,
+    points: list[int],
+) -> None:
+    from dataclasses import asdict
+
+    from marl_battlegrounds.training._continuation_schedules import LearnerContinuation
+
+    panel = _continuation_panel(tmp_path)
+    config = _continuation_config(20)
+    context = {
+        "start_env_steps": 10,
+        "parent_validation_declaration": validation.run_validation_declaration(
+            _continuation_config(10), panel
+        ),
+        "learner": {
+            "schema_version": 1,
+            **asdict(LearnerContinuation("mappo", 5, 2, 2)),
+        },
+        "changes": {"validation": {"env_steps": points}},
+    }
+    with pytest.raises(ValueError):
+        validation.run_validation_declaration(config, panel, continuation=context)
+
+
+def test_schema_one_continuation_roots_stay_fixed(tmp_path: Path) -> None:
+    panel = validation.FrozenPanel(
+        tmp_path / "panel.json",
+        "old-panel",
+        (
+            validation.PanelMember("Halfway", actor_digest="one"),
+            validation.PanelMember("Final", actor_digest="two"),
+        ),
+        True,
+    )
+    declaration = validation.run_validation_declaration(_continuation_config(20), panel)
+    task = validation.declared_panel_task(
+        declaration,
+        panel,
+        checkpoint_id="actor",
+        actor_digest="weights",
+        env_steps=20,
+        purpose="confirmation",
+    )
+    assert task["root"] == 19_043_003
+    declaration["roots"]["confirmation"] = 99
+    with pytest.raises(ValueError, match="Historical panels"):
+        validation.declared_panel_task(
+            declaration,
+            panel,
+            checkpoint_id="actor",
+            actor_digest="weights",
+            env_steps=20,
+            purpose="confirmation",
+        )

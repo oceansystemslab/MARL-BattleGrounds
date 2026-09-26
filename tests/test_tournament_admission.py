@@ -2,7 +2,11 @@
 
 Store-focused cases replace game evidence preparation with controlled records;
 separate integration cases exercise the real schedule, report and fit authorities.
-No test treats a fixture store as a qualified official release.
+No test treats a fixture store as a qualified official release. Version-2
+fields of 2, 5 and 12 entrants keep their declared size through execution,
+promotion, the next challenger and monthly release. Inline evidence and
+unplayed companion stream declarations keep the same shared verification rules.
+Version-1 admission still requires its historical twelve entrants.
 
 A release saved before the Red Zone rule (pins 14, 2, 3 and 12-key depth-0.0
 configurations) is admitted under its original snapshot identity, with its
@@ -649,11 +653,18 @@ def test_commit_directory_sync_failure_reconciles_applied_state(
     assert _state(store)["applied_attempt_ids"] == [attempt["attempt_id"]]
 
 
-def test_real_population_checks_all_66_matchups_and_full_rows(tmp_path: Path) -> None:
-    bundle = build_record_bundle(tmp_path / "complete", full=True)
+@pytest.mark.parametrize(("version", "entrants"), [(1, 12), (2, 2), (2, 5), (2, 12)])
+def test_real_population_checks_every_matchup_and_full_row(
+    tmp_path: Path, version: int, entrants: int
+) -> None:
+    bundle = build_record_bundle(tmp_path / "complete", full=True, entrants=entrants)
+    if version == 2:
+        bundle["config"]["version"] = version
+        bundle["config"]["snapshot_id"] = snapshot_identity(bundle["config"])
     evidence = admission._population_evidence(bundle["config"])
-    assert evidence["matchups"] == 66
-    assert evidence["games"] == evidence["full_rows"] == 660
+    matchups = entrants * (entrants - 1) // 2
+    assert evidence["matchups"] == matchups
+    assert evidence["games"] == evidence["full_rows"] == matchups * 10
     assert evidence["snapshot_id"] == bundle["config"]["snapshot_id"]
     assert len(evidence["physical_evidence_id"]) == 64
 
@@ -666,14 +677,61 @@ def test_real_priority_only_population_cannot_start_full_admission(
         admission._population_evidence(bundle["config"])
 
 
+@pytest.mark.parametrize(("version", "entrants"), [(1, 12), (2, 2), (2, 5), (2, 12)])
 def test_real_admission_retains_refits_and_prepares_next_challenger(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, version: int, entrants: int
 ) -> None:
     clock = datetime(2026, 10, 29, tzinfo=UTC)
     monkeypatch.setattr(admission, "_utc_now", lambda: clock)
-    bundle = build_record_bundle(tmp_path / "incumbents", full=True, max_steps=1)
+    bundle = build_record_bundle(
+        tmp_path / "incumbents", full=True, max_steps=1, entrants=entrants
+    )
+    if version == 2:
+        bundle["config"]["version"] = version
+        if entrants == 5:
+            schedule_asset = bundle["config"]["conditions"]["schedule_asset"]
+            descriptor = bundle["config"]["assets"][schedule_asset]
+            manifest = read_config_json(descriptor["path"])
+            manifest["companion_stream_rule"] = "participant-method-v1"
+            group = copy.deepcopy(manifest["execution_groups"][0])
+            group["group_id"] = "deferred-fixture-companion"
+            manifest["execution_groups"].append(group)
+            companion_asset = bundle["config"]["assets"][
+                manifest["challenger_games_asset"]
+            ]
+            companion = copy.deepcopy(bundle["companion"])
+            for row in companion:
+                row["execution"]["group_id"] = group["group_id"]
+            data = b"".join(canonical_json(row) + b"\n" for row in companion)
+            Path(companion_asset["path"]).write_bytes(data)
+            companion_asset.update(
+                sha256=sha256(data).hexdigest(), size_bytes=len(data)
+            )
+            bundle["config"]["assets"][schedule_asset] = _asset(
+                Path(descriptor["path"]), manifest, "schedule"
+            )
+        if entrants == 2:
+            for key, asset in bundle["config"]["assets"].items():
+                path = Path(asset["path"])
+                if (
+                    asset["role"] not in {"schedule", "registration"}
+                    or path.suffix != ".json"
+                ):
+                    continue
+                value = json.loads(path.read_text())
+                data = canonical_json(value)
+                bundle["config"]["assets"][key] = {
+                    "sha256": sha256(data).hexdigest(),
+                    "size_bytes": len(data),
+                    "role": asset["role"],
+                    "path": None,
+                    "url": None,
+                    "inline": value,
+                }
+        bundle["config"]["snapshot_id"] = snapshot_identity(bundle["config"])
+    original_games = copy.deepcopy(bundle["games"])
     extra = build_record_bundle(
-        tmp_path / "challenger", entrants=13, maps=1, max_steps=1
+        tmp_path / "challenger", entrants=entrants + 1, maps=1, max_steps=1
     )
     participant = extra["config"]["participants"][-1]
     asset_ids = {participant["registration_asset"]}
@@ -728,9 +786,16 @@ def test_real_admission_retains_refits_and_prepares_next_challenger(
         num_envs=32,
         chunk_size=1,
     )
-    assert result.planned_games == 780
-    assert result.reused_games == 660
-    assert result.executed_games == 120
+    retained_games = entrants * (entrants - 1) // 2 * 10
+    challenger_games = entrants * 10
+    assert result.planned_games == retained_games + challenger_games
+    assert result.reused_games == retained_games
+    assert result.executed_games == challenger_games
+    assert len(result.tournament_results) == entrants + 1
+    assert bundle["games"] == original_games
+    assert result.protocol_compliant is False
+    assert result.metadata["official_snapshot_verified"] is False
+    assert result.metadata["protocol_compliant"] is False
     assert result.metadata["metrics"] == "full"
     loader_calls: list[object] = []
 
@@ -759,10 +824,21 @@ def test_real_admission_retains_refits_and_prepares_next_challenger(
     assert [(row["policy"], row["elo"]) for row in resumed.tournament_results] == [
         (row["policy"], row["elo"]) for row in result.tournament_results
     ]
+    if version == 2 and entrants == 2:
+        metadata = result.metadata
+        unexpected = copy.deepcopy(metadata["participant_descriptors"])
+        unexpected[0]["entrant_id"] = "outside-frozen-field"
+        before = (store / "admission_state.json").read_bytes()
+        with monkeypatch.context() as context:
+            context.setitem(metadata, "participant_descriptors", unexpected)
+            with pytest.raises(ValueError, match="another challenger version"):
+                admission.apply_admission(store, attempt["attempt_id"], result)
+        assert (store / "admission_state.json").read_bytes() == before
     applied = admission.apply_admission(store, attempt["attempt_id"], result)
     assert applied["decision"] == "promoted"
     replacement = admission._snapshot(store, applied["resulting_snapshot_id"])
-    assert len(replacement["participants"]) == 12
+    assert replacement["version"] == version
+    assert len(replacement["participants"]) == entrants
     assert participant["entrant_id"] in {
         item["entrant_id"] for item in replacement["participants"]
     }
@@ -770,7 +846,7 @@ def test_real_admission_retains_refits_and_prepares_next_challenger(
         item["elo"] is not None and item["result_ref"] is not None
         for item in replacement["participants"]
     )
-    assert admission._population_evidence(replacement)["games"] == 660
+    assert admission._population_evidence(replacement)["games"] == retained_games
     assert admission.apply_admission(store, attempt["attempt_id"], result) == applied
     removed = {item["entrant_id"] for item in bundle["config"]["participants"]} - {
         item["entrant_id"] for item in replacement["participants"]
@@ -782,21 +858,64 @@ def test_real_admission_retains_refits_and_prepares_next_challenger(
         if item["entrant_id"] in removed
     )
     assert removed_item["registration_asset"] not in replacement["assets"]
-    assert len(replacement["record_sources"]) == 3
+    assert len(replacement["record_sources"]) == (2 if entrants == 2 else 3)
     from marl_battlegrounds.evaluation.tournament_reuse import resolve_reuse_plan
 
     verifier, paths = admission._snapshot_inputs(replacement)
     following = resolve_reuse_plan(
-        replacement, paths, challenger_id="next-unexecuted-fixture", require_reuse=True
+        replacement,
+        paths,
+        asset_reader=verifier.read_json,
+        challenger_id="next-unexecuted-fixture",
+        participant_kinds={
+            **{item["entrant_id"]: "system" for item in replacement["participants"]},
+            "next-unexecuted-fixture": "system",
+        },
+        require_reuse=True,
     )
-    assert len(following.games) == 780
-    assert len([game for game in following.games if game["origin"] is not None]) == 660
+    assert len(following.games) == retained_games + challenger_games
+    if version == 2 and entrants == 5:
+        assert following.schedule_manifest["companion_stream_rule"] == (
+            "participant-method-v1"
+        )
+        retained_groups = {
+            game["execution"]["group_id"]
+            for game in following.games
+            if game["origin"] is not None
+        }
+        fresh_groups = {
+            game["execution"]["group_id"]
+            for game in following.games
+            if game["origin"] is None
+        }
+        assert retained_groups.isdisjoint(fresh_groups)
+    inherited = [game for game in following.games if game["origin"] is not None]
+    assert len(inherited) == retained_games
+    surviving_ids = {item["entrant_id"] for item in replacement["participants"]}
+    original_by_id = {
+        game["logical_game_id"]: game
+        for game in original_games
+        if game["team_a"] in surviving_ids and game["team_b"] in surviving_ids
+    }
+    for game in inherited:
+        if game["logical_game_id"] in original_by_id:
+            assert game == original_by_id[game["logical_game_id"]]
+    assert len(original_by_id) == (entrants - 1) * (entrants - 2) // 2 * 10
+    assert {game["team_b"] for game in following.games if game["origin"] is None} == (
+        surviving_ids
+    )
+    assert all(
+        game["team_a"] == "next-unexecuted-fixture"
+        for game in following.games
+        if game["origin"] is None
+    )
     assert verifier is not None
     clock = datetime(2026, 11, 1, tzinfo=UTC)
     prepared = admission.prepare_release(store, "2026-11-01T00:00:00+00:00")
-    assert prepared["asset_evidence"]["full_rows"] == 660
+    assert prepared["asset_evidence"]["full_rows"] == retained_games
     released = admission._snapshot(store, prepared["snapshot_id"])
-    assert len(released["participants"]) == 12
+    assert released["version"] == version
+    assert len(released["participants"]) == entrants
     assert all(
         item["elo"] is not None and item["result_ref"] is not None
         for item in released["participants"]
@@ -939,3 +1058,39 @@ def test_challenger_needing_new_games_under_red_zone_stops_before_any_write(
         )
     assert not (tmp_path / "runs").exists()
     assert _tree(store) == before
+
+
+@pytest.mark.parametrize("entrants", [2, 5])
+def test_v1_custom_field_remains_outside_historical_admission(
+    tmp_path: Path, entrants: int
+) -> None:
+    config = config_descriptor(entrants=entrants, root=tmp_path)
+    store = tmp_path / "store"
+    with pytest.raises(ValueError, match="Version-1 admission requires exactly twelve"):
+        admission.initialize_admission_store(store, config, rules=_rules())
+    assert not store.exists()
+
+
+@pytest.mark.parametrize(("entrants", "maps"), [(2, 1), (5, 3), (12, 5)])
+def test_v2_store_uses_declared_population_and_map_budget(
+    tmp_path: Path, entrants: int, maps: int
+) -> None:
+    config = config_descriptor(entrants=entrants, root=tmp_path)
+    config["version"] = 2
+    config["conditions"]["map_sources"] = config["conditions"]["map_sources"][:maps]
+    config["conditions"]["games_per_opponent"] = maps * 2
+    config["snapshot_id"] = snapshot_identity(config)
+    state = admission.initialize_admission_store(
+        tmp_path / "store", config, rules=_rules(games_per_opponent=maps * 2)
+    )
+    pinned = admission._snapshot(tmp_path / "store", state["provisional_snapshot_id"])
+    assert {
+        key: value for key, value in pinned.items() if key != "source_location"
+    } == (config)
+    assert Path(pinned["source_location"]) == tmp_path / "store" / "snapshots"
+    assert len(pinned["participants"]) == entrants
+    with pytest.raises(ValueError, match="twice the configured map count"):
+        admission.initialize_admission_store(
+            tmp_path / "invalid", config, rules=_rules(games_per_opponent=maps * 2 + 1)
+        )
+    assert not (tmp_path / "invalid").exists()

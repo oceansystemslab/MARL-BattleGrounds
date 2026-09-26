@@ -1,36 +1,34 @@
-"""Execute current paired all-pairs tournaments through the shared evaluator.
+"""Normalize tournament inputs and preserve historical resume contracts.
 
-run_tournament freezes entrants, builds a balanced map/spawn schedule, executes
-each fixed-participant matchup and qualifies the complete result population. Optional
-RunWriter output owns match/full/replay files. The same in-memory statistics
-serve both routes; this module does not define a second rating implementation.
+run_tournament sends fresh entrant lists, short declarations and full configs
+through the shared configured runner. Its private historical adapter finishes
+old list-tournament folders without migrating their files or random streams.
+Statistics, method loading, evaluation and result writing retain shared owners.
 """
 
 
 # Private setup and population helpers are shared authorities, not parallel rules.
-# pyright: reportPrivateUsage=false
+# pyright: reportPrivateUsage=false, reportUnusedFunction=false
 
 import json
 from collections import defaultdict
-from collections.abc import Iterable, Mapping, Sequence
-from contextlib import ExitStack
+from collections.abc import Generator, Iterable, Mapping, Sequence
+from contextlib import ExitStack, contextmanager
 from dataclasses import asdict, replace
 from numbers import Integral
 from pathlib import Path
 from typing import Any, cast
-from uuid import uuid4
 
 import jax
 import numpy as np
 
 from marl_battlegrounds._tdm_assets import current_map_id
 from marl_battlegrounds.core.types import EnvConfig
-from marl_battlegrounds.environment import MetricMode, make
+from marl_battlegrounds.environment import MetricMode, _episode_selection, make
 from marl_battlegrounds.evaluation.evaluate import (
     Columns,
     EpisodeSpec,
     EvaluationResult,
-    evaluate_episodes,
     normalize_episode_specs,
     policy_description,
     positive_int,
@@ -41,7 +39,6 @@ from marl_battlegrounds.evaluation.policy_execution import (
     Policy,
     System,
 )
-from marl_battlegrounds.evaluation.replay_v4 import ReplayArtifactV4
 from marl_battlegrounds.evaluation.results import TournamentResult
 from marl_battlegrounds.evaluation.run_writer import (
     IDENTITY_COLUMNS,
@@ -67,9 +64,114 @@ from marl_battlegrounds.tasks import (
     CANONICAL_TDM_EVALUATION_MAP_IDS,
     TDMMapInfo,
     canonical_tournament_rosters,
+    list_tdm_maps,
 )
 
 _ROSTER_A, _ROSTER_B = canonical_tournament_rosters()
+
+
+def _saved_configurations(
+    manifest: Mapping[str, Any], details: Mapping[str, Any]
+) -> dict[str, Any]:
+    """Recover pinned map contents from coordinator, pass and recorded snapshots.
+
+    manifest and details are checked saved-run metadata. Return a new mapping;
+    neither input is changed. Every duplicate identity must have equal content.
+    Missing planned source maps raise an actionable ValueError before recovery.
+    Callers restore required content through the shared configuration authority;
+    this helper never selects maps from the current catalog.
+    """
+    contents: dict[str, Any] = {}
+    snapshots = [manifest.get("configurations", {}), details.get("configurations", {})]
+    snapshots.extend(
+        entry.get("details", {}).get("configurations", {})
+        for entry in manifest["passes"].values()
+        if entry.get("phase") == "tournament"
+    )
+    for snapshot in snapshots:
+        if not isinstance(snapshot, dict):
+            raise ValueError("Saved tournament configuration snapshot is invalid")
+        for identifier, content in cast(dict[str, Any], snapshot).items():
+            if identifier in contents and contents[identifier] != content:
+                raise ValueError("Saved tournament configuration snapshots disagree")
+            contents[identifier] = content
+    for map_id, identifier in details["configuration_ids_by_map"].items():
+        if identifier not in contents:
+            raise ValueError(
+                f"Saved tournament lacks configuration {identifier} for map {map_id}; "
+                "restore its original run files or start a new tournament. "
+                "Current map content cannot replace missing saved content."
+            )
+    return contents
+
+
+def _saved_registered_maps(
+    manifest: Mapping[str, Any], details: Mapping[str, Any], configs: Mapping[int, Any]
+) -> dict[int, Mapping[str, Any]]:
+    """Recover and check the pinned registration of every unfinished source map.
+
+    New coordinators save serialized TDMMapInfo rows. Older runs may retain only
+    exact map names and splits in episode declarations; match those identities
+    against approved current/history records and check their saved geometry.
+    Never choose a replacement by integer ID alone. Missing or conflicting
+    evidence raises ValueError before opening the writer. Completed runs do not
+    need this recovery helper. Inputs and historical records stay unchanged.
+    """
+    from marl_battlegrounds._tdm_assets import map_history
+    from marl_battlegrounds.evaluation.catalog import build_resolved_env_config_v2
+    from marl_battlegrounds.evaluation.map_identity import _snapshot_map_metadata
+
+    saved = details.get("registered_maps")
+    result: dict[int, Mapping[str, Any]] = {}
+    if saved is not None:
+        if not isinstance(saved, dict):
+            raise ValueError("Saved tournament map registrations must be a mapping")
+        saved = cast(dict[str, Any], saved)
+        if set(saved) != {str(key) for key in configs}:
+            raise ValueError("Saved tournament map registrations differ from its plan")
+        result = {int(key): value for key, value in saved.items()}
+    else:
+        names: dict[int, tuple[str, str]] = {}
+        for entry in manifest["passes"].values():
+            if entry.get("phase") != "tournament":
+                continue
+            for row in entry.get("episodes", {}).values():
+                metadata = {
+                    item["name"]: item["value"] for item in row.get("map_metadata", [])
+                }
+                if metadata.get("map_origin") != "registered":
+                    continue
+                map_id = row["map_id"]
+                identity = (metadata["map_name"], metadata["map_split"])
+                if map_id in names and names[map_id] != identity:
+                    raise ValueError("Saved tournament map registrations disagree")
+                names[map_id] = identity
+        approved = (*list_tdm_maps(), *(row.info for row in map_history()))
+        for map_id, config in configs.items():
+            identity = names.get(map_id)
+            source = build_resolved_env_config_v2(config)
+            for info in approved:
+                if info.map_id != map_id or (info.name, info.split) != identity:
+                    continue
+                declared = info.model_dump(mode="json")
+                try:
+                    _snapshot_map_metadata(map_id, source, declared)
+                except ValueError:
+                    # Retained revisions can share a name but have other geometry.
+                    continue
+                result[map_id] = declared
+                break
+            else:
+                raise ValueError(
+                    f"Saved tournament lacks pinned registration for map {map_id}; "
+                    "restore its original run files or start a new tournament"
+                )
+        return result
+    for map_id, config in configs.items():
+        _snapshot_map_metadata(
+            map_id, build_resolved_env_config_v2(config), result[map_id]
+        )
+    return result
 
 
 def _config_matches_identity(
@@ -524,10 +626,9 @@ def _saved_tournament(
     )
 
 
-def run_tournament(
+def _resume_legacy_tournament(
     policies: Sequence[System | Policy | str] | None = None,
     *,
-    config: str | Path | Mapping[str, Any] | None = None,
     save_replays: int | Omitted = OMITTED,
     maps: Sequence[int | TDMMapInfo] | None | Omitted = OMITTED,
     episodes_per_pair: int | Omitted = OMITTED,
@@ -536,131 +637,60 @@ def run_tournament(
     metrics: MetricMode | Omitted = OMITTED,
     full_metrics_episodes: Iterable[int] | Omitted = OMITTED,
     replay_episodes: Iterable[int] | Omitted = OMITTED,
-    output_dir: str | Path | None = None,
-    resume_from: str | Path | None = None,
+    resume_from: str | Path | None,
     opponent_weights: Mapping[str, float] | None | Omitted = OMITTED,
     score_threshold: int | Omitted = OMITTED,
     max_steps: int | Omitted = OMITTED,
     red_zone_depth: float | Omitted = OMITTED,
     chunk_size: int = 16,
 ) -> TournamentResult:
-    """Evaluate every participant pair with fixed teams and both spawn locations.
+    """Resume a historical list tournament without changing its saved format.
 
     Parameters
     ----------
-    policies : Sequence[System | Policy | str] or None
-        At least two Systems, Policies or built-in names. Entrant labels must
-        be distinct. Numerical variables and initial memory templates are
-        snapshotted once; opaque external providers remain caller-owned.
-    config : JSON path, mapping or None
-        Complete custom tournament population and conditions. Use this or a
-        policies sequence, not both. Scientific programmatic options must stay
-        omitted on this route. Saved configuration runs inherit their config.
-    save_replays : int, default=0
-        First N scheduled games to capture. A nonempty explicit selection must
-        agree with this shorthand. Configuration runs use logical game IDs.
-    maps : Sequence[int | TDMMapInfo] | None
-        Optional distinct integer map IDs or TDMMapInfo entries. None uses
-        canonical evaluation maps 47..51 for a new run. Omitted maps on resume
-        reuse recorded configurations, without consulting current map assets.
-        Exact EnvConfig inputs are not accepted by this generic runner.
-    episodes_per_pair : int
-        Positive total across maps and both spawn choices, normally 100.
-        Must be divisible by twice the map count. Omitted scientific settings
-        inherit the selected saved tournament on resume. Explicit conflicts fail.
-    seed : int
-        Root uint32 integer, default 0; also seeds summary resampling.
-    num_envs : int
-        Positive maximum simultaneous games per fixed-participant matchup,
-        default 128. Smaller pending schedules use smaller batches.
-    metrics : MetricMode
-        "priority" by default, "full" for all full measurements, or "none"
-        to skip optional episode measurements. Match outcomes are always kept.
-    full_metrics_episodes : Iterable[int]
-        Global schedule IDs selected for full metrics;
-        empty by default. Explicit selections still work with metrics="none".
-    replay_episodes : Iterable[int]
-        Global schedule IDs selected for replay; empty by default.
-    output_dir : str | Path | None
-        Optional parent folder for a new run with a unique child folder.
-    resume_from : str | Path | None
-        Optional existing run folder with matching tournament identity.
-        Use this or output_dir, not both. Durable matches are not re-executed.
-    opponent_weights : Mapping[str, float] | None
-        Optional finite positive weight for every entrant name.
-        None gives equal opponent weights. Rates/tail scores use these weights;
-        the rating fit uses the observed match counts.
-    score_threshold : int
-        Positive TDM score target for every map, default 20.
-    max_steps : int
-        Positive horizon in ticks for each game, default 300.
-    red_zone_depth : float, default=5.0 (DEFAULT_TDM_RED_ZONE_DEPTH)
-        Red Zone depth in map units for every map. When an agent dies inside
-        its own team's Red Zone, the enemy team gets 2 points instead of 1; it
-        is still one kill and one death. 0.0 keeps one point per death. Must
-        be a Python float. New runs record it as "red_zone_depth" in their
-        metadata. On resume, omission inherits the saved run; a run saved
-        before the Red Zone rule reads as 0.0 and keeps its original
-        configuration IDs. A supplied value, even 5.0, must match the saved
-        run. The config route owns its rules, so any supplied value is
-        refused there.
-    chunk_size : int
-        Positive scheduling chunk length in ticks, default 16.
+    policies : sequence of System, Policy or str
+        Original frozen entrants, in any order. Their identities must match the
+        saved registrations. Each distinct System needed by unfinished jobs keeps
+        one resource scope until execution ends, closing before the writer.
+        Opaque external providers remain caller-owned.
+    resume_from : path
+        Exact old-format run folder. Required; this adapter cannot start a run.
+    save_replays, maps, episodes_per_pair, seed, metrics : saved options
+        Omitted values inherit the saved declaration. Supplied values assert
+        those same conditions; conflicting settings fail before writer recovery.
+    full_metrics_episodes, replay_episodes : iterable of int or Omitted
+        Saved global capture selections, inherited when omitted.
+    opponent_weights, score_threshold, max_steps, red_zone_depth : saved options
+        Scientific conditions that must remain equal to the saved run. A run
+        saved before Red Zone keeps depth 0.0 and historical configuration IDs.
+    num_envs : int, default=128
+        Positive execution capacity. Changing it does not change planned games.
+    chunk_size : int, default=16
+        Positive number of ticks per evaluator chunk, allowed to change on resume.
 
     Returns
     -------
     TournamentResult
-        TournamentResult with complete match evidence, policy/matchup/map summaries
-        and method metadata. Without file output, selected full columns and replays
-        remain in memory. With output, those fields are empty and paths identifies
-        produced files. Persisted priority values share match_results.csv rather
-        than a duplicate priority table.
+        Historical fields and recorded summaries. Completed results are read
+        without fitting or execution. New captures remain file-backed.
 
     Raises
     ------
     ValueError
-        Names, map choices, budgets, selections, weights, saved identity
-        or the complete match population are invalid, a supplied
-        red_zone_depth differs from the saved run ("red_zone_depth differs
-        from the saved evaluation conditions") or Core rejects it, or the
-        config route receives red_zone_depth. These depth errors are raised
-        before any file is written.
+        The folder, original entrants or saved scientific settings are invalid.
+        Missing historical map content is never replaced with current content.
     TypeError
-        A config or policy input/output violates its type contract, or
-        red_zone_depth is not a Python float.
-    RuntimeError
-        A policy, writer or required statistical fit fails.
-    OSError
-        Run files cannot be accessed or written.
+        A supplied method or option violates its existing type contract.
+    RuntimeError, OSError
+        Evaluation, fitting or recording fails. The failed run stays resumable.
 
     Notes
     -----
-    Host-only orchestration; do not wrap this function in jax.jit. JAX policies
-    use the shared compiled evaluator; external policies add their host-boundary
-    costs. Ratings and 5,000 paired-block bootstrap replicates run on the host.
-    The function owns and closes any writer it creates. A failed run remains
-    available for explicit resume. Default ordered rosters are mage, warrior,
-    hunter, rogue, priest for both teams. Within each matchup the sorted first
-    entrant stays Team A and the other
-    stays Team B. Paired games exchange complete spawn banks and have fresh
-    episode memory. Priority/full runs produce participant headline summaries;
-    none skips them, even with selected full reports. Completed saved summaries
-    are loaded without fitting again. Historical reversed-team schedules retain
-    their original interpretation and receive no fabricated spawn-pair headlines.
-    Configuration runs support verified game reuse through the shared canonical
-    machinery. This call does not perform admission or publish official releases.
-
-    Examples
-    --------
-    A small complete in-memory tournament (20 games across two maps):
-
-    >>> import marl_battlegrounds as marl_bgs
-    >>> result = marl_bgs.run_tournament(
-    ...     ["random", "tdm-alpha"], maps=[47, 48],
-    ...     episodes_per_pair=20, num_envs=4, max_steps=16, seed=7,
-    ... )
-    >>> len(result.matches)
-    20
+    Saved formats retain their original passes, game IDs, random streams and
+    interpretation. Reversed-team games keep the old evaluator contract and
+    receive no fabricated spawn-pair headlines. The shared job executor owns
+    sequential dispatch; this adapter only reads and finishes the old format.
+    It neither migrates folders nor installs canonical configuration records.
     """
     from marl_battlegrounds.evaluation.evaluation_conditions import (
         config_record,
@@ -673,57 +703,19 @@ def run_tournament(
         normalize_system_registration,
     )
     from marl_battlegrounds.evaluation.system_evaluation import (
-        freeze_evaluation_method,
         prepare_evaluation_system,
         validate_evaluation_rosters,
     )
     from marl_battlegrounds.tasks import _swap_spawn_banks, _validate_config_choices
 
-    if output_dir is not None and resume_from is not None:
-        raise ValueError("output_dir and resume_from are mutually exclusive")
-    configured_resume = False
-    if resume_from is not None:
-        from marl_battlegrounds.evaluation.results import _read_manifest
-
-        configured_resume = "tournament_reuse" in _read_manifest(Path(resume_from))
-    if config is not None or configured_resume:
-        from marl_battlegrounds.evaluation.canonical import _run_configured_tournament
-
-        if policies is not None:
-            raise ValueError("Supply policies or config, not competing populations")
-        explicit_rules = {
-            "maps": maps,
-            "episodes_per_pair": episodes_per_pair,
-            "seed": seed,
-            "opponent_weights": opponent_weights,
-            "score_threshold": score_threshold,
-            "max_steps": max_steps,
-            "red_zone_depth": red_zone_depth,
-        }
-        conflicts = [
-            name
-            for name, value in explicit_rules.items()
-            if not isinstance(value, Omitted)
-        ]
-        if conflicts:
-            raise ValueError(
-                "Config owns scientific settings; omit " + ", ".join(conflicts)
-            )
-        return _run_configured_tournament(
-            config,
-            metrics=metrics,
-            full_metrics_episodes=full_metrics_episodes,
-            replay_episodes=replay_episodes,
-            save_replays=save_replays,
-            output_dir=output_dir,
-            resume_from=resume_from,
-            num_envs=num_envs,
-            chunk_size=chunk_size,
-        )
+    if resume_from is None:
+        raise ValueError("Historical tournament recovery requires resume_from")
     if policies is None:
-        raise ValueError("Supply a policies sequence or a tournament config")
+        raise ValueError("Supply the original historical tournament policies")
     saved = read_saved_pass(resume_from, None, "tournament", "schedule")
-    saved_details = None if saved is None else saved[1]["details"]
+    if saved is None:
+        raise ValueError("Historical tournament recovery requires a saved schedule")
+    saved_details = cast(dict[str, Any], saved[1]["details"])
     seed = cast(int, option(seed, saved_details, "seed", 0))
     metrics = cast(MetricMode, option(metrics, saved_details, "metrics", "priority"))
     episodes_per_pair = cast(
@@ -752,14 +744,18 @@ def run_tournament(
         current_map_id(item) if isinstance(item, TDMMapInfo) else item
         for item in (CANONICAL_TDM_EVALUATION_MAP_IDS if maps is None else maps)
     )
-    if saved_details is not None:
-        if (
-            not isinstance(supplied_maps, Omitted)
-            and list(sorted(map_ids)) != saved_details["map_ids"]
-        ):
-            raise ValueError("maps differ from the saved tournament conditions")
-        map_ids = tuple(saved_details["map_ids"])
-    entrants = tuple(freeze_evaluation_method(item) for item in policies)
+    if (
+        not isinstance(supplied_maps, Omitted)
+        and list(sorted(map_ids)) != saved_details["map_ids"]
+    ):
+        raise ValueError("maps differ from the saved tournament conditions")
+    map_ids = tuple(saved_details["map_ids"])
+    from marl_battlegrounds.evaluation.sampling_evidence import method_sampling_fact
+    from marl_battlegrounds.evaluation.tournament_inputs import (
+        _prepare_tournament_method,
+    )
+
+    entrants = tuple(_prepare_tournament_method(item) for item in policies)
     frozen = {entrant.name: entrant for entrant in entrants}
     schedule = build_tournament_schedule(
         [entrant.name for entrant in entrants],
@@ -801,7 +797,7 @@ def run_tournament(
         else normalize_system_registration(team, phase="tournament", frozen=True)[1]
         for _, team in sorted(frozen.items())
     ]
-    if saved_details is not None and descriptions != saved_details.get("policies"):
+    if descriptions != saved_details.get("policies"):
         raise ValueError(
             "tournament participant identity differs from the saved frozen registration"
         )
@@ -813,77 +809,61 @@ def run_tournament(
         )
         systems[identifier] = registration
         participants[str(description["name"])] = identifier
-    legacy = saved_details is not None and saved_details.get("pairing_protocol") is None
-    if (
-        saved_details is not None
-        and not legacy
-        and saved_details.get("pairing_protocol") != "fixed-team-spawn-v1"
-    ):
+    legacy = saved_details.get("pairing_protocol") is None
+    if not legacy and saved_details.get("pairing_protocol") != "fixed-team-spawn-v1":
         raise ValueError("unknown saved tournament pairing protocol")
     configurations: dict[str, Any] = {}
     # A saved run may predate the Red Zone rule: its 12-key configurations
     # restore at depth 0.0 and keep their original (historical) identities.
     historical_by_map: dict[int, bool] = {}
-    if saved is not None:
-        assert saved_details is not None
-        configurations.update(saved[0]["configurations"])
-        restored = {
-            int(map_id): restore_recorded_config(configurations[identifier], identifier)
-            for map_id, identifier in saved_details["configuration_ids_by_map"].items()
-        }
-        configs = {map_id: config for map_id, (config, _) in restored.items()}
-        historical_by_map = {
-            map_id: historical for map_id, (_, historical) in restored.items()
-        }
-        if not isinstance(supplied_maps, Omitted):
-            for current in normalize_episode_specs(
-                sorted(map_ids),
-                len(map_ids),
-                _ROSTER_A,
-                _ROSTER_B,
-                score_threshold,
-                max_steps,
-                red_zone_depth=red_zone_depth,
+    configurations.update(_saved_configurations(saved[0], saved_details))
+    restored = {
+        int(map_id): restore_recorded_config(configurations[identifier], identifier)
+        for map_id, identifier in saved_details["configuration_ids_by_map"].items()
+    }
+    configs = {map_id: config for map_id, (config, _) in restored.items()}
+    historical_by_map = {
+        map_id: historical for map_id, (_, historical) in restored.items()
+    }
+    if not isinstance(supplied_maps, Omitted):
+        for current in normalize_episode_specs(
+            sorted(map_ids),
+            len(map_ids),
+            _ROSTER_A,
+            _ROSTER_B,
+            score_threshold,
+            max_steps,
+            red_zone_depth=red_zone_depth,
+        ):
+            recorded = saved_details["configuration_ids_by_map"].get(
+                str(current.map_id)
+            )
+            if not _config_matches_identity(
+                current.env_config,
+                recorded,
+                historical=historical_by_map.get(cast(int, current.map_id), False),
             ):
-                recorded = saved_details["configuration_ids_by_map"].get(
-                    str(current.map_id)
+                raise ValueError(
+                    "explicit map contents differ from the saved tournament source"
                 )
-                if not _config_matches_identity(
-                    current.env_config,
-                    recorded,
-                    historical=historical_by_map.get(cast(int, current.map_id), False),
-                ):
-                    raise ValueError(
-                        "explicit map contents differ from the saved tournament source"
-                    )
-        if not legacy:
-            schedule = tuple(
-                TournamentMatch(**record) for record in saved_details["schedule"]
-            )
-        else:
-            schedule = tuple(
-                replace(
-                    match,
-                    team_a=match.team_b if match.spawn_locations == 1 else match.team_a,
-                    team_b=match.team_a if match.spawn_locations == 1 else match.team_b,
-                    pairing_protocol=None,
-                    spawn_locations=None,
-                )
-                for match in schedule
-            )
+    if not legacy:
+        schedule = tuple(
+            TournamentMatch(**record) for record in saved_details["schedule"]
+        )
     else:
-        configs = {
-            spec.map_id: spec.env_config
-            for spec in normalize_episode_specs(
-                sorted(map_ids),
-                len(map_ids),
-                _ROSTER_A,
-                _ROSTER_B,
-                score_threshold,
-                max_steps,
-                red_zone_depth=red_zone_depth,
+        schedule = tuple(
+            replace(
+                match,
+                team_a=match.team_b if match.spawn_locations == 1 else match.team_a,
+                team_b=match.team_a if match.spawn_locations == 1 else match.team_b,
+                pairing_protocol=None,
+                spawn_locations=None,
             )
-        }
+            for match in schedule
+        )
+    registered_maps: dict[int, Mapping[str, Any]] = {}
+    if not legacy and saved[0].get("tournament_summary") is None:
+        registered_maps = _saved_registered_maps(saved[0], saved_details, configs)
     resolved: dict[tuple[int, int], Any] = {}
     executions = {
         name: prepare_evaluation_system(entrant)[0] for name, entrant in frozen.items()
@@ -899,20 +879,20 @@ def run_tournament(
         _validate_config_choices(
             env_config, batched=False, both_spawn_choices=not legacy
         )
-        historical = historical_by_map.get(cast(int, map_id), False)
+        historical = historical_by_map.get(map_id, False)
         identifier, content = config_record(env_config, historical=historical)
         configurations[identifier] = content
-        source_ids[cast(int, map_id)] = identifier
-        resolved[cast(int, map_id), 0] = env_config
-        resolved_ids[cast(int, map_id), 0] = identifier
+        source_ids[map_id] = identifier
+        resolved[map_id, 0] = env_config
+        resolved_ids[map_id, 0] = identifier
         if not legacy:
             exchanged = _swap_spawn_banks(env_config)
             swapped_id, swapped_content = config_record(
                 exchanged, historical=historical
             )
             configurations[swapped_id] = swapped_content
-            resolved[cast(int, map_id), 1] = exchanged
-            resolved_ids[cast(int, map_id), 1] = swapped_id
+            resolved[map_id, 1] = exchanged
+            resolved_ids[map_id, 1] = swapped_id
     if not legacy:
         calculated = tuple(
             replace(
@@ -924,7 +904,7 @@ def run_tournament(
             )
             for match in schedule
         )
-        if saved is not None and calculated != schedule:
+        if calculated != schedule:
             raise ValueError(
                 "saved tournament schedule differs from its configuration content"
             )
@@ -932,34 +912,14 @@ def run_tournament(
     groups: dict[tuple[str, str], list[TournamentMatch]] = defaultdict(list)
     for match in schedule:
         groups[match.team_a, match.team_b].append(match)
-    metadata: dict[str, Any] = (
-        dict(saved_details)
-        if saved_details is not None
-        else {
-            "seed": seed,
-            "rng_protocol": "evaluation-systems-v1",
-            "policies": descriptions,
-            "map_ids": sorted(map_ids),
-            "episodes_per_pair": episodes_per_pair,
-            "num_matches": len(schedule),
-            "score_threshold": score_threshold,
-            "max_steps": max_steps,
-            "red_zone_depth": red_zone_depth,
-            "metrics": metrics,
-            "full_metrics_episodes": list(selected.full_metrics_episodes),
-            "replay_episodes": list(selected.replay_episodes),
-            "opponent_weights": None
-            if opponent_weights is None
-            else dict(opponent_weights),
-            "configuration_ids_by_map": {
-                str(key): value for key, value in source_ids.items()
-            },
-            "pairing_protocol": "fixed-team-spawn-v1",
-            "schedule": [asdict(match) for match in schedule],
-            "schedule_digest": content_digest([asdict(match) for match in schedule]),
-            "participants": participants,
-        }
-    )
+    metadata: dict[str, Any] = dict(saved_details)
+    saved_sampling = metadata.get("method_sampling")
+    if saved_sampling is not None and saved_sampling != {
+        name: method_sampling_fact(method) for name, method in frozen.items()
+    }:
+        raise ValueError(
+            "Tournament sampling facts differ from the saved frozen methods"
+        )
     specs_by_group: dict[tuple[str, str], list[EpisodeSpec]] = {}
     for pair, group in sorted(groups.items()):
         specs = [
@@ -986,19 +946,18 @@ def run_tournament(
             for match in group
         ]
         specs_by_group[pair] = specs
-    if saved is not None:
-        _check_saved_matchups(
-            saved[0],
-            groups,
-            {str(value["name"]): value for value in descriptions},
-            legacy=legacy,
-            seed=seed,
-            metrics=metrics,
-            full_ids=selected.full_metrics_episodes,
-            replay_ids=selected.replay_episodes,
-            verify_execution=saved[0].get("tournament_summary") is None,
-        )
-    if saved is not None and saved[0].get("tournament_summary") is not None:
+    _check_saved_matchups(
+        saved[0],
+        groups,
+        {str(value["name"]): value for value in descriptions},
+        legacy=legacy,
+        seed=seed,
+        metrics=metrics,
+        full_ids=selected.full_metrics_episodes,
+        replay_ids=selected.replay_episodes,
+        verify_execution=saved[0].get("tournament_summary") is None,
+    )
+    if saved[0].get("tournament_summary") is not None:
         assert resume_from is not None
         manifest = saved[0]
         if not legacy and any(
@@ -1015,123 +974,93 @@ def run_tournament(
                 finalizer.reaffirm_tournament_result(str(metadata["schedule_digest"]))
             manifest = json.loads((Path(resume_from) / "run_details.json").read_bytes())
         return _saved_tournament(Path(resume_from), manifest, metadata)
-    with ExitStack() as cleanup:
-        writer = None
-        if output_dir is not None or resume_from is not None:
-            writer = cleanup.enter_context(
-                RunWriter(
-                    output_dir,
-                    resume_from=resume_from,
-                    phase="tournament",
-                    pass_id="schedule",
-                    details=metadata,
-                )
-            )
-            if not legacy:
-                writer.set_tournament_coordinator(str(metadata["schedule_digest"]))
-        run_id = writer.run_id if writer is not None else "in-memory-" + uuid4().hex
+    with (
+        RunWriter(
+            resume_from=resume_from,
+            phase="tournament",
+            pass_id="schedule",
+            details=metadata,
+        ) as writer,
+        ExitStack() as cleanup,
+    ):
+        if not legacy:
+            writer.set_tournament_coordinator(str(metadata["schedule_digest"]))
+        run_id = writer.run_id
         metadata = {**metadata, "run_id": run_id}
-        passes: dict[str, Any] = {}
-        matches: list[ResultRow] = []
         completion_order: list[int] = []
-        full_tables: list[Columns] = []
-        replays: list[ReplayArtifactV4] = []
         leased: set[int] = set()
-        for index, ((first, second), group) in enumerate(sorted(groups.items()), 1):
-            group_ids = {match.episode_id for match in group}
-            pass_id = f"pair-side-{index}" if legacy else f"pair-{index}"
-            pass_key = json.dumps(("tournament", pass_id), separators=(",", ":"))
-            completed: set[int] = (
-                set(
-                    saved[0]["passes"]
-                    .get(pass_key, {})
-                    .get("completed_episode_ids", ())
-                )
-                if saved is not None
-                else set()
+        from marl_battlegrounds.evaluation.tournament_execution import (
+            TournamentJob,
+            execute_tournament_jobs,
+        )
+
+        jobs = (
+            TournamentJob(
+                index,
+                first,
+                second,
+                tuple(specs_by_group[first, second]),
+                seed,
+                "tournament",
+                f"pair-side-{index}" if legacy else f"pair-{index}",
+                tuple(
+                    sorted(
+                        {match.episode_id for match in group}.intersection(
+                            selected.full_metrics_episodes
+                        )
+                    )
+                ),
+                tuple(
+                    sorted(
+                        {match.episode_id for match in group}.intersection(
+                            selected.replay_episodes
+                        )
+                    )
+                ),
+                legacy,
             )
-            if group_ids - completed:
-                for name in (first, second):
+            for index, ((first, second), group) in enumerate(sorted(groups.items()), 1)
+        )
+
+        @contextmanager
+        def legacy_pair(
+            job: TournamentJob,
+        ) -> Generator[tuple[System | Policy, System | Policy]]:
+            """Lease only unfinished historical games; share clients across pairs."""
+            pass_key = json.dumps((job.phase, job.pass_id), separators=(",", ":"))
+            completed = set(
+                saved[0]["passes"].get(pass_key, {}).get("completed_episode_ids", ())
+            )
+            if any(spec.episode_id not in completed for spec in job.episodes):
+                for name in (job.first, job.second):
                     method = frozen[name]
                     if (
                         isinstance(method, System)
                         and method.resource_scope is not None
                         and id(method) not in leased
                     ):
-                        cleanup.enter_context(method.resource_scope(writer is not None))
+                        cleanup.enter_context(method.resource_scope(True))
                         leased.add(id(method))
-            execute = evaluate_episodes
-            if legacy:
-                from marl_battlegrounds.evaluation.evaluate import _run_evaluation
+            yield frozen[job.first], frozen[job.second]
 
-                execute = _run_evaluation
-            result = execute(
-                frozen[first],
-                frozen[second],
-                specs_by_group[first, second],
-                seed=seed,
-                num_envs=num_envs,
-                metrics=metrics,
-                full_metrics_episodes=group_ids.intersection(
-                    selected.full_metrics_episodes
-                ),
-                replay_episodes=group_ids.intersection(selected.replay_episodes),
-                writer=writer,
-                phase="tournament",
-                pass_id=pass_id,
-                chunk_size=chunk_size,
-                run_id=run_id,
-            )
+        for _job, result in execute_tournament_jobs(
+            jobs,
+            legacy_pair,
+            writer=writer,
+            run_id=run_id,
+            num_envs=num_envs,
+            metrics=metrics,
+            chunk_size=chunk_size,
+            registered_maps=registered_maps,
+        ):
             completion_order.extend(
                 cast(Sequence[int], result.metadata.get("completion_order", ()))
             )
-            configurations.update(
-                cast(dict[str, Any], result.metadata["configurations"])
-            )
-            systems.update(cast(dict[str, Any], result.metadata.get("systems", {})))
-            entry = result.metadata
-            declared_schedule: Any = entry.get("schedule", {})
-            if isinstance(declared_schedule, (tuple, list)):
-                declared_schedule = {
-                    str(row["episode_id"]): row
-                    for row in cast(Sequence[dict[str, Any]], declared_schedule)
-                }
-            pass_key = json.dumps(
-                ("tournament", entry["pass_id"]), separators=(",", ":")
-            )
-            passes[pass_key] = {
-                "phase": "tournament",
-                "pass_id": entry["pass_id"],
-                "details": entry,
-                "system_ids": entry.get("system_ids", {}),
-                "episodes": {
-                    str(key): value
-                    for key, value in cast(dict[int, Any], declared_schedule).items()
-                },
-                "completed_episode_ids": sorted(group_ids),
-                "recorded_metrics_by_episode": {
-                    str(identifier): "full"
-                    if metrics == "full" or identifier in selected.full_metrics_episodes
-                    else metrics
-                    for identifier in group_ids
-                },
-                "result_state": {
-                    "version": 1,
-                    "status": "complete",
-                    "schedule_digest": entry.get("schedule_digest"),
-                    "reason": None,
-                },
-            }
-            if writer is None:
-                matches.extend(_memory_matches(result, group))
-                full_tables.append(result.full_metrics)
-                replays.extend(result.replays)
-        if writer is not None:
-            matches = _read_matches(writer.paths["match_results"])
-            manifest = json.loads((writer.run_dir / "run_details.json").read_bytes())
-            configurations.update(manifest["configurations"])
-            systems.update(manifest["systems"])
-            passes = manifest["passes"]
+        matches = _read_matches(writer.paths["match_results"])
+        manifest = json.loads((writer.run_dir / "run_details.json").read_bytes())
+        configurations.update(manifest["configurations"])
+        systems.update(manifest["systems"])
+        passes = manifest["passes"]
         matches.sort(key=lambda row: int(cast(int, row["episode_id"])))
         outcomes = {
             int(cast(int, row["episode_id"])): int(cast(int, row["outcome"]))
@@ -1151,7 +1080,11 @@ def run_tournament(
             )
         )
         statistics = summarize_tournament(
-            schedule, outcomes, seed=seed, opponent_weights=opponent_weights
+            schedule,
+            outcomes,
+            seed=seed,
+            opponent_weights=opponent_weights,
+            method_sampling=saved_sampling,
         )
         headline = (
             None
@@ -1171,17 +1104,16 @@ def run_tournament(
                 "evidence": evidence,
             }
         )
-        if writer is not None:
-            writer.write_tournament_results(
-                statistics, headline=headline, qualification=qualification
-            )
+        writer.write_tournament_results(
+            statistics, headline=headline, qualification=qualification
+        )
         return TournamentResult(
             tuple(matches),
             statistics.tournament_results,
             statistics.matchup_results,
             statistics.map_results,
-            _merge_columns(full_tables),
-            tuple(replays),
+            {},
+            (),
             {
                 **metadata,
                 "configurations": configurations,
@@ -1196,6 +1128,419 @@ def run_tournament(
                     "qualification": qualification,
                 },
             },
-            None if writer is None else writer.paths,
+            writer.paths,
             headline_metrics=() if headline is None else headline,
         )
+
+
+def run_tournament(
+    policies: Sequence[System | Policy | str] | None = None,
+    *,
+    config: str | Path | Mapping[str, Any] | None = None,
+    challenger: System | Policy | str | None | Omitted = OMITTED,
+    games_per_opponent: int | Omitted = OMITTED,
+    episodes_per_pair: int | Omitted = OMITTED,
+    save_replays: int | Omitted = OMITTED,
+    maps: Sequence[int | TDMMapInfo] | None | Omitted = OMITTED,
+    seed: int | Omitted = OMITTED,
+    num_envs: int = 128,
+    metrics: MetricMode | Omitted = OMITTED,
+    full_metrics_episodes: Iterable[int] | Omitted = OMITTED,
+    replay_episodes: Iterable[int] | Omitted = OMITTED,
+    output_dir: str | Path | None = None,
+    resume_from: str | Path | None = None,
+    opponent_weights: Mapping[str, float] | None | Omitted = OMITTED,
+    score_threshold: int | Omitted = OMITTED,
+    max_steps: int | Omitted = OMITTED,
+    red_zone_depth: float | Omitted = OMITTED,
+    rerun_existing: bool | Omitted = OMITTED,
+    chunk_size: int = 16,
+) -> TournamentResult:
+    """Run one round robin from methods, a short config or a saved full field.
+
+    Parameters
+    ----------
+    policies : sequence of System, Policy or str, optional
+        At least two entrants with distinct names. Strings use the shared loader:
+        built-in names, actor export/checkpoint folders or trusted module:function
+        factories. Live objects stay in this process and are never serialized.
+        Use this sequence or config, not both.
+    config : path or mapping, optional
+        Short field with entrants and optional maps, rosters, rules, budget,
+        seed/seeds, output settings and a pre-game selection declaration; or a
+        complete saved tournament descriptor. Selection freezes the candidate
+        field and budget before validation, and a frozen population before tests.
+        Relative folder and output paths resolve beside its JSON file. A mapping
+        uses the current directory. Equal explicit values may use different
+        sequence types; capture IDs compare as sorted unique selections. Unknown
+        fields and conflicting settings fail.
+    challenger : System, Policy, str or None, optional
+        Add one method as Team A against each field member, exchanging spawn
+        ends between paired games. None means no challenger. Omission on resume
+        inherits a saved reloadable challenger; a live one must be supplied again.
+    games_per_opponent, episodes_per_pair : int, optional
+        Total games per unordered pair across all maps and spawn ends. New lists
+        default to 100. The total must divide equally over maps and spawn pairs.
+        episodes_per_pair is the retained alias; equal simultaneous values pass,
+        conflicts fail. Saved and configured budgets are inherited on omission.
+    maps : sequence of int or TDMMapInfo, or None, optional
+        Distinct map IDs or checked registered map descriptions. None selects
+        test maps 47 through 51 for a new list. Resume uses saved map contents.
+    seed : int, optional
+        Root uint32 random seed and bootstrap seed; new lists default to 0.
+        Short configs may instead declare distinct roots in seeds; the total
+        budget is shared equally across them, not multiplied.
+    num_envs : int, default=128
+        Maximum parallel games in the active matchup. Matchups run in sequence.
+        Execution settings may change on resume without changing planned games.
+    metrics : {'priority', 'full', 'none'}, optional
+        Default priority. None-mode is the string 'none'; outcomes and ratings
+        remain available while optional metrics are skipped.
+    full_metrics_episodes, replay_episodes : iterable of int, optional
+        Logical scheduled game IDs to capture; empty by default. Original replay
+        execution IDs remain unchanged. Explicit full selections work in none mode.
+    save_replays : int, optional
+        Capture the first N scheduled games, default 0. An explicit replay list
+        must agree with a nonzero shorthand.
+    output_dir, resume_from : path or None
+        Parent for a new run or the exact saved run to resume; choose at most one.
+        With neither, results stay in memory and no run files are created.
+    opponent_weights : mapping or None, optional
+        Positive weight per entrant name for rate/tail summaries. None gives
+        equal weights. It does not change the joint rating fit.
+    score_threshold, max_steps : int, optional
+        New-list score target and horizon in ticks; defaults 20 and 300.
+    red_zone_depth : float, optional
+        New-list Red Zone depth in map units, default 5.0. An own-zone death
+        gives the other team 2 points. 0.0 keeps one point per death. Historical
+        runs keep their saved rules; loading an actor never changes these rules.
+    rerun_existing : bool, optional
+        Explicit fresh execution of a configured field, default False. Reuse
+        requires matching conditions and checked evidence; no hidden fallback.
+    chunk_size : int, default=16
+        Decisions per evaluator chunk. An explicit value is honored.
+
+    Returns
+    -------
+    TournamentResult
+        Complete match, matchup, map and ranking tables through the shared result
+        interface. New runs also expose the configured result's snapshot and reuse
+        facts. Selected captures stay in memory only when no output folder is used.
+
+    Raises
+    ------
+    ValueError, TypeError
+        Entrants, rules, budget aliases, saved identities or captures conflict.
+        Invalid batch or chunk sizes fail before any entrant loads. Required live
+        entrants must be supplied again for unfinished resumed work.
+    OSError, RuntimeError
+        Loading, evaluation, recording or analysis fails. Durable earlier games
+        remain available for explicit resume. Factories are trusted installed code.
+
+    Notes
+    -----
+    Host orchestration, not a jitted function. All new entry forms share one
+    resolved runner, evaluator, writer and statistical owner. Old list folders
+    use the same job executor while retaining their original file format. No
+    call here publishes results or admits a System to the official ladder.
+    Numerical variables and memory templates are frozen at setup; opaque provider
+    state remains caller-owned. A needed System keeps its resource scope open
+    across unfinished matchups, closing before the writer. This manages clients
+    created by the System, not caller-supplied clients or independent servers.
+    Backend allocation errors propagate. A smaller num_envs reduces simulation
+    memory, not model weights. Scientific settings on resume are assertions,
+    not permission to replace saved conditions.
+
+    Examples
+    --------
+    >>> import marl_battlegrounds as marl_bgs
+    >>> result = marl_bgs.run_tournament(
+    ...     ["random", "tdm-alpha"], maps=[47], games_per_opponent=2,
+    ...     max_steps=16, seed=7,
+    ... )
+    >>> len(result.matches)
+    2
+    """
+    from marl_battlegrounds.evaluation.canonical import (
+        _run_configured_tournament,
+        _saved_plan,
+    )
+    from marl_battlegrounds.evaluation.results import _read_manifest
+    from marl_battlegrounds.evaluation.tournament_inputs import (
+        _prepare_tournament_method,
+        prepare_tournament_inputs,
+        read_short_tournament_config,
+        resolve_tournament_budget,
+    )
+
+    num_envs = positive_int(num_envs, "num_envs")
+    chunk_size = positive_int(chunk_size, "chunk_size")
+    if output_dir is not None and resume_from is not None:
+        raise ValueError("output_dir and resume_from are mutually exclusive")
+    if policies is not None and config is not None:
+        raise ValueError("Supply policies or config, not competing populations")
+    budget = resolve_tournament_budget(games_per_opponent, episodes_per_pair)
+    challenger_prepared = False
+    if resume_from is not None and "tournament_reuse" not in _read_manifest(
+        Path(resume_from)
+    ):
+        if config is not None or (
+            not isinstance(challenger, Omitted) and challenger is not None
+        ):
+            raise ValueError("Historical list runs resume with their original policies")
+        if not isinstance(rerun_existing, Omitted) and rerun_existing:
+            raise ValueError("Historical resume cannot replace saved games")
+        return _resume_legacy_tournament(
+            policies,
+            resume_from=resume_from,
+            save_replays=save_replays,
+            maps=maps,
+            episodes_per_pair=budget,
+            seed=seed,
+            num_envs=num_envs,
+            metrics=metrics,
+            full_metrics_episodes=full_metrics_episodes,
+            replay_episodes=replay_episodes,
+            opponent_weights=opponent_weights,
+            score_threshold=score_threshold,
+            max_steps=max_steps,
+            red_zone_depth=red_zone_depth,
+            chunk_size=chunk_size,
+        )
+    short = None if config is None else read_short_tournament_config(config)
+    rules: dict[str, Any] = {
+        "maps": maps,
+        "games_per_opponent": budget,
+        "seed": seed,
+        "opponent_weights": opponent_weights,
+        "score_threshold": score_threshold,
+        "max_steps": max_steps,
+        "red_zone_depth": red_zone_depth,
+    }
+    outputs: dict[str, Any] = {
+        "metrics": metrics,
+        "full_metrics_episodes": full_metrics_episodes,
+        "replay_episodes": replay_episodes,
+        "save_replays": save_replays,
+    }
+    raw: dict[str, Any] = {}
+    if short is not None:
+        raw, _ = short
+        policies = raw["entrants"]
+        for name in ("full_metrics_episodes", "replay_episodes"):
+            if not isinstance(outputs[name], Omitted):
+                outputs[name] = _episode_selection(outputs[name], name)
+        config_budget = resolve_tournament_budget(
+            raw.get("games_per_opponent", OMITTED),
+            raw.get("episodes_per_pair", OMITTED),
+        )
+        if not isinstance(config_budget, Omitted):
+            raw = {**raw, "games_per_opponent": config_budget}
+        for key, value in [*rules.items(), *outputs.items()]:
+            if key not in raw:
+                continue
+            selected = raw[key]
+            if key in {"full_metrics_episodes", "replay_episodes"}:
+                selected = _episode_selection(selected, key)
+            if not isinstance(value, Omitted):
+                actual, expected = value, selected
+                if key == "maps":
+                    # Schedule order is sorted by ID; keep supplied map objects
+                    # below so their complete content still reaches validation.
+                    actual, expected = (
+                        tuple(
+                            sorted(
+                                item.map_id if isinstance(item, TDMMapInfo) else item
+                                for item in (
+                                    CANONICAL_TDM_EVALUATION_MAP_IDS
+                                    if choices is None
+                                    else choices
+                                )
+                            )
+                        )
+                        for choices in (value, selected)
+                    )
+                if actual != expected:
+                    raise ValueError(
+                        f"{key} conflicts with the short tournament config"
+                    )
+                if key == "maps":
+                    selected = value
+            (rules if key in rules else outputs)[key] = selected
+        if raw.get("output_dir") is not None:
+            if (
+                output_dir is not None
+                and Path(output_dir).resolve() != Path(raw["output_dir"]).resolve()
+            ):
+                raise ValueError(
+                    "output_dir conflicts with the short tournament config"
+                )
+            if resume_from is None:
+                output_dir = raw["output_dir"]
+    saved = _saved_plan(resume_from)
+    bindings: dict[str, System | Policy] | None = None
+    input_metadata: dict[str, Any] | None = None
+    if saved is not None:
+        previous = saved[0]["details"]
+        generic = previous.get("input_metadata", {})
+        if short is not None and not generic:
+            raise ValueError(
+                "A full saved field needs its full config, not a new short config"
+            )
+        for key, value in rules.items():
+            if isinstance(value, Omitted):
+                continue
+            saved_key = (
+                "episodes_per_pair"
+                if key == "games_per_opponent"
+                else "map_ids"
+                if key == "maps"
+                else key
+            )
+            expected = generic.get(saved_key)
+            actual = value
+            if key == "maps":
+                actual = sorted(
+                    item.map_id if isinstance(item, TDMMapInfo) else item
+                    for item in (
+                        CANONICAL_TDM_EVALUATION_MAP_IDS if value is None else value
+                    )
+                )
+                for item in value or ():
+                    if isinstance(item, TDMMapInfo):
+                        known = next(
+                            (
+                                row["registered_map"]
+                                for row in saved[1]["conditions"]["map_sources"]
+                                if row["map_id"] == item.map_id
+                            ),
+                            None,
+                        )
+                        if item.model_dump(mode="json") != known:
+                            raise ValueError(
+                                "Supplied map description differs from the "
+                                "saved tournament"
+                            )
+            if not generic:
+                if key == "games_per_opponent":
+                    expected = previous["budget"]["resolved_games_per_opponent"]
+                else:
+                    raise ValueError("Config owns scientific settings; omit " + key)
+            if actual != expected:
+                label = (
+                    "red_zone_depth differs from the saved evaluation conditions"
+                    if key == "red_zone_depth"
+                    else f"{key} differs from the saved tournament conditions"
+                )
+                raise ValueError(label)
+        if generic and not isinstance(rules["maps"], Omitted):
+            from marl_battlegrounds.evaluation import tournament_inputs
+            from marl_battlegrounds.evaluation.evaluation_conditions import (
+                config_record,
+            )
+
+            rosters = generic["rosters"]
+            for current in tournament_inputs.normalize_episode_specs(
+                generic["map_ids"],
+                len(generic["map_ids"]),
+                rosters["team_a"],
+                rosters["team_b"],
+                generic["score_threshold"],
+                generic["max_steps"],
+                red_zone_depth=generic["red_zone_depth"],
+            ):
+                identifier, _ = config_record(current.env_config)
+                if (
+                    identifier
+                    != generic["configuration_ids_by_map"][str(current.map_id)]
+                ):
+                    raise ValueError(
+                        "explicit map contents differ from the saved tournament source"
+                    )
+        if "selection" in raw:
+            from marl_battlegrounds.evaluation.population_selection import (
+                bind_selection,
+            )
+
+            previous_bound = saved[1].get("selection")
+            if previous_bound is None:
+                raise ValueError(
+                    "A saved tournament cannot acquire a selection rule after games"
+                )
+            current_bound = bind_selection(
+                raw["selection"],
+                saved[1],
+                entrant_order=previous_bound["declaration"].get("entrant_order"),
+            )
+            if current_bound != previous_bound:
+                raise ValueError(
+                    "selection differs from the saved pre-game declaration"
+                )
+        for key in ("seeds", "rosters"):
+            if key in raw and raw[key] != generic.get(key):
+                raise ValueError(f"{key} differs from the saved tournament conditions")
+        if policies is not None:
+            frozen = tuple(_prepare_tournament_method(value) for value in policies)
+            by_name = {method.name: method for method in frozen}
+            expected = {row["name"] for row in saved[1]["participants"]}
+            if len(by_name) != len(frozen) or set(by_name) != expected:
+                raise ValueError(
+                    "Supplied participant names differ from the saved field"
+                )
+            bindings = {
+                row["entrant_id"]: by_name[row["name"]]
+                for row in saved[1]["participants"]
+            }
+        selected_config = None if config is None or short is not None else config
+    elif policies is not None:
+        if isinstance(challenger, str):
+            challenger = _prepare_tournament_method(challenger)
+            challenger_prepared = True
+        defaults: dict[str, Any] = {
+            "maps": None,
+            "games_per_opponent": 100,
+            "seed": 0,
+            "opponent_weights": None,
+            "score_threshold": 20,
+            "max_steps": 300,
+            "red_zone_depth": 5.0,
+        }
+        resolved = {
+            key: defaults[key] if isinstance(value, Omitted) else value
+            for key, value in rules.items()
+        }
+        selected_config, bindings, input_metadata = prepare_tournament_inputs(
+            policies,
+            **resolved,
+            seeds=raw.get("seeds"),
+            selection=raw.get("selection"),
+            rosters=raw.get("rosters"),
+            challenger=None if isinstance(challenger, Omitted) else challenger,
+        )
+    else:
+        if config is None:
+            raise ValueError("Supply a policies sequence or a tournament config")
+        conflicts = [
+            key
+            for key, value in rules.items()
+            if key != "games_per_opponent" and not isinstance(value, Omitted)
+        ]
+        if conflicts:
+            raise ValueError(
+                "Config owns scientific settings; omit " + ", ".join(conflicts)
+            )
+        selected_config = config
+    return _run_configured_tournament(
+        selected_config,
+        challenger=challenger,
+        challenger_prepared=challenger_prepared,
+        games_per_opponent=cast(int | Omitted, rules["games_per_opponent"]),
+        rerun_existing=rerun_existing,
+        **outputs,
+        output_dir=output_dir,
+        resume_from=resume_from,
+        num_envs=num_envs,
+        chunk_size=chunk_size,
+        bindings=bindings,
+        input_metadata=input_metadata,
+    )

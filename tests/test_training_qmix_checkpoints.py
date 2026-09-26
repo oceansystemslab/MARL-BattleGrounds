@@ -57,10 +57,15 @@ from tests.test_training_checkpoints import (
 )
 
 import marl_battlegrounds.training.checkpoints as checkpoints
+from marl_battlegrounds._method_loading import load_method
 from marl_battlegrounds.baselines import qmix
 from marl_battlegrounds.baselines.actions import categorical_action_mask, encode_actions
 from marl_battlegrounds.environment import make
-from marl_battlegrounds.evaluation.policy_execution import SystemInput, SystemOutput
+from marl_battlegrounds.evaluation.policy_execution import (
+    System,
+    SystemInput,
+    SystemOutput,
+)
 from marl_battlegrounds.tasks import balanced_spawn_configs
 from marl_battlegrounds.training import _run_io as io_helpers
 from marl_battlegrounds.training import make_training_schedule, prepare_training_content
@@ -707,7 +712,7 @@ def test_greedy_export_matches_the_q_network_and_its_learner(tmp_path: Path) -> 
         assert bool(jnp.all(jnp.take_along_axis(legal, indices[..., None], axis=-1)))
         if frame == "left":
             _equal(loaded, expected)
-    from_learner = load_system(learner_path)
+    from_learner = cast(System, load_method(str(learner_path)))
     _equal(from_learner.variables, system.variables)
 
 

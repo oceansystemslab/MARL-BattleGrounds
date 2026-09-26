@@ -15,7 +15,6 @@ from __future__ import annotations
 # pyright: reportPrivateUsage=false
 import argparse
 import csv
-import fcntl
 import hashlib
 import json
 import math
@@ -622,7 +621,7 @@ def _live_records(root: Path) -> list[Path]:
         *root.glob("jobs/*/process.json"),
         *root.glob("calibration/*/process.json"),
     ]
-    return [path for path in paths if path.is_file() and _launch._alive(_read(path))]
+    return _launch.live_process_records(paths)
 
 
 def _clean_job(job: Path) -> bool:
@@ -705,11 +704,7 @@ def _run_job(
 
 def _write_once(path: Path, value: Mapping[str, Any]) -> None:
     """Publish a declaration once or require byte-independent JSON equality."""
-    if path.exists():
-        if _read(path) != value:
-            raise ValueError(f"Frozen declaration changed: {path}")
-    else:
-        atomic_json(path, value)
+    _launch.write_once(path, value)
 
 
 def calibrate(root: Path) -> Record:
@@ -766,8 +761,7 @@ def calibrate(root: Path) -> Record:
     capacity prevents launch.
     """
     manifest = verify_package(root)
-    with (root / ".launch.lock").open("a+b") as lock:
-        fcntl.flock(lock.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+    with _launch.launch_lock(root):
         if _live_records(root) or (root / "study.json").exists():
             raise RuntimeError("An active or started study cannot be recalibrated")
         declared = _read(root / "declaration.json")
@@ -906,23 +900,22 @@ def start_search(root: Path, *, resume: bool = False) -> Record:
     """
     verify_package(root)
     declared, budgets = _check_budget(root)
-    with (root / ".launch.lock").open("a+b") as lock:
-        fcntl.flock(lock.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+    with _launch.launch_lock(root):
         if _live_records(root):
             raise RuntimeError("This study still has an active owned process")
         previous = _optional(root / "study.json")
         if bool(previous) != resume:
             raise ValueError("Use resume for an existing study, start for a new study")
         if not previous:
-            saved_clock = _optional(root / "launch_time.json")
-            started = saved_clock.get("started_at_seconds", time.time())
-            clock = {
-                "started_at_seconds": started,
-                "numerical_deadline": started + declared["numerical_stop_seconds"],
-                "hard_deadline": started + declared["hard_stop_seconds"],
-                "budget_digest": _digest(budgets),
-            }
-            _write_once(root / "launch_time.json", clock)
+            clock = _launch.launch_clock(
+                root / "launch_time.json",
+                durations={
+                    "numerical_deadline": declared["numerical_stop_seconds"],
+                    "hard_deadline": declared["hard_stop_seconds"],
+                },
+                binding={"budget_digest": _digest(budgets)},
+                create=True,
+            )
             atomic_json(
                 root / "study.json",
                 {
@@ -935,26 +928,14 @@ def start_search(root: Path, *, resume: bool = False) -> Record:
             )
         _check_clock(root, _read(root / "study.json"), declared, budgets)
         command = _command(root, "supervise")
-        with (root / "logs/experiment.log").open("ab", buffering=0) as log:
-            child = subprocess.Popen(
-                command,
-                stdin=subprocess.DEVNULL,
-                stdout=log,
-                stderr=subprocess.STDOUT,
-                start_new_session=True,
-                env=_launch._environment(None),
-                cwd=root / "source",
-            )
-        record = {
-            "schema_version": 1,
-            "state": "starting",
-            "process": process_identity(child.pid),
-            "command": command,
-            "mode": "resume" if resume else "start",
-            "started_at": utc_now(),
-        }
-        atomic_json(root / "process.json", record)
-        return record
+        return _launch.spawn_detached(
+            root,
+            command,
+            log_path=root / "logs/experiment.log",
+            mode="resume" if resume else "start",
+            env=_launch._environment(None),
+            cwd=root / "source",
+        )
 
 
 def _check_clock(
@@ -964,18 +945,15 @@ def _check_clock(
     budgets: Mapping[str, Any],
 ) -> None:
     """Reject changed clocks or budget bindings before work or recovery."""
-    clock = _read(root / "launch_time.json")
-    started = _positive(clock.get("started_at_seconds"), "original launch time")
-    expected = {
-        "started_at_seconds": started,
-        "numerical_deadline": started + declared["numerical_stop_seconds"],
-        "hard_deadline": started + declared["hard_stop_seconds"],
-        "budget_digest": _digest(budgets),
-    }
-    if clock != expected or any(
-        study.get(key) != value for key, value in expected.items()
-    ):
-        raise ValueError("Original study clock or budgets changed")
+    _launch.launch_clock(
+        root / "launch_time.json",
+        durations={
+            "numerical_deadline": declared["numerical_stop_seconds"],
+            "hard_deadline": declared["hard_stop_seconds"],
+        },
+        binding={"budget_digest": _digest(budgets)},
+        recorded=study,
+    )
 
 
 def search_status(root: Path) -> Record:
@@ -995,14 +973,7 @@ def search_status(root: Path) -> Record:
 
 def stop_search(root: Path) -> Record:
     """Request shutdown from exact live owners; never kill a saved group number."""
-    signalled: list[int] = []
-    for path in _live_records(root):
-        record = _read(path)
-        owner = record.get("process")
-        if isinstance(owner, dict) and _launch._alive({"process": owner}):
-            pid = int(cast(Record, owner)["pid"])
-            os.kill(pid, signal.SIGTERM)
-            signalled.append(pid)
+    signalled = _launch.request_stop(_live_records(root))
     return {**search_status(root), "stop_requested_pids": signalled}
 
 
@@ -1797,8 +1768,7 @@ def main(argv: list[str] | None = None) -> int:
     elif args.action == "report":
         result = report_search(root)
     elif args.action == "supervise":
-        with (root / ".launch.lock").open("a+b") as lock:
-            fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
+        with _launch.launch_lock(root, blocking=True):
             clock = _read(root / "launch_time.json")
         return _launch.supervise_command(
             root,

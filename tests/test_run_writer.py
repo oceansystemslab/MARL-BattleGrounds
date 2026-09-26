@@ -1,6 +1,7 @@
 """Check durable CSV output from completed games.
 
-Cases include interrupted writes and recovery through the existing writer.
+Cases include interrupted writes and recovery through the existing writer,
+sampling facts, LLM summaries and links from model decisions to durable games.
 """
 
 import csv

@@ -667,19 +667,14 @@ def test_partial_tournament_resume_acquires_no_finished_llm_client(
         return provenance
 
     monkeypatch.setattr(evaluator, "capture_recording_provenance", same_source)
-    module = import_module("marl_battlegrounds.evaluation.tournament")
-    original = module.evaluate_episodes
-    finished = 0
+    original = evaluator._evaluate_tournament_episodes
 
     def interrupt(*args: PolicyTree, **kwargs: PolicyTree) -> marl_bgs.EvaluationResult:
-        nonlocal finished
-        if finished == 2:
+        if (args[0].name, args[1].name) == ("b-random", "c-random"):
             raise RuntimeError("Stop before the unrelated Random pair")
-        result = original(*args, **kwargs)
-        finished += 1
-        return cast(marl_bgs.EvaluationResult, result)
+        return cast(marl_bgs.EvaluationResult, original(*args, **kwargs))
 
-    monkeypatch.setattr(module, "evaluate_episodes", interrupt)
+    monkeypatch.setattr(evaluator, "_evaluate_tournament_episodes", interrupt)
     model = FakeModel()
     with server(model.serve) as url:
         method = llm.make_system("fake", url, name="a-llm")
@@ -710,7 +705,7 @@ def test_partial_tournament_resume_acquires_no_finished_llm_client(
             raise AssertionError("Completed LLM games acquired a new client")
 
         monkeypatch.setattr(llm.Client, "__init__", reject_client)
-        monkeypatch.setattr(module, "evaluate_episodes", original)
+        monkeypatch.setattr(evaluator, "_evaluate_tournament_episodes", original)
         resumed = marl_bgs.run_tournament(
             entrants,
             maps=[0],
@@ -724,3 +719,70 @@ def test_partial_tournament_resume_acquires_no_finished_llm_client(
         assert len(model.generations()) == 20
         assert before == {path: path.read_bytes() for path in before}
         assert llm.call_summary(resumed)["all_attempts"]["team_a"]["model_calls"] == 20
+
+
+def test_historical_resume_keeps_one_llm_client_across_pending_pairs(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from dataclasses import replace
+
+    from tests.tournament_legacy_fixtures import create_legacy_tournament
+
+    from marl_battlegrounds.evaluation.policy_execution import policy
+    from marl_battlegrounds.evaluation.recording_context import (
+        capture_recording_provenance,
+    )
+
+    provenance = capture_recording_provenance()
+    evaluator = import_module("marl_battlegrounds.evaluation.evaluate")
+
+    def same_source(**_: object) -> dict[str, object]:
+        return provenance
+
+    monkeypatch.setattr(evaluator, "capture_recording_provenance", same_source)
+    acquired: list[llm.Client] = []
+    closed: list[llm.Client] = []
+    initialize = llm.Client.__init__
+    close_client = llm.Client.close
+
+    def count_initialize(client: llm.Client, *args: object, **kwargs: object) -> None:
+        initialize(client, *args, **kwargs)  # type: ignore[arg-type]
+        acquired.append(client)
+
+    def count_close(client: llm.Client, *, grace: float = 2.0) -> None:
+        close_client(client, grace=grace)
+        closed.append(client)
+
+    monkeypatch.setattr(llm.Client, "__init__", count_initialize)
+    monkeypatch.setattr(llm.Client, "close", count_close)
+    model = FakeModel()
+    with server(model.serve) as url:
+        methods = [
+            replace(policy("random"), name="a-random"),
+            llm.make_system("fake", url, name="m-llm"),
+            replace(policy("random"), name="z-random"),
+        ]
+        directory = create_legacy_tournament(tmp_path, methods, maps=(0,))
+        assert len(acquired) == 1
+        assert acquired[0]._executor is None  # pyright: ignore[reportPrivateUsage]
+        assert closed == []
+        assert model.generations() == []
+        result = marl_bgs.run_tournament(
+            methods, resume_from=directory, num_envs=2, chunk_size=1
+        )
+        assert len(result.matches) == 6
+        assert len(model.generations()) == 20
+        assert len(acquired) == len(closed) == 1
+        assert acquired[0] is closed[0]
+        calls = list(llm.read_calls(directory))
+        assert len(calls) == 20
+        assert len({row["pass_id"] for row in calls}) == 2
+        assert {row["team"] for row in calls} == {0, 1}
+        before = {
+            path: path.read_bytes() for path in directory.rglob("*") if path.is_file()
+        }
+        resumed = marl_bgs.run_tournament(methods, resume_from=directory)
+        assert resumed.matches == result.matches
+        assert len(model.generations()) == 20
+        assert len(acquired) == len(closed) == 1
+        assert before == {path: path.read_bytes() for path in before}

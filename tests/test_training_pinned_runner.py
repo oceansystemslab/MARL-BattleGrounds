@@ -124,3 +124,18 @@ def test_exports_are_verified_only_when_linked_to_their_own_checkpoint(
     )
     assert unlinked["source"] == "declared export"
     assert unlinked["exposure"] == "unknown"
+
+
+def test_complete_checkpoint_has_truthful_unknown_exposure(
+    baseline: TrainResult,
+) -> None:
+    from marl_battlegrounds._method_loading import load_method
+
+    path = _checkpoint(baseline.run_dir, 1)
+    method = load_method(str(path))
+    evidence = pinned_opponent_evidence(
+        prepare_training_content().binding, method, export=path
+    )
+    assert evidence["source"] == "declared checkpoint"
+    assert evidence["exposure"] == "unknown"
+    assert evidence["familiar_scenarios"] == list(range(1, 9))

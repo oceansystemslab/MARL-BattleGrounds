@@ -18,13 +18,14 @@ import sys
 import time
 import uuid
 from collections import deque
-from collections.abc import Generator
+from collections.abc import Generator, Mapping
 from contextlib import contextmanager
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, TextIO, cast
 
 if TYPE_CHECKING:
+    from marl_battlegrounds.training._continuation_schedules import LearnerContinuation
     from marl_battlegrounds.training.validation import FrozenPanel
 
 
@@ -552,6 +553,79 @@ def checkpoint_ancestry(
     return ancestry
 
 
+def _check_validation_interval(result: Mapping[str, Any]) -> None:
+    """Check finite scores and explicitly available or unsupported saved intervals.
+
+    Historical records keep their numerical interval requirement. New sampling
+    metadata may withhold public bounds only when the shared summary owner
+    produces that same availability decision. Conditional bounds remain finite
+    descriptive numbers and never stand in for a supported interval.
+    """
+    from marl_battlegrounds.training.analysis import (
+        _validation_sampling_interval,  # pyright: ignore[reportPrivateUsage]
+    )
+
+    evidence = result.get("sampling_evidence")
+    fields = ["score"]
+    unavailable = result.get("ci_low") is None or result.get("ci_high") is None
+    if evidence is None and unavailable:
+        raise ValueError("Saved validation interval needs sampling evidence")
+    fields.extend(
+        ("conditional_ci_low", "conditional_ci_high")
+        if unavailable
+        else ("ci_low", "ci_high")
+    )
+    for field in fields:
+        number = result.get(field)
+        if (
+            isinstance(number, bool)
+            or not isinstance(number, (int, float))
+            or not math.isfinite(number)
+            or not 0 <= number <= 1
+        ):
+            raise ValueError("Saved validation score or interval is invalid")
+    if result[fields[1]] > result[fields[2]]:
+        raise ValueError("Saved validation interval is reversed")
+    if evidence is not None:
+        if not isinstance(evidence, Mapping):
+            raise ValueError("Saved validation sampling evidence must be an object")
+        base = dict(result)
+        base.update(ci_low=result[fields[1]], ci_high=result[fields[2]])
+        pairs = result.get("seed_pairs")
+        if type(pairs) is not int or pairs < 1:
+            raise ValueError("Saved validation seed_pairs must be positive")
+        checked = _validation_sampling_interval(
+            base,
+            cast(Mapping[str, Any], evidence),
+            pairs,
+        )
+        # Earlier closeout records used independent_blocks for the supported
+        # count. Keep reading those original bytes; new records separate counts.
+        historical_counts = "supported_independent_sampling_units" not in result
+        if historical_counts:
+            checked["independent_blocks"] = checked[
+                "supported_independent_sampling_units"
+            ]
+        required = [
+            "ci_low",
+            "ci_high",
+            "interval_status",
+            "confidence",
+            "sampling_unit",
+            "interval_method",
+            "independent_blocks",
+            "declared_blocks",
+        ]
+        if not historical_counts:
+            required.append("supported_independent_sampling_units")
+        if unavailable:
+            required.append("conditional_interval_assumption")
+        if any(result.get(field) != checked[field] for field in required):
+            raise ValueError(
+                "Saved validation interval disagrees with sampling evidence"
+            )
+
+
 def validate_host_state(
     run_dir: Path,
     checkpoint_details: dict[str, Any],
@@ -611,8 +685,11 @@ def validate_host_state(
     config's red_zone_depth (checkpoints._config_red_zone_depth), so they must
     carry that depth. System-panel records may require loading an actor to verify its
     registration; learner arrays are not restored here. No games run and no
-    writer or log is changed. Call this after complete learner restore and
-    before resume_recording.
+    writer or log is changed. Child runs use their frozen future points and
+    effective roots. Their local actor map stays local; explicit checked ancestor
+    references may supply a selected actor or an actor for child confirmation.
+    Parent games do not count as new child work. Call this after complete learner
+    restore and before resume_recording.
     """
     from marl_battlegrounds.baselines.methods import method_settings_field
     from marl_battlegrounds.training import analysis, checkpoints, validation
@@ -621,6 +698,26 @@ def validate_host_state(
     metadata = checkpoint_details["metadata"]
     config = metadata["config"]
     method = config.get("method", "mappo")
+    continuation = metadata.get("continuation")
+    declaration = validation.saved_validation_declaration(metadata, panel)
+    from marl_battlegrounds.training._continuation_schedules import (
+        continuation_counts,
+        learner_continuation,
+    )
+
+    learner_context = learner_continuation(
+        None if continuation is None else continuation.get("learner")
+    )
+    inherited: dict[str, Any] = {"records": [], "actors": {}, "used_roots": []}
+    if declaration is not None:
+        from marl_battlegrounds.training._selection_evidence import (
+            read_inherited_candidates,
+        )
+
+        inherited = read_inherited_candidates(
+            continuation.get("inherited_candidates", []) if continuation else [],
+            declaration=declaration,
+        )
     qmix_run = method == "qmix"
     pqn_run = method == "pqn_vdn"
     settings = config[method_settings_field(method)]
@@ -755,14 +852,25 @@ def validate_host_state(
     batch, total = config["num_envs"], config["total_env_steps"]
     epochs, length = settings["epochs"], settings["rollout_length"]
     if qmix_run:
-        _check_qmix_host_counts(host, checkpoint_details["counters"], config)
+        _check_qmix_host_counts(
+            host, checkpoint_details["counters"], config, continuation=learner_context
+        )
     elif pqn_run:
-        _check_pqn_host_counts(host, checkpoint_details["counters"], config)
+        _check_pqn_host_counts(
+            host, checkpoint_details["counters"], config, continuation=learner_context
+        )
     elif (
         {"env_steps": steps, "updates": updates} != checkpoint_details["counters"]
         or steps > total
         or steps % batch
-        or updates != math.ceil(steps / (batch * length))
+        or updates
+        != (
+            math.ceil(steps / (batch * length))
+            if learner_context is None
+            else continuation_counts(
+                steps // batch, continuation=learner_context, rollout_length=length
+            )[0]
+        )
         or host["actor_decisions"] > steps * 5
         or host["used_policy_samples"] != host["actor_decisions"] * epochs
         or not steps * epochs <= host["used_value_samples"] <= steps * 5 * epochs
@@ -853,8 +961,11 @@ def validate_host_state(
             raise ValueError("Saved actor identity differs from its learner boundary")
         actor_records[key] = actor
 
-    points: set[int] = (
-        {
+    points: set[int] = set()
+    if declaration is not None:
+        points = {point["env_steps"] for point in declaration["points"]}
+    elif panel is not None:
+        points = {
             point.env_steps
             for point in validation.resolve_validation_schedule(
                 total,
@@ -864,16 +975,21 @@ def validate_host_state(
                 initial_rounds=(settings["memory_window"] + length if pqn_run else 0),
             )
         }
-        if panel is not None
-        else set()
-    )
+    selection_actors: dict[str, str] = {
+        **{key: item["actor_path"] for key, item in inherited["actors"].items()},
+        **cast(dict[str, str], actors),
+    }
     random_points: set[int] = (
         {0, total, *config["checkpoint_env_steps"]}
         if random_pairs is not None
         else set()
     )
+    if continuation is not None:
+        random_points = {
+            point for point in random_points if point > continuation["start_env_steps"]
+        }
     initial_reference = config.get("random_initialization_result")
-    if initial_reference is not None:
+    if initial_reference is not None and continuation is None:
         initial = next(
             (item for item in ancestry.values() if item["counters"]["env_steps"] == 0),
             None,
@@ -888,6 +1004,45 @@ def validate_host_state(
             seed_pairs=random_pairs,
             red_zone_depth=depth,
         )
+    if initial_reference is not None and continuation is not None:
+        parent_context = continuation
+        visited: set[str] = set()
+        while True:
+            parent_path = Path(parent_context["parent_checkpoint"])
+            if str(parent_path) in visited or parent_path.resolve() != parent_path:
+                raise ValueError("Random initialization ancestry is cyclic or linked")
+            visited.add(str(parent_path))
+            parent_details = checkpoints.read_checkpoint_description(parent_path)
+            if parent_details["checkpoint_id"] != parent_path.name:
+                raise ValueError("Random initialization ancestor identity differs")
+            parent_chain = checkpoint_ancestry(
+                parent_path.parent.parent, parent_details
+            )
+            initial = next(
+                (
+                    item
+                    for item in parent_chain.values()
+                    if item["counters"]["env_steps"] == 0
+                ),
+                None,
+            )
+            if initial is not None:
+                if random_pairs is None:
+                    raise ValueError(
+                        "Shared Random initialization has no declared count"
+                    )
+                validation.read_random_initialization(
+                    initial_reference,
+                    actor_digest=checkpoints._inference_digest(initial),  # pyright: ignore[reportPrivateUsage]
+                    seed_pairs=random_pairs,
+                    red_zone_depth=depth,
+                )
+                break
+            parent_context = parent_details["metadata"].get("continuation")
+            if parent_context is None:
+                raise ValueError(
+                    "Shared Random initialization has no original zero boundary"
+                )
     pending = host["pending"]
     if pending is not None:
         allowed_flags = (
@@ -943,9 +1098,13 @@ def validate_host_state(
                 raise ValueError("Saved validation result must be an object")
             result = cast(dict[str, Any], result)
             key = identifier(result.get("checkpoint_id"))
-            if key not in actor_records or panel is None:
+            if panel is None or (
+                key not in actor_records
+                and not (purpose == "confirmation" and key in inherited["actors"])
+            ):
                 raise ValueError("Saved validation refers to an unknown actor")
-            actor = actor_records[key]
+            actor = actor_records.get(key, inherited["actors"].get(key))
+            assert actor is not None
             _check_result_method(result, actor, method)
             pairs = config[f"{purpose}_seed_pairs"]
             expected_task = validation.panel_task_description(
@@ -957,6 +1116,16 @@ def validate_host_state(
                 seed_pairs=pairs,
                 red_zone_depth=depth,
             )
+            if declaration is not None:
+                expected_task = validation.declared_panel_task(
+                    declaration,
+                    panel,
+                    checkpoint_id=key,
+                    actor_digest=actor["actor_digest"],
+                    env_steps=actor["env_steps"],
+                    purpose=purpose,
+                )
+                pairs = expected_task["seed_pairs"]
             directory = root / "validation" / f"{purpose}-{key}"
             task_file = read(directory / "task.json")
             if json.dumps(task_file, sort_keys=True, allow_nan=False) != json.dumps(
@@ -979,17 +1148,7 @@ def validate_host_state(
                 > host["elapsed_seconds"] + 1e-6
             ):
                 raise ValueError("Saved validation follows its checkpoint time")
-            for field in ("score", "ci_low", "ci_high"):
-                score = result.get(field)
-                if (
-                    isinstance(score, bool)
-                    or not isinstance(score, (int, float))
-                    or not math.isfinite(score)
-                    or not 0 <= score <= 1
-                ):
-                    raise ValueError("Saved validation score or interval is invalid")
-            if result["ci_low"] > result["ci_high"]:
-                raise ValueError("Saved validation interval is reversed")
+            _check_validation_interval(result)
             games = 2 * len(validation.VALIDATION_MAPS) * len(panel.members) * pairs
             if integer(result.get("games"), "validation games") != games:
                 raise ValueError("Saved validation game count differs")
@@ -999,7 +1158,7 @@ def validate_host_state(
             ):
                 raise ValueError("Saved validation pass paths are incomplete")
             loaded_actor = (
-                checkpoints.load_system(cast(dict[str, str], actors)[key])
+                checkpoints.load_system(selection_actors[key])
                 if panel.schema_version == 2
                 else None
             )
@@ -1112,11 +1271,25 @@ def validate_host_state(
     ):
         raise ValueError("Saved completed validation coverage is incomplete")
     confirmations = host["confirmation_results"]
+    routine_results = host["routine_results"]
+    if (
+        declaration is not None
+        and panel is not None
+        and host["final_actor"] is not None
+    ):
+        routine_results, confirmations, _ = validation.selection_validation_results(
+            routine_results,
+            confirmations,
+            inherited,
+            declaration=declaration,
+            panel=panel,
+            final_checkpoint_id=Path(host["final_actor"]).name,
+        )
     if confirmations:
         if host["final_actor"] is None:
             raise ValueError("Saved confirmation has no final checkpoint")
         candidates = analysis.confirmation_candidates(
-            host["routine_results"], final_checkpoint_id=Path(host["final_actor"]).name
+            routine_results, final_checkpoint_id=Path(host["final_actor"]).name
         )
         if not {row["checkpoint_id"] for row in confirmations} <= set(candidates):
             raise ValueError("Saved confirmation includes an unselected candidate")
@@ -1127,14 +1300,25 @@ def validate_host_state(
         if not confirmations or host["final_actor"] is None:
             raise ValueError("Saved selection has no completed confirmation")
         candidates = analysis.confirmation_candidates(
-            host["routine_results"], final_checkpoint_id=Path(host["final_actor"]).name
+            routine_results, final_checkpoint_id=Path(host["final_actor"]).name
         )
         if {row["checkpoint_id"] for row in confirmations} != set(candidates):
             raise ValueError("Saved selection is missing confirmation candidates")
         chosen = analysis.select_checkpoint(confirmations)
+        if declaration is not None:
+            chosen.update(
+                routine_comparison=validation.validation_root_comparison(
+                    routine_results,
+                    allow_different_roots=declaration["allow_different_roots"],
+                ),
+                confirmation_comparison=validation.validation_root_comparison(
+                    confirmations,
+                    allow_different_roots=declaration["allow_different_roots"],
+                ),
+            )
         if (
             host["selection"] != chosen
-            or host["selected_actor"] != actors[chosen["checkpoint_id"]]
+            or host["selected_actor"] != selection_actors[chosen["checkpoint_id"]]
         ):
             raise ValueError("Saved selection or selected actor identity differs")
 
@@ -1172,7 +1356,11 @@ def qmix_fixed_block_counts(
 
 
 def _check_qmix_host_counts(
-    host: dict[str, Any], counters: dict[str, Any], config: dict[str, Any]
+    host: dict[str, Any],
+    counters: dict[str, Any],
+    config: dict[str, Any],
+    *,
+    continuation: LearnerContinuation | None = None,
 ) -> None:
     """Check a QMIX run's saved host counts with fixed-block arithmetic.
 
@@ -1181,7 +1369,9 @@ def _check_qmix_host_counts(
     rollout_length rounds, the last one shorter; a block learns once the rows
     stored per game reach min_buffer_size. Every ready block takes epochs
     optimizer steps of sample_batch_size sequences with S-1 TD pairs each.
-    Raises ValueError on any disagreement; reads and changes nothing else.
+    continuation is the checked child boundary, or None for the original
+    zero-based block schedule. A child retains cumulative counters across partial
+    parent blocks. Raises ValueError on disagreement; reads and changes no files.
     """
     settings = config["qmix"]
     batch, total = config["num_envs"], config["total_env_steps"]
@@ -1190,6 +1380,17 @@ def _check_qmix_host_counts(
     blocks, learning = qmix_fixed_block_counts(
         steps // batch, rollout_length=length, minimum=minimum
     )
+    if continuation is not None:
+        from marl_battlegrounds.training._continuation_schedules import (
+            continuation_counts,
+        )
+
+        blocks, learning = continuation_counts(
+            steps // batch,
+            continuation=continuation,
+            rollout_length=length,
+            minimum=minimum,
+        )
     pairs = host["used_td_pairs"]
     exposure = host["sampled_exposure"]
     marginals = ("by_stage", "by_source", "by_opponent")
@@ -1232,7 +1433,11 @@ def _check_qmix_host_counts(
 
 
 def _check_pqn_host_counts(
-    host: dict[str, Any], counters: dict[str, Any], config: dict[str, Any]
+    host: dict[str, Any],
+    counters: dict[str, Any],
+    config: dict[str, Any],
+    *,
+    continuation: LearnerContinuation | None = None,
 ) -> None:
     """Check a PQN-VDN run's saved host counts with offset-block arithmetic.
 
@@ -1245,6 +1450,9 @@ def _check_pqn_host_counts(
     config : dict
         The saved run config, whose "pqn" block gives T, H, epochs and
         minibatches.
+    continuation : LearnerContinuation or None, default=None
+        Checked child block origin and cumulative counts. None uses the original
+        warmup-offset schedule. A child never repeats completed warmup blocks.
 
     Raises
     ------
@@ -1276,14 +1484,27 @@ def _check_pqn_host_counts(
     if steps > total or steps % batch or total % batch:
         raise ValueError("Saved host experience or sample counts disagree")
     rounds = steps // batch
-    reachable, blocks = _collection_boundary(
-        rounds,
-        total_env_steps=total // batch,
-        num_envs=1,
-        rollout_length=length,
-        initial_rounds=initial,
-    )
-    learning = max(0, blocks - -(-initial // length))
+    if continuation is None:
+        reachable, blocks = _collection_boundary(
+            rounds,
+            total_env_steps=total // batch,
+            num_envs=1,
+            rollout_length=length,
+            initial_rounds=initial,
+        )
+        learning = max(0, blocks - -(-initial // length))
+    else:
+        from marl_battlegrounds.training._continuation_schedules import (
+            continuation_boundary,
+        )
+
+        reachable, blocks, learning = continuation_boundary(
+            rounds,
+            total_rounds=total // batch,
+            continuation=continuation,
+            rollout_length=length,
+            initial_rounds=initial,
+        )
     pairs = host["used_td_pairs"]
     expected_pairs = (
         epochs * batch * ((rounds - initial) + learning * (window - 1))

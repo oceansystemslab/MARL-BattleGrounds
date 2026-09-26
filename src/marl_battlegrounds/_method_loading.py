@@ -1,9 +1,10 @@
-"""Resolve method references: built-in names, exported actors and factories.
+"""Resolve method references: built-in names, saved actors and factories.
 
 Command factories and tournament loaders share the ``module:function`` grammar
 through installed_callable. load_method is the one owner of the wider
 reference grammar used for training opponents: a built-in Policy name, an
-exported actor directory, or a ``module:function`` factory. Importing this
+actor export or complete learner checkpoint directory, or a ``module:function``
+factory. Importing this
 module uses only the standard library; load_method imports the evaluation and
 training code it needs only when called. Calling a selected function remains
 the caller's responsibility; imported researcher code may have its own side
@@ -89,9 +90,11 @@ def load_method(reference: str) -> Policy | System:
         Checked in this order. A built-in Policy name ("random", "tdm-alpha",
         "tdm-beta" or "tdm-gamma", as ``policy`` defines them) gives that
         Policy. Otherwise an
-        existing directory is loaded as an exported PPO, QMIX or PQN-VDN actor with
-        ``marl_battlegrounds.training.load_system``; it must be an actor
-        export, not a learner checkpoint, and needs the training extra.
+        existing directory is loaded through
+        ``marl_battlegrounds.training.load_system``. Actor exports and complete
+        learner checkpoints are supported, including historical actor inputs.
+        Only actor arrays are restored; every payload file is checked. This needs
+        the training extra and grants no permission to resume training.
         Otherwise the text must be a ``module:function`` factory (see
         load_factory). A relative path resolves against the current directory,
         so saved configurations must use absolute paths.
@@ -109,7 +112,7 @@ def load_method(reference: str) -> Policy | System:
         a Policy or System.
     ValueError
         The text is empty, names no built-in, directory or valid factory, the
-        directory is a learner checkpoint, or its files fail their checks.
+        directory is incomplete, or its files fail their checks.
     OSError
         An actor directory cannot be read.
     ImportError
@@ -134,18 +137,13 @@ def load_method(reference: str) -> Policy | System:
         pass
     path = Path(reference)
     if path.is_dir():
-        if (path / "checkpoint_details.json").exists():
-            raise ValueError(
-                "A learner checkpoint is not a method; export the actor first "
-                "and pass the actor directory"
-            )
         from marl_battlegrounds.training.checkpoints import load_system
 
         return load_system(path)
     if reference.count(":") != 1:
         raise ValueError(
             f"Method reference {reference!r} is not a built-in name, an existing "
-            "actor directory or a module:function factory"
+            "actor export/checkpoint directory or a module:function factory"
         )
     return load_factory(reference)
 
@@ -153,10 +151,11 @@ def load_method(reference: str) -> Policy | System:
 def validate_saved_method_reference(reference: str) -> None:
     """Check a durable method reference without opening files or calling factories.
 
-    reference is a nonempty built-in Policy name, an absolute export path, or
+    reference is a nonempty built-in Policy name, an absolute actor
+    export/checkpoint path, or
     module:function. Relative paths, including bare directory names, are refused
     because their meaning changes with the working directory. Built-in names use
-    the existing Policy authority. Missing imports and export files are checked
+    the existing Policy authority. Missing imports and artifact files are checked
     later by load_method. Invalid types or grammar raise TypeError or ValueError.
     """
     if not isinstance(cast(object, reference), str):

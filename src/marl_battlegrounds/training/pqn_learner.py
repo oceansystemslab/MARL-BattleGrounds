@@ -72,6 +72,11 @@ from marl_battlegrounds.policies.input import (
     mirror_team_view,
 )
 from marl_battlegrounds.training._content import PreparedTrainingContent
+from marl_battlegrounds.training._continuation_schedules import (
+    LearnerContinuation,
+    continuation_boundary,
+    schedule_continuation,
+)
 
 # Collection's padding template, failure and continuation checks, and the PPO
 # learner's summary and error codes keep one owner each.
@@ -772,6 +777,7 @@ def _boundary_valid(
     rollout: TrainingRollout,
     pqn: PQNConfig,
     planned_learning_blocks: int,
+    continuation: LearnerContinuation | None = None,
 ) -> Array:
     """Check counters, the chunk rule and the exact real prefix in one bool.
 
@@ -782,7 +788,10 @@ def _boundary_valid(
     expected chunk (``min(T, W - r)`` before W, ``min(T, R - r)`` after) and
     may learn only at capacity T; the collected carry must keep the same actor
     version; and the rows must be an exact valid prefix of this learner
-    version with matching memory, opponent versions and endings.
+    version with matching memory, opponent versions and endings. A checked
+    continuation counts later blocks from its saved origin and keeps the
+    original planned horizon; remaining initial collection is still capped
+    at W. The child end may also cap an initial chunk.
     """
     rows = rollout.transitions
     capacity = rows.valid.shape[0]
@@ -814,6 +823,15 @@ def _boundary_valid(
         (rows.opponent_update == captured) | (rows.opponent_update == -2),
     )
     planned = _ceil(jnp.maximum(total - initial, 0), length)
+    if continuation is not None:
+        start = continuation.start_rounds
+        warm = jnp.maximum(0, jnp.minimum(rounds, initial) - start)
+        learned_rounds = jnp.maximum(0, rounds - max(start, initial))
+        new_learning = _ceil(learned_rounds, length)
+        expected_learning = continuation.start_learning_blocks + new_learning
+        expected_blocks = continuation.start_blocks + _ceil(warm, length) + new_learning
+        expected_chunk = jnp.minimum(expected_chunk, total - rounds)
+        planned = jnp.int32(continuation.pqn_planned_learning_blocks)
     return (
         (learning >= 0)
         & (state.completed_blocks < _MAX_COUNT)
@@ -1054,6 +1072,7 @@ def learn_window(
     pqn: PQNConfig,
     planned_learning_blocks: int,
     bank: int,
+    continuation: LearnerContinuation | None = None,
 ) -> tuple[PQNTrainState, PQNMetrics, PQNUsedCounts]:
     """Run every epoch and minibatch of one learning window.
 
@@ -1074,6 +1093,10 @@ def learn_window(
         Static positive N for the learning-rate schedule.
     bank : int
         Static source-bank size for exposure bins.
+
+    continuation : LearnerContinuation or None, default=None
+        Checked child schedule. Its optional future rate uses absolute optimizer
+        counts; the saved optimizer tree and every counter stay intact.
 
     Returns
     -------
@@ -1101,8 +1124,13 @@ def learn_window(
 
         selected = cast(PQNRow, jax.tree.map(select, rows))
         batch = _expand_minibatch(selected, jnp.take(start, chosen, axis=0), pqn)
+        rate = None if continuation is None else continuation.pqn_rate
         candidate, metrics = update_pqn(
-            state, batch, pqn=pqn, planned_learning_blocks=planned_learning_blocks
+            state,
+            batch,
+            pqn=pqn,
+            planned_learning_blocks=planned_learning_blocks,
+            learning_rate=None if rate is None else rate.at_array,
         )
         return candidate, (
             metrics,
@@ -1174,6 +1202,7 @@ def update_pqn_learner(
     *,
     pqn: PQNConfig = DEFAULT_PQN_CONFIG,
     planned_learning_blocks: int,
+    continuation: LearnerContinuation | None = None,
 ) -> tuple[PQNLearnerState, PQNUpdateResult]:
     """Accept one collected block: keep its rows, and learn once W is reached.
 
@@ -1199,6 +1228,10 @@ def update_pqn_learner(
         Static positive N from ``pqn_planned_learning_blocks`` for the
         declared total. The block is rejected when it differs from the count
         computed from the carried schedule.
+
+    continuation : LearnerContinuation or None, default=None
+        Checked static child boundary and future schedules. The original PQN
+        horizon, saved blocks, retained rows and optimizer clocks continue.
 
     Returns
     -------
@@ -1251,7 +1284,9 @@ def update_pqn_learner(
         _failed(state.carry) | _failed(collected),
         LEARNER_ERROR_COLLECTION,
         jnp.where(
-            _boundary_valid(state, collected, rollout, pqn, planned_learning_blocks),
+            _boundary_valid(
+                state, collected, rollout, pqn, planned_learning_blocks, continuation
+            ),
             LEARNER_ERROR_NONE,
             LEARNER_ERROR_BOUNDARY,
         ),
@@ -1303,6 +1338,7 @@ def update_pqn_learner(
                 pqn=pqn,
                 planned_learning_blocks=planned_learning_blocks,
                 bank=bank,
+                continuation=continuation,
             )
             complete = (
                 jnp.all(metrics.performed)
@@ -1321,6 +1357,9 @@ def update_pqn_learner(
     due = (history.threshold_to_snapshot == -1) & (
         rounds >= collected.schedule.history_threshold_rounds
     )
+    threshold_count = getattr(collected.schedule, "history_threshold_count", None)
+    if threshold_count is not None:
+        due &= jnp.arange(_SNAPSHOT_SLOTS) < threshold_count
     publishable = _publishable(
         history, rounds, index, collected.schedule.total_rounds, due
     )
@@ -1346,9 +1385,13 @@ def update_pqn_learner(
     accepted = ~failed & nonempty
     publish = accepted & attempted
     next_epsilon = epsilon_at(index, planned_learning_blocks, pqn)
+    initial_epsilon = epsilon_at(jnp.int32(0), planned_learning_blocks, pqn)
+    if continuation is not None and continuation.exploration is not None:
+        next_epsilon = continuation.exploration.at_array(index)
+        initial_epsilon = continuation.exploration.at_array(jnp.int32(0))
     kept_epsilon = jnp.where(
         rounds == pqn.initial_rounds,
-        epsilon_at(jnp.int32(0), planned_learning_blocks, pqn),
+        initial_epsilon,
         history.current_variables.epsilon,
     )
 
@@ -1505,8 +1548,10 @@ def validate_pqn_learner(
 
     Notes
     -----
-    Host-only. The planned count N comes from the carried schedule through
-    ``pqn_planned_learning_blocks``. The rounds must be a reachable boundary
+    Host-only. A fresh run obtains N from its declared schedule through
+    ``pqn_planned_learning_blocks``. A child keeps N and its block origin in
+    ``collection.schedule.continuation['learner']``. The rounds must be a
+    reachable boundary under that exact declaration
     (``validation._collection_boundary`` with W initial rounds) and every
     counter must match it: completed blocks equal its ordinal, learning blocks
     k, ``completed_updates == k * epochs * num_minibatches``,
@@ -1517,13 +1562,16 @@ def validate_pqn_learner(
     rows must hold ``min(H, rounds)`` real rows in game order that lead into
     the carried successor, with zero memory at episode starts and in inactive
     slots. The current rate is exactly 1 before W and follows the block clock
-    from W on; each history slot's rate follows its captured update. This
-    check reads the whole state once from the device; it changes nothing.
+    from W on; each history slot's rate follows its captured update. A child
+    checks inherited slots against its verified parent proof and later slots
+    against its active future rule. This check reads the whole state once
+    from the device; it changes nothing.
     """
     if type(recheck_installed_content) is not bool:
         raise TypeError("recheck_installed_content must be a Python bool")
     if not isinstance(cast(object, pqn), PQNConfig):
         raise TypeError("pqn must be a PQNConfig")
+    continuation = schedule_continuation(collection.schedule)
     games = _state_shapes(state, pqn)
     validate_pqn_batch_size(games, pqn)
     if (
@@ -1539,23 +1587,37 @@ def validate_pqn_learner(
     from marl_battlegrounds.training.validation import _collection_boundary
 
     total = int(state.carry.schedule.total_rounds)
-    planned = pqn_planned_learning_blocks(total, pqn)
+    planned = (
+        pqn_planned_learning_blocks(total, pqn)
+        if continuation is None
+        else cast(int, continuation.pqn_planned_learning_blocks)
+    )
     rounds = int(state.carry.progress.rounds)
     learning = int(state.learning_blocks)
     updates = int(state.completed_updates)
     history = state.carry.history
-    reachable, ordinal = _collection_boundary(
-        rounds,
-        total_env_steps=total,
-        num_envs=1,
-        rollout_length=pqn.rollout_length,
-        initial_rounds=pqn.initial_rounds,
-    )
     initial_blocks = -(-pqn.initial_rounds // pqn.rollout_length)
+    if continuation is None:
+        reachable, ordinal = _collection_boundary(
+            rounds,
+            total_env_steps=total,
+            num_envs=1,
+            rollout_length=pqn.rollout_length,
+            initial_rounds=pqn.initial_rounds,
+        )
+        expected_learning = max(0, ordinal - initial_blocks)
+    else:
+        reachable, ordinal, expected_learning = continuation_boundary(
+            rounds,
+            total_rounds=total,
+            continuation=continuation,
+            rollout_length=pqn.rollout_length,
+            initial_rounds=pqn.initial_rounds,
+        )
     if (
         reachable != rounds
         or int(state.completed_blocks) != ordinal
-        or learning != max(0, ordinal - initial_blocks)
+        or learning != expected_learning
         or updates != learning * pqn.epochs * pqn.num_minibatches
         or int(history.current_update) != learning
         or int(history.last_refresh_rounds) != (rounds if learning else 0)
@@ -1600,14 +1662,25 @@ def validate_pqn_learner(
     ):
         raise ValueError("A PQN running variance is negative")
     _check_recent(state, pqn)
+
+    def epsilon_matches(value: float, block: int) -> bool:
+        """Check the active future rule without changing inherited opponents."""
+        if continuation is not None and continuation.exploration is not None:
+            return abs(value - continuation.exploration.at(block)) <= 2e-6
+        return _epsilon_matches(value, block, planned, pqn)
+
     rate = float(history.current_variables.epsilon)
     if rounds < pqn.initial_rounds:
         if rate != 1.0:
             raise ValueError("Initial random collection must explore with rate 1")
-    elif not _epsilon_matches(rate, learning, planned, pqn):
+    elif not epsilon_matches(rate, learning):
         raise ValueError("Current exploration rate disagrees with the block clock")
     captured = np.asarray(history.captured_updates)
     rates = np.asarray(history.historical_variables.epsilon)
     for slot in range(int(history.count)):
-        if not _epsilon_matches(float(rates[slot]), int(captured[slot]), planned, pqn):
+        if continuation is not None and slot < len(continuation.frozen_epsilon):
+            matches = float(rates[slot]) == continuation.frozen_epsilon[slot]
+        else:
+            matches = epsilon_matches(float(rates[slot]), int(captured[slot]))
+        if not matches:
             raise ValueError("A frozen opponent's exploration rate disagrees")

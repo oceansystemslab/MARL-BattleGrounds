@@ -1036,3 +1036,41 @@ def test_parent_process_boundaries_use_cpu_without_changing_caller(
     assert calls[0]["env"]["JAX_PLATFORMS"] == "cpu"
     assert calls[0]["env"]["XLA_PYTHON_CLIENT_PREALLOCATE"] == "false"
     assert dict(os.environ) == before
+
+
+def test_search_shared_launch_keeps_historical_clock_bytes_and_deadlines(
+    tmp_path: Path, declared: dict[str, Any], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root = _package(tmp_path, declared, monkeypatch)
+    (root / "logs").mkdir()
+    (root / "study.json").unlink()
+    clock_bytes = (root / "launch_time.json").read_bytes()
+    clock = search._read(root / "launch_time.json")
+    calls: list[dict[str, Any]] = []
+
+    def spawned(
+        path: Path,
+        command: list[str],
+        *,
+        log_path: Path,
+        mode: str,
+        env: dict[str, str],
+        cwd: Path,
+    ) -> dict[str, Any]:
+        calls.append({"root": path, "command": command, "mode": mode, "env": env})
+        assert log_path == root / "logs/experiment.log"
+        assert cwd == root / "source"
+        with pytest.raises(BlockingIOError), search._launch.launch_lock(root):
+            pytest.fail("The caller must keep the launch lock until publication")
+        return {"state": "starting", "mode": mode}
+
+    monkeypatch.setattr(search._launch, "spawn_detached", spawned)
+    assert search.start_search(root) == {"state": "starting", "mode": "start"}
+    assert (root / "launch_time.json").read_bytes() == clock_bytes
+    assert all(
+        search._read(root / "study.json")[key] == value for key, value in clock.items()
+    )
+    assert search.start_search(root, resume=True)["mode"] == "resume"
+    assert (root / "launch_time.json").read_bytes() == clock_bytes
+    assert [call["mode"] for call in calls] == ["start", "resume"]
+    assert all(call["env"]["JAX_PLATFORMS"] == "cpu" for call in calls)

@@ -7,8 +7,9 @@ for compiled, batched GPU execution.
 
 The project is under development. Team Deathmatch, the native researcher API,
 evaluation, recording and canonical tournament machinery are implemented.
-Trained baselines, a qualified official Big 12 bundle and manuscript results
-remain future work.
+Trained baseline qualification, a released official tournament field and
+manuscript results remain future work. Six learner implementations are available;
+software checks do not establish learned skill.
 
 The installed package also has terminal commands:
 
@@ -260,7 +261,9 @@ fixes permitted information, shapes, categorical meanings, masks and provenance;
 it does not require one-hot features, embeddings, attention or a particular
 model framework.
 
-## Planned Scenario Evaluations and Big 12
+<a id="planned-scenario-evaluations-and-big-12"></a>
+
+## Scenario Evaluations And The Official Tournament
 
 The approved TDM suite contains eight scenarios. Seven use five-transition
 horizons; Scenario 3 uses ten transitions to examine sustained body blocking,
@@ -295,9 +298,11 @@ manuscript submission.
 [Amendment A36](docs/design/specification_amendments.md#a36-submission-roadmap-approved-tdm-content-and-m7-closeout)
 records the roadmap and the historical milestone-number mapping.
 
-M8's native API scope is complete. M9 will define training distributions and
-curricula; M10 will add learners and learning experiments. The growing-pool
-example shows how to use the API, not an approved training curriculum.
+M8's native API scope is complete. Training distributions, curricula and six
+learners are implemented. Their integration checks establish software behavior,
+not scientific qualification. Finish the software before running the scientific
+campaign. The growing-pool example shows how to use the API; it does not choose
+an approved experimental curriculum.
 Gymnasium/PettingZoo adapters are deferred until a specific learner integration
 shows a need. The optional `interop` dependencies do not provide those adapters.
 The native JAX workflow is the supported route; see the
@@ -305,63 +310,72 @@ The native JAX workflow is the supported route; see the
 
 Public evaluation scenarios and their complete content closure must not inform
 training, checkpoint selection, early stopping, hyperparameters, prompts,
-curricula, population weights, or any other adaptive choice. Future M9/M10
-pipelines will enforce content-addressed training, validation, and evaluation
-manifest separation, while official systems retain complete provenance for
-maintainer reproduction. This is a reproducibility and eligibility boundary,
+curricula, population weights, or any other adaptive choice. The shared training
+content checks keep declared training, validation and evaluation content separate.
+Official systems must also retain complete provenance for maintainer
+reproduction. This is a reproducibility and eligibility boundary,
 not a claim that open-source software can make deliberate misconduct
 impossible.
 
-The planned Big 12 is a rolling ladder of exactly twelve method-level entrants,
-each represented by one validation-selected fixed tournament system and one
-Elo. The tentative initial roster is:
+The official ladder uses a frozen population, called **Big N**. Each entrant
+is one fixed, validation-selected System with one Elo value. Version-2 releases
+take N from their participant list, with at least two entrants; no separate size
+setting can disagree with that list. Historical version-1 official snapshots
+keep exactly twelve entrants and their original rules and hashes.
 
-1. RNN-IPPO, parameter-shared
-2. RNN-MAPPO, parameter-shared
-3. RNN-MAPPO, class-specific actors
-4. RNN-HAPPO
-5. HyperMARL-PPO
-6. RNN-QMIX
-7. RNN-PQN-VDN
-8. MAPPO-PFSP League
-9. MAPPO-PSRO
-10. S\*-Curriculum
-11. S\*-Curriculum-Shaped
-12. Qwen-Five
+The initial scientific plan covers eighteen settings from six learners:
 
-These learned systems and the manuscript training campaign are planned; the
-shared evaluation and tournament tools are implemented. Rows 1–11 will each
-retain three independently trained runs and their checkpoint
-histories, but only the fixed checkpoint selected by the frozen validation-only
-rule enters the tournament. Qwen-Five remains tentative until a measured
-throughput and resource gate is passed. Twelve systems yield 66 unordered
-pairings. For illustration, 100 episodes per pairing would mean 6,600 games;
-the final official numerical budget is not settled. The raw
-win/draw/loss matrix remains authoritative. The compact ladder presentation is
-Policy, Elo with uncertainty, Expected Score with uncertainty, Win %, Draw % and
-Loss %, accompanied by full matchup and per-map results. Full tactical metrics
-are optional when running a local tournament. The headline report identifies tournament entries, rather than calling
-them teams. Its K/D ratio divides total kills by total deaths and stays blank
-when deaths are zero. This is descriptive evidence, not a rating input.
+| Learner | Planned Settings |
+| --- | --- |
+| Recurrent MAPPO, recurrent IPPO, QMIX and PQN-VDN | Plain, curriculum, reward shaping, and curriculum plus reward shaping for each learner |
+| Feedforward MAPPO and feedforward IPPO | Plain only |
 
-The implemented canonical machinery uses immutable monthly snapshots with exactly twelve
-controller versions. A challenger comparison contains those twelve plus one
-challenger; the growing Baseline Library does not enlarge that population.
-Custom tournaments may use other populations. Local runs produce results and
-do not admit or publish a controller. Numerical budgets and several admission
-rules still need approval. The snapshot/reuse runner and separate maintainer
-admission machinery are implemented and tested with fixtures. Those fixtures
-do not supply trained controllers or a qualified official bundle. See
-[Canonical Tournaments](docs/evaluation/canonical_tournaments.md).
+These are candidate settings, not eighteen qualified Systems. The initial
+campaign plan uses three independent training seeds per setting. That is a
+starting scientific plan, not evidence that three seeds are enough. Declare
+comparable search and extension effort, or disclose differences. Each setting
+supplies one fixed candidate through a rule declared before training; keep all
+run, checkpoint and selection records.
 
-The Paper 1 snapshot stays frozen. Pool-centred Elo values from different
-populations are not directly comparable over time. Current and former entrants
-retain immutable identities and supporting records in the Baseline Library.
-The earlier weekly update wording is superseded by this monthly direction.
-Reactive TDM (ALPHA, BETA and GAMMA), specialist scenario controllers,
-Random, and internal training-population members are not Big 12 entrants.
-See
-[specification amendment A27](docs/design/specification_amendments.md#a27-rolling-big-12-and-baseline-library-governance).
+Freeze the candidate field and selection rule before its validation games. Fit
+joint Elo on the complete eligible field, take the top N, and break cutoff ties
+by expected score against that same field, then by declared entrant order. Freeze
+membership before any selected-field refit or separate test-map evaluation. A
+refit may change ratings and order, but cannot choose different members. Weak
+valid candidates stay eligible; failed work stays visible and missing evidence
+must not turn into invented results or replacement seeds.
+
+Scripted controllers and LLMs, including the former Qwen-Five proposal, are
+excluded from the official candidate field and ladder. Valid scripted and host
+Systems remain usable in custom tournaments and local comparisons against the
+released field. Their diagnostic, scenario and declared competence-evaluation
+roles remain separate. Loading a valid actor does not require official training
+provenance; loading it does not grant official eligibility.
+
+A field has N*(N-1)/2 unordered matchups; one challenger adds N. Twelve entrants
+at 100 games per pairing give 6,600 games. That is a historical workload example,
+not a selected official N or budget. The final official field, game budget and
+resource rules still need a scientific declaration and qualification.
+
+The raw win/draw/loss matrix remains authoritative. The compact report is Policy,
+Elo with uncertainty, Expected Score with uncertainty, Win %, Draw % and Loss %,
+with full matchup and per-map results beside it. Tactical metrics are optional
+for local tournaments. K/D divides total kills by total deaths and stays blank
+when deaths are zero; it is descriptive evidence, not a rating input.
+
+The shared runner resolves one config, reuses compatible incumbent games and
+runs the required new games. Saved-first resume keeps the run's original field.
+Local runs neither admit nor publish a controller. Separate maintainer admission
+works against a pinned field; fixture checks do not create an official release.
+See [Canonical Tournaments](docs/evaluation/canonical_tournaments.md).
+
+The Paper 1 field stays frozen. Later releases follow the accepted monthly
+process; a promotion replaces one incumbent and keeps that release's N. Ratings
+from different populations are not directly comparable over time. The Baseline
+Library retains current and former entrants with their identities and evidence;
+its growth does not enlarge the active field. See
+[amendment A27](docs/design/specification_amendments.md#a27-rolling-big-n-and-baseline-library-governance)
+and the [tournament protocol](docs/evaluation/protocol.md#big-n-tournament-and-baseline-library).
 
 ## Static Snapshots
 
@@ -382,6 +396,9 @@ optional painter with `uv sync --locked --extra viz`. Browser launch does not
 require Matplotlib.
 
 ## Design and Evaluation
+
+- [LLM Systems](docs/llm/README.md) shows default and custom formats, actor
+  history, evaluation, tournaments and the qualified local Qwen recipe.
 
 - [Specification amendments](docs/design/specification_amendments.md) are the
   controlling public authority for accepted departures from the historical
