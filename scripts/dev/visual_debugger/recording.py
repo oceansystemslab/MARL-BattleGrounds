@@ -298,7 +298,14 @@ def recording_policy_execution_included(context: EvaluationEpisodeContext) -> bo
     return any(
         isinstance(row, (AssignedPolicySlotV1, AssignedPolicySlotV2))
         and row.policy_kind
-        in ("reactive_tdm", "random_valid", "scenario_5", "tdm_gamma")
+        in (
+            "reactive_tdm",
+            "random_valid",
+            "scenario_5",
+            "tdm_gamma",
+            "system",
+            "callable",
+        )
         for row in context.policy_assignments
     )
 

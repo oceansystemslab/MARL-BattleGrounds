@@ -6,6 +6,7 @@
  * serializes commands, and manages local focus, filters, replay playback, and
  * downloads. Open the launcher URL; this module is not a standalone Node program.
  */
+
 import {
   acquireCapabilityToken,
   acquireClientId,
@@ -60,11 +61,11 @@ import { explainAgent, explainLegality, explainTechnicalFact } from "./explanati
 import { renderMatchSummary } from "./match-summary.js";
 import {
   buildMetricSearchIndex,
-  searchMeasurements,
   renderMetricDefinition,
   renderMetricNavigation,
   renderMetricRows,
   renderMetricSearchResults,
+  searchMeasurements,
 } from "./metrics-panel.js";
 import {
   authorizedInspectorView,
@@ -88,6 +89,11 @@ import {
 import { captureReplayBattlefieldPngV1 } from "./replay-export.js";
 import { isReplayAgentRecipientRotation } from "./replay-recipient-rotation.js";
 import { BattlefieldRenderer } from "./scene.js";
+import {
+  requiresSharedObs as isReactiveController,
+  isSystemController,
+  isTeamController,
+} from "./system-controls.js";
 import {
   createSemanticDescriptor,
   createTooltipController,
@@ -2323,27 +2329,6 @@ function isReplayMode() {
 }
 
 /**
- * Return whether a value is a live controller that either team may use: manual,
- * random_valid, or one of the reactive controllers reactive_tdm (ALPHA),
- * scenario_5 (BETA) and tdm_gamma (GAMMA).
- *
- * @param {unknown} value
- */
-function isTeamController(value) {
-  return value === "manual" || value === "random_valid" || isReactiveController(value);
-}
-
-/**
- * Return whether a value is a reactive controller that needs SharedObs:
- * reactive_tdm (ALPHA), scenario_5 (BETA) or tdm_gamma (GAMMA).
- *
- * @param {unknown} value
- */
-function isReactiveController(value) {
-  return value === "reactive_tdm" || value === "scenario_5" || value === "tdm_gamma";
-}
-
-/**
  * Return the display label for a controller value.
  * Known reactive and random controllers have explicit names; other values use
  * Manual. This label helper does not validate the requested configuration.
@@ -2351,6 +2336,7 @@ function isReactiveController(value) {
  * @param {unknown} controller
  */
 function combatControllerLabel(controller) {
+  if (isSystemController(controller)) return String(controller).slice(7);
   if (controller === "reactive_tdm") {
     return "Reactive TDM ALPHA";
   }
@@ -2369,8 +2355,8 @@ function combatControllerLabel(controller) {
 /**
  * Read and validate the three public combat settings from a frame-like object.
  * Require known controllers and information mode. Both teams accept the same
- * five controllers; the reactive controllers (reactive_tdm, scenario_5 and
- * tdm_gamma) require SharedObs whichever team uses them. Return a frozen copy of
+ * built-in controllers and host-declared Systems. Reactive controllers
+ * (reactive_tdm, scenario_5 and tdm_gamma) and Systems require SharedObs. Return a frozen copy of
  * those settings, or null for malformed or unsupported input.
  *
  * @param {unknown} frame
@@ -2416,7 +2402,10 @@ function publishInstalledCombatConfiguration(frame) {
   }
   document.dispatchEvent(
     new CustomEvent("marl-devclient-combat-configuration-installed", {
-      detail: configuration,
+      detail: {
+        ...configuration,
+        system_choices: isRecord(frame) ? (frame.system_choices ?? []) : [],
+      },
     }),
   );
 }
@@ -5322,6 +5311,58 @@ function pauseReplayAfterPresentationFailure(reason) {
   }
 }
 
+/** @type {number | null} */
+let systemPollTimer = null;
+
+/** Show pending work and poll its explicit completion command without a new turn. */
+function renderSystemOperation() {
+  const button = document.getElementById("cancel-system-button");
+  const status = document.getElementById("system-operation-status");
+  const operation = isRecord(state.frame) ? state.frame.system_operation : null;
+  if (button instanceof HTMLButtonElement) {
+    button.hidden = !operation || isReplayMode();
+    button.disabled = state.busy || !["loading", "thinking"].includes(operation?.state);
+    button.onclick = () => {
+      if (operation)
+        void dispatchCommand({
+          command_type: "cancel_system",
+          operation_id: operation.operation_id,
+        });
+    };
+  }
+  if (status) {
+    /** @type {Record<string, string>} */
+    const labels = {
+      loading: "Loading",
+      thinking: "Choosing Actions",
+      finishing: "Finishing",
+      cancelling: "Cancelling",
+      failed: "Cleanup Failed",
+    };
+    status.textContent = operation ? `System: ${labels[operation.state]}` : "";
+  }
+  if (systemPollTimer !== null) window.clearTimeout(systemPollTimer);
+  systemPollTimer = null;
+  if (
+    operation &&
+    operation.state !== "failed" &&
+    !isReplayMode() &&
+    !state.shuttingDown &&
+    !state.offline &&
+    !state.resyncRequired
+  ) {
+    systemPollTimer = window.setTimeout(() => {
+      systemPollTimer = null;
+      if (!state.busy)
+        void dispatchCommand({
+          command_type: "finish_system",
+          operation_id: operation.operation_id,
+        });
+      else renderSystemOperation();
+    }, 250);
+  }
+}
+
 /**
  * Paint the complete page from one coherent installed transport/presentation pair.
  * Share a single visual-filter snapshot across scene and choreography, refresh
@@ -5329,6 +5370,7 @@ function pauseReplayAfterPresentationFailure(reason) {
  * choices. Presentation failures pause replay and clear choreography with a notice.
  */
 function render() {
+  renderSystemOperation();
   capturePresentationPreferenceBeforeRender();
   const installed = installedPresentationAuthority();
   const presentationFrame = installed?.presentation ?? null;

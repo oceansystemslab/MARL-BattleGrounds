@@ -17,7 +17,7 @@ import stat
 import sys
 import tempfile
 from collections.abc import Callable, Generator, Iterator, Mapping, Sequence
-from contextlib import contextmanager
+from contextlib import ExitStack, contextmanager
 from dataclasses import dataclass
 from dataclasses import field as dataclass_field
 from graphlib import CycleError, TopologicalSorter
@@ -1164,25 +1164,40 @@ def active_tournament_pair(
     leaving the context: this helper cannot discover caller-owned output trees.
     On exit, pending method-array creation and JAX callback effects finish before
     local references are released. Compilation caches stay; JAX may retain its
-    device allocation pool. External sessions are not closed or rolled back.
+    device allocation pool. Managed System scopes remain open across the pair and
+    close even if the second loader fails. Supplied external clients remain
+    caller-owned under that System's resource contract.
     """
-    first_method: System | Policy | None = None
-    second_method: System | Policy | None = None
-    try:
-        first_method = load_tournament_controller(first, verifier)
-        second_method = load_tournament_controller(second, verifier)
-        yield first_method, second_method
-    finally:
-        if first_method is not None or second_method is not None:
-            import jax
+    from marl_battlegrounds.evaluation.policy_execution import System
 
-            for method in (first_method, second_method):
-                if method is not None:
-                    for leaf in jax.tree.leaves(method.variables):
-                        if isinstance(leaf, jax.Array):
-                            leaf.block_until_ready()
-            jax.effects_barrier()
-        first_method = second_method = None
+    with ExitStack() as cleanup:
+        first_method: System | Policy | None = None
+        second_method: System | Policy | None = None
+        try:
+            first_method = load_tournament_controller(first, verifier)
+            if (
+                isinstance(first_method, System)
+                and first_method.resource_scope is not None
+            ):
+                cleanup.enter_context(first_method.resource_scope(False))
+            second_method = load_tournament_controller(second, verifier)
+            if (
+                isinstance(second_method, System)
+                and second_method.resource_scope is not None
+            ):
+                cleanup.enter_context(second_method.resource_scope(False))
+            yield first_method, second_method
+        finally:
+            if first_method is not None or second_method is not None:
+                import jax
+
+                for method in (first_method, second_method):
+                    if method is not None:
+                        for leaf in jax.tree.leaves(method.variables):
+                            if isinstance(leaf, jax.Array):
+                                leaf.block_until_ready()
+                jax.effects_barrier()
+            first_method = second_method = None
 
 
 def asset_location_config(

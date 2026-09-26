@@ -57,6 +57,11 @@ from marl_battlegrounds.core.types import (
     Observation,
     Reward,
 )
+from marl_battlegrounds.environment import (
+    EnvironmentState,
+    _checked_increment,  # pyright: ignore[reportPrivateUsage] - shared counter owner
+    make,
+)
 from marl_battlegrounds.evaluation import policy_execution
 from marl_battlegrounds.evaluation.capture import (
     capture_evaluation_transition_unit_v3,
@@ -72,9 +77,18 @@ from marl_battlegrounds.evaluation.models import (
 from marl_battlegrounds.evaluation.policy_execution import (
     Policy,
     PolicyTree,
+    System,
+    SystemState,
     apply_policies,
+    apply_systems,
+    init_systems,
     policy,
+    shared_policy,
 )
+from marl_battlegrounds.evaluation.recording_identity import (
+    normalize_system_registration,
+)
+from marl_battlegrounds.evaluation.system_evaluation import freeze_evaluation_method
 from marl_battlegrounds.policies.actor import (
     ActorAction,
     build_joint_action_from_actor_actions,
@@ -99,8 +113,6 @@ from scripts.dev.visual_debugger.evaluation_bridge import (
     debugger_action_source_kind_v1,
 )
 from scripts.dev.visual_debugger.model import (
-    SUPPORTED_TEAM_B_CONTROLLERS,
-    SUPPORTED_TEAM_CONTROLLERS,
     DebuggerScenario,
     DebuggerSession,
     Lane,
@@ -110,6 +122,8 @@ from scripts.dev.visual_debugger.model import (
     SubmissionKind,
     TeamBController,
     TeamController,
+    is_system_controller,
+    is_team_controller,
 )
 
 # Compiled forms of the real policy executor and Core step. Controller callables
@@ -525,6 +539,149 @@ def _configured_policy(
     )
 
 
+def _prepare_session_systems(
+    controllers: tuple[TeamController, TeamController],
+    supplied: tuple[System | None, System | None] | None,
+) -> tuple[System, System] | None:
+    """Freeze declared methods once and adapt built-ins only for a System pair.
+
+    supplied follows Team A/B order. Each system: alias needs its actual System.
+    Built-ins use their existing Policy implementations. Manual starts neutral;
+    each decision later passes its current draft as dynamic parameters. This
+    creates no client scope and makes no model request.
+    """
+    if not all(is_team_controller(value) for value in controllers):
+        raise ValueError("Choose a built-in controller or a declared System alias")
+    if not any(is_system_controller(value) for value in controllers):
+        if supplied is not None and any(value is not None for value in supplied):
+            raise ValueError("Supplied Systems need a declared System controller")
+        return None
+    if supplied is None:
+        raise ValueError("A declared System controller needs its loaded method")
+    methods: list[System] = []
+    prepared: dict[int, System] = {}
+    for controller, method in zip(controllers, supplied, strict=True):
+        if is_system_controller(controller):
+            if not isinstance(method, System):
+                raise ValueError("A declared System controller needs a System")
+            if id(method) not in prepared:
+                prepared[id(method)] = cast(System, freeze_evaluation_method(method))
+            methods.append(prepared[id(method)])
+        elif controller == "manual":
+            neutral = Action(*(jnp.zeros(5, jnp.int32) for _ in range(3)))
+            methods.append(
+                shared_policy(Policy("manual", _manual_policy, variables=neutral))
+            )
+        else:
+            methods.append(
+                shared_policy(
+                    policy(
+                        {
+                            "reactive_tdm": "tdm-alpha",
+                            "random_valid": "random",
+                            "scenario_5": "tdm-beta",
+                            "tdm_gamma": "tdm-gamma",
+                        }[controller]
+                    )
+                )
+            )
+    return methods[0], methods[1]
+
+
+def _session_system_registrations(
+    methods: tuple[System, System] | None,
+) -> tuple[tuple[str, dict[str, object]], tuple[str, dict[str, object]]] | None:
+    """Register the two frozen setup methods once, without reading live memory."""
+    if methods is None:
+        return None
+    first = normalize_system_registration(methods[0], phase="evaluation", frozen=True)
+    second = (
+        first
+        if methods[0] is methods[1]
+        else normalize_system_registration(methods[1], phase="evaluation", frozen=True)
+    )
+    return first, second
+
+
+def _initial_system_state(
+    systems: tuple[System, System] | None,
+    config: EnvConfig,
+    state: EnvState,
+    observation: Observation,
+    action_mask: ActionMask,
+    availability: Array | None,
+    context: EvaluationEpisodeContextV4,
+    registrations: tuple[tuple[str, dict[str, object]], tuple[str, dict[str, object]]]
+    | None,
+) -> tuple[EnvironmentState | None, SystemState | None, tuple[str, str] | None]:
+    """Pair the existing raw snapshot with fresh public System memory, once.
+
+    No transition occurs. Use local episode ID 1 and the recorded shared System
+    root. The wrapper retains the exact raw objects and permitted source matrix.
+    The caller owns any resource scopes needed by custom initializers.
+    """
+    if systems is None:
+        return None, None, None
+    if availability is None:
+        raise ValueError("Systems require SharedObs source permissions")
+    env = make("tdm", metrics="none", balance_spawn_locations=False)
+    root = jax.random.key(_required_seed(context.seed_protocol.focal_policy_seed))
+    _, wrapped = env.reset(
+        root, env_config=config, initial=(state, observation, action_mask), episode_id=1
+    )
+    wrapped = wrapped._replace(
+        config=config,
+        core_state=state,
+        observation=observation,
+        action_mask=action_mask,
+        source_availability=availability,
+    )
+    memory = init_systems(*systems, env.get_observations(wrapped), wrapped, root)
+    assert registrations is not None
+    identifiers = (registrations[0][0], registrations[1][0])
+    return wrapped, memory, (identifiers[0], identifiers[1])
+
+
+def _build_system_joint_action(session: DebuggerSession) -> tuple[Action, SystemState]:
+    """Choose one complete joint action and stage memory without changing the game.
+
+    Manual drafts are supplied only to their own adapter. Public apply_systems
+    filters each actor's information and keeps the existing whole-System batch.
+    Memory is adopted only after submit_joint_action packages its successor.
+    """
+    methods, wrapped, memory = (
+        session.systems,
+        session.environment_state,
+        session.system_memory,
+    )
+    if methods is None or wrapped is None or memory is None:
+        raise ValueError("System state is missing")
+    variables = [method.variables for method in methods]
+    for team, controller in enumerate(
+        (session.team_a_controller, session.team_b_controller)
+    ):
+        if controller == "manual":
+            variables[team] = _configured_policy(
+                session, TEAM_A_ID if team == 0 else TEAM_B_ID, controller
+            ).variables
+    key = jax.random.fold_in(
+        jax.random.key(
+            _required_seed(session.evaluation_context.seed_protocol.focal_policy_seed)
+        ),
+        session.current_evaluation_frame.frame_index,
+    )
+    action, proposed, _ = apply_systems(
+        *methods,
+        memory,
+        Observations(wrapped.observation, wrapped.source_availability),
+        wrapped,
+        key,
+        variables_a=variables[0],
+        variables_b=variables[1],
+    )
+    return action, proposed
+
+
 def _build_configured_joint_action(session: DebuggerSession) -> Action:
     """Resolve both teams before the single existing simulator step.
 
@@ -727,6 +884,7 @@ def _validate_reactive_controller_selection(
     """Check execution boundaries, independently of scenario content."""
     if not any(
         controller in ("reactive_tdm", "scenario_5", "tdm_gamma")
+        or is_system_controller(controller)
         for controller in (team_a_controller, team_b_controller)
     ):
         return
@@ -751,6 +909,7 @@ def create_session(
     team_a_controller: TeamController = "manual",
     team_b_controller: TeamBController = "manual",
     execution_information_mode: ExecutionInformationMode = "no_shared_obs",
+    systems: tuple[System | None, System | None] | None = None,
 ) -> DebuggerSession:
     """Create one deterministic immutable debugger session.
 
@@ -781,7 +940,11 @@ def create_session(
         which require SharedObs, as well as Manual and Random.
     execution_information_mode : ExecutionInformationMode
         no_shared_obs by default for direct diagnostics; shared_obs enables the
-        composed team input contract.
+        composed team input contract. Declared Systems require shared_obs.
+    systems : tuple of System or None, optional
+        Actual Team A/B methods for system: aliases. Built-in teams use None.
+        Methods are frozen at setup; their fresh memory belongs to this match.
+        The caller owns resource scopes, including any custom initializer work.
 
     Returns
     -------
@@ -795,6 +958,9 @@ def create_session(
         If the scenario, seed, active selection or controller/input combination is
         invalid.
     """
+    prepared_systems = _prepare_session_systems(
+        (team_a_controller, team_b_controller), systems
+    )
     if seed != evaluation_launch_specification.root_seed:
         raise ValueError("seed must equal the debugger evaluation launch root seed.")
     (
@@ -810,6 +976,7 @@ def create_session(
         team_b_controller=team_b_controller,
         execution_information_mode=execution_information_mode,
     )
+    registrations = _session_system_registrations(prepared_systems)
     evaluation_context = build_debugger_evaluation_context_v1(
         evaluation_launch_specification,
         scenario=scenario,
@@ -824,6 +991,7 @@ def create_session(
         team_b_controller=team_b_controller,
         execution_information_mode=execution_information_mode,
         expected_horizon=_debugger_expected_horizon(scenario, config, state),
+        system_registrations=registrations,
     )
     next_key = jax.random.key(
         _required_seed(evaluation_context.seed_protocol.environment_seed)
@@ -859,7 +1027,21 @@ def create_session(
         name="controlled_global_slot",
     )
 
+    wrapped, memory, system_ids = _initial_system_state(
+        prepared_systems,
+        config,
+        state,
+        observation,
+        action_mask,
+        information_availability,
+        evaluation_context,
+        registrations,
+    )
     session = DebuggerSession(
+        systems=prepared_systems,
+        environment_state=wrapped,
+        system_memory=memory,
+        system_ids=system_ids,
         scenario=scenario,
         seed=seed,
         run_generation=0,
@@ -1216,6 +1398,7 @@ def submit_joint_action(
     *,
     submission_kind: SubmissionKind,
     report_actor_slots: tuple[int, ...],
+    system_memory: SystemState | None = None,
 ) -> DebuggerSession:
     """Split once, step once, diagnose once, and advance all paired epoch fields.
 
@@ -1231,6 +1414,9 @@ def submit_joint_action(
     report_actor_slots : tuple[int, ...]
         Distinct active global actor slots whose submitted/accepted rows should
         be reported.
+    system_memory : SystemState | None
+        Proposed memory from this exact joint choice. None retains the current
+        memory. It is adopted only with the completely packaged successor.
 
     Returns
     -------
@@ -1340,8 +1526,26 @@ def submit_joint_action(
             session.status_source_evidence_state,
             coherent_view,
         )
+        wrapped = session.environment_state
+        if wrapped is not None:
+            count, exhausted = _checked_increment(
+                wrapped.cumulative_transition_count, 1
+            )
+            wrapped = wrapped._replace(
+                core_state=next_state,
+                observation=next_observation,
+                action_mask=next_action_mask,
+                done=done_flags,
+                episode_start=jnp.asarray(False),
+                cumulative_transition_count=count,
+                lifecycle_error=wrapped.lifecycle_error | exhausted,
+            )
         return replace(
             session,
+            environment_state=wrapped,
+            system_memory=session.system_memory
+            if system_memory is None
+            else system_memory,
             key=next_key,
             state=next_state,
             observation=next_observation,
@@ -1421,13 +1625,25 @@ def submit_interactive(
         )
     ):
         try:
-            action = _build_configured_joint_action(session)
+            proposed = None
+            if session.systems is None:
+                action = _build_configured_joint_action(session)
+            else:
+                action, proposed = _build_system_joint_action(session)
         except Exception as error:
             raise _transition_failure(
                 "action_build",
                 "policy_action_build_failed",
                 error,
             ) from error
+        if proposed is not None:
+            return submit_joint_action(
+                session,
+                action,
+                submission_kind="interactive",
+                report_actor_slots=_active_context_slots(session),
+                system_memory=proposed,
+            )
         return submit_joint_action(
             session,
             action,
@@ -1560,6 +1776,7 @@ def _restart_session(
     team_a_controller: TeamController | None = None,
     team_b_controller: TeamBController | None = None,
     execution_information_mode: ExecutionInformationMode | None = None,
+    systems: tuple[System | None, System | None] | None = None,
 ) -> DebuggerSession:
     """Build one coherent fresh epoch without entering the simulator step seam."""
     next_team_a_controller = (
@@ -1573,6 +1790,17 @@ def _restart_session(
         if execution_information_mode is None
         else execution_information_mode
     )
+    selected = (next_team_a_controller, next_team_b_controller)
+    provided = systems
+    if provided is None and any(is_system_controller(value) for value in selected):
+        previous = (session.team_a_controller, session.team_b_controller)
+        if any(
+            is_system_controller(value) and value != previous[index]
+            for index, value in enumerate(selected)
+        ):
+            raise ValueError("A new System alias needs its loaded method")
+        provided = session.systems
+    prepared_systems = _prepare_session_systems(selected, provided)
     (
         scenario_default_movement_scale,
         config,
@@ -1595,6 +1823,7 @@ def _restart_session(
             session.evaluation_context.capture_profile,
         ),
     )
+    registrations = _session_system_registrations(prepared_systems)
     evaluation_context = build_debugger_evaluation_context_v1(
         launch_specification,
         scenario=scenario,
@@ -1609,6 +1838,7 @@ def _restart_session(
         team_b_controller=next_team_b_controller,
         execution_information_mode=next_information_mode,
         expected_horizon=_debugger_expected_horizon(scenario, config, state),
+        system_registrations=registrations,
     )
     next_key = jax.random.key(
         _required_seed(evaluation_context.seed_protocol.environment_seed)
@@ -1643,8 +1873,22 @@ def _restart_session(
         controlled_slot,
         name="controlled_global_slot",
     )
+    wrapped, memory, system_ids = _initial_system_state(
+        prepared_systems,
+        config,
+        state,
+        observation,
+        action_mask,
+        information_availability,
+        evaluation_context,
+        registrations,
+    )
     restarted = replace(
         session,
+        systems=prepared_systems,
+        environment_state=wrapped,
+        system_memory=memory,
+        system_ids=system_ids,
         scenario=scenario,
         run_generation=run_generation,
         scenario_default_movement_scale=scenario_default_movement_scale,
@@ -1678,6 +1922,7 @@ def set_combat_configuration(
     team_a_controller: TeamController,
     team_b_controller: TeamBController,
     execution_information_mode: ExecutionInformationMode,
+    systems: tuple[System | None, System | None] | None = None,
 ) -> DebuggerSession:
     """Replace the episode only when its controller or information mode changes.
 
@@ -1691,7 +1936,11 @@ def set_combat_configuration(
         Supported Team B controller kind; both teams accept the same kinds.
     execution_information_mode : ExecutionInformationMode
         shared_obs or no_shared_obs; must satisfy the selected controllers'
-        input needs.
+        input needs. Declared Systems require shared_obs.
+    systems : tuple of System or None, optional
+        Loaded Team A/B methods for a deliberate replacement. Omission retains
+        current declarations on restart. Supplying methods creates fresh memory
+        even when controller labels are unchanged. Caller owns resource scopes.
 
     Returns
     -------
@@ -1704,12 +1953,12 @@ def set_combat_configuration(
         If the scenario, seed, active selection or controller/input combination is
         invalid.
     """
-    if team_a_controller not in SUPPORTED_TEAM_CONTROLLERS:
+    if not is_team_controller(team_a_controller):
         raise CombatConfigurationRejectedError(
             "team_a_controller must be manual, reactive_tdm, random_valid, "
             "scenario_5, or tdm_gamma"
         )
-    if team_b_controller not in SUPPORTED_TEAM_B_CONTROLLERS:
+    if not is_team_controller(team_b_controller):
         raise CombatConfigurationRejectedError(
             "team_b_controller must be manual, reactive_tdm, random_valid, "
             "scenario_5, or tdm_gamma"
@@ -1723,6 +1972,7 @@ def set_combat_configuration(
         and session.team_b_controller == team_b_controller
         and session.evaluation_context.execution_information_mode
         == execution_information_mode
+        and systems is None
     ):
         return session
     return _restart_session(
@@ -1732,12 +1982,15 @@ def set_combat_configuration(
         team_a_controller=team_a_controller,
         team_b_controller=team_b_controller,
         execution_information_mode=execution_information_mode,
+        systems=systems,
     )
 
 
 def switch_scenario(
     session: DebuggerSession,
     scenario: DebuggerScenario,
+    *,
+    systems: tuple[System | None, System | None] | None = None,
 ) -> DebuggerSession:
     """Start another scenario at the canonical product movement scale.
 
@@ -1748,6 +2001,9 @@ def switch_scenario(
         replacement.
     scenario : DebuggerScenario
         New validated scenario factory and metadata.
+    systems : tuple of System or None, optional
+        Fresh loaded Team A/B methods, when a declared replacement owns setup.
+        Omission preserves the existing caller-owned methods.
 
     Returns
     -------
@@ -1765,4 +2021,5 @@ def switch_scenario(
         session,
         scenario,
         preserve_controlled_slot=False,
+        systems=systems,
     )

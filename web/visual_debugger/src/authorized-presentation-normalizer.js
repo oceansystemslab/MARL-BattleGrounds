@@ -9,6 +9,7 @@
  * must test this module's private marker, not accept look-alike objects. Work is in
  * memory, with asynchronous Web Crypto SHA-256 checks and no network or file I/O.
  */
+
 import { AUTHORIZED_PRESENTATION_SCHEMA_V1 } from "./authorized-presentation-schema.js";
 import { normalizeLiveDebuggerFrameV2 } from "./frame-normalizer.js";
 import {
@@ -19,6 +20,11 @@ import {
   normalizeReplayViewerFrameV1,
   validateReplayFrameContinuity,
 } from "./replay-frame-normalizer.js";
+import {
+  isTeamController,
+  requiresSharedObs,
+  systemTransportKeys,
+} from "./system-controls.js";
 import { CANONICAL_STATUS_ORDER, statusTokenIdFromCatalogId } from "./vocabulary.js";
 
 const PRESENTATION_KINDS = new Set([
@@ -6300,7 +6306,9 @@ function preflightTransportPresentationIdentity(rawValue, presentationValue) {
   }
   requireExactSnapshotKeys(
     raw,
-    RAW_FRAME_KEYS[raw.frame_kind],
+    live
+      ? systemTransportKeys(RAW_FRAME_KEYS[raw.frame_kind], raw)
+      : RAW_FRAME_KEYS[raw.frame_kind],
     "Raw transport candidate",
   );
   if (raw.frame_kind !== expectedFrameKind) {
@@ -6349,16 +6357,14 @@ function preflightTransportPresentationIdentity(rawValue, presentationValue) {
     );
     // Both teams accept the same five controllers; the three reactive ones
     // (ALPHA, BETA and GAMMA) need SharedObs whichever team uses them.
-    const reactive = ["reactive_tdm", "scenario_5", "tdm_gamma"];
-    const controllers = ["manual", "random_valid", ...reactive];
     if (
-      !controllers.includes(configuration.team_a_controller) ||
-      !controllers.includes(configuration.team_b_controller) ||
+      !isTeamController(configuration.team_a_controller) ||
+      !isTeamController(configuration.team_b_controller) ||
       !["shared_obs", "no_shared_obs"].includes(
         configuration.execution_information_mode,
       ) ||
-      ((reactive.includes(configuration.team_a_controller) ||
-        reactive.includes(configuration.team_b_controller)) &&
+      ((requiresSharedObs(configuration.team_a_controller) ||
+        requiresSharedObs(configuration.team_b_controller)) &&
         configuration.execution_information_mode !== "shared_obs") ||
       (!oracle &&
         configuration.execution_information_mode !==

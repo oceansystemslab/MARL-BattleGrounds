@@ -2358,3 +2358,46 @@ test("native panels preserve user state only within exact authority", async ({
   await expect.poll(() => rosterBody.evaluate((body) => body.scrollTop)).toBe(0);
   await expect(page.locator("#agent-details")).not.toHaveAttribute("open", "");
 });
+
+test("declared System loads, accepts one turn and abandons a cancelled late reply", async ({
+  page,
+}) => {
+  const started = await startDebugger({
+    extraArgs: [
+      "--offer-system",
+      "counter=tests.visual_debugger_system_browser_harness:make_system",
+    ],
+  });
+  page.on("pageerror", (error) => {
+    throw error;
+  });
+  try {
+    await page.goto(started.url);
+    await expect(
+      page.locator("#devclient-team-a-controller option[value='system:counter']"),
+    ).toHaveCount(1);
+    await page.locator("#devclient-team-a-controller").selectOption("system:counter");
+    await expect(page.locator("#devclient-team-a-controller")).toHaveValue(
+      "system:counter",
+    );
+    await expect(page.locator("#system-operation-status")).toHaveText("");
+    await setDisclosureOpen(page, "#command-deck", true);
+    await page.locator("#submit-turn-button").click();
+    await expect(page.locator("#system-operation-status")).toHaveText(
+      "System: Choosing Actions",
+    );
+    await expect(page.locator("#step-value")).toHaveText("1");
+    await expect(page.locator("#system-operation-status")).toHaveText("");
+    await page.locator("#submit-turn-button").click();
+    await expect(page.locator("#cancel-system-button")).toBeEnabled();
+    await page.locator("#cancel-system-button").click();
+    await expect(page.locator("#system-operation-status")).toHaveText("");
+    await expect(page.locator("#step-value")).toHaveText("1");
+    await page.locator("#devclient-team-a-controller").selectOption("manual");
+    await expect(page.locator("#devclient-team-a-controller")).toHaveValue("manual");
+    await expect(page.locator("#system-operation-status")).toHaveText("");
+    await expect(page.locator("#step-value")).toHaveText("0");
+  } finally {
+    await stopDebugger(started.process);
+  }
+});

@@ -56,6 +56,87 @@ This also lets two Systems share one request limit. For a hand-written loop,
 keep that client context open, or enter `system.resource_scope(False)` around
 the complete loop. A managed System cannot make unowned requests.
 
+## Use A Factory From The Package Command
+
+A factory is an ordinary function that takes no arguments and returns a System.
+The example provides one for each reply format. Examples are not included in
+the installed wheel or source distribution. Run from a repository checkout,
+or copy the example into your own importable module. From the repository root:
+
+```bash
+export MARL_LLM_MODEL=my-served-model
+export MARL_LLM_URL=http://127.0.0.1:8000/v1
+export MARL_LLM_REVISION=my-pinned-model-revision
+export MARL_LLM_HISTORY=2
+JAX_PLATFORMS=cpu python -m marl_battlegrounds evaluate \
+  --system examples.llm:make_default_system --opponent random \
+  --episodes 2 --maps 0 --max-steps 300 --num-envs 2 \
+  --output-dir runs/llm-factory --save-replays 2
+```
+
+Use `examples.llm:make_custom_system` for the two-word parser from the
+[custom-format tutorial](custom_formats.md). Both factories use the shared
+loader and evaluator. They make no requests during construction. The runner
+owns the managed client. The URL defaults to `http://127.0.0.1:8000/v1`, history
+defaults to 0, and an omitted revision means unknown model content. Set the real
+revision when comparing or resuming experiments.
+
+To resume, replace `--output-dir` with `--resume-from` and the saved run directory
+printed by the command. Keep the model, revision, history and format settings
+unchanged. Completed games need no new model requests. Changes to the declared
+method are rejected before play.
+
+## Run Tournaments
+
+Pass the same System to the ordinary tournament functions:
+
+```python
+import marl_battlegrounds as marl_bgs
+from marl_battlegrounds import llm
+
+system = llm.make_system("my-served-model", "http://127.0.0.1:8000/v1")
+result = marl_bgs.run_tournament(
+    [system, "random", "tdm-alpha"], maps=[0], episodes_per_pair=2,
+    num_envs=2, max_steps=300, output_dir="runs/llm-tournament",
+)
+print(result.table("tournament_rankings"))
+print(llm.call_summary(result))
+```
+
+A managed client stays open across that System's unfinished matchups and closes
+when the tournament exits, including after an error. Supplied clients remain
+caller-owned. Each game still starts with fresh actor history. Completed
+matchups acquire no client on resume. Use `resume_from=result.run_dir` with the
+same methods and settings to resume the saved custom tournament.
+
+For a local canonical challenger, use
+`marl_bgs.run_canonical_tournament(system, output_dir="runs/llm-canonical")`.
+This requires an installed, verified canonical snapshot and its local record
+assets; M11 does not fabricate or publish a release. The
+[canonical tournament guide](../evaluation/canonical_tournaments.md) explains
+setup. Resume with the same System and `resume_from` pointing to its run.
+The challenger remains Team A while the schedule exchanges spawn ends.
+Incumbent games retain their original identities and records.
+
+The [custom-format factory](custom_formats.md) works through these same routes.
+A tournament keeps a whole System's batch contract; it does not advance separate
+actors or lanes while another part of that System is still deciding.
+
+## Start From An Authored State
+
+Use the same System with `evaluate_episodes` and an `EpisodeSpec` whose
+`initial_state` is your authored Core state. See the
+[evaluation workflow guide](../evaluation/workflows.md) for schedule construction.
+The model sees the state's actual game tick. Recorded `decision_step` instead
+counts decisions since this scheduled episode began. For example, a start at
+tick 5 records its first decision as 0 while the prompt still says tick 5.
+History starts empty and then retains only that actor's played turns.
+
+Saved replay transitions contain both teams' submitted world actions. They can
+be played again without asking a model. Do not reflect `world_action` a second
+time. This reproduces the saved choices; it does not promise that a fresh model
+request gives the same answer.
+
 ## Read Calls And Recovery
 
 Game tables and model calls have different jobs. `llm.call_summary(result)`
@@ -64,6 +145,14 @@ works with a fresh result or `marl_bgs.load_results(run_dir)`. It returns:
 - `all_attempts`: recorded calls, tokens and failures from all execution attempts.
 - `completed_games`: counts only from the attempt that saved each completed game.
   Report both teams' fallback counts beside those games' win rates.
+- `by_system`: the same two scopes for each saved System registration ID, with
+  its recorded name. This keeps ownership clear when tournament entrants change
+  between Team A and Team B. These IDs are not canonical entrant IDs.
+
+These summaries read the selected run's own passes. Canonical games reused from
+older runs keep their original records; their model calls and fallback counts
+are excluded here. Include that source evidence before reporting costs or
+fallback counts for the whole tournament population.
 
 Token totals cover measured usage only. `missing_usage_replies` marks replies
 with incomplete usage. Abrupt interruption can lose unflushed costs; these
@@ -327,5 +416,51 @@ Local raw evidence is under
 are in `artifacts/m11/packet-2/pre-live-source.json`; the base is `fa58649`.
 These local artifacts are not bundled with an installation. Saved actions and
 requests support audits; temperature zero does not guarantee identical fresh
-model replies. The fixed model comparison and combined GPU workload are separate
-qualification work.
+model replies. The model comparison and combined GPU workload have separate qualification
+evidence.
+
+## Play In DevClient
+
+From a source checkout, offer a factory when starting DevClient:
+
+```bash
+export MARL_LLM_MODEL=my-served-model
+export MARL_LLM_URL=http://127.0.0.1:8000/v1
+export MARL_LLM_HISTORY=2
+JAX_PLATFORMS=cpu python scripts/dev/debug_renderer.py \
+  --offer-system qwen=examples.llm:make_default_system
+```
+
+Choose **Qwen** for either team and keep **SharedObs** selected. Each Submit
+asks the Systems for one joint turn. The browser stays usable while they work.
+**Cancel System Work** abandons the pending result and keeps the last accepted
+game state. A cancelled decision requires fresh methods before another turn;
+Reset or choose new controllers. Cleanup never stops the model server.
+
+Add `--offer-system words=examples.llm:make_custom_system` for the tutorial's
+non-JSON replies. Only factories named by the host are offered. The browser
+cannot supply a Python import, model URL or credential. Factories load only when
+selected and must return fresh method instances for replacement. Both teams can
+select one declaration: it loads once and keeps separate team memories.
+
+Loading an authored map or scenario prepares fresh methods in the same worker.
+The old game and source snapshot remain current until the new setup succeeds.
+A failed or cancelled replacement leaves the old methods usable. Cancel pending
+work before retrying a different load. Authored map/scenario loading is available
+only without replay recording. While recording, controller changes and Reset use
+the existing discard confirmation; Finish & Review saves the accepted prefix.
+
+Add `--record-replay artifacts/dev_client/replays/qwen.marlbg-replay.json` to
+save the game. The launcher prints the adjacent model-call directory. Its
+`generation-N/session.json` records full System identities and verified saved
+replay prefixes. `llm.read_calls(generation_directory)` reads the separate call
+rows. A row marked `played` means the service accepted that action; it does not
+by itself mean the replay reached disk. An abandoned or interrupted attempt can
+remain in the call files. Save As keeps the original call directory and adds the
+new verified replay path to its saved-prefix list.
+
+A Python factory or custom hook can block indefinitely. Cancellation fences its
+result immediately, but the worker cannot forcibly interrupt arbitrary Python.
+The single pending slot stays occupied until that work returns and cleanup ends.
+HTTP calls still use the client's deadlines. Cleanup and recording failures are
+reported in the host log; the browser keeps paths and server details private.

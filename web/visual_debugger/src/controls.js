@@ -4,6 +4,11 @@
  * These browser helpers build requests and decide local focus/confirmation
  * behavior; they do not execute a simulator transition or persist a replay.
  */
+import {
+  requiresSharedObs as isReactiveController,
+  isTeamController,
+} from "./system-controls.js";
+
 const GAME_KEYS = new Set([
   "Tab",
   "Escape",
@@ -153,27 +158,6 @@ export function targetSelectionCommand(value) {
 }
 
 /**
- * Return whether value is a live controller that either team may use: manual,
- * random_valid, or one of the reactive controllers reactive_tdm (ALPHA),
- * scenario_5 (BETA) and tdm_gamma (GAMMA).
- *
- * @param {unknown} value
- */
-function isTeamController(value) {
-  return value === "manual" || value === "random_valid" || isReactiveController(value);
-}
-
-/**
- * Return whether value is a reactive controller that needs SharedObs:
- * reactive_tdm (ALPHA), scenario_5 (BETA) or tdm_gamma (GAMMA).
- *
- * @param {unknown} value
- */
-function isReactiveController(value) {
-  return value === "reactive_tdm" || value === "scenario_5" || value === "tdm_gamma";
-}
-
-/**
  * Project an effective episode replacement from frame and command, or null.
  *
  * Recognize reset, a changed valid combat configuration, an available changed
@@ -273,6 +257,8 @@ export function recordingReplacementCommand(frame, command) {
  * }>}
  */
 export function recordingCommandDecision(frame, command) {
+  if (["finish_system", "cancel_system"].includes(String(command.command_type)))
+    return Object.freeze({ action: "allow", command });
   const status = frame.recording;
   if (!status || typeof status !== "object" || Array.isArray(status)) {
     return Object.freeze({ action: "allow", command });

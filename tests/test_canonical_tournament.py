@@ -500,3 +500,90 @@ def test_pre_red_zone_bundle_reuses_every_game_and_refuses_new_games(
         for path in (tmp_path / "inputs").rglob("*")
         if path.is_file()
     } == inputs
+
+
+@pytest.mark.parametrize("custom", [False, True])
+def test_local_canonical_llm_uses_pinned_records_and_resumes_without_calls(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    custom: bool,
+) -> None:
+    from examples.llm import parse_words, prompt_for_words
+    from tests.llm_fixtures import FakeModel, server
+
+    from marl_battlegrounds import llm
+
+    bundle = build_record_bundle(tmp_path / "inputs", max_steps=1)
+    selected = _pin(monkeypatch, bundle["config"])
+    closed: list[llm.Client] = []
+    close_original = llm.Client.close
+
+    def close(client: llm.Client, *, grace: float = 2.0) -> None:
+        close_original(client, grace=grace)
+        closed.append(client)
+
+    monkeypatch.setattr(llm.Client, "close", close)
+    model = FakeModel(
+        "stay no_combat" if custom else '{"move":"stay","combat":"no_combat"}'
+    )
+    with server(model.serve) as url:
+        method = llm.make_system(
+            "fake",
+            url,
+            model_revision="test-revision",
+            prompt_builder=prompt_for_words if custom else None,
+            reply_parser=parse_words if custom else None,
+            custom_version="canonical-test-v1" if custom else None,
+        )
+        result = marl_bgs.run_canonical_tournament(
+            method,
+            config=selected,
+            num_envs=2,
+            chunk_size=1,
+            output_dir=tmp_path / "out",
+        )
+        assert result.status == "complete"
+        assert result.reused_games == 660
+        assert result.executed_games == 120
+        assert len(model.generations()) == 600
+        assert len(closed) == 1
+        assert result.run_dir is not None
+        calls = list(llm.read_calls(result.run_dir))
+        assert len(calls) == 600
+        assert {row["team"] for row in calls} == {0}
+        assert all(row["outcome"] == "played" for row in calls)
+        new = [
+            game
+            for game in result.metadata["canonical_plan"]["games"]
+            if game["origin"] is None
+        ]
+        assert all(game["team_a"] == result.challenger_id for game in new)
+        assert {game["spawn_locations"] for game in new} == {0, 1}
+        summary = llm.call_summary(result)
+        assert summary["completed_games"]["team_a"]["model_calls"] == 600
+        assert (
+            sum(
+                value["completed_games"]["model_calls"]
+                for value in summary["by_system"].values()
+            )
+            == 600
+        )
+        before = {
+            path: path.read_bytes()
+            for path in (result.run_dir / "model_calls").rglob("*")
+            if path.is_file()
+        }
+        monkeypatch.setattr(canonical, "_active_pair", _unexpected)
+        resumed = marl_bgs.run_canonical_tournament(method, resume_from=result.run_dir)
+        assert resumed.matches == result.matches
+        assert resumed.metadata["executed_this_call"] == 0
+        assert len(model.generations()) == 600
+        assert len(closed) == 1
+        assert llm.call_summary(resumed) == summary
+        assert llm.call_summary(marl_bgs.load_results(result.run_dir)) == summary
+        assert resumed.paths is not None and resumed.paths["model_calls"].is_dir()
+        assert before == {path: path.read_bytes() for path in before}
+        changed = llm.make_system("fake", url, model_revision="changed")
+        with pytest.raises(ValueError):
+            marl_bgs.run_canonical_tournament(changed, resume_from=result.run_dir)
+        assert len(model.generations()) == 600

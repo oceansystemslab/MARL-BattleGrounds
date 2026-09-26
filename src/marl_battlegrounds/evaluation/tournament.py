@@ -479,6 +479,8 @@ def _saved_tournament(
     load_results(run_dir, phase="tournament")
     tables: dict[str, tuple[dict[str, Any], ...]] = {}
     paths = {"run_details": run_dir / "run_details.json"}
+    if (run_dir / "model_calls").is_dir():
+        paths["model_calls"] = run_dir / "model_calls"
     for name in (
         "tournament_results",
         "matchup_results",
@@ -1034,8 +1036,30 @@ def run_tournament(
         completion_order: list[int] = []
         full_tables: list[Columns] = []
         replays: list[ReplayArtifactV4] = []
+        leased: set[int] = set()
         for index, ((first, second), group) in enumerate(sorted(groups.items()), 1):
             group_ids = {match.episode_id for match in group}
+            pass_id = f"pair-side-{index}" if legacy else f"pair-{index}"
+            pass_key = json.dumps(("tournament", pass_id), separators=(",", ":"))
+            completed: set[int] = (
+                set(
+                    saved[0]["passes"]
+                    .get(pass_key, {})
+                    .get("completed_episode_ids", ())
+                )
+                if saved is not None
+                else set()
+            )
+            if group_ids - completed:
+                for name in (first, second):
+                    method = frozen[name]
+                    if (
+                        isinstance(method, System)
+                        and method.resource_scope is not None
+                        and id(method) not in leased
+                    ):
+                        cleanup.enter_context(method.resource_scope(writer is not None))
+                        leased.add(id(method))
             execute = evaluate_episodes
             if legacy:
                 from marl_battlegrounds.evaluation.evaluate import _run_evaluation
@@ -1054,7 +1078,7 @@ def run_tournament(
                 replay_episodes=group_ids.intersection(selected.replay_episodes),
                 writer=writer,
                 phase="tournament",
-                pass_id=f"pair-side-{index}" if legacy else f"pair-{index}",
+                pass_id=pass_id,
                 chunk_size=chunk_size,
                 run_id=run_id,
             )

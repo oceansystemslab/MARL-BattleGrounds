@@ -49,6 +49,7 @@ from marl_battlegrounds.evaluation.models import (
     canonical_digest_sha256,
     canonical_json_bytes,
 )
+from marl_battlegrounds.evaluation.recording_context import recorded_policy_assignment
 from marl_battlegrounds.policies.reactive_tdm_alpha import (
     reactive_tdm_alpha_controller_descriptor,
 )
@@ -59,13 +60,13 @@ from marl_battlegrounds.policies.reactive_tdm_gamma import (
     reactive_tdm_gamma_controller_descriptor,
 )
 from scripts.dev.visual_debugger.model import (
-    SUPPORTED_TEAM_B_CONTROLLERS,
-    SUPPORTED_TEAM_CONTROLLERS,
     DebuggerScenario,
     ScenarioMode,
     TeamBController,
     TeamController,
     TeamControllerActionSource,
+    is_system_controller,
+    is_team_controller,
     team_controller_action_source,
 )
 
@@ -351,6 +352,10 @@ def _policy_assignments(
     reactive_tdm_identity: ContentAddressedIdentityV1 | None = None,
     scenario_controller_identity: ContentAddressedIdentityV1 | None = None,
     team_a_scenario_controller_identity: ContentAddressedIdentityV1 | None = None,
+    system_registrations: tuple[
+        tuple[str, dict[str, object]], tuple[str, dict[str, object]]
+    ]
+    | None = None,
 ) -> tuple[PolicyAssignmentSlotV2, ...]:
     """Assign each active fixed slot its recorded role and action-source identity.
 
@@ -385,6 +390,24 @@ def _policy_assignments(
             policy_kind = (
                 team_a_controller if team_id == TEAM_A_ID else team_b_controller
             )
+        if is_system_controller(policy_kind):
+            if system_registrations is None:
+                raise ValueError("System assignment needs its registration")
+            identifier, registration = system_registrations[
+                0 if team_id == TEAM_A_ID else 1
+            ]
+            rows.append(
+                recorded_policy_assignment(
+                    slot=slot,
+                    role=role,
+                    phase="evaluation",
+                    name=registration["name"],
+                    descriptor=registration,
+                    system_id=identifier,
+                    registration=registration,
+                )
+            )
+            continue
         controller_identity = None
         team_scenario_identity = (
             team_a_scenario_controller_identity
@@ -481,6 +504,10 @@ def build_debugger_evaluation_context_v1(
     team_b_controller: TeamBController,
     execution_information_mode: ExecutionInformationMode,
     expected_horizon: int | None = None,
+    system_registrations: tuple[
+        tuple[str, dict[str, object]], tuple[str, dict[str, object]]
+    ]
+    | None = None,
 ) -> EvaluationEpisodeContextV4:
     """Build the recorded custom-evaluation context for one live debugger episode.
 
@@ -506,6 +533,15 @@ def build_debugger_evaluation_context_v1(
     expected_horizon : int or None, optional
         Positive captured-transition bound no greater than config.max_steps. None uses
         config.max_steps; callers pass script length or remaining interactive steps.
+
+    system_registrations : tuple of registration pairs or None
+        Optional Team A/B (ID, metadata) pairs already frozen and registered at
+        setup. Required for declared System aliases; forbidden for built-in-only,
+        scripted or NoSharedObs sessions. The bridge never loads a method.
+        System routes use action payload V8 and one recorded System seed root;
+        public System helpers split it by episode, operation and team. Control
+        folds the accepted frame index into each action root. Old routes retain
+        their original payloads and role-specific seeds.
 
     Returns
     -------
@@ -569,12 +605,12 @@ def build_debugger_evaluation_context_v1(
         raise ValueError("run_generation must be a nonnegative exact integer")
     if type(config) is not EnvConfig:
         raise TypeError("config must be the exact EnvConfig type")
-    if team_a_controller not in SUPPORTED_TEAM_CONTROLLERS:
+    if not is_team_controller(team_a_controller):
         raise ValueError(
             "team_a_controller must be manual, reactive_tdm, random_valid, "
             "scenario_5, or tdm_gamma"
         )
-    if team_b_controller not in SUPPORTED_TEAM_B_CONTROLLERS:
+    if not is_team_controller(team_b_controller):
         raise ValueError(
             "team_b_controller must be manual, reactive_tdm, random_valid, "
             "scenario_5, or tdm_gamma"
@@ -599,6 +635,15 @@ def build_debugger_evaluation_context_v1(
         raise ValueError(
             "action_source_kind must match scenario mode and team controllers"
         )
+    system_route = any(
+        is_system_controller(value) for value in (team_a_controller, team_b_controller)
+    )
+    if system_route != (system_registrations is not None):
+        raise ValueError("System aliases require their registered setup methods")
+    if system_route and (
+        scenario.mode != "interactive" or execution_information_mode != "shared_obs"
+    ):
+        raise ValueError("Systems require interactive SharedObs")
     validate_env_config(config)
     resolved_config = build_resolved_env_config_v2(config)
     horizon = config.max_steps if expected_horizon is None else expected_horizon
@@ -697,6 +742,16 @@ def build_debugger_evaluation_context_v1(
         scenario_controller_identity=scenario_controller_identity,
         team_a_scenario_controller_identity=team_a_scenario_controller_identity,
     )
+    if system_registrations is not None:
+        action_payload = {
+            **action_payload,
+            "schema_version": 8,
+            "system_registrations": {
+                team: system_registrations[index][0]
+                for index, team in enumerate(("team_a", "team_b"))
+            },
+            "system_key_protocol": "debugger-system-root-v1",
+        }
     action_digest = canonical_digest_sha256(action_payload)
     config_digest = resolved_config.canonical_digest_sha256
     evaluation_payload: dict[str, object] = {
@@ -798,6 +853,7 @@ def build_debugger_evaluation_context_v1(
         reactive_tdm_identity=reactive_tdm_identity,
         scenario_controller_identity=scenario_controller_identity,
         team_a_scenario_controller_identity=team_a_scenario_controller_identity,
+        system_registrations=system_registrations,
     )
     active_roles = {
         row.evaluation_role
@@ -814,22 +870,30 @@ def build_debugger_evaluation_context_v1(
 
     seed_protocol = build_evaluation_seed_protocol_v1(
         seed_protocol=VersionedIdentityV1(
-            identifier="debugger-namespaced-sha256-u32",
+            identifier="debugger-system-root-v1"
+            if system_route
+            else "debugger-namespaced-sha256-u32",
             version=1,
         ),
         root_seed=launch.root_seed,
         episode_seed=seed("episode"),
         layout_seed=seed("layout"),
         environment_seed=seed("environment"),
-        focal_policy_seed=seed("focal-action-source"),
+        focal_policy_seed=seed(
+            "system-action-source" if system_route else "focal-action-source"
+        ),
         evaluation_seed=seed("evaluation"),
         cooperative_partner_seed=(
-            seed("cooperative-action-source")
+            seed(
+                "system-action-source" if system_route else "cooperative-action-source"
+            )
             if "cooperative_partner" in active_roles
             else "not_applicable"
         ),
         adversarial_opponent_seed=(
-            seed("adversarial-action-source")
+            seed(
+                "system-action-source" if system_route else "adversarial-action-source"
+            )
             if "adversarial_opponent" in active_roles
             else "not_applicable"
         ),
@@ -843,6 +907,25 @@ def build_debugger_evaluation_context_v1(
         AggregationKeyV1(name="team_b_controller", value=team_b_controller),
         AggregationKeyV1(name="tool", value="visual_debugger"),
     ]
+    if system_registrations is not None:
+        for team, controller, (identifier, registration) in zip(
+            ("team_a", "team_b"),
+            (team_a_controller, team_b_controller),
+            system_registrations,
+            strict=True,
+        ):
+            if is_system_controller(controller):
+                aggregation_keys.extend(
+                    [
+                        AggregationKeyV1(
+                            name=f"marl_bgs.system_id.{team}", value=identifier
+                        ),
+                        AggregationKeyV1(
+                            name=f"marl_bgs.parameter_status.{team}",
+                            value=str(registration["parameter_status"]),
+                        ),
+                    ]
+                )
     if scenario.provenance is not None and scenario.provenance.map_id is not None:
         from marl_battlegrounds.evaluation.map_identity import registered_map_metadata
 

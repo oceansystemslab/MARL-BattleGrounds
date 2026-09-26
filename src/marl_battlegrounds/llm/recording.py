@@ -354,7 +354,7 @@ def actor_channel(
 
 
 def read_calls(path: str | Path) -> Iterator[dict[str, Any]]:
-    """Stream actor rows from a run directory, model_calls directory or call file.
+    """Stream actor rows from an evaluation or DevClient run, call folder or file.
 
     Each returned row includes run/pass/execution identity from its file header.
     Truncated final lines after a crash are skipped; malformed complete lines
@@ -363,7 +363,9 @@ def read_calls(path: str | Path) -> Iterator[dict[str, Any]]:
     JSON exists only in full mode; its UTF-8 bytes reproduce the transmitted body.
     """
     source = Path(path)
-    if source.is_dir() and (source / "run_details.json").is_file():
+    if source.is_dir() and (
+        (source / "run_details.json").is_file() or (source / "session.json").is_file()
+    ):
         source = source / "model_calls"
         if not source.exists():
             return
@@ -396,10 +398,18 @@ def call_summary(
     recorded costs across successful and abandoned attempts. completed_games
     includes only the attempt that made each saved game durable. Its fallback
     counts belong beside those games' win rates. For unsaved successful runs,
-    completed_games uses the current run's played decisions.
+    completed_games uses the current run's played decisions. Reused canonical
+    games keep their original source records: their calls and fallbacks are not
+    included here. Read those source records before reporting whole-population
+    fallback counts or costs.
 
     Token totals count only reported usage; missing_usage_replies marks gaps.
     An abrupt interruption can lose unflushed costs, especially with records=none.
+    by_system groups the same counts by the saved System registration ID,
+    with its recorded name. This keeps ownership clear when tournament entrants
+    change team labels. Registration IDs are not canonical entrant IDs. Older
+    records without System IDs still contribute to the team totals.
+
     These totals are not a hard spending limit. This reads existing metadata;
     it makes no model calls, reads no call files and changes nothing.
     """
@@ -409,38 +419,69 @@ def call_summary(
         return {name: dict.fromkeys(_COUNTERS, 0) for name in ("team_a", "team_b")}
 
     all_attempts, completed = empty(), empty()
+    by_system: dict[str, Any] = {}
+    systems = cast(Mapping[str, Any], result.metadata.get("systems", {}))
 
-    def add(target: dict[str, dict[str, int]], source: Mapping[str, Any]) -> None:
-        """Sum known numerical counters, retaining zero for unrepresented teams."""
+    def add(
+        target: dict[str, dict[str, int]],
+        source: Mapping[str, Any],
+        system_ids: Mapping[str, str],
+        scope: str,
+    ) -> None:
+        """Sum team counters and bind them to each pass's recorded System IDs."""
         for team, counts in target.items():
+            identifier = system_ids.get(team)
+            owner = None
+            if identifier is not None:
+                owner = by_system.setdefault(
+                    identifier,
+                    {
+                        "name": systems.get(identifier, {}).get("name"),
+                        "all_attempts": dict.fromkeys(_COUNTERS, 0),
+                        "completed_games": dict.fromkeys(_COUNTERS, 0),
+                    },
+                )[scope]
             for name in _COUNTERS:
-                counts[name] += int(source.get(team, {}).get(name, 0))
+                value = int(source.get(team, {}).get(name, 0))
+                counts[name] += value
+                if owner is not None:
+                    owner[name] += value
 
     passes = cast(dict[str, Any], result.metadata.get("passes", {}))
     found = False
     for entry in passes.values():
+        system_ids = entry.get(
+            "system_ids", entry.get("details", {}).get("system_ids", {})
+        )
         evidence = entry.get("host_evidence", {}).get("llm")
         if evidence is None:
             current_pass = entry.get("details", {}).get("llm")
             if result.run_dir is None and current_pass is not None:
                 found = True
-                add(all_attempts, current_pass["teams"])
-                add(completed, current_pass["teams"])
+                add(all_attempts, current_pass["teams"], system_ids, "all_attempts")
+                add(completed, current_pass["teams"], system_ids, "completed_games")
             continue
         found = True
         attempts = evidence["attempts"]
         for attempt in attempts.values():
-            add(all_attempts, attempt["teams"])
+            add(all_attempts, attempt["teams"], system_ids, "all_attempts")
         for episode, attempt in evidence["episode_attempts"].items():
-            add(completed, attempts[attempt]["episodes"][episode])
+            add(
+                completed,
+                attempts[attempt]["episodes"][episode],
+                system_ids,
+                "completed_games",
+            )
     if not found and result.run_dir is None:
         current = result.metadata.get("llm")
         if current is not None:
             current = cast(dict[str, Any], current)
-            add(all_attempts, current["teams"])
-            add(completed, current["teams"])
+            system_ids = cast(Mapping[str, str], result.metadata.get("system_ids", {}))
+            add(all_attempts, current["teams"], system_ids, "all_attempts")
+            add(completed, current["teams"], system_ids, "completed_games")
     return {
         "all_attempts": all_attempts,
         "completed_games": completed,
+        "by_system": by_system,
         "interrupted_costs_may_be_missing": True,
     }

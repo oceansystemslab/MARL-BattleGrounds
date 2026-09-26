@@ -1753,11 +1753,18 @@ class RunWriter:
 
     @property
     def paths(self) -> dict[str, Path]:
-        """Return fresh paths for run_details and only tables/replays already
-        produced.
+        """Return run_details and existing table, replay and model-call paths.
+
+        Model calls stay separate from game files. A model_calls directory is
+        included only after a provider has created it.
         """
         return {
             "run_details": self.run_dir / "run_details.json",
+            **(
+                {"model_calls": self.run_dir / "model_calls"}
+                if (self.run_dir / "model_calls").is_dir()
+                else {}
+            ),
             **{
                 Path(name).stem: self.run_dir / name for name in self._details["tables"]
             },

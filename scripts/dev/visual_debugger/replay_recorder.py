@@ -150,6 +150,16 @@ class DebuggerReplayRecorder:
         self._verify_existing = False
 
     @property
+    def evidence_directory(self) -> Path:
+        """Return the stable host-only folder beside this recorder's first target.
+
+        Save As does not move this folder. Browser recording status never exposes
+        it. Each replacement episode adds its own identifier below this folder.
+        """
+        path = self._original_destination.replay_path
+        return path.parent / (path.name + ".model-calls")
+
+    @property
     def current_frame(self) -> EvaluationFrame:
         """Return the most recently retained immutable frame."""
         return self._frames[-1]

@@ -9,6 +9,7 @@ model-call evidence. Both teams' failure and cost totals are printed with outcom
 
 import argparse
 import json
+import os
 from pathlib import Path
 
 import marl_battlegrounds as marl_bgs
@@ -99,6 +100,48 @@ def parse_words(
     return llm.parse_action_reply(
         json.dumps({"move": words[0], "combat": words[1]}), masks
     )
+
+
+def _factory(*, custom: bool) -> marl_bgs.System:
+    """Build a lazy CLI/DevClient System from the example's environment settings.
+
+    MARL_LLM_MODEL is the required served model name. MARL_LLM_URL defaults to
+    http://127.0.0.1:8000/v1. MARL_LLM_REVISION optionally records pinned model
+    content; omission means unknown. MARL_LLM_HISTORY defaults to 0 earlier turns.
+    custom selects the two-word tutorial functions. No request or server starts.
+    """
+    model = os.environ.get("MARL_LLM_MODEL")
+    if not model:
+        raise ValueError("Set MARL_LLM_MODEL to the model name served by your server")
+    return llm.make_system(
+        model,
+        os.environ.get("MARL_LLM_URL", "http://127.0.0.1:8000/v1"),
+        model_revision=os.environ.get("MARL_LLM_REVISION"),
+        history_turns=int(os.environ.get("MARL_LLM_HISTORY", "0")),
+        prompt_builder=prompt_for_words if custom else None,
+        reply_parser=parse_words if custom else None,
+        custom_version="tutorial-v1" if custom else None,
+        custom_settings={"format": "words" if custom else "default"},
+    )
+
+
+def make_default_system() -> marl_bgs.System:
+    """Return the default JSON System for a trusted module:function declaration.
+
+    Set MARL_LLM_MODEL first. Optional MARL_LLM_URL, MARL_LLM_REVISION and
+    MARL_LLM_HISTORY select the endpoint, declared content and earlier turns.
+    This zero-argument factory starts no request. The runner owns its client.
+    """
+    return _factory(custom=False)
+
+
+def make_custom_system() -> marl_bgs.System:
+    """Return the two-word tutorial System with the same managed runner lifetime.
+
+    Use the same environment settings as make_default_system. Only prompt and
+    reply format change; history, action checks, recording and cleanup are shared.
+    """
+    return _factory(custom=True)
 
 
 def main() -> None:

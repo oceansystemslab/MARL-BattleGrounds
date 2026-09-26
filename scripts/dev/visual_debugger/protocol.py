@@ -44,8 +44,11 @@ type PendingSubmissionScope = Literal[
     "joint_turn",
     "scripted_playback",
 ]
-type TeamController = Literal[
-    "manual", "reactive_tdm", "random_valid", "scenario_5", "tdm_gamma"
+type TeamController = Annotated[
+    str,
+    StringConstraints(
+        pattern=r"^(manual|reactive_tdm|random_valid|scenario_5|tdm_gamma|system:[a-z0-9_-]{1,64})$"
+    ),
 ]
 type TeamBController = TeamController
 type ExecutionInformationMode = Literal["shared_obs", "no_shared_obs"]
@@ -238,6 +241,7 @@ class CombatConfigurationV1(_ProtocolModel):
         if (
             any(
                 controller in ("reactive_tdm", "scenario_5", "tdm_gamma")
+                or controller.startswith("system:")
                 for controller in (self.team_a_controller, self.team_b_controller)
             )
             and self.execution_information_mode != "shared_obs"
@@ -311,6 +315,20 @@ class ConfirmDiscardAndReplaceCommandV1(_ProtocolModel):
     replacement: RecordingReplacementCommandV1
 
 
+class FinishSystemCommandV1(_ProtocolModel):
+    """Poll one pending operation; accept its ready result at most once."""
+
+    command_type: Literal["finish_system"] = "finish_system"
+    operation_id: _OpaqueId
+
+
+class CancelSystemCommandV1(_ProtocolModel):
+    """Abandon a pending result and keep the last accepted game state."""
+
+    command_type: Literal["cancel_system"] = "cancel_system"
+    operation_id: _OpaqueId
+
+
 type DebuggerCommandV1 = Annotated[
     KeyboardCommandV1
     | BattlefieldPointerCommandV1
@@ -326,7 +344,9 @@ type DebuggerCommandV1 = Annotated[
     | RetrySaveCommandV1
     | SaveAsCommandV1
     | ConfirmDiscardAndReplaceCommandV1
-    | ExitCommandV1,
+    | ExitCommandV1
+    | FinishSystemCommandV1
+    | CancelSystemCommandV1,
     Field(discriminator="command_type"),
 ]
 
@@ -1084,6 +1104,20 @@ class RecordingStatusV1(_ProtocolModel):
         return self
 
 
+class SystemChoiceV1(_ProtocolModel):
+    """One launcher-declared browser choice; never a factory or server address."""
+
+    id: Annotated[str, StringConstraints(pattern=r"^system:[a-z0-9_-]{1,64}$")]
+    label: Annotated[str, StringConstraints(min_length=1, max_length=64)]
+
+
+class SystemOperationV1(_ProtocolModel):
+    """One bounded pending operation; polling does not itself run a new turn."""
+
+    operation_id: _OpaqueId
+    state: Literal["loading", "thinking", "finishing", "cancelling", "failed"]
+
+
 class _LiveDebuggerEnvelopeV2(_ProtocolModel):
     """Transport metadata shared without sharing audience payload authority."""
 
@@ -1099,6 +1133,12 @@ class _LiveDebuggerEnvelopeV2(_ProtocolModel):
     verbose: Literal[False] = False
     terminal: TerminalStateV2
     recording: RecordingStatusV1 | None = None
+    system_choices: tuple[SystemChoiceV1, ...] = Field(
+        default=(), exclude_if=lambda value: not value
+    )
+    system_operation: SystemOperationV1 | None = Field(
+        default=None, exclude_if=lambda value: value is None
+    )
 
     @model_validator(mode="after")
     def _validate_common_epoch(self) -> Self:

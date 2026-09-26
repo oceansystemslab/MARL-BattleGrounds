@@ -10,6 +10,12 @@
  * Geometric coordinates/radii are map units, speeds are map units per tick, and
  * durations/countdowns are ticks unless a field says otherwise.
  */
+import {
+  isTeamController,
+  normalizeSystemControls,
+  requiresSharedObs,
+  systemTransportKeys,
+} from "./system-controls.js";
 import { CANONICAL_STATUS_ORDER, statusTokenIdFromCatalogId } from "./vocabulary.js";
 
 const RESEARCHER_EVENT_TYPES_V2 = new Set([
@@ -558,16 +564,14 @@ function normalizeCombatConfigurationV1(value) {
     COMBAT_CONFIGURATION_KEYS_V1,
     "Live combat configuration has unknown or missing fields.",
   );
-  const reactive = ["reactive_tdm", "scenario_5", "tdm_gamma"];
-  const controllers = ["manual", "random_valid", ...reactive];
   if (
-    !controllers.includes(configuration.team_a_controller) ||
-    !controllers.includes(configuration.team_b_controller) ||
+    !isTeamController(configuration.team_a_controller) ||
+    !isTeamController(configuration.team_b_controller) ||
     !["shared_obs", "no_shared_obs"].includes(
       configuration.execution_information_mode,
     ) ||
-    ((reactive.includes(configuration.team_a_controller) ||
-      reactive.includes(configuration.team_b_controller)) &&
+    ((requiresSharedObs(configuration.team_a_controller) ||
+      requiresSharedObs(configuration.team_b_controller)) &&
       configuration.execution_information_mode !== "shared_obs")
   ) {
     throw new TypeError("Live combat configuration is invalid.");
@@ -5618,7 +5622,7 @@ export function normalizeDebuggerAudienceProjectionV2(value) {
 function normalizeSharedObsAgentPovLiveFrameV2(frame) {
   requireExactKeys(
     frame,
-    SHARED_OBS_AGENT_POV_LIVE_FRAME_KEYS_V2,
+    systemTransportKeys(SHARED_OBS_AGENT_POV_LIVE_FRAME_KEYS_V2, frame),
     "SharedObs live frame has unknown or missing top-level fields.",
   );
   if (
@@ -5693,6 +5697,7 @@ function normalizeSharedObsAgentPovLiveFrameV2(frame) {
     terminal,
     recording,
     combat_configuration: combatConfiguration,
+    ...normalizeSystemControls(frame),
     frame_kind: "shared_obs_agent_pov_live_debugger",
     schema_version: 2,
     view_mode: "pov",
@@ -5740,9 +5745,12 @@ export function normalizeLiveDebuggerFrameV2(value) {
   }
   requireExactKeys(
     frame,
-    frame.frame_kind === "researcher_live_debugger"
-      ? RESEARCHER_LIVE_FRAME_KEYS_V2
-      : ACTOR_POV_LIVE_FRAME_KEYS_V2,
+    systemTransportKeys(
+      frame.frame_kind === "researcher_live_debugger"
+        ? RESEARCHER_LIVE_FRAME_KEYS_V2
+        : ACTOR_POV_LIVE_FRAME_KEYS_V2,
+      frame,
+    ),
     "Live debugger frame has unknown or missing top-level fields.",
   );
   if (
@@ -5884,6 +5892,7 @@ export function normalizeLiveDebuggerFrameV2(value) {
     terminal,
     recording,
     combat_configuration: combatConfiguration,
+    ...normalizeSystemControls(frame),
     frame_kind: frame.frame_kind,
     schema_version: 2,
     view_mode: frame.view_mode,

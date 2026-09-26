@@ -18,6 +18,8 @@ import {
   researcherEventTypesV2,
 } from "../src/frame-normalizer.js";
 
+import { isTeamController, requiresSharedObs } from "../src/system-controls.js";
+
 const episodeId = "evaluation-episode";
 const transitionId = `${episodeId}:transition:0`;
 const phaseRankByEventType = Object.freeze({
@@ -2709,4 +2711,55 @@ test("scripted authority comes from the audience-owned live envelope", () => {
     }),
     false,
   );
+});
+
+test("declared System menu and operation fields stay exact and private", async () => {
+  const fixture = await authorizedFixture();
+  for (const kind of ["live_oracle", "live_shared_obs_agent_pov"]) {
+    const raw = structuredClone(fixture.pairs[kind].transport);
+    raw.combat_configuration.team_a_controller = "system:qwen";
+    raw.combat_configuration.execution_information_mode = "shared_obs";
+    raw.system_choices = [{ id: "system:qwen", label: "Qwen" }];
+    raw.system_operation = { operation_id: "request-1", state: "thinking" };
+    const normalized = normalizeLiveDebuggerFrameV2(raw);
+    assert.equal(normalized.system_choices[0].id, "system:qwen");
+    assert.equal(normalized.system_operation.state, "thinking");
+    assert.equal(Object.isFrozen(normalized.system_choices[0]), true);
+    assert.throws(() =>
+      normalizeLiveDebuggerFrameV2({
+        ...raw,
+        system_choices: [{ ...raw.system_choices[0], url: "http://private" }],
+      }),
+    );
+    assert.throws(() =>
+      normalizeLiveDebuggerFrameV2({
+        ...raw,
+        system_choices: [raw.system_choices[0], raw.system_choices[0]],
+      }),
+    );
+    assert.throws(() =>
+      normalizeLiveDebuggerFrameV2({
+        ...raw,
+        system_operation: { ...raw.system_operation, state: "played" },
+      }),
+    );
+    assert.throws(() =>
+      normalizeLiveDebuggerFrameV2({
+        ...raw,
+        combat_configuration: {
+          ...raw.combat_configuration,
+          execution_information_mode: "no_shared_obs",
+        },
+      }),
+    );
+  }
+});
+
+test("controller names reject values that only stringify to known names", () => {
+  for (const value of [["reactive_tdm"], null, { toString: () => "tdm_gamma" }]) {
+    assert.equal(isTeamController(value), false);
+    assert.equal(requiresSharedObs(value), false);
+  }
+  assert.equal(isTeamController("reactive_tdm"), true);
+  assert.equal(requiresSharedObs("system:qwen"), true);
 });

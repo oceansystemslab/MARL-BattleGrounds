@@ -472,6 +472,9 @@ class DevAuthoringCommandResponseV1(_ServiceModel):
     assets: tuple[DevAssetSummaryV1, ...] = ()
     validation: DevValidationSummaryV1 | None = None
     debug_load: DevDebugLoadSummaryV1 | None = None
+    pending_operation_id: str | None = Field(
+        default=None, exclude_if=lambda value: value is None
+    )
     problems: tuple[DevAuthoringProblemV1, ...] = ()
     catalog: DevAuthoringCatalogV1 = _AUTHORING_CATALOG
 
@@ -564,10 +567,15 @@ def debugger_scenario_from_snapshot(
 
 
 class DevScenarioLoadAttemptV1(_ServiceModel):
-    """Report a completed load or its linked errors without exposing a failed partial
-    snapshot.
+    """Report installed success, pending work, or errors without a partial snapshot.
+
+    A pending operation has ok=False and no summary or problems. Only the live
+    service can adopt it; its accepted callback updates the loader snapshot.
     """
 
+    pending_operation_id: str | None = Field(
+        default=None, exclude_if=lambda value: value is None
+    )
     ok: bool
     summary: DevDebugLoadSummaryV1 | None = None
     problems: tuple[DevAuthoringProblemV1, ...] = ()
@@ -692,7 +700,9 @@ class DevScenarioLoadService:
         Protected local store used to resolve saved revisions.
     install_snapshot : callable or None, optional
         Host callback receiving a fully compiled snapshot. None retains the snapshot
-        locally without installing it in another live service.
+        locally without installing it in another live service. A callback returns
+        None after installation, or a pending System operation ID. For pending
+        work it later calls accept_installed_snapshot only after real adoption.
 
     Notes
     -----
@@ -705,7 +715,8 @@ class DevScenarioLoadService:
         self,
         store: DevAssetStore,
         *,
-        install_snapshot: Callable[[LoadedDevScenarioSnapshotV1], None] | None = None,
+        install_snapshot: Callable[[LoadedDevScenarioSnapshotV1], str | None]
+        | None = None,
     ) -> None:
         """Keep the store and optional installer; start with no loaded snapshot."""
         self._store = store
@@ -887,7 +898,11 @@ class DevScenarioLoadService:
         )
         try:
             if self._install_snapshot is not None:
-                self._install_snapshot(snapshot)
+                pending = self._install_snapshot(snapshot)
+                if pending is not None:
+                    return DevScenarioLoadAttemptV1(
+                        ok=False, pending_operation_id=pending
+                    )
         except (RuntimeError, TypeError, ValueError) as error:
             return DevScenarioLoadAttemptV1(
                 ok=False,
@@ -899,8 +914,17 @@ class DevScenarioLoadService:
                     ),
                 ),
             )
-        self._current_snapshot = snapshot
+        self.accept_installed_snapshot(snapshot)
         return DevScenarioLoadAttemptV1(ok=True, summary=summary)
+
+    def accept_installed_snapshot(self, snapshot: LoadedDevScenarioSnapshotV1) -> None:
+        """Record the exact compiled snapshot after the live service adopts it.
+
+        This trusted host callback performs no I/O or compilation. A deferred
+        installer calls it once on adoption, never on cancellation or failure.
+        Ordinary synchronous loads call it before returning ok=True.
+        """
+        self._current_snapshot = snapshot
 
     def list_persisted(
         self,
@@ -1206,6 +1230,7 @@ class DevClientAuthoringBinding:
                 ok=attempt.ok,
                 command_type=command.command_type,
                 debug_load=attempt.summary,
+                pending_operation_id=attempt.pending_operation_id,
                 problems=attempt.problems,
             )
         except DevAuthoringValidationError as error:

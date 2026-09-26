@@ -437,6 +437,8 @@ def _saved_result(
 
     tables: dict[str, tuple[dict[str, Any], ...]] = {}
     paths = {"run_details": directory / "run_details.json"}
+    if (directory / "model_calls").is_dir():
+        paths["model_calls"] = directory / "model_calls"
     for name in (
         "tournament_results",
         "matchup_results",
@@ -566,6 +568,8 @@ def _active_pair(
     also release its borrowed pair references before loading another pair.
     Loader/action exceptions propagate; no implicit retries or downloads occur.
     """
+    from marl_battlegrounds.evaluation.policy_execution import System
+
     if challenger_id not in (first, second) or method is None:
         with active_tournament_pair(
             participants[first], participants[second], verifier
@@ -574,13 +578,16 @@ def _active_pair(
         return
     other = second if first == challenger_id else first
     loaded = load_tournament_controller(participants[other], verifier)
-    try:
-        yield (method, loaded) if first == challenger_id else (loaded, method)
-    finally:
-        import jax
+    with ExitStack() as cleanup:
+        if isinstance(loaded, System) and loaded.resource_scope is not None:
+            cleanup.enter_context(loaded.resource_scope(False))
+        try:
+            yield (method, loaded) if first == challenger_id else (loaded, method)
+        finally:
+            import jax
 
-        jax.effects_barrier()
-        del loaded
+            jax.effects_barrier()
+            del loaded
 
 
 def _run_resolved_tournament(
@@ -639,7 +646,7 @@ def _run_resolved_tournament(
     )
     from marl_battlegrounds.evaluation.evaluation_conditions import capture_ids
     from marl_battlegrounds.evaluation.metric_catalog import METRIC_SCHEMA_ID
-    from marl_battlegrounds.evaluation.policy_execution import Policy
+    from marl_battlegrounds.evaluation.policy_execution import Policy, System
     from marl_battlegrounds.evaluation.run_writer import (
         RUN_SCHEMA_VERSION,
         RunWriter,
@@ -991,6 +998,7 @@ def _run_resolved_tournament(
         full_tables: list[dict[str, Any]] = []
         replays: list[Any] = []
         executed = 0
+        challenger_leased = False
         by_id = {game["logical_game_id"]: game for game in plan.games}
         for job in plan.jobs:
             current = TournamentRecords(
@@ -1007,6 +1015,14 @@ def _run_resolved_tournament(
                 for identifier in job["logical_game_ids"]
             ):
                 continue
+            if (
+                not challenger_leased
+                and challenger_id in (job["team_a"], job["team_b"])
+                and isinstance(method, System)
+                and method.resource_scope is not None
+            ):
+                cleanup.enter_context(method.resource_scope(writer is not None))
+                challenger_leased = True
             with _active_pair(
                 job["team_a"],
                 job["team_b"],

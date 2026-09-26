@@ -10,6 +10,7 @@ Argument discovery avoids importing JAX until a live session is requested.
 from __future__ import annotations
 
 import argparse
+import re
 import sys
 from collections.abc import Sequence
 from dataclasses import dataclass
@@ -188,6 +189,14 @@ def build_parser() -> argparse.ArgumentParser:
         help="policy information regime (default: shared_obs)",
     )
 
+    parser.add_argument(
+        "--offer-system",
+        action="append",
+        default=[],
+        metavar="NAME=MODULE:FUNCTION",
+        help="offer a System factory in both controller menus; load only when selected",
+    )
+
     # Compatibility-only inputs remain accepted but are absent from public help.
     parser.add_argument(
         "--preset",
@@ -324,8 +333,9 @@ def _recording_policy_execution_included(session: object) -> bool:
         getattr(session, "team_a_controller", None),
         getattr(session, "team_b_controller", None),
     )
-    supported = ("manual", "reactive_tdm", "random_valid", "scenario_5", "tdm_gamma")
-    if controllers[0] not in supported or controllers[1] not in supported:
+    from scripts.dev.visual_debugger.model import is_team_controller
+
+    if not all(is_team_controller(value) for value in controllers):
         raise ValueError("recording sessions require exact team controllers.")
     return any(controller != "manual" for controller in controllers)
 
@@ -361,6 +371,23 @@ def main(argv: Sequence[str] | None = None) -> int:
     options = _resolve_launch_options(namespace)
     _validate_option_matrix(parser, options)
 
+    offered_systems: dict[str, str] = {}
+    for declaration in namespace.offer_system:
+        name, separator, reference = declaration.partition("=")
+        if (
+            not separator
+            or not re.fullmatch(r"[a-z0-9_-]{1,64}", name)
+            or not reference.strip()
+        ):
+            parser.error(
+                "--offer-system needs NAME=module:function with a lowercase name"
+            )
+        if name in offered_systems:
+            parser.error(f"System name {name!r} was declared twice")
+        offered_systems[name] = reference
+    if offered_systems and options.static:
+        parser.error("--offer-system needs the live DevClient")
+    service = None
     try:
         recording_destination = None
         if options.record_replay is not None:
@@ -449,19 +476,26 @@ def main(argv: Sequence[str] | None = None) -> int:
             """
             store = DevAssetStore(_REPOSITORY_ROOT)
 
-            def install(snapshot: LoadedDevScenarioSnapshotV1) -> None:
+            def install(snapshot: LoadedDevScenarioSnapshotV1) -> str | None:
                 """Replace the service scenario with the compiled, fixed draft
                 snapshot.
                 """
-                service.load_scenario(debugger_scenario_from_snapshot(snapshot))
+                from scripts.dev.visual_debugger.system_worker import (
+                    PendingSystemOperation,
+                )
 
-            authoring_service = DevClientAuthoringBinding(
-                store,
-                scenario_loader=DevScenarioLoadService(
-                    store,
-                    install_snapshot=install,
-                ),
-            )
+                result = service.load_scenario(
+                    debugger_scenario_from_snapshot(snapshot),
+                    on_installed=lambda: loader.accept_installed_snapshot(snapshot),
+                )
+                return (
+                    result.identifier
+                    if isinstance(result, PendingSystemOperation)
+                    else None
+                )
+
+            loader = DevScenarioLoadService(store, install_snapshot=install)
+            authoring_service = DevClientAuthoringBinding(store, scenario_loader=loader)
 
             def apply(request: object) -> DevAuthoringCommandResponseV1:
                 """Reject an unexpected request model before dispatching an authoring
@@ -482,6 +516,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 view_mode=options.view,
                 preset="analysis",
                 include_stress=False,
+                offered_systems=offered_systems,
             )
             authoring_http = authoring_http_for(service)
             return serve_browser_debugger(
@@ -533,6 +568,10 @@ def main(argv: Sequence[str] | None = None) -> int:
             preset="analysis",
             include_stress=False,
             recorder=recorder,
+            offered_systems=offered_systems,
+        )
+        print(
+            f"Model-call evidence for selected Systems: {recorder.evidence_directory}"
         )
         authoring_http = authoring_http_for(service)
         recording_coordinator = RecordingDebuggerCoordinator(
@@ -554,6 +593,9 @@ def main(argv: Sequence[str] | None = None) -> int:
         return 2
     except ValueError as exc:
         parser.error(str(exc))
+    finally:
+        if service is not None:
+            service.close()
 
 
 if __name__ == "__main__":

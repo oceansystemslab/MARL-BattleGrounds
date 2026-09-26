@@ -842,3 +842,38 @@ def test_verification_scope_nested_failure_aborts_outer_read(tmp_path: Path) -> 
     assert verifier._scope_depth == 0
     with verifier.verification_scope():
         assert verifier.verify("weights") == tmp_path / "weights"
+
+
+def test_second_loader_failure_closes_the_first_owned_system_scope(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from marl_battlegrounds.evaluation.policy_execution import Policy, shared_policy
+
+    participant, verifier = _participant(tmp_path)
+    loaded = assets.load_tournament_controller(participant, verifier)
+    assert isinstance(loaded, Policy)
+    base = shared_policy(loaded)
+    events: list[str] = []
+
+    @contextmanager
+    def scope(recording: bool) -> Generator[None]:
+        events.append("open")
+        try:
+            yield
+        finally:
+            events.append("close")
+
+    owned = replace(base, resource_scope=scope)
+
+    def load(*args: object) -> object:
+        if events:
+            raise RuntimeError("Second load failed")
+        return owned
+
+    monkeypatch.setattr(assets, "load_tournament_controller", load)
+    with (
+        pytest.raises(RuntimeError, match="Second load failed"),
+        assets.active_tournament_pair(participant, participant, verifier),
+    ):
+        raise AssertionError("A failed pair must not reach execution")
+    assert events == ["open", "close"]

@@ -203,6 +203,10 @@ def test_every_debugger_structure_has_the_exact_audited_field_schema() -> None:
             "show_ranges",
             "verbose_logging",
             "raw_continuation_identity",
+            "systems",
+            "environment_state",
+            "system_memory",
+            "system_ids",
         ),
     }
 

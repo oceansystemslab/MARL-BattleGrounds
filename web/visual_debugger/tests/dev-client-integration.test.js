@@ -694,16 +694,13 @@ test("DevClient binds both teams' BETA and GAMMA options as scenario options", a
   );
   assert.match(
     devClient,
-    /!isSupportedController\(candidate\.team_a_controller\) \|\|\s*!isSupportedController\(candidate\.team_b_controller\) \|\|/u,
+    /!isTeamController\(candidate\.team_a_controller\) \|\|\s*!isTeamController\(candidate\.team_b_controller\) \|\|/u,
   );
   assert.match(
     devClient,
-    /isReactiveController\(configuration\?\.team_a_controller\) \|\|\s*isReactiveController\(configuration\?\.team_b_controller\);/u,
+    /requiresSharedObs\(configuration\?\.team_a_controller\) \|\|\s*requiresSharedObs\(configuration\?\.team_b_controller\);/u,
   );
-  assert.match(
-    devClient,
-    /value === "reactive_tdm" \|\| value === "scenario_5" \|\| value === "tdm_gamma"/u,
-  );
+  assert.match(devClient, /from "\.\/system-controls\.js"/u);
   assert.doesNotMatch(
     devClient,
     /team_[ab]_controller (?:===|!==) "(?:scenario_5|tdm_gamma)"/u,

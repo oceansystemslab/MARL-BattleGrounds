@@ -5,6 +5,7 @@
  * This module binds DOM events and sends whole-draft commands through api.js.
  * Combat selectors reflect confirmed host configuration, not unconfirmed choices.
  */
+
 import {
   acquireCapabilityToken,
   DebuggerApiError,
@@ -42,6 +43,12 @@ import {
   renderAuthoringSvg,
   zoomAuthoringCamera,
 } from "./authoring-renderer.js";
+import {
+  isSystemController,
+  isTeamController,
+  normalizeSystemControls,
+  requiresSharedObs,
+} from "./system-controls.js";
 
 const bootstrap = Reflect.get(globalThis, "__MARL_DEBUGGER_BOOTSTRAP__");
 const AUTHORING_AGENT_DRAG_TYPE = "application/x-marl-authoring-agent";
@@ -275,16 +282,16 @@ export function isValidAuthoringAssetId(value) {
  * Only confirmed host configuration becomes authoritative. A user request first
  * restores displayed confirmed values, then emits a valid changed intent. Return
  * a frozen controller; no HTTP request is sent directly. Both teams accept the
- * same five controllers: Manual, Random and the reactive ALPHA (reactive_tdm),
- * BETA (scenario_5) and GAMMA (tdm_gamma). Reactive controllers require SharedObs
- * whichever team uses them. reactiveControllerOptions holds both teams' ALPHA
+ * same built-in controllers and host-declared Systems. Reactive ALPHA
+ * (reactive_tdm), BETA (scenario_5), GAMMA (tdm_gamma) and Systems require
+ * SharedObs whichever team uses them. reactiveControllerOptions holds both teams' ALPHA
  * options and scenarioControllerOptions holds both teams' BETA and GAMMA
  * options; all of them are enabled only under confirmed SharedObs. The
- * NoSharedObs option is disabled while either team uses a reactive controller.
+ * NoSharedObs option is disabled while either team uses a reactive controller or System.
  *
  * @param {{
- *   teamAController: {value: string, disabled: boolean},
- *   teamBController: {value: string, disabled: boolean},
+ *   teamAController: {value: string, disabled: boolean, options?: HTMLOptionsCollection, append?: (option: HTMLOptionElement) => void},
+ *   teamBController: {value: string, disabled: boolean, options?: HTMLOptionsCollection, append?: (option: HTMLOptionElement) => void},
  *   informationMode: {value: string, disabled: boolean},
  *   reactiveControllerOptions: {disabled: boolean}[],
  *   scenarioControllerOptions: {disabled: boolean}[],
@@ -298,28 +305,6 @@ export function createCombatConfigurationController(bindings) {
   let authoritative = null;
 
   /**
-   * Return whether value is a controller either team may use: manual,
-   * random_valid, reactive_tdm, scenario_5 or tdm_gamma.
-   *
-   * @param {unknown} value
-   */
-  function isSupportedController(value) {
-    return (
-      value === "manual" || value === "random_valid" || isReactiveController(value)
-    );
-  }
-
-  /**
-   * Return whether value is a reactive controller that needs SharedObs:
-   * reactive_tdm (ALPHA), scenario_5 (BETA) or tdm_gamma (GAMMA).
-   *
-   * @param {unknown} value
-   */
-  function isReactiveController(value) {
-    return value === "reactive_tdm" || value === "scenario_5" || value === "tdm_gamma";
-  }
-
-  /**
    * Return a frozen supported controller/information-mode selection or null.
    * Reject unsupported combinations without changing controls or host state.
    *
@@ -331,12 +316,12 @@ export function createCombatConfigurationController(bindings) {
     }
     const candidate = /** @type {Record<string, unknown>} */ (value);
     if (
-      !isSupportedController(candidate.team_a_controller) ||
-      !isSupportedController(candidate.team_b_controller) ||
+      !isTeamController(candidate.team_a_controller) ||
+      !isTeamController(candidate.team_b_controller) ||
       (candidate.execution_information_mode !== "shared_obs" &&
         candidate.execution_information_mode !== "no_shared_obs") ||
-      ((isReactiveController(candidate.team_a_controller) ||
-        isReactiveController(candidate.team_b_controller)) &&
+      ((requiresSharedObs(candidate.team_a_controller) ||
+        requiresSharedObs(candidate.team_b_controller)) &&
         candidate.execution_information_mode !== "shared_obs")
     ) {
       return null;
@@ -363,9 +348,15 @@ export function createCombatConfigurationController(bindings) {
     ]) {
       option.disabled = configuration?.execution_information_mode !== "shared_obs";
     }
+    for (const selector of [bindings.teamAController, bindings.teamBController]) {
+      for (const option of Array.from(selector.options ?? [])) {
+        if (isSystemController(option.value))
+          option.disabled = configuration?.execution_information_mode !== "shared_obs";
+      }
+    }
     bindings.noSharedOption.disabled =
-      isReactiveController(configuration?.team_a_controller) ||
-      isReactiveController(configuration?.team_b_controller);
+      requiresSharedObs(configuration?.team_a_controller) ||
+      requiresSharedObs(configuration?.team_b_controller);
     if (configuration === null) {
       return;
     }
@@ -386,8 +377,23 @@ export function createCombatConfigurationController(bindings) {
      */
     install(value) {
       const normalized = normalize(value);
-      if (normalized === null) {
-        return false;
+      if (normalized === null) return false;
+      if (value && typeof value === "object" && !Array.isArray(value)) {
+        const menu =
+          normalizeSystemControls(/** @type {Record<string, any>} */ (value))
+            .system_choices ?? [];
+        for (const selector of [bindings.teamAController, bindings.teamBController]) {
+          for (const option of Array.from(selector.options ?? [])) {
+            if (isSystemController(option.value)) option.remove();
+          }
+          if (!selector.append) continue;
+          for (const choice of menu) {
+            const option = document.createElement("option");
+            option.value = choice.id;
+            option.textContent = choice.label;
+            selector.append?.(option);
+          }
+        }
       }
       authoritative = normalized;
       render();
@@ -739,6 +745,11 @@ function installDevClient() {
    */
   async function openInDebug(source, returnToCombat = false) {
     const response = await send({ command_type: "open_in_debug", source });
+    if (response?.pending_operation_id) {
+      notifyDebugSessionReplaced();
+      if (returnToCombat) await selectArea("combat");
+      return;
+    }
     if (!response?.ok) {
       return;
     }

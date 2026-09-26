@@ -76,6 +76,7 @@ _REQUIRED_RUNTIME_ASSET_PATHS = (
     "src/choreography-plan.js",
     "src/choreography.js",
     "src/controls.js",
+    "src/system-controls.js",
     "src/display.js",
     "src/explanations.js",
     "src/frame-normalizer.js",

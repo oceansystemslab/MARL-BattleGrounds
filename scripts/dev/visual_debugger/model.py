@@ -9,10 +9,11 @@ no file, network, or simulator-step entry point.
 
 from __future__ import annotations
 
+import re
 from collections.abc import Callable
 from dataclasses import dataclass
 from math import isfinite
-from typing import TYPE_CHECKING, Literal, cast
+from typing import TYPE_CHECKING, Literal, TypeGuard, cast
 
 from marl_battlegrounds.evaluation.wire_shapes import (
     MAX_AGENT_SLOTS_V1 as MAX_AGENT_SLOTS,
@@ -33,11 +34,13 @@ if TYPE_CHECKING:
         EnvState,
         Observation,
     )
+    from marl_battlegrounds.environment import EnvironmentState
     from marl_battlegrounds.evaluation.metrics import EvaluationTransitionViewV1
     from marl_battlegrounds.evaluation.models import (
         EvaluationEpisodeContextV4,
         EvaluationFrameV3,
     )
+    from marl_battlegrounds.evaluation.policy_execution import System, SystemState
     from marl_battlegrounds.rendering.scene import StatusSourceEvidenceStateV2
 
 _MOVE_STAY_V1 = 0
@@ -47,9 +50,8 @@ type ArmOrigin = Literal["automatic", "explicit"]
 type ScenarioMode = Literal["interactive", "scripted"]
 type ScenarioAudience = Literal["researcher", "stress"]
 type SubmissionKind = Literal["interactive", "scripted"]
-type TeamController = Literal[
-    "manual", "reactive_tdm", "random_valid", "scenario_5", "tdm_gamma"
-]
+# Built-in names or a bounded alias declared by the launcher. Never an import path.
+type TeamController = str
 # Both teams accept the same controllers; the name is kept for existing callers.
 type TeamBController = TeamController
 type TeamControllerActionSource = Literal["manual", "scripted", "mixed", "policy"]
@@ -66,6 +68,25 @@ SUPPORTED_TEAM_CONTROLLERS: tuple[TeamController, ...] = (
     "tdm_gamma",
 )
 SUPPORTED_TEAM_B_CONTROLLERS: tuple[TeamBController, ...] = SUPPORTED_TEAM_CONTROLLERS
+
+
+def is_system_controller(value: object) -> TypeGuard[str]:
+    """Tell whether value is a bounded System alias, never a factory path.
+
+    Accept system: followed by 1 to 64 lowercase letters, digits, underscores or
+    hyphens. The service separately checks membership in its launch declarations.
+    """
+    return (
+        isinstance(value, str)
+        and re.fullmatch(r"system:[a-z0-9_-]{1,64}", value) is not None
+    )
+
+
+def is_team_controller(value: object) -> TypeGuard[str]:
+    """Accept an existing built-in choice or a correctly shaped System alias."""
+    return isinstance(value, str) and (
+        value in SUPPORTED_TEAM_CONTROLLERS or is_system_controller(value)
+    )
 
 
 def team_controller_action_source(
@@ -294,6 +315,10 @@ class RawContinuationIdentity:
     state: EnvState
     observation: Observation
     action_mask: ActionMask
+    systems: tuple[System, System] | None = None
+    environment_state: EnvironmentState | None = None
+    system_memory: SystemState | None = None
+    system_ids: tuple[str, str] | None = None
 
     def matches(
         self,
@@ -303,6 +328,10 @@ class RawContinuationIdentity:
         state: EnvState,
         observation: Observation,
         action_mask: ActionMask,
+        systems: tuple[System, System] | None = None,
+        environment_state: EnvironmentState | None = None,
+        system_memory: SystemState | None = None,
+        system_ids: tuple[str, str] | None = None,
     ) -> bool:
         """Check that a continuation still uses the exact objects that were bound.
 
@@ -318,11 +347,14 @@ class RawContinuationIdentity:
             Observation produced with that state.
         action_mask : ActionMask
             Action mask produced with that state.
+        systems, environment_state, system_memory, system_ids : optional
+            Exact declared methods, wrapper, accepted memory and setup IDs.
+            All are None for the original built-in route.
 
         Returns
         -------
         bool
-            True only when all five arguments are the original objects by identity.
+            True only when all supplied arguments are the bound objects by identity.
             This does not compare array contents or copy device buffers.
         """
         return (
@@ -331,6 +363,10 @@ class RawContinuationIdentity:
             and self.state is state
             and self.observation is observation
             and self.action_mask is action_mask
+            and self.systems is systems
+            and self.environment_state is environment_state
+            and self.system_memory is system_memory
+            and self.system_ids is system_ids
         )
 
 
@@ -340,6 +376,10 @@ class DebuggerSession:
 
     State, observation, mask, config, and random key must refer to the same next
     simulator step. Host controls and pending actions live beside that endpoint.
+    systems, environment_state and system_memory are all absent for built-ins.
+    A declared System route retains both methods, a matching public wrapper state
+    and only the last accepted memory. Resource and worker ownership stays with
+    the service, outside this numerical snapshot.
     """
 
     scenario: DebuggerScenario
@@ -365,6 +405,10 @@ class DebuggerSession:
     show_ranges: bool
     verbose_logging: bool
     raw_continuation_identity: RawContinuationIdentity | None = None
+    systems: tuple[System, System] | None = None
+    environment_state: EnvironmentState | None = None
+    system_memory: SystemState | None = None
+    system_ids: tuple[str, str] | None = None
 
     @property
     def scenario_name(self) -> str:
@@ -386,6 +430,7 @@ class DebuggerSession:
         if type(self.scenario) is not DebuggerScenario:
             raise TypeError("scenario must be the exact DebuggerScenario type.")
         continuation = self.raw_continuation_identity
+        new_continuation = continuation is None
         if continuation is None:
             continuation = RawContinuationIdentity(
                 config=self.config,
@@ -393,6 +438,10 @@ class DebuggerSession:
                 state=self.state,
                 observation=self.observation,
                 action_mask=self.action_mask,
+                systems=self.systems,
+                environment_state=self.environment_state,
+                system_memory=self.system_memory,
+                system_ids=self.system_ids,
             )
             object.__setattr__(self, "raw_continuation_identity", continuation)
         elif type(
@@ -403,6 +452,10 @@ class DebuggerSession:
             state=self.state,
             observation=self.observation,
             action_mask=self.action_mask,
+            systems=self.systems,
+            environment_state=self.environment_state,
+            system_memory=self.system_memory,
+            system_ids=self.system_ids,
         ):
             raise ValueError(
                 "raw continuation identity must bind the exact next-step objects."
@@ -501,12 +554,12 @@ class DebuggerSession:
             _validate_slot(actor_slot, name="last_report_actor_slot")
             if not self.evaluation_context.roster[actor_slot].configured_active:
                 raise ValueError("last report actor slots must be configured active.")
-        if self.team_a_controller not in SUPPORTED_TEAM_CONTROLLERS:
+        if not is_team_controller(self.team_a_controller):
             raise ValueError(
                 "team_a_controller must be manual, reactive_tdm, random_valid, "
                 "scenario_5, or tdm_gamma."
             )
-        if self.team_b_controller not in SUPPORTED_TEAM_B_CONTROLLERS:
+        if not is_team_controller(self.team_b_controller):
             raise ValueError(
                 "team_b_controller must be manual, reactive_tdm, random_valid, "
                 "scenario_5, or tdm_gamma."
@@ -514,6 +567,7 @@ class DebuggerSession:
         if (
             any(
                 controller in ("reactive_tdm", "scenario_5", "tdm_gamma")
+                or is_system_controller(controller)
                 for controller in (self.team_a_controller, self.team_b_controller)
             )
             and self.evaluation_context.execution_information_mode != "shared_obs"
@@ -555,6 +609,23 @@ class DebuggerSession:
                     if roster_row.configured_team_id == team_a_id
                     else self.team_b_controller
                 )
+                if is_system_controller(expected_policy_kind):
+                    if self.systems is None:
+                        raise ValueError("A System controller needs its actual method")
+                    team = 0 if roster_row.configured_team_id == team_a_id else 1
+                    if self.system_ids is None:
+                        raise ValueError("System identities must be bound at setup")
+                    identifier = self.system_ids[team]
+                    if not isinstance(
+                        assignment, AssignedPolicySlotV2
+                    ) or assignment.policy_id not in {
+                        identifier,
+                        *(f"{identifier}:component-{index}" for index in range(5)),
+                    }:
+                        raise ValueError(
+                            "System assignment must match its actual method"
+                        )
+                    continue
                 if (
                     not isinstance(assignment, AssignedPolicySlotV2)
                     or assignment.policy_kind != expected_policy_kind
@@ -562,6 +633,57 @@ class DebuggerSession:
                     raise ValueError(
                         "session team controllers must join every active policy "
                         "assignment."
+                    )
+        system_route = any(
+            is_system_controller(value)
+            for value in (self.team_a_controller, self.team_b_controller)
+        )
+        if system_route != (self.systems is not None):
+            raise ValueError("System methods must match the selected controllers")
+        if self.systems is None:
+            if (
+                self.environment_state is not None
+                or self.system_memory is not None
+                or self.system_ids is not None
+            ):
+                raise ValueError("A built-in session cannot retain System memory")
+        else:
+            wrapped = self.environment_state
+            if wrapped is None or self.system_memory is None:
+                raise ValueError("A System session needs paired state and memory")
+            if (
+                wrapped.config is not self.config
+                or wrapped.core_state is not self.state
+                or wrapped.observation is not self.observation
+                or wrapped.action_mask is not self.action_mask
+            ):
+                raise ValueError("System state must bind the exact current game view")
+            if new_continuation:
+                import numpy as np
+
+                captured = current_frame.shared_obs_information_availability_by_recipient_and_sensor_source  # noqa: E501
+                if captured is None or not np.array_equal(
+                    np.asarray(wrapped.source_availability), captured
+                ):
+                    raise ValueError(
+                        "System source permissions must match the captured frame"
+                    )
+                if (
+                    int(wrapped.episode_id) != 1
+                    or int(wrapped.reset_generation) != 0
+                    or int(wrapped.cumulative_transition_count)
+                    != current_frame.frame_index
+                    or int(wrapped.initial_step_count)
+                    != int(self.state.step_count) - current_frame.frame_index
+                    or bool(wrapped.episode_start) != (current_frame.frame_index == 0)
+                    or bool(wrapped.lifecycle_error)
+                    or bool(wrapped.done.terminated) != self.terminated
+                    or bool(wrapped.done.truncated) != self.truncated
+                    or not np.all(np.asarray(self.system_memory.episode_id) == 1)
+                    or not np.all(np.asarray(self.system_memory.reset_generation) == 0)
+                ):
+                    raise ValueError(
+                        "System lifecycle must match the accepted game epoch"
                     )
         evidence_state = self.status_source_evidence_state
         if type(evidence_state) is not StatusSourceEvidenceStateV2:
