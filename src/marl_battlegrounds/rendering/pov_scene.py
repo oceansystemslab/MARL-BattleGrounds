@@ -803,8 +803,9 @@ def _map_scene(
 ) -> MapSceneV1:
     """Decode map geometry from recipient-visible obstacle and context rows.
 
-    frame_rows is the (32, 8) obstacle tuple and context is the 19-column context
-    tuple. Ignore inactive obstacle padding; build circles/walls from supplied
+    frame_rows is the (32, 8) obstacle tuple. context has 20 columns in current
+    views or 19 in supported historical views. Ignore inactive obstacle padding;
+    build circles/walls from supplied
     world values and return MapSceneV1. Raise ValueError for malformed wire
     values or unsupported active obstacle types. No privileged map is read.
     """

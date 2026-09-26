@@ -75,7 +75,7 @@ def context_v2(
     TypeError
         Context has an unsupported exact model type.
     ValueError
-        Context is current V3 or converted metadata violates V2.
+        Context is V3/V4 or converted metadata violates V2.
 
     Notes
     -----
@@ -557,7 +557,7 @@ def replay_reference_v2(replay: ReplayArtifactV2) -> ReplayArtifactReferenceV2:
     Parameters
     ----------
     replay : ReplayArtifactV2
-        Exact ReplayArtifactV2; current V3 is not silently relabeled.
+        Exact ReplayArtifactV2; other replay versions are not silently relabeled.
 
     Returns
     -------

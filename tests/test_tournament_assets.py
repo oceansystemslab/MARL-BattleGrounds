@@ -842,3 +842,94 @@ def test_verification_scope_nested_failure_aborts_outer_read(tmp_path: Path) -> 
     assert verifier._scope_depth == 0
     with verifier.verification_scope():
         assert verifier.verify("weights") == tmp_path / "weights"
+
+
+def _inline(value: object, role: str = "registration") -> dict[str, Any]:
+    from marl_battlegrounds.evaluation.tournament_config import canonical_json
+
+    encoded = canonical_json(value)
+    return {
+        "role": role,
+        "sha256": sha256(encoded).hexdigest(),
+        "size_bytes": len(encoded),
+        "inline": value,
+    }
+
+
+def test_inline_metadata_is_verified_without_cache_and_returned_as_owned_copy(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _identity_resolver(monkeypatch)
+    config = {"version": 2, "assets": {"registration": _inline({"name": "random"})}}
+    cache = tmp_path / "cache"
+    verifier = assets.AssetVerifier(config, cache_dir=cache)
+    value = verifier.read_json("registration")
+    assert value == {"name": "random"}
+    assert isinstance(value, dict)
+    value["name"] = "edited"
+    assert verifier.read_json("registration") == {"name": "random"}
+    with pytest.raises(ValueError, match="inline metadata"):
+        verifier.require(["registration"])
+    result = assets.prepare_tournament_assets(config, cache_dir=cache, download=True)
+    assert result["verified"] == ["registration"]
+    assert result["missing"] == []
+    assert result["bytes_downloaded"] == result["bytes_missing"] == 0
+    assert "path" not in result["config"]["assets"]["registration"]
+    assert not cache.exists()
+    verifier.assets["registration"]["inline"]["name"] = "changed"
+    with pytest.raises(ValueError, match="size or digest"):
+        verifier.read_json("registration")
+
+
+def test_inline_metadata_checks_nested_dependencies_and_cycles(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _identity_resolver(monkeypatch)
+    config: dict[str, Any] = {
+        "version": 2,
+        "assets": {
+            "a": _inline({"next_asset": "b"}),
+            "b": _inline({"next_asset": "a"}),
+        },
+    }
+    with pytest.raises(ValueError, match="dependency cycle"):
+        assets.prepare_tournament_assets(config, cache_dir=tmp_path / "cache")
+    config["assets"].pop("b")
+    with pytest.raises(ValueError, match="undeclared assets"):
+        assets.prepare_tournament_assets(config, cache_dir=tmp_path / "cache")
+    assert not (tmp_path / "cache").exists()
+
+
+def test_reference_controller_uses_shared_loader_once(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from marl_battlegrounds import _method_loading
+    from marl_battlegrounds.evaluation.policy_execution import policy
+
+    method = policy("random")
+    registration = assets.loaded_controller_registration(method)
+    config = {"version": 2, "assets": {"registration": _inline(registration)}}
+    verifier = assets.AssetVerifier(config, cache_dir=tmp_path / "cache")
+    controller = {
+        "kind": "reference",
+        "reference": "/saved/actor",
+        "content": {name: None for name in assets._CONTENT_FIELDS},
+    }
+    identifier, _ = assets.controller_content_identity(controller, verifier)
+    participant = {
+        "name": "random",
+        "controller": controller,
+        "controller_id": identifier,
+        "registration_asset": "registration",
+    }
+    calls: list[str] = []
+
+    def load(reference: str) -> object:
+        calls.append(reference)
+        return method
+
+    monkeypatch.setattr(_method_loading, "load_method", load)
+    restored = assets.load_tournament_controller(participant, verifier)
+    assert restored.name == "random"
+    assert calls == ["/saved/actor"]
+    assert not (tmp_path / "cache").exists()

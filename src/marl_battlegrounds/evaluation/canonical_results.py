@@ -15,10 +15,13 @@ from __future__ import annotations
 # pyright: reportPrivateUsage=false
 import json
 from collections.abc import Iterator, Mapping
+from copy import deepcopy
+from dataclasses import asdict
 from pathlib import Path
 from typing import Any, cast
 
 from marl_battlegrounds.evaluation.metric_catalog import PRIORITY_METRIC_NAMES
+from marl_battlegrounds.evaluation.models import canonical_digest_sha256
 from marl_battlegrounds.evaluation.results import (
     Row,
     _cell_type,
@@ -36,12 +39,19 @@ from marl_battlegrounds.evaluation.tournament_assets import (
     AssetVerifier,
     _hash_file,
     asset_location_config,
+    policy_recording_registration,
 )
-from marl_battlegrounds.evaluation.tournament_config import read_config_json
+from marl_battlegrounds.evaluation.tournament_config import (
+    canonical_json,
+    load_tournament_config,
+    read_config_json,
+    tournament_qualification,
+)
 from marl_battlegrounds.evaluation.tournament_records import (
     TournamentRecords,
     origin_key,
 )
+from marl_battlegrounds.evaluation.tournament_reuse import analysis_schedule
 
 # Raw roles whose headers never depend on the scalar schema. full_metrics.csv
 # is also raw; its header comes from the snapshot pin (CanonicalView._raw_header).
@@ -51,6 +61,78 @@ _RAW_HEADERS = {
     "episodes.csv": EPISODE_COLUMNS,
 }
 _RAW_ROLES = frozenset({*_RAW_HEADERS, "full_metrics.csv"})
+
+
+def _saved_qualification(
+    manifest: Mapping[str, Any], config: Mapping[str, Any]
+) -> dict[str, Any]:
+    """Check every saved qualification copy against its immutable descriptor.
+
+    manifest is the in-memory run record and config is its hash-checked saved
+    descriptor (including optional challenger assets). Older narrow views may
+    omit qualification metadata; they remain unverified. Conflicting release,
+    budget or flag copies raise ValueError before recovery or model loading.
+    Asset location hints may differ; asset content and all scientific fields may
+    not. Return the shared qualification projection without editing either input.
+    """
+    settings = _mapping(manifest.get("details"))
+    copies = [settings]
+    copies.extend(
+        _mapping(entry.get("details"))
+        for entry in _mapping(manifest.get("passes")).values()
+        if entry.get("phase") == "tournament" and entry.get("pass_id") == "schedule"
+    )
+    verified = settings.get("official_snapshot_verified", False)
+    budget = _mapping(manifest["tournament_reuse"].get("budget"))
+    decision = tournament_qualification(config, budget, official_verified=verified)
+    if (
+        type(budget.get("protocol_compliant")) is not bool
+        or budget["protocol_compliant"] != decision["protocol_compliant"]
+    ):
+        raise ValueError("Saved tournament qualification differs from its budget")
+    for details in copies:
+        if (
+            "official_snapshot_verified" in details
+            and (
+                type(details["official_snapshot_verified"]) is not bool
+                or details["official_snapshot_verified"] != verified
+            )
+        ) or ("budget" in details and details["budget"] != budget):
+            raise ValueError("Saved tournament qualification copies disagree")
+        declared = details.get("canonical_config")
+        if declared is None:
+            continue
+        try:
+            declared = load_tournament_config(declared, official=False)
+            scientific = {
+                key: value
+                for key, value in declared.items()
+                if key not in {"assets", "source_location"}
+            }
+            recorded = {
+                key: value
+                for key, value in config.items()
+                if key not in {"assets", "source_location"}
+            }
+            if canonical_json(scientific) != canonical_json(recorded):
+                raise ValueError("Saved descriptor differs")
+            for key, asset in declared["assets"].items():
+                saved_asset = config["assets"].get(key, {})
+                if {
+                    field: value
+                    for field, value in asset.items()
+                    if field not in {"path", "url"}
+                } != {
+                    field: value
+                    for field, value in saved_asset.items()
+                    if field not in {"path", "url"}
+                }:
+                    raise ValueError("Saved asset identity differs")
+        except (KeyError, TypeError, ValueError) as error:
+            raise ValueError(
+                "Saved tournament qualification differs from its saved release record"
+            ) from error
+    return decision
 
 
 def read_canonical_files(
@@ -88,7 +170,66 @@ def read_canonical_files(
             if not isinstance(value, dict):
                 raise ValueError("canonical logical game must be a JSON object")
             games.append(cast(Row, value))
+    _saved_qualification(manifest, config)
     return config, tuple(games)
+
+
+def _population_metadata(records: TournamentRecords) -> Row:
+    """Project one population for direct, resumed and read-only results.
+
+    records supplies checked run settings and immutable logical games. Keep the
+    caller's original field under input_metadata. Population aliases use the
+    resolved registrations and shared schedule projection, including the
+    challenger. Participant IDs retain the generic writer-registration meaning;
+    participant_descriptors separately hold tournament entrant IDs. Sampling
+    facts come only from the saved summary, otherwise they stay unknown. This
+    host-only projection loads no models or reports and changes no saved bytes.
+    """
+    manifest = records.manifest
+    settings = _mapping(manifest.get("details"))
+    aliases = deepcopy(
+        {
+            name: value
+            for name, value in _mapping(settings.get("input_metadata")).items()
+            if name not in settings
+        }
+    )
+    for name in ("policies", "participants", "method_sampling", "schedule"):
+        aliases.pop(name, None)
+    aliases["num_matches"] = len(records.games)
+    registrations = _mapping(settings.get("participant_registrations"))
+    if registrations:
+        descriptions: list[Row] = []
+        participant_ids: dict[str, str] = {}
+        for registration in sorted(registrations.values(), key=lambda row: row["name"]):
+            description = policy_recording_registration(registration)
+            participant_ids[description["name"]] = canonical_digest_sha256(description)
+            if registration["kind"] == "policy":
+                for field in ("kind", "components", "parameter_status"):
+                    description.pop(field, None)
+            descriptions.append(description)
+        aliases["policies"] = descriptions
+        aliases["participants"] = participant_ids
+        aliases["schedule"] = [
+            asdict(row)
+            for row in analysis_schedule(
+                records.games,
+                {identifier: row["name"] for identifier, row in registrations.items()},
+            )
+        ]
+    summary = _mapping(manifest.get("tournament_summary"))
+    sampling = _mapping(summary.get("metadata")).get("method_sampling")
+    if sampling is not None:
+        aliases["method_sampling"] = deepcopy(sampling)
+    elif registrations:
+        aliases["method_sampling"] = {
+            row["name"]: {
+                "determinism": "unknown",
+                "basis": "This result has no saved complete sampling evidence",
+            }
+            for row in registrations.values()
+        }
+    return aliases
 
 
 class CanonicalView(_View):
@@ -118,6 +259,12 @@ class CanonicalView(_View):
         snapshot's pinned scalar schema (see above), plus tournament_owner (the
         run's tournament "schedule" pass), origin_join_version (1) and
         schedule_reference (the recorded SHA-256 of tournament_games.jsonl).
+        List and short-config convenience settings stay available here. Complete
+        population aliases describe every entrant, including the challenger;
+        input_metadata retains the original field declaration. Participants map
+        names to writer-registration IDs; participant_descriptors carry the
+        separate tournament entrant IDs. The immutable plan supplies the schedule.
+        Sampling facts come from the saved summary and otherwise stay unknown.
         Other attributes come from the shared view unchanged.
     """
 
@@ -195,8 +342,12 @@ class CanonicalView(_View):
         )
         self.metadata.update(
             {
+                **_population_metadata(self.records),
                 # The full report follows the snapshot pin, so the version a
                 # researcher reads must be the pin too (14 for an old snapshot).
+                **_saved_qualification(manifest, self.records.config),
+                "snapshot_id": self.records.config["snapshot_id"],
+                "big_12_id": self.records.config["snapshot_id"],
                 "metric_schema_version": self.records.scalar_schema,
                 "tournament_owner": {
                     "run_id": manifest["run_id"],
@@ -423,7 +574,7 @@ class CanonicalView(_View):
     def _spawn_balance(self) -> object:
         """Count scoped physical pairs from narrow original completed outcomes.
 
-        A challenger is the only focal entrant; twelve-only views report actual
+        A challenger is the only focal entrant; field-only views report actual
         team bindings separately. Missing referenced evidence makes coverage
         unavailable without blocking unrelated stored summaries. This reads no
         full report, model or optional metric cell and never fits statistics.

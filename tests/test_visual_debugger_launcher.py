@@ -2199,3 +2199,77 @@ def test_launcher_split_has_both_products_and_no_old_compatibility_wrapper() -> 
     assert _REPLAY_SHELL_LAUNCHER.is_file()
     assert not _OLD_PYTHON_ENTRYPOINT.exists()
     assert not _OLD_SHELL_LAUNCHER.exists()
+
+
+@pytest.mark.parametrize("initialized", [None, False, True])
+@pytest.mark.parametrize("setting", [None, "true"])
+def test_devclient_allocation_setup_is_lazy_and_respects_caller_settings(
+    initialized: bool | None, setting: str | None
+) -> None:
+    program = f"""
+import os, sys
+from scripts.dev.debug_renderer import _configure_allocation
+assert 'jax' not in sys.modules
+if {initialized!r} is not None:
+    import jax
+    if {initialized!r}:
+        jax.devices('cpu')
+before = dict(os.environ)
+_configure_allocation()
+assert os.environ['XLA_PYTHON_CLIENT_PREALLOCATE'] == {setting or "false"!r}
+exclude = 'XLA_PYTHON_CLIENT_PREALLOCATE'
+assert {{k:v for k,v in os.environ.items() if k != exclude}} == {{
+    k:v for k,v in before.items() if k != exclude
+}}
+if {initialized!r} is None:
+    assert 'jax' not in sys.modules
+else:
+    from jax._src import xla_bridge
+    assert xla_bridge.backends_are_initialized() == {initialized!r}
+"""
+    environment = dict(os.environ, JAX_PLATFORMS="cpu")
+    environment.pop("XLA_PYTHON_CLIENT_PREALLOCATE", None)
+    if setting is not None:
+        environment["XLA_PYTHON_CLIENT_PREALLOCATE"] = setting
+    result = subprocess.run(
+        [sys.executable, "-c", program],
+        cwd=_REPOSITORY_ROOT,
+        env=environment,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert result.returncode == 0, result.stderr
+    assert ("existing memory reservations" in result.stderr) is (initialized is True)
+
+
+def test_devclient_sets_allocation_before_first_numerical_import() -> None:
+    program = """
+import builtins, os, sys
+from scripts.dev.debug_renderer import main
+original = builtins.__import__
+def importing(name, *args, **kwargs):
+    if name.startswith(('marl_battlegrounds', 'jax')):
+        assert os.environ.get('XLA_PYTHON_CLIENT_PREALLOCATE') == 'false'
+        assert 'jax' not in sys.modules
+        raise RuntimeError('allocation-before-import-proved')
+    return original(name, *args, **kwargs)
+builtins.__import__ = importing
+try:
+    main(['--no-open'])
+except RuntimeError as exc:
+    assert str(exc) == 'allocation-before-import-proved'
+else:
+    raise AssertionError('Expected a numerical import')
+"""
+    environment = dict(os.environ, JAX_PLATFORMS="cpu")
+    environment.pop("XLA_PYTHON_CLIENT_PREALLOCATE", None)
+    result = subprocess.run(
+        [sys.executable, "-c", program],
+        cwd=_REPOSITORY_ROOT,
+        env=environment,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert result.returncode == 0, result.stderr

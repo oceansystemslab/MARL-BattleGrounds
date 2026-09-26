@@ -4,9 +4,9 @@ load_method turns the four built-in names into their Policies, an exported
 actor directory into its method's PPO System (or a greedy QMIX or PQN-VDN
 System for such an export, which then plays a complete two-entrant
 tournament), and a module:function factory
-into the Policy or System it returns; it refuses a learner checkpoint
-directory, an empty or unknown reference and a factory that returns anything
-else, and a factory's own error keeps its type. The command line's factory
+into the Policy or System it returns. Complete learner folders use the same
+actor-only loader. Malformed folders, empty or unknown references and wrong
+factory return types fail. A factory's own error keeps its type. The CLI factory
 branch calls the same factory loader, load_factory, and wraps every error with
 its cause kept.
 pinned_opponent_evidence records the built-in Random team as installed with no
@@ -145,6 +145,8 @@ def test_built_in_names_exports_and_factories_resolve(
         assert isinstance(value, Policy) and value.name == name
     loaded = load_method(str(exported))
     assert isinstance(loaded, System) and loaded.execution == "jax"
+    from_cli = _cli._load_method(str(exported))
+    assert isinstance(from_cli, System) and from_cli.checkpoint == loaded.checkpoint
     host = System("Host Team", _unused_apply, execution="host")
     assert load_method(_factory_module(monkeypatch, host)) is host
 
@@ -155,7 +157,7 @@ def test_bad_references_are_refused_with_clear_errors(
     learner = tmp_path / "learner"
     learner.mkdir()
     (learner / "checkpoint_details.json").write_text("{}")
-    with pytest.raises(ValueError, match="export the actor first"):
+    with pytest.raises(ValueError, match="Checkpoint ID"):
         load_method(str(learner))
     for text in ("", "   ", "unknown-team", "a:b:c"):
         with pytest.raises(ValueError):
@@ -481,3 +483,24 @@ def test_schema_1_systems_reproduce_their_pre_red_zone_outputs(
     assert compared == set(expected)
     joined = "\n".join(registrations).encode()
     assert hashlib.sha256(joined).hexdigest() == _SCHEMA_1_REGISTRATIONS, registrations
+
+
+@pytest.mark.parametrize("learner", [False, True])
+def test_directory_loading_is_shared_with_the_cli(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, learner: bool
+) -> None:
+    folder = tmp_path / "saved:actor"
+    folder.mkdir()
+    if learner:
+        (folder / "checkpoint_details.json").write_text("{}")
+    expected = System("Saved Actor", _unused_apply)
+    seen: list[Path] = []
+
+    def actor_only(path: Path) -> System:
+        seen.append(path)
+        return expected
+
+    monkeypatch.setattr(checkpoints, "load_system", actor_only)
+    assert load_method(str(folder)) is expected
+    assert _cli._load_method(str(folder)) is expected
+    assert seen == [folder, folder]

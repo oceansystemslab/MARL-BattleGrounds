@@ -143,3 +143,148 @@ def test_train_cli_passes_a_pqn_config_to_the_shared_function(
     assert calls[0].method == "pqn_vdn" and calls[0].pqn is not None
     assert (calls[0].pqn.rollout_length, calls[0].pqn.memory_window) == (4, 2)
     assert calls[0].checkpoint_interval_updates == 1600
+
+
+def test_reselection_cli_uses_the_public_owner(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from marl_battlegrounds.training import selection
+
+    calls: list[dict[str, Any]] = []
+
+    def reselect(**arguments: object) -> dict[str, Any]:
+        calls.append(arguments)
+        return {"status": "needs_confirmation", "runs": []}
+
+    monkeypatch.setattr(selection, "reselect_checkpoint", reselect)
+    assert (
+        _cli.main(
+            [
+                "reselect-checkpoint",
+                "run-a",
+                "run-b",
+                "--declaration",
+                "choice.json",
+                "--output-dir",
+                str(tmp_path),
+            ]
+        )
+        == 0
+    )
+    assert calls == [
+        {
+            "run_dirs": ["run-a", "run-b"],
+            "declaration": "choice.json",
+            "output_dir": str(tmp_path),
+        }
+    ]
+
+
+def test_analysis_cli_passes_selection_and_grouping_unchanged(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from marl_battlegrounds.training import analysis
+
+    calls: list[dict[str, Any]] = []
+
+    def analyze(**arguments: object) -> dict[str, Any]:
+        calls.append(arguments)
+        return {"artifacts": {"summary": "summary.md"}}
+
+    monkeypatch.setattr(analysis, "analyze", analyze)
+    assert (
+        _cli.main(
+            [
+                "analyze-training",
+                "run",
+                "--output-dir",
+                str(tmp_path),
+                "--selection",
+                "choice.json",
+                "--grouping",
+                "groups.json",
+            ]
+        )
+        == 0
+    )
+    assert calls == [
+        {
+            "run_dirs": ["run"],
+            "output_dir": str(tmp_path),
+            "selection": "choice.json",
+            "grouping": "groups.json",
+        }
+    ]
+
+
+def test_extension_cli_calls_owner_with_relative_panel(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    calls: list[dict[str, Any]] = []
+
+    def extend(**arguments: object) -> runner.TrainResult:
+        calls.append(arguments)
+        return runner.TrainResult(
+            tmp_path, tmp_path / "actor", None, 12, 2, "complete", ()
+        )
+
+    monkeypatch.setattr(runner, "extend_training", extend)
+    declaration = tmp_path / "changes.json"
+    declaration.write_text(json.dumps({"validation": {"panel": "panel.json"}}))
+    assert (
+        _cli.main(
+            [
+                "extend-training",
+                "parent/checkpoints/id",
+                "--additional-env-steps",
+                "4",
+                "--output-dir",
+                "child",
+                "--changes",
+                str(declaration),
+            ]
+        )
+        == 0
+    )
+    assert calls == [
+        {
+            "checkpoint": "parent/checkpoints/id",
+            "additional_env_steps": 4,
+            "output_dir": "child",
+            "changes": {"validation": {"panel": str(tmp_path / "panel.json")}},
+        }
+    ]
+
+
+@pytest.mark.parametrize("value", [[], {"validation": {"panel": 1}}])
+def test_extension_cli_rejects_bad_changes_before_call(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, value: object
+) -> None:
+    called = False
+
+    def extend(**arguments: object) -> runner.TrainResult:
+        nonlocal called
+        called = True
+        raise AssertionError(arguments)
+
+    monkeypatch.setattr(runner, "extend_training", extend)
+    declaration = tmp_path / "changes.json"
+    declaration.write_text(json.dumps(value))
+    assert (
+        _cli.main(
+            [
+                "extend-training",
+                "parent/checkpoints/id",
+                "--additional-env-steps",
+                "4",
+                "--output-dir",
+                "child",
+                "--changes",
+                str(declaration),
+            ]
+        )
+        == 1
+    )
+    assert not called

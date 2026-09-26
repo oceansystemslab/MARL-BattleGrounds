@@ -804,3 +804,243 @@ def test_each_group_preserves_its_supported_original_rng_protocol(
         _write(paths["schedule"], manifest)
         with pytest.raises(ValueError, match="supported action/init"):
             resolve_reuse_plan(config, paths)
+
+
+@pytest.mark.parametrize(
+    "inline_names",
+    [("schedule",), ("games", "companion"), ("schedule", "games", "companion")],
+)
+def test_v2_inline_schedule_matches_file_plan_and_keeps_challenger_keys(
+    tmp_path: Path, inline_names: tuple[str, ...]
+) -> None:
+    from marl_battlegrounds.evaluation.tournament_assets import AssetVerifier
+
+    config, paths, manifest, games, companion = _fixture(
+        tmp_path, entrants=3, maps=2, pairs=2, saved=False
+    )
+    expected = resolve_reuse_plan(config, paths, challenger_id="challenger")
+    config["version"] = 2
+    values = {"schedule": manifest, "games": games, "companion": companion}
+    for name in inline_names:
+        value = values[name]
+        encoded = canonical_json(value)
+        config["assets"][name] = {
+            "role": "schedule",
+            "sha256": sha256(encoded).hexdigest(),
+            "size_bytes": len(encoded),
+            "inline": value,
+        }
+        paths[name].unlink()
+        paths.pop(name)
+    verifier = AssetVerifier(config, cache_dir=tmp_path / "cache")
+    actual = resolve_reuse_plan(
+        config, paths, asset_reader=verifier.read_json, challenger_id="challenger"
+    )
+    assert actual == expected
+    assert not (tmp_path / "cache").exists()
+    with pytest.raises(ValueError, match="checked reader"):
+        resolve_reuse_plan(config, paths, challenger_id="challenger")
+    games_asset = config["assets"]["games"]
+    if "inline" in games_asset:
+        games_asset["inline"][0]["execution"]["seed_id"] += 1
+        with pytest.raises(ValueError, match="size or digest"):
+            AssetVerifier(config)
+
+
+def _deferred_fixture(
+    tmp_path: Path,
+) -> tuple[dict[str, Any], dict[str, Path], dict[str, str]]:
+    config, paths, manifest, games, companion = _fixture(
+        tmp_path, entrants=3, maps=2, pairs=1
+    )
+    config["version"] = 2
+    manifest["companion_stream_rule"] = "participant-method-v1"
+    kinds = {
+        row["entrant_id"]: "system" if index == 2 else "policy"
+        for index, row in enumerate(config["participants"])
+    }
+    groups: dict[str, dict[str, Any]] = {}
+    template = manifest["execution_groups"][0]
+    for row in [*games, *companion]:
+        first, second = row["team_a"], row["team_b"]
+        group_id = (
+            f"deferred:{second}"
+            if first == CHALLENGER_PLACEHOLDER
+            else f"incumbent:{first}:{second}"
+        )
+        stream = (
+            "episode-fold-in-v1"
+            if kinds.get(first, "policy") == kinds[second] == "policy"
+            else "evaluation-systems-v1"
+        )
+        row["execution"].update(
+            group_id=group_id,
+            action_stream_version=stream,
+            initialization_stream_version=stream,
+        )
+        groups[group_id] = {
+            **template,
+            "group_id": group_id,
+            "action_stream_version": stream,
+            "initialization_stream_version": stream,
+        }
+    manifest["execution_groups"] = list(groups.values())
+    _write(paths["schedule"], manifest)
+    _write_rows(paths["games"], games)
+    _write_rows(paths["companion"], companion)
+    return config, paths, kinds
+
+
+def test_marked_v2_repeated_promotions_keep_old_games_and_bind_new_method_streams(
+    tmp_path: Path,
+) -> None:
+    config, paths, kinds = _deferred_fixture(tmp_path)
+    seen_seed_coordinates: set[tuple[int, int]] = set()
+    seen_episode_coordinates: set[tuple[int, int]] = set()
+    expected_retained = None
+    for generation, (challenger, kind) in enumerate(
+        (("policy-one", "policy"), ("system-two", "system"), ("policy-three", "policy"))
+    ):
+        kinds[challenger] = kind
+        plan = resolve_reuse_plan(
+            config, paths, challenger_id=challenger, participant_kinds=kinds
+        )
+        if expected_retained is not None:
+            assert plan.games[: len(expected_retained)] == expected_retained
+        for row in plan.games:
+            if row["team_a"] == challenger:
+                stream = (
+                    "episode-fold-in-v1"
+                    if kinds[challenger] == kinds[row["team_b"]] == "policy"
+                    else "evaluation-systems-v1"
+                )
+                assert row["execution"]["action_stream_version"] == stream
+                assert row["execution"]["initialization_stream_version"] == stream
+            execution = row["execution"]
+            seen_seed_coordinates.add((execution["root_seed"], execution["seed_id"]))
+            seen_episode_coordinates.add(
+                (execution["root_seed"], execution["episode_id"])
+            )
+        original_plan = copy.deepcopy(plan)
+        survivors, retained, source = _completed_retained(plan, config)
+        source["run_id"] = f"promotion-{generation}"
+        source["source_id"] = record_source_identity(source, config["assets"])
+        original_by_id = {row["logical_game_id"]: row for row in plan.games}
+        for row in retained:
+            if original_by_id[row["logical_game_id"]]["origin"] is None:
+                row["origin"].update(
+                    source_id=source["source_id"], run_id=source["run_id"]
+                )
+        original_retained = copy.deepcopy(retained)
+        manifest, retained_rows, companion = rebuild_companion(
+            plan,
+            retained,
+            survivors,
+            games_asset=f"retained-{generation}",
+            challenger_games_asset=f"companion-{generation}",
+            map_ids=(0, 1),
+        )
+        assert plan == original_plan
+        assert retained == original_retained == list(retained_rows)
+        assert manifest["companion_stream_rule"] == "participant-method-v1"
+        old_groups = {
+            row["group_id"] for row in plan.schedule_manifest["execution_groups"]
+        }
+        companion_groups = {row["execution"]["group_id"] for row in companion}
+        assert old_groups.isdisjoint(companion_groups)
+        assert len(companion_groups) == len(survivors)
+        for entrant in survivors:
+            assert (
+                len(
+                    {
+                        row["execution"]["group_id"]
+                        for row in companion
+                        if row["team_b"] == entrant
+                    }
+                )
+                == 1
+            )
+        assert seen_seed_coordinates.isdisjoint(
+            (row["execution"]["root_seed"], row["execution"]["seed_id"])
+            for row in companion
+        )
+        assert seen_episode_coordinates.isdisjoint(
+            (row["execution"]["root_seed"], row["execution"]["episode_id"])
+            for row in companion
+        )
+        assert {row["execution"]["root_seed"] for row in companion} == {47}
+        assert len({row["execution"]["episode_id"] for row in companion}) == len(
+            companion
+        )
+        assert (
+            len({row["execution"]["seed_id"] for row in companion})
+            == len(companion) // 2
+        )
+        for group in manifest["execution_groups"]:
+            assert group["next_episode_id"] > max(
+                row["execution"]["episode_id"] for row in companion
+            )
+            assert group["next_seed_id"] > max(
+                row["execution"]["seed_id"] for row in companion
+            )
+        config["participants"] = [
+            {"entrant_id": identifier, "name": identifier} for identifier in survivors
+        ]
+        config["record_sources"].append(source)
+        for name, rows in (
+            (manifest["games_asset"], retained_rows),
+            (manifest["challenger_games_asset"], companion),
+        ):
+            paths[name] = tmp_path / f"{name}.jsonl"
+            _write_rows(paths[name], list(rows))
+            config["assets"][name] = _asset(paths[name].read_bytes())
+        _write(paths["schedule"], manifest)
+        expected_retained = retained_rows
+
+
+@pytest.mark.parametrize("challenger", [None, "next"])
+def test_marked_v2_fresh_extension_uses_one_counter_per_root(
+    tmp_path: Path, challenger: str | None
+) -> None:
+    config, paths, kinds = _deferred_fixture(tmp_path)
+    if challenger is not None:
+        kinds[challenger] = "policy"
+    originals = {name: path.read_bytes() for name, path in paths.items()}
+    before = resolve_reuse_plan(
+        config, paths, challenger_id=challenger, participant_kinds=kinds
+    )
+    plan = resolve_reuse_plan(
+        config,
+        paths,
+        challenger_id=challenger,
+        participant_kinds=kinds,
+        games_per_opponent=8,
+        rerun_existing=True,
+    )
+    assert {name: path.read_bytes() for name, path in paths.items()} == originals
+    assert len(plan.games) == (3 if challenger is None else 6) * 8
+    by_id = {row["logical_game_id"]: row for row in plan.games}
+    for original in before.games:
+        fresh = by_id[original["logical_game_id"]]
+        assert fresh["execution"] == original["execution"]
+        assert fresh["origin"] is None
+        assert fresh["prior_origin"] == original["origin"]
+    added = [row for row in plan.games if row["pair_order"] == 1]
+    assert len({row["execution"]["episode_id"] for row in added}) == len(added)
+    assert len({row["execution"]["seed_id"] for row in added}) == len(added) // 2
+    prior_companion = [
+        json.loads(line) for line in paths["companion"].read_text().splitlines()
+    ]
+    assert min(row["execution"]["episode_id"] for row in added) > max(
+        row["execution"]["episode_id"] for row in prior_companion
+    )
+    assert min(row["execution"]["seed_id"] for row in added) > max(
+        row["execution"]["seed_id"] for row in prior_companion
+    )
+    for group in plan.schedule_manifest["execution_groups"]:
+        assert group["next_episode_id"] > max(
+            row["execution"]["episode_id"] for row in plan.games
+        )
+        assert group["next_seed_id"] > max(
+            row["execution"]["seed_id"] for row in plan.games
+        )

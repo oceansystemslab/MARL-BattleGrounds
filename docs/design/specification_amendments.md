@@ -12,9 +12,10 @@ source identities and evidence intact when reading later decisions.
 Use the [workflow guide](../evaluation/workflows.md) for current executable API
 examples and the [protocol](../evaluation/protocol.md) for current scientific
 rules. These distinguish implemented behavior, accepted future design and
-historical evidence. The current monthly Big 12 snapshot direction supersedes
-A27's weekly schedule and fixed numerical example; the final official budget
-and remaining admission gates are still unresolved.
+historical evidence. A27's current Big N contract records the later population,
+selection and monthly-release decisions. Historical v1 fields and measurements
+keep their original meanings; the final official budget, resource rules and
+remaining launch gates are unresolved.
 
 The four North Stars remain researcher usability, low sample complexity,
 meaningful tactical/strategic team behavior and professional engineering.
@@ -1423,7 +1424,10 @@ authored scenario, never mutates or implicitly saves the source map, and leaves
 the current Debug session untouched on any resolution or validation failure.
 
 (Revised by [A44](#a44-team-deathmatch-red-zone-scoring): the preview also
-declares Red Zone depth 5.0 and is identified by `default-tdm-map-preview@2`.)
+declares Red Zone depth 5.0 and is identified by `default-tdm-map-preview@2`.
+The 25 September closeout repair adds an explicitly Red-Zone-off preview for maps
+narrower than 5.0 map units, identified by `red-zone-off-tdm-map-preview@1`.
+Authored playable scenarios keep their declared rules.)
 
 Spawn pads remain simulator coordinate points with no core radius. DevClient
 authoring renders their validation footprint using the maximum positive body
@@ -1705,9 +1709,9 @@ The existing generic Scripted SharedObs Team Deathmatch policy is a DevClient,
 debugging, regression, and behavior-inspection controller. It is not an
 official baseline, a Big 12 entrant, or a source of general-strength claims.
 The built-in Random controller remains diagnostic and quality-control tooling.
-A materially improved general scripted policy may become an official baseline
-only through a later explicit qualification and amendment; its present
-availability does not grant that status.
+A27's later eligibility decision excludes scripted controllers from the
+initial candidate field and official ladder. Their diagnostic availability does
+not grant official status; a different policy would need a new owner decision.
 
 Official controlled-scenario evaluation instead binds an explicit
 scenario-pressure-controller identity through the resolved evaluation
@@ -1824,154 +1828,166 @@ Open-source software cannot make such misconduct technically impossible, and
 the current roadmap does not add a secret-scenario service, private hosted
 evaluator, attestation system, or submission sandbox.
 
-Scenario pressure controllers remain outside the Big 12 and the cumulative
-Baseline Library defined by A27. Their content identities and outputs may be
-retained as evaluation provenance, but they are not training opponents,
-published baselines, or independently rated systems.
+Scenario pressure controllers remain outside the official field and cumulative
+Baseline Library defined by A27. Their identities and outputs may be retained
+as evaluation provenance. Their scenario-specific definitions remain evaluation
+fixtures. The ordinary ALPHA/BETA training exception above does not make these
+controllers official baselines or independently rated entrants.
 
-## A27. Rolling Big 12 and Baseline Library governance
+<a id="a27-rolling-big-12-and-baseline-library-governance"></a>
 
-**Classification:** approved Paper 1 baseline-roster, checkpoint-selection,
-rating, and longitudinal-governance contract.
-**Supersedes:** historical or planning language that treats independently
-trained runs, checkpoint histories, population members, diagnostic policies,
-or scenario controllers as separate tournament entrants; specifies a Big 12
-cardinality other than twelve; gives the current generic scripted policy
-official baseline status; or permits a mutable latest-roster alias to select
-training inputs. It
-preserves A25's SharedObs-only official execution and A26's independent
-scenario-ablation boundary.
+## A27. Rolling Big N And Baseline Library Governance
 
-The Big 12 contains exactly twelve method-level entrants. Each numbered,
-versioned method/configuration row is one entrant identity, so separately
-declared variants of the same broad algorithm may occupy distinct rows. Each
-entrant supplies one validation-selected, fixed executable system to the active
-tournament and receives one Elo. Independently trained runs and their
-checkpoint histories are selection and reproducibility evidence, not
-additional entrants or rating subjects.
+**Current contract, 26 September 2026.** This section records the approved
+M8–M10 closeout decisions. It replaces the earlier tentative twelve-method
+roster, Qwen-Five admission proposal, fixed size for future releases, weekly
+cadence and compulsory three-run wording. It preserves A25's SharedObs
+information limits, A26's protected-scenario boundary and every historical
+version-1 record, hash and qualification condition. Approval of this contract
+is not evidence of trained skill or an official released field.
 
-The tentative initial method roster is:
+### Candidate Systems And Training Evidence
 
-1. RNN-IPPO, parameter-shared;
-2. RNN-MAPPO, parameter-shared;
-3. RNN-MAPPO, class-specific actors;
-4. RNN-HAPPO;
-5. HyperMARL-PPO;
-6. RNN-QMIX;
-7. RNN-PQN-VDN;
-8. MAPPO-PFSP League;
-9. MAPPO-PSRO;
-10. S*-Curriculum;
-11. S*-Curriculum-Shaped; and
-12. Qwen-Five.
+The active field is **Big N**. Each declared method/configuration contributes
+one fixed System and receives one Elo. An entrant may contain several policies;
+its components, independent training runs and checkpoint history do not become
+extra entrants. A version-2 release derives N from its frozen participant list,
+with at least two entrants and no separate size setting. Version-1 official
+snapshots retain exactly twelve. Custom v1 fields already permit other sizes.
 
-This roster is a planned target, not a claim that the methods, training
-pipeline, or tournament are already implemented or qualified. Exact HyperMARL
-method identity, PFSP and PSRO training/runtime semantics, stochastic
-evaluation policy, compatibility requirements, and other unresolved method
-details must be frozen and qualified before activation rather than guessed from
-the labels above.
+The initial scientific plan has six learners and eighteen settings:
 
-For each of rows 1–11, training produces three independent runs and retains all
-three checkpoint histories. Before training begins, the owning protocol freezes
-the validation distribution and metric, checkpoint cadence, checkpoint
-eligibility rules, run-comparison rule, and every tie break. Each run first
-selects its eligible checkpoint using only that frozen validation rule. The
-highest validation-scoring selected checkpoint among the three runs becomes
-the method's one fixed tournament system, with the frozen tie break applied
-when necessary. All run identities, seeds, configurations, checkpoints,
-validation evidence, exclusions, and selection evidence remain inspectable.
-Official scenarios, scenario results, tournament games, tournament ratings,
-and other locked evaluation feedback may not select or alter the system.
+- Recurrent MAPPO, recurrent IPPO, QMIX and PQN-VDN each have Plain, curriculum,
+  reward-shaping and combined curriculum/reward-shaping settings.
+- Feedforward MAPPO and feedforward IPPO each have one Plain setting.
 
-Qwen-Five contributes at most one fixed executable system. It is tentative and
-cost-gated: measured throughput, latency, resource consumption, execution
-stability, reproducibility, interface compatibility, and tournament-budget
-feasibility must pass before it may occupy the twelfth active position. It is
-not presumed compatible with the JAX learner loop, and its inference or
-artifact costs may not be hidden. Failure of the feasibility gate leaves the
-roster position unresolved until an explicit governance decision; no substitute
-is silently invented or admitted.
+The software provides these learner routes. Its short integration checks do not
+qualify the resulting policies or prove sample efficiency. All software comes
+before the scientific campaign. Actual candidate training, searches, validation
+panels, learning curves, fairness checks and final membership selection remain
+campaign work.
 
-The Paper 1 Big 12 tournament therefore contains:
+Three independent training seeds per setting are the initial scientific plan,
+not a claim of adequate uncertainty or a fixed software requirement. Before the
+campaign, declare the seed list, budgets, competence targets, validation panel,
+checkpoint cadence, eligibility, scoring and all tie rules. Give learner
+families comparable search and extension effort or disclose each difference.
+Retain every run and checkpoint-selection record, including failures. Select
+one fixed candidate per setting using its declared validation-only rule; do not
+choose a final checkpoint merely because it was saved last. Separately declare
+any comparison among run finalists. Related continuations are not new
+independent training seeds.
 
-```text
-12 method entrants
-12 fixed tournament systems
-66 unordered pairings
-100 episodes per pairing
-6,600 tournament episodes
-1 Elo per method
-```
+### Initial Population Selection
 
-Each unordered pairing evaluates five maps by ten evaluation coordinates by
-two side assignments. The side assignments belong to the same unordered
-pairing and do not create more entrants. Every episode uses A25's canonical
-SharedObs actor-information contract. The raw win/draw/loss matrix, exact
-episode manifests, failures, and provenance are the authoritative result; a
-compact rating is a derived presentation.
+Declare the complete candidate field and its order, requested selection size,
+conditions, validation maps, seeds, game budget, draw rule and failure policy
+before any selection games. Settle the scientific draw/selection choices before
+the actual campaign; this software packet does not settle them from synthetic
+records. Do not reserve family places or quietly drop weak but valid entrants.
 
-The planned compact rating is a jointly fitted, draw-aware
-Bradley–Terry–Davidson rating centred at 1000, reported as one Elo-style value
-per method. Exact estimator parameterization, numerical implementation,
-uncertainty reporting, convergence criteria, missing/failing-episode handling,
-and validation against the raw matrix are mandatory pre-tournament activation
-gates. The word `Elo` does not authorize sequential order dependence or permit
-the derived rating to replace the raw matrix.
+The selection workflow must:
 
-After Paper 1, the live Big 12 is governed through immutable dated weekly
-snapshots. A challenger becomes eligible only after peer-reviewed publication,
-a compatible versioned implementation, reproducible qualification, and all
-then-current safety, resource, and protocol gates. When a qualified challenger
-is admitted, promotion and relegation apply to one exact versioned entrant
-identity, never an individual checkpoint or an entire broad algorithm family,
-and the bottom entrant leaves active Big 12 status so the active roster remains
-exactly twelve. If no qualified challenger exists, the roster does not change
-merely because a weekly review occurred.
+1. Fit the existing joint Elo estimator on the complete eligible validation
+   field under the frozen conditions.
+2. Take the top N. Break a cutoff tie by expected score against that same field,
+   then by the declared entrant order.
+3. Save the selected Systems' exact identities and freeze membership before any
+   fit restricted to that membership. A restricted refit may change ratings and
+   order, but never membership.
+4. Run the separate test-map stage only after membership is frozen. Preserve the
+   validation field, selection decision and test records separately.
 
-The Paper 1 roster, manifests, systems, raw results, and ratings remain
-permanently frozen after publication. Every later weekly snapshot likewise
-retains its exact member systems, tournament/evaluation contract, inputs,
-outputs, and governance decision. Ratings centred within different weekly
-pools are not directly comparable as a longitudinal measure when membership or
-systems change. A separate explicitly validated longitudinal model would be
-required for that claim. Exact challenger scheduling, multiple simultaneous
-challengers, ties at promotion or relegation boundaries, weekly refitting, and
-exception handling remain mandatory pre-launch governance gates rather than
-implicit implementation choices.
+Failures remain visible and follow the declared failure policy. Missing required
+confirmation or game evidence produces an incomplete decision, not an invented
+winner, fabricated outcome or replacement seed. Repeating a deterministic game
+under another seed label does not create independent evidence. Report scheduled
+games, supported sampling units and repeated trajectories separately; uncertain
+determinism stays unknown.
 
-Relegation removes only active Big 12 membership. The cumulative Baseline
-Library monotonically retains every current and former Big 12 method's:
+Validation games on maps 42–46 choose membership. They cannot be reused as
+held-out games on maps 47–51. Protected test/scenario material cannot choose
+checkpoints, hyperparameters, prompts, curricula or membership. This restriction
+does not ban a researcher's unrelated custom test-map comparison; it determines
+which evidence can support the official claim.
 
-- compatible implementation and official configuration;
-- complete provenance and qualification record;
-- designated retained checkpoints and its selected final system;
-- interface and environment-version compatibility metadata; and
-- historical Big 12 membership, dated snapshots, and results.
+### Eligibility And Local Use
 
-An authorized training workflow may consume compatible Baseline Library
-material only through an immutable, content-addressed population manifest that
-declares exact method/system/checkpoint identities and sampling weights. It may
-not resolve a mutable `latest_big_12`, `current_champion`, or equivalent moving
-alias. This includes population-based training and any other adaptive opponent
-or curriculum selection. Use of a retained method for training does not restore
-active Big 12 membership or create another tournament entrant.
+Scripted controllers and LLMs are excluded from the official initial candidate
+field and ladder. This explicitly supersedes the tentative Qwen-Five place;
+removing it does not choose N=11 or invent a replacement. Random, scenario
+pressure controllers, privileged/oracle policies, unqualified checkpoints and
+internal training-population members do not become official entrants merely
+because they are available.
 
-Scenario pressure controllers, generic Scripted TDM, Random, privileged or
-oracle policies, intermediate or otherwise unqualified checkpoints, and a
-PSRO method's internal population members are not independent Big 12 entrants.
-They do not receive Big 12 ratings merely because they support development,
-training, or evaluation. If Qwen-Five is admitted, its approved artifacts and
-history remain retained by the Baseline Library after relegation; using them in
-a training population remains separately capability- and cost-gated rather
-than assumed to fit the common JAX training loop.
+Any valid System may still use custom evaluation and tournaments, including
+scripted, recurrent, mixed, planner and host/LLM Systems. Local comparisons
+against the official field do not grant admission. Training provenance alone
+does not block inference loading. Actor information limits and valid actions
+remain required everywhere.
 
-All official Big 12 training, validation, selection, tournament, rating, and
-weekly-governance evidence must retain canonical SharedObs provenance, exact
-content identities, code and environment revisions, seeds, resource and
-failure records, and the immutable manifests that joined them. These controls
-support maintainer reproduction and eligibility assessment; they do not claim
-to make scientific misconduct technically impossible.
+Keep explicit diagnostic, controlled-scenario and declared one-day competence
+checks separate from official field eligibility. The ordinary ALPHA/BETA
+training-opponent exception in A26 retains its exposure reporting and loss of
+protected-scenario qualification. Scripted controllers are not ordinary
+training defaults or candidates for the Big N selection tournament.
+
+### Releases, Ratings And History
+
+The release/config owns maps, rosters, rules, seeds and its uniform game budget.
+Version-1 official snapshots retain five registered test maps and mirrored
+five-agent teams. Version-2 releases may declare a nonempty registered test-map
+list and supported mirrored teams of one through five agents. Both retain
+SharedObs, fixed Team A/B ownership, paired spawn ends, equal official opponent
+weights and the existing 5,000 bootstrap resamples. Each game's actual model,
+configuration, source and execution identities remain recorded.
+
+A field has N*(N-1)/2 unordered matchups; one challenger adds N. The historical
+twelve-entry, 100-game example has 66 matchups and 6,600 games. It does not set a
+new official budget. Old team-swapped results retain that schedule; new fixed-team
+results exchange spawn ends without changing Team A/B ownership. The challenger
+stays Team A. Compatible incumbent games may be reused; changed scientific
+conditions need fresh evidence. Reuse raw games, never old Elo as rating credit.
+
+The authoritative evidence is the raw win/draw/loss matrix, exact game records,
+failures and source identities. Current summaries use the existing joint
+Bradley–Terry–Davidson fit centered at 1200, with its declared convergence and
+uncertainty checks. This supersedes the earlier proposed 1000 display center;
+historical reports are not rewritten. Fixed-System intervals do not measure
+training-run variation, and insufficient independent variation must remain
+visible. The [protocol](../evaluation/protocol.md#frozen-rating-and-uncertainty-contract)
+owns the estimator details.
+
+The accepted post-Paper-1 cadence is one immutable monthly release, at midnight
+Europe/London on the first day, with the existing 72-elapsed-hour submission
+cutoff. Maintainers compare one challenger with a pinned provisional field and
+fit all N+1 Systems together. A strictly stronger challenger replaces the lowest
+incumbent; an exact challenger cutoff tie does not promote. Refit the retained
+N-System field before the next admission. The published field stays unchanged
+until release; local calls neither promote nor publish. Remaining eligibility,
+reproduction, tie, numerical budget and resource decisions must be resolved
+before the relevant release. No official field, N, budget or resource limit is
+chosen here.
+
+Paper 1's released Systems, manifests, raw results and ratings remain frozen.
+Later monthly snapshots keep their own identities and conditions. Ratings from
+different populations are not directly comparable over time without a separate
+validated model for that purpose. The older weekly wording is superseded.
+
+Relegation removes active membership, not historical records. The Baseline
+Library retains each current and former official member's implementation,
+configuration, provenance, designated checkpoints, selected System,
+compatibility information, membership decisions and results. Its growth does
+not change the active field's N. Other research artifacts may remain available
+without being described as admitted official members.
+
+Training may use compatible library material only through an immutable manifest
+that declares exact method/System/checkpoint identities and weights. A mutable
+`latest_big_12`, `current_champion` or equivalent alias cannot select training
+inputs. Loading or training against a retained System does not restore its
+active membership. Maintainers must be able to reproduce official claims from
+the saved information; these controls do not claim to prevent all scientific
+misconduct.
 
 ## A28. Scenario pressure controllers in the DevClient
 
@@ -3403,8 +3419,9 @@ turns the rule off (one point per death, as before).
 
 **Defaults.** 5.0 (`tasks.DEFAULT_TDM_RED_ZONE_DEPTH`) for fresh map-based
 games (`make`, the TDM factories), default `evaluate` and `run_tournament`,
-new training runs, and new DevClient scenario drafts and map previews. An
-explicit 0.0 keeps one-point scoring. Supplying a depth next to an exact
+new training runs, and new DevClient scenario drafts. Map-only previews use
+5.0 when it fits the map; a narrower map gets an explicitly labelled depth-zero
+preview. This does not relax validation of a playable scenario. An explicit 0.0 keeps one-point scoring. Supplying a depth next to an exact
 `env_config`, or one that differs from a recorded depth, raises instead of
 being ignored.
 
@@ -3413,9 +3430,11 @@ context V4, frame V3 (20 context columns), replay V4, scenario record V5, actor
 POV V3, SharedObs projection 3 and NoSharedObs projection 4. Older records keep
 their original meaning: they scored one point per death and have no depth.
 Saved raw configurations with 12 keys restore at depth 0.0 under their
-original identities. A pass or snapshot saved before the rule stays readable;
-resuming it, or running new games from it, needs the source version that made
-it. Because resolved config V2 always records the depth, a new recording of a
+original identities. Ordinary evaluator passes saved before the rule remain
+readable but need their original source for resume. Supported list tournaments
+can recover pinned historical configurations; canonical completed-game reuse
+keeps the saved snapshot conditions and refuses incompatible new execution.
+Neither route migrates old records or grants learner-training resume. Because resolved config V2 always records the depth, a new recording of a
 layout has a new configuration identity, so its episode, match, evaluation and
 matchup IDs differ from older recordings of the same layout. This includes the
 neutral DevClient scenes and sample replays at depth 0.
@@ -3427,11 +3446,11 @@ see and act exactly as before. Their weights cannot be re-exported, and old
 training runs cannot be resumed.
 
 **Training.** `TrainConfig.red_zone_depth` defaults to 5.0 and is fixed for a
-run (a resume with another depth is refused); training configs saved without
-it read as 0.0. Validation tasks record the depth (family-1 schema 3, System
+run (a resume with another depth is refused). Saved learner provenance without
+the field decodes as historical 0.0; a new config file that omits it uses 5.0. Validation tasks record the depth (family-1 schema 3, System
 panel schema 4, slot schema 2), and panel ranking evidence gains
-`schema_version` 2 with the ranked depth, so rankings are never reused under
-another rule. The frozen MAPPO search and screen pin 0.0. Score-delta shaping
+`schema_version` 2 with the ranked depth. Actors remain loadable under another
+declared rule; their historical ranking is not relabelled as new-rule evidence. The frozen MAPPO search and screen pin 0.0. Score-delta shaping
 follows points, so a Red Zone death moves it by 2. Reports compare recorded
 kills, not points.
 
@@ -3444,7 +3463,9 @@ kills, not points.
 `red_zone_depth` (help: "How far each team's Red Zone reaches in from its own
 spawn edge"). Version-1 drafts mean depth 0.0, their original rule, and keep
 their semantic digests. The map preview is identified by
-`default-tdm-map-preview@2`. The Replay Viewer and DevClient gain the Red Zone
+`default-tdm-map-preview@2` when the default depth fits. The closeout repair
+uses `red-zone-off-tdm-map-preview@1` only for a narrower map preview. The Replay
+Viewer and DevClient gain the Red Zone
 Floors visual filter, a subtle deep-red floor tint under obstacles, on by
 default; Cooldown Effects is also on by default, giving 11 of 20 filters on.
 The Scenario Author canvas shows the same tint from the host's validation

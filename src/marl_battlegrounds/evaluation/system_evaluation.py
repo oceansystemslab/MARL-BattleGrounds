@@ -93,32 +93,31 @@ def freeze_evaluation_method(value: System | Policy | str) -> System | Policy:
     """
     if isinstance(value, str):
         value = policy(value)
-    if isinstance(value, Policy):
-        return replace(
-            value,
-            variables=freeze_variables(value.variables),
-            initial_carry=freeze_variables(value.initial_carry),
-        )
-    if not isinstance(cast(object, value), System):
+    if not isinstance(cast(object, value), (System, Policy)):
         raise TypeError(
             "evaluation methods must be Systems, Policies or built-in names"
         )
-    variables = (
-        _freeze_host_variables(value.variables)
-        if value.execution == "host" and not value._policies
-        else freeze_variables(value.variables)
+    transform = (
+        _freeze_host_variables
+        if isinstance(value, System)
+        and value.execution == "host"
+        and not value._policies
+        else freeze_variables
     )
-    result = replace(
-        value,
-        variables=variables,
-        components=deepcopy(value.components),
-    )
+    if isinstance(value, Policy):
+        return replace(
+            value,
+            variables=transform(value.variables),
+            initial_carry=transform(value.initial_carry),
+        )
+    variables = transform(value.variables)
+    result = replace(value, variables=variables, components=deepcopy(value.components))
     if value._policies:
         entries = tuple(
             replace(
                 entry,
                 variables=variables if value._shared else variables[index],
-                initial_carry=freeze_variables(entry.initial_carry),
+                initial_carry=transform(entry.initial_carry),
             )
             for index, entry in enumerate(value._policies)
         )

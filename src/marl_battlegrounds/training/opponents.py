@@ -422,7 +422,9 @@ def refresh_opponents(
         Validated numerical schedule with int32 total_rounds and
         history_threshold_rounds shaped (20,) as built by make_training_schedule:
         the upward-rounded 5% steps, or round 1 then 5% through 95% when early
-        history capture is requested. Structure stays fixed under jit.
+        history capture is requested. A child may set history_threshold_count
+        to an active prefix of at most 20 entries; unused entries never trigger
+        captures. Structure stays fixed under jit.
 
     Returns
     -------
@@ -454,6 +456,9 @@ def refresh_opponents(
     due = (history.threshold_to_snapshot == -1) & (
         completed_rounds >= schedule.history_threshold_rounds
     )
+    threshold_count = getattr(schedule, "history_threshold_count", None)
+    if threshold_count is not None:
+        due &= jnp.arange(_CAPACITY) < threshold_count
     capture = jnp.any(due)
     valid = (
         ~_history_invalid(history)

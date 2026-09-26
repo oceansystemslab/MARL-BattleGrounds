@@ -802,7 +802,7 @@ def _export_origin(
     binding : TrainingContentBinding
         Today's verified training content.
     export : Path
-        Actor export directory, already loaded and hash-checked by load_system.
+        Actor export or complete checkpoint, already checked by load_system.
 
     Returns
     -------
@@ -810,7 +810,8 @@ def _export_origin(
         ("verified", the source learner's saved pinned-opponent record or None)
         when every linking field agrees and the learner's protected scenario
         closure matches today's; otherwise ("declared", None). A pinned record
-        of None means the source run played self-play only.
+        of None means the source run played self-play only. A full learner
+        folder returns ("checkpoint", None); its exposure stays unknown.
 
     Notes
     -----
@@ -825,6 +826,9 @@ def _export_origin(
     from marl_battlegrounds.training import checkpoints
 
     details = checkpoints.read_checkpoint_description(export)
+    if details["kind"] == "learner":
+        # Loading weights does not establish the training exposure of their source.
+        return "checkpoint", None
     metadata = cast(dict[str, object], details.get("metadata", {}))
     identifier = metadata.get("checkpoint_id")
     if not isinstance(identifier, str):
@@ -878,13 +882,14 @@ def pinned_opponent_evidence(
     method : Policy or System
         The frozen pinned method.
     export : Path or None, default None
-        Its actor export directory when it was loaded from one.
+        Its actor export or complete learner checkpoint directory, if supplied.
 
     Returns
     -------
     dict
         JSON-ready. ``source`` is "installed" (a built-in Policy), "verified
-        export", "declared export" or "researcher method". ``exposure`` is
+        export", "declared export", "declared checkpoint" or "researcher method".
+        Full checkpoints retain unknown exposure. ``exposure`` is
         "none", "known" or "unknown": whether the method, or anything it was
         trained against through a verified chain, is one of the protected
         scenario pressure controllers. ``controllers`` names the known ones by
@@ -1001,7 +1006,9 @@ def pinned_opponent_evidence(
                     )
             return record
         return {
-            "source": "declared export",
+            "source": "declared checkpoint"
+            if status == "checkpoint"
+            else "declared export",
             "exposure": "unknown",
             "controllers": [],
             "familiar_scenarios": all_scenarios,

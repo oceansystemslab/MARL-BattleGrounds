@@ -60,12 +60,18 @@ prints the URL and tries to open a modern browser. Node.js and npm are needed
 for frontend development, not for using the installed browser assets.
 
 `run_debug_renderer.sh` remains a thin compatibility redirect to this launcher.
+The Python entry point also sets `XLA_PYTHON_CLIENT_PREALLOCATE=false` before
+loading the simulator, unless the caller explicitly set it. JAX then allocates
+GPU memory as needed; this is not a memory limit. Calling `main()` after JAX has
+initialized cannot release an existing allocation pool, and prints a warning.
+Set the variable before starting Python to use this startup default reliably.
+Help and argument checks do not initialize JAX or change memory settings.
 
 The public options are:
 
 | Option | Meaning |
 | --- | --- |
-| `--record-replay PATH` | Record one live episode to a self-contained V3 replay, then offer read-only review. |
+| `--record-replay PATH` | Record one live episode to a self-contained V4 replay, then offer read-only review. |
 | `--seed N` | Set the deterministic reset/step seed; default `0`. |
 | `--controlled-slot N` | Select an initially active global slot; otherwise use the arena default. |
 | `--static` | Render one stateless Matplotlib reset snapshot without a browser server. |
@@ -152,7 +158,11 @@ scenario revision in numeric-aware asset-ID order. Scenario rows load the
 authored starting state. Map rows are explicitly labelled as default 5v5 TDM
 previews: Python copies the map into the default scenario, with Red Zone depth
 5.0 (`default-tdm-map-preview@2`), builds the simulator inputs, and validates
-them. It does not change or save the map. `Open in Debug`
+them. A map narrower than 5.0 map units instead gets a preview explicitly
+labelled **Red Zone Off**, at depth 0.0 (`red-zone-off-tdm-map-preview@1`).
+This preview choice never changes an authored scenario's declared depth. A
+playable scenario whose depth does not fit its map still fails validation.
+Neither preview changes or saves the map. `Open in Debug`
 in either authoring area calls this same loading service for its current buffer.
 When a map retains an approved TDM map's source name and content digest, its
 preview is recorded under that map's registered identity: the map ID, name and
@@ -161,7 +171,10 @@ source's asset ID, catalog revision and semantic digest, so the match summary
 shows the map's name instead of Custom Map. Any other map is recorded as a custom
 layout.
 Python parses and validates each requested start before replacing the current
-session. A failure leaves the session untouched and reports linked problems.
+session. A rejected load leaves the session untouched and reports linked problems.
+Combat also shows the error in the page notice. If the connection is lost, the
+notice says the load outcome is unknown; the client does not retry it automatically.
+A successful later load clears the old failure notice.
 Reset restores the immutable loaded snapshot and seed, including its map,
 roster, scores, timers, and current timestep.
 

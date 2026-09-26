@@ -177,6 +177,22 @@ def _json_value(value: object) -> object:
     return value
 
 
+def _recording_table_headers() -> dict[str, tuple[str, ...]]:
+    """Return the fixed CSV headers shared by writers and recording preflight.
+
+    Each call returns a new mapping. Summary tables get their headers only when
+    a tournament summary is written; a training checkpoint keeps them empty.
+    This reads no files and creates no writer.
+    """
+    return {
+        "episodes.csv": EPISODE_COLUMNS,
+        "policy_assignments.csv": ASSIGNMENT_COLUMNS,
+        "priority_metrics.csv": (*IDENTITY_COLUMNS, *PRIORITY_METRIC_NAMES),
+        "full_metrics.csv": (*IDENTITY_COLUMNS, *FULL_METRIC_NAMES),
+        "match_results.csv": MATCH_COLUMNS,
+    }
+
+
 def _json_bytes(value: object) -> bytes:
     """Encode sorted compact UTF-8 JSON with a trailing newline; reject NaN/Infinity."""
     return (
@@ -521,13 +537,7 @@ class RunWriter:
             "match_results.csv": [],
             **{name: [] for name in _SUMMARY_TABLES},
         }
-        self._headers: dict[str, tuple[str, ...]] = {
-            "episodes.csv": EPISODE_COLUMNS,
-            "policy_assignments.csv": ASSIGNMENT_COLUMNS,
-            "priority_metrics.csv": (*IDENTITY_COLUMNS, *PRIORITY_METRIC_NAMES),
-            "full_metrics.csv": (*IDENTITY_COLUMNS, *FULL_METRIC_NAMES),
-            "match_results.csv": MATCH_COLUMNS,
-        }
+        self._headers = _recording_table_headers()
         self._pending: list[tuple[str, int]] = []
         self._collector: ReplayCollector | None = None
         self._replay_ids: dict[str, int] = {}

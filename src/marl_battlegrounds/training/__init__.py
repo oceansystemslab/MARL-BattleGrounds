@@ -4,7 +4,8 @@ Content preparation, schedules, shaping, self-play and compact collection use
 base dependencies. The package alone imports no JAX or PPO. Baseline actors need
 the existing training extra. train owns complete PPO, QMIX and PQN-VDN runs;
 load_system reads frozen actors and analyze uses the optional viz extra for
-saved-result plots.
+saved-result plots. reselect_checkpoint writes a separate decision from saved
+actor and game evidence; it never replaces the original run selection.
 """
 
 # pyright: reportUnsupportedDunderAll=false
@@ -88,8 +89,12 @@ if TYPE_CHECKING:
     )
     from marl_battlegrounds.training.runner import TrainConfig as TrainConfig
     from marl_battlegrounds.training.runner import TrainResult as TrainResult
+    from marl_battlegrounds.training.runner import extend_training as extend_training
     from marl_battlegrounds.training.runner import train as train
     from marl_battlegrounds.training.screen import prepare_screen as prepare_screen
+    from marl_battlegrounds.training.selection import (
+        reselect_checkpoint as reselect_checkpoint,
+    )
     from marl_battlegrounds.training.shaping import (
         team_potential_shaping as team_potential_shaping,
     )
@@ -97,15 +102,25 @@ if TYPE_CHECKING:
         team_score_delta_shaping as team_score_delta_shaping,
     )
     from marl_battlegrounds.training.shaping import validate_shaping as validate_shaping
+    from marl_battlegrounds.training.study import run_study as run_study
+    from marl_battlegrounds.training.study import start_study as start_study
+    from marl_battlegrounds.training.study import stop_study as stop_study
+    from marl_battlegrounds.training.study import study_status as study_status
 
 _OWNERS = {
     "TrainConfig": "runner",
     "TrainResult": "runner",
     "train": "runner",
+    "extend_training": "runner",
     "load_system": "checkpoints",
     "analyze": "analysis",
     "analyze_screen": "analysis",
+    "reselect_checkpoint": "selection",
     "prepare_screen": "screen",
+    "run_study": "study",
+    "start_study": "study",
+    "stop_study": "study",
+    "study_status": "study",
     "PreparedTrainingContent": "_content",
     "TrainingContentBinding": "_content",
     "prepare_training_content": "_content",
@@ -159,6 +174,7 @@ __all__ = [
     "analyze_screen",
     "assign_opponents",
     "collect_training_rollout",
+    "extend_training",
     "init_opponent_history",
     "init_training_collection",
     "load_system",
@@ -167,8 +183,13 @@ __all__ = [
     "prepare_screen",
     "prepare_training_content",
     "refresh_opponents",
+    "reselect_checkpoint",
+    "run_study",
     "sample_training_configs",
     "scan_training_rollout",
+    "start_study",
+    "stop_study",
+    "study_status",
     "team_potential_shaping",
     "train",
     "training_keys",

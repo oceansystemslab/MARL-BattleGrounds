@@ -1,6 +1,7 @@
 """Check saved screen reports without running policies, games or optimizers.
 
 Known tables prove native scores, kill margins and whole-block paired changes.
+Training and validation depth labels retain their own recorded values.
 Synthetic run records exercise shared initialization identity, missing evidence,
 unfinished cases, timing scopes and immutable inputs. One report renders real
 headless plots; other cases replace plotting only. M8 loading has its own tests.
@@ -210,6 +211,7 @@ def _saved_rows(
             maps=result["maps"],
             opponents=("Random",),
             seed_pairs=result["seed_pairs"],
+            actual_kills="red_zone_depth" in result,
         ), rows
 
     monkeypatch.setattr(analysis, "_screen_evidence", read)
@@ -305,10 +307,21 @@ def test_screen_duration_has_clear_units(seconds: object, expected: str) -> None
     assert analysis._screen_duration(seconds) == expected
 
 
+@pytest.mark.parametrize("training_depth", [None, 5.0])
 def test_complete_screen_keeps_shared_task_once_and_renders_actual_axes(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, training_depth: float | None
 ) -> None:
     package, sources = _package(tmp_path)
+    if training_depth is not None:
+        budget_path = package / "budgets.json"
+        budgets = json.loads(budget_path.read_text())
+        for item in budgets["cases"]:
+            path = package / "jobs" / item["name"] / "run" / "run_details.json"
+            details = json.loads(path.read_text())
+            details["config"]["red_zone_depth"] = training_depth
+            item["config"] = details["config"]
+            _write(path, details)
+        _write(budget_path, budgets)
     calls: list[str] = []
 
     def read(
@@ -321,6 +334,7 @@ def test_complete_screen_keeps_shared_task_once_and_renders_actual_axes(
             maps=result["maps"],
             opponents=("Random",),
             seed_pairs=result["seed_pairs"],
+            actual_kills="red_zone_depth" in result,
         ), rows
 
     monkeypatch.setattr(analysis, "_screen_evidence", read)
@@ -359,7 +373,18 @@ def test_complete_screen_keeps_shared_task_once_and_renders_actual_axes(
     assert "Environment Transitions" in svg
     assert "Change In Kills Minus Deaths Per Game" in svg
     assert "Win = 1, Draw = 0.5, Loss = 0" in svg
+    assert "Validation Red Zone: Unknown (not recorded)" in svg
+    assert all(row["red_zone_depth"] == "" for row in initial_points + cells)
+    expected_depth = "" if training_depth is None else "5.0"
+    assert all(row["training_red_zone_depth"] == expected_depth for row in curves)
+    assert all(row["red_zone_depth"] == expected_depth for row in trials)
     summary = Path(result["artifacts"]["summary"]).read_text()
+    assert "Training Red Zone Depth" in summary
+    assert "Final Validation Red Zone Depth" in summary
+    assert all(row["final_validation_red_zone_depth"] == "" for row in trials)
+    assert (
+        "Unknown (not recorded)" if training_depth is None else "5.0 map units"
+    ) in summary
     assert "Unique Evaluated Games: 200" in summary
     assert "not pure compilation time" in summary
     assert "No winner" in summary
@@ -546,3 +571,58 @@ def test_each_training_seed_can_have_its_own_shared_initial_actor(
     assert result["complete"], result["evidence_errors"]
     assert result["unique_validation_tasks"] == 6
     assert "png" not in result["artifacts"]
+
+
+def test_missing_initialization_keeps_different_validation_rules_separate(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import matplotlib.pyplot as plt
+    import numpy as np
+    from matplotlib.figure import Figure
+
+    package, sources = _package(tmp_path)
+    path = package / "jobs" / "b32-t16" / "run" / "random_diagnostics.json"
+    records = json.loads(path.read_text())[1:]
+    for record, depth in zip(records, (0.0, 5.0), strict=True):
+        rows = sources[record["task_id"]]
+        for row in rows:
+            row["team_a_kills"] = row["team_a_score"]
+            row["team_b_kills"] = row["team_b_score"]
+        record.update(
+            red_zone_depth=depth,
+            **analysis.summarize_validation(
+                rows, maps=MAPS, opponents=("Random",), seed_pairs=4, actual_kills=True
+            ),
+        )
+    _write(path, records)
+    before = path.read_bytes()
+    _saved_rows(monkeypatch, sources)
+    lines: list[tuple[str, int]] = []
+    original = plt.close
+
+    def close(figure: Figure | int | str | None = None) -> None:
+        if isinstance(figure, Figure):
+            for axis in figure.axes:
+                for line in axis.lines:
+                    label = line.get_label()
+                    if isinstance(label, str) and label.startswith(
+                        "b32-t16 / Training"
+                    ):
+                        lines.append((label, int(np.asarray(line.get_xdata()).size)))
+        original(figure)
+
+    monkeypatch.setattr(plt, "close", close)
+    report = analysis.analyze_screen(package)
+    assert not report["complete"]
+    assert not report["evidence_errors"]
+    assert lines and all(count == 1 for _, count in lines)
+    assert {label.split("Validation Red Zone: ")[1] for label, _ in lines} == {
+        "0.0 map units",
+        "5.0 map units",
+    }
+    trials = _csv(Path(report["artifacts"]["trials"]))
+    assert trials[0]["final_validation_red_zone_depth"] == "5.0"
+    summary = Path(report["artifacts"]["summary"]).read_text()
+    assert "Final Validation Red Zone Depth" in summary
+    assert "0.0 map units; 5.0 map units" in summary
+    assert path.read_bytes() == before

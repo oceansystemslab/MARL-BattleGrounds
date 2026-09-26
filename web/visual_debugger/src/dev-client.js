@@ -4,6 +4,7 @@
  * validation, saved revisions, and live scenario replacement belong to the host.
  * This module binds DOM events and sends whole-draft commands through api.js.
  * Combat selectors reflect confirmed host configuration, not unconfirmed choices.
+ * Failed Combat loads publish their error to the main client's existing notice.
  */
 import {
   acquireCapabilityToken,
@@ -732,14 +733,29 @@ function installDevClient() {
 
   /**
    * Ask the host to load source into the live debugger. On success notify the main
-   * client and optionally select Combat; returnToCombat defaults to false. Failed
-   * commands leave the current area unchanged and are reported by send.
+   * client and optionally select Combat; returnToCombat defaults to false. Without
+   * a successful reply, keep the current area and browser frame. The editor shows
+   * its problems in authoring areas; Combat sends their text through
+   * marl-devclient-debug-load-failed to the main client's notice owner. A failed
+   * connection keeps its unknown-outcome warning and is never retried here.
    *
    * @param {Record<string, any>} source @param {boolean} returnToCombat
    */
   async function openInDebug(source, returnToCombat = false) {
     const response = await send({ command_type: "open_in_debug", source });
     if (!response?.ok) {
+      if (state.area === "combat") {
+        document.dispatchEvent(
+          new CustomEvent("marl-devclient-debug-load-failed", {
+            detail: {
+              message:
+                state.editor.problems
+                  .map((/** @type {{message: string}} */ problem) => problem.message)
+                  .join("\n") || "Could not load the selected match.",
+            },
+          }),
+        );
+      }
       return;
     }
     notifyDebugSessionReplaced();

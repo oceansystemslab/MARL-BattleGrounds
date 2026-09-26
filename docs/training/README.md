@@ -322,12 +322,14 @@ first real decision. Actor decisions are active, living Team A decisions.
 `learner_samples` stays `None`: collection counts do not establish which samples
 a future learner used, sample efficiency or learned tactics.
 
-The small-team stages keep K20/H300. Some sampled class pairs cannot reach that
-threshold. For example, Hunter versus Hunter needs at least 2,000 damage for
-20 kills, but even 300 Basics plus ten Ultimates deliver at most 1,900 damage,
-before travel, shields and healing. Hunter+Priest mirrors also have this limit.
-Such games must draw. Played exposure therefore does not establish a useful
-win/loss learning signal; report this limitation when using the curriculum.
+The small-team stages keep K20/H300. The old damage bound for Hunter versus
+Hunter applied when every kill gave one point: 20 kills needed at least 2,000
+damage, while 300 Basics plus ten Ultimates gave at most 1,900 before travel,
+shields or healing. With the current Red Zone rule, some kills give two points.
+That old bound no longer proves a draw, including for Hunter+Priest mirrors.
+Keep historical depth-zero results under their original rules. For current
+curriculum runs, inspect recorded wins, draws, kills and points; played exposure
+alone does not establish useful learning.
 
 ### Optional Score Shaping
 
@@ -414,7 +416,7 @@ config = training.TrainConfig(
 ```
 
 The reference is a built-in name (`"random"`, `"tdm-alpha"`, `"tdm-beta"`,
-`"tdm-gamma"`), an absolute path to one of our exported actor directories, or a
+`"tdm-gamma"`), an absolute path to a supported actor export or complete learner checkpoint, or a
 `module:function` factory that returns a `System` or `Policy`; the library
 route's `init_training_collection(..., pinned_opponent=...)` also takes the
 object itself. Slot 0 still marks the assignment, so row 1 of the opponent lists in
@@ -446,7 +448,7 @@ JAX methods keep their
 memory in the saved state. A host method's memory is never saved: a host method
 with no initializer, no reset hook and no memory template has none and resumes
 normally, and any other host method can resume only from a checkpoint where
-none of its games is unfinished. Use absolute export paths; a moved export
+none of its games is unfinished. Use absolute artifact paths; a moved export or checkpoint
 fails the resume check. A named pinned System is a training opponent of that
 run and of any run that later pins an export of it. Results against it are
 familiar-opponent results, and a different name is not proof of an unfamiliar
@@ -1325,8 +1327,10 @@ panel, is written. It is fixed for a run. The saved config (still
 `schema_version: 1`), the content binding (version 3) and every validation task
 record it. A resume that declares another depth fails before any file changes:
 "Resume config declares red_zone_depth 6.0, but the saved run uses 5.0. The
-depth is fixed for a run; start a new run to use another depth." A saved config
-without the field was saved before the rule and reads as 0.0.
+depth is fixed for a run; start a new run to use another depth." Decoding saved
+learner provenance supplies historical 0.0 when the field is absent. Reading a
+new config file through `read_config` uses today's default, 5.0, when omitted.
+These are separate routes; the file's age alone does not change new-run defaults.
 
 **Points and kills are different numbers.** Scores, winning thresholds (K20
 and the score-threshold curriculum) and `score_delta` shaping count points.
@@ -1340,18 +1344,28 @@ depths.
 
 **Panels.** A panel frozen directly from opponents works at any depth. A panel
 chosen from a tournament ranking records the depth the ranking was played at;
-`train` and `validate_checkpoint` refuse it under another depth (a ranking saved
-before the rule counts as 0.0). Rank again under the new depth, or freeze the
-opponents directly. Validation tasks, Random checks and slot diagnostics all
+its actors remain usable at another declared depth. The original ranking keeps
+its own conditions and identity (a ranking saved before the rule used 0.0).
+Loading those actors does not turn the ranking into evidence under the new rule.
+Validation tasks, Random checks and slot diagnostics all
 play at the run's depth; a task folder saved under another depth is refused
 rather than reused. Called directly, outside a run, they default to 5.0 (see
 the standalone validation example below).
+
+Analysis shows the saved training depth separately from each validation result's
+depth in summaries, CSV rows and plots. Missing historical fields remain unknown,
+not today's default or an explicit zero. Curves from different validation depths
+stay separate even when they use the same panel.
 
 **Old models and old runs.** An actor saved before the rule (actor input
 schema 1, 5,164 features) still loads with `load_system` and can be evaluated
 at any declared depth. It sees its original input and ignores the depth, so it
 is an old model playing a declared task, not a model retrained for Red Zone. Its
-weights cannot be exported again. A learner checkpoint saved before the rule
+weights cannot be exported again. Pass the original actor export or complete
+learner checkpoint folder to `load_system` or a method-reference input instead.
+The loader restores only actor arrays, but hashes every payload file, including
+saved optimizer/replay state. A pruned or corrupt checkpoint is rejected; a valid
+actor export stays independently usable. A learner checkpoint saved before the rule
 cannot resume training in this version: resume refuses it before any file
 changes and says the original source environment that created it (for example
 its launch package) is needed. An exported actor trained before the eight
@@ -1444,6 +1458,8 @@ Ordinary local filesystem rename/fsync semantics are required.
 
 Setup and restore verify the installed training content. Periodic saves reuse
 that checked descriptor instead of rebuilding the installed content each time.
+Starting a child also reuses the check from its required full parent restore;
+it still checks the carried source bank, structure, keys and counters.
 Every save still checks the actual source bank carried by the learner, its
 numerical state and its counters. Restore places every array on the selected
 device, including empty recording and metric IDs.
@@ -1514,7 +1530,8 @@ result = training.train(config, output_dir="artifacts/alpha-validation")
 print(result.selected_actor)
 ```
 
-A reference may also be an absolute exported-actor path or an installed
+A reference may also be an absolute actor export or complete learner checkpoint
+path, or an installed
 `module:function` factory returning a `System` or `Policy`. The factory runs once
 when the panel is loaded. Python callers may instead pass their live methods to
 `train(config, ..., validation_opponents=(my_system,))`. Live clients stay in the
@@ -1636,6 +1653,165 @@ step tie rule and CPU tail recovery. Those historical rules do not silently
 change when an old run resumes. The optional slot diagnostic compares two
 actor exports of the run's method. New panels require `slot_diagnostic_actor` to name that
 comparison explicitly; ordinary validation works without it.
+
+
+
+### Re-Select From Saved Results
+
+`training.reselect_checkpoint` makes a separate decision. It checks saved actor
+identities, validation tasks and game tables. It does not train, load model
+weights into an actor, or play games. The original `selection.json` stays as it
+was. Changing the rule now does not make it the original study rule.
+
+Start with completed training runs that kept their actor exports and validation
+records. Save this as `choice.json`:
+
+```json
+{
+  "schema_version": 1,
+  "name": "Saved score with kill-difference ties",
+  "rule": "score_then_kills",
+  "shortlist_size": 2
+}
+```
+
+Then run either interface, using a new output folder:
+
+```python
+from marl_battlegrounds import training
+
+decision = training.reselect_checkpoint(
+    ["RUN"], declaration="choice.json", output_dir="artifacts/new-choice",
+)
+print(decision["status"])
+for run in decision["runs"]:
+    print(run["run_id"], run["winner"])
+    for missing in run["needs_confirmation"]:
+        print(missing["python"])
+```
+
+```bash
+JAX_PLATFORMS=cpu uv run --no-sync python -m marl_battlegrounds reselect-checkpoint RUN \
+  --declaration choice.json --output-dir artifacts/new-choice
+```
+
+The [runnable example](../../examples/training_selection.py) prints the same
+missing-game calls. Artifact verification uses the optional training extra and
+existing imports that may initialize JAX. For a separate saved-analysis process,
+set `JAX_PLATFORMS=cpu` before starting Python, as above. This avoids reserving GPU
+memory just to read records. It does not change an already initialized backend
+inside your training script. No model is restored or updated.
+
+The declaration accepts these rules:
+
+| Rule | Order |
+|---|---|
+| `saved` (default) | The original schema's score and tie order. |
+| `score_then_kills` | Score, kill difference, earlier step, checkpoint ID. |
+| `score_then_step` | Score, earlier step, checkpoint ID. |
+
+The new rule builds its own routine shortlist. It always adds the final actor
+when that actor is not already listed. A winner needs complete confirmation for
+every shortlisted actor. Missing games give `needs_confirmation` and the exact
+`validate_checkpoint` calls. Run those calls deliberately; this tool never starts
+them for you. Historical tasks retain their original rules. New confirmation of
+a verified pre–Red Zone actor comparison explicitly uses depth zero.
+
+After the calls finish, copy the same declaration into a new file. Add
+`previous_decision` pointing to the pending `selection_decision.json`, and
+`confirmation_results` listing the new `validation_summary.json` paths. Write the
+follow-up into another new output folder. The rule and original shortlist cannot
+change in that follow-up. Paths in a declaration file resolve beside that file;
+paths supplied in a Python mapping resolve from the working directory.
+
+By default each run gets its own decision. To choose between run finalists, set
+`across_runs` to `true` and supply `seed_order`, listing each run's training seed
+once in the order to use for exact ties. Missing, failed and unfinished runs
+remain visible and prevent a completed across-run choice. A missing run leaves
+its seed unverified; the tool cannot use that entry to name a winner. No
+replacement seed is added.
+Different validation roots require `allow_different_roots: true`; those
+comparisons are labelled unpaired. A confirmation root must still be separate
+from every routine and initialization root actually used. `confirmation_root`
+and `confirmation_seed_pairs` can declare new confirmation work explicitly.
+
+Analyze the chosen decision with:
+
+```python
+from marl_battlegrounds import training
+
+report = training.analyze(
+    ["RUN"], output_dir="artifacts/new-choice-report",
+    selection="artifacts/new-choice/selection_decision.json",
+)
+print(report["artifacts"]["summary"])
+```
+
+```bash
+JAX_PLATFORMS=cpu uv run --no-sync python -m marl_battlegrounds analyze-training RUN \
+  --selection artifacts/new-choice/selection_decision.json \
+  --output-dir artifacts/new-choice-report
+```
+
+An incomplete decision cannot supply completed selection evidence. Omit
+`selection` to report ordinary progress and the original saved selection. The
+final checkpoint stays an extra labelled row; it never replaces a missing winner.
+
+### Keep Training Variation Separate From Game Variation
+
+A game interval describes fixed actors. A training interval needs independent
+training runs. Repeating a deterministic matchup does not create more random
+samples. New records report planned games, completed games, declared sampling
+groups and supported independent groups separately. Exact method facts may show
+determinism; a matching score or action digest alone cannot. Unknown methods
+say “Determinism Unknown.” Unsupported public bounds are `null`, with a reason.
+Any retained conditional bounds explicitly state the unsupported assumption.
+In new validation summaries, `independent_blocks` keeps its original declared
+paired-block count, also reported as `declared_blocks`.
+`supported_independent_sampling_units` is separate: zero for fixed deterministic
+conditions, `null` when the sampling mechanism is unknown. The rule for making
+training-validation intervals available is unchanged. Training-group
+`independent_units` is also `null` when the declared runs cannot support an
+independence claim. A missing score alone does not make an otherwise known
+independent run dependent. Old saved reports keep their original meaning and bytes.
+
+To compare training seeds, save a grouping declaration, for example `groups.json`:
+
+```json
+{
+  "schema_version": 1,
+  "maps": [42, 43, 44, 45, 46],
+  "opponents": ["tdm-alpha"],
+  "panel_digest": "COPY_THE_SAVED_PANEL_DIGEST",
+  "red_zone_depth": 5.0,
+  "runs": [
+    {"run_dir": "RUN_SEED_1", "group": "My method", "unit": "Seed 1"},
+    {"run_dir": "RUN_SEED_2", "group": "My method", "unit": "Seed 2"}
+  ],
+  "bootstrap_draws": 2000,
+  "bootstrap_seed": 19044003
+}
+```
+
+Use the actual panel digest, opponents, depth and all planned runs. Then call
+`training.analyze(["RUN_SEED_1", "RUN_SEED_2"], output_dir="REPORT", grouping="groups.json")`,
+or add `--grouping groups.json` to `analyze-training`. The report adds
+`training_variation.json`, `training_variation.csv` and a separate summary.
+It resamples whole run vectors, keeping a run's map/opponent scores together.
+The interval has a declared 95% confidence level. It is unavailable when runs or
+cells are missing, there are too few independent runs, or independence is unknown.
+A continuation and its siblings do not count as new independent training seeds.
+For example, three independently trained actors tested for 100 games each give
+three training units, not 300. Each actor keeps its complete map/opponent vector
+when the report resamples training runs.
+
+For two groups, add `comparisons` entries with `left`, `right` and `paired`.
+A paired comparison matches the same `unit` names across groups and keeps each
+pair together. Shared saved seeds and parent lineages must stay inside the same
+declared pair. An unpaired comparison cannot treat those shared sources as
+independent merely because their unit labels differ. Declare pairing from the
+study design, not from similar scores. Missing or failed pairs stay visible. These reports do not establish sample
+efficiency or learned competence without the later scientific campaign.
 
 
 ## A Panel-Backed MAPPO Demonstration
@@ -2144,3 +2320,301 @@ The study's artifact directory owns its launch/watch/status/resume scripts and
 reports. It checks every 10% boundary, selects a model, confirms it on fresh
 games and writes plots without an active assistant session. It has no automatic
 time limit and starts no longer follow-up run.
+
+### Continue A Full Learner Checkpoint
+
+Use `extend_training` when you want to add a declared amount of training. Give it
+an exact full learner checkpoint, an added budget, and a new child folder:
+
+```python
+from marl_battlegrounds import training
+
+result = training.extend_training(
+    "parent/checkpoints/CHECKPOINT_ID",
+    additional_env_steps=1_048_576,
+    output_dir="child",
+)
+print(result.selected_actor)
+```
+
+The matching CLI uses the same function:
+
+```bash
+python -m marl_battlegrounds extend-training parent/checkpoints/CHECKPOINT_ID \
+  --additional-env-steps 1048576 --output-dir child
+```
+
+The added budget starts at the checkpoint's actual saved step. It must contain
+whole batches of environment transitions. The child keeps the learner state,
+ongoing games, recurrent memory, random streams, optimizer state and method
+statistics. It keeps the original curriculum boundaries, then holds the final
+distribution. It does not restart the curriculum or warmup. The parent stays
+unchanged. The child and its siblings share one training lineage; they are not
+new independent training seeds. Exposure and completed-game totals remain
+cumulative across the lineage. The child records its new curriculum-accounting
+segment separately. If recording was enabled, it checks the parent's complete
+saved recording boundary before creating child output and carries only the
+unfinished games' needed prefixes. Large saved histories can take time to verify.
+
+A full learner folder is required. `actors/ID` contains inference weights only,
+and a pruned learner folder is missing state needed to train. Supported old
+actors still load for evaluation, but checkpoints from before Red Zone cannot
+be continuation parents. Source, dependencies, schemas and execution must match,
+or use a specifically qualified source transition. This is not a general model
+migration tool. Ordinary `train(resume_from=...)` still requires the child's exact
+saved settings.
+
+Keep parent checkpoint folders and their descriptions at the recorded paths.
+Child resume reads those descriptions to check its ancestry. Old numerical
+payloads may be pruned when retention permits it, but the ancestor description
+must stay. Moving or deleting it breaks that saved path; the error names the
+folder to restore. Starting another continuation from that ancestor still needs
+its full learner checkpoint.
+
+`changes` accepts only future validation, learning-rate, exploration and history
+capture declarations. No model, batch, reward or optimizer migration is implied.
+The following rate choices preserve the existing optimizer state:
+
+| Method | `changes["learning_rate"]` |
+| --- | --- |
+| Four PPO methods | `{"kind": "constant", "actor_lr": 0.0001, "critic_lr": 0.0001}` |
+| QMIX | `{"kind": "constant", "q_lr": 0.0001}` |
+| PQN-VDN | `{"kind": "constant", "q_lr": 0.0001}` or `{"kind": "linear", "q_lr": 0.0001, "optimizer_steps": 10000}` |
+| PQN-VDN, deliberately keep the floor | `{"kind": "keep_terminal_rate"}` |
+
+A new PQN linear rule starts at the saved optimizer count and ends at its existing
+`1e-10` floor. Without a change, the original horizon is kept. If an added update
+would use that floor, declare a future rate or explicitly keep it. Reaching the
+floor only after the last added update does not require that choice. BatchNorm
+statistics can still change at the floor; a tiny rate is not a promise of no
+learning or no actor change.
+
+Validation keeps the parent's frozen panel and purpose roots by default. The
+child's final step is always validated when a panel is present. To add future
+validation targets, use `changes={"validation": {"env_steps": [12000000,
+14000000]}}`; values are absolute cumulative steps after the parent boundary.
+The declaration records the reachable update boundary for each target before
+training starts. Schema-2 panels also allow a declared `roots` mapping for
+`routine`, `initialization` and `confirmation`. Different routine roots need
+`allow_different_roots=True` and are labelled unpaired. A confirmation root must
+be distinct from every routine or initialization root used by the candidate
+family. A changed `panel` excludes incompatible parent evidence.
+
+A parent panel with live-only Systems needs those same Systems again:
+
+```python
+child = training.extend_training(
+    "parent/checkpoints/CHECKPOINT_ID",
+    additional_env_steps=1_048_576,
+    output_dir="child",
+    validation_opponents=[my_system],  # The parent's frozen member order.
+)
+```
+
+The panel checks each System's saved identity, just as `train` does on resume.
+Clients stay in memory and are never written to JSON. An explicitly changed
+future panel can use `changes={"validation": {"panel": "new-panel/panel.json",
+"bindings": [new_system]}}`. The parent bindings still go in
+`validation_opponents`; changed membership belongs only to the new panel.
+The CLI can reload saved references but cannot accept a caller's live objects.
+
+Compatible parent candidates keep their exact original identities. The child
+selects the best eligible confirmed candidate, which can be a parent actor;
+`final_actor` always identifies the child's final actor. Extra history captures
+use `history_capture_env_steps`, a list of future cumulative steps. Existing
+snapshots and pending captures stay fixed, and the twenty-slot bank cannot grow.
+For Q-learning methods, optional `exploration` declarations affect future current
+actors only; frozen history actors keep their recorded exploration values.
+
+The [complete continuation example](../../examples/training_continuation.py)
+accepts the same checkpoint, child folder, budget and optional JSON changes.
+When a JSON changes file names a relative validation panel, the CLI and example
+resolve it beside that file. These short workflows check software behavior;
+they do not establish policy competence or sample efficiency.
+
+A child can stop during the parent's warmup, before any optimizer update. It
+still saves a full checkpoint and a loadable final actor. If there is no eligible
+trained actor, `selected_actor` is `None`; the status and event log say
+`No eligible trained checkpoint`. This is completed declared work, not evidence
+that a policy learned.
+
+Future exploration uses a declared constant or line. QMIX accepts
+`{"exploration": {"kind": "constant", "epsilon": 0.2}}` for a constant.
+For a line, use `kind="linear"` and add `end_epsilon` and `env_steps`, the
+number of added environment transitions over which epsilon changes. PQN uses
+`learning_blocks` instead of `env_steps`; warmup does not advance that clock.
+These choices only affect future actions. Stored opponent snapshots keep their
+original epsilon, and an unchanged child keeps its exact saved current epsilon.
+
+
+### Continuation Engineering Checks
+
+The 25 September 2026 checks cover all six learner families. On CPU, restoring
+all 1,990 saved numerical leaves from the pinned post–Red Zone source and taking
+one further declared update matched the reference bytes exactly. Public child
+runs separately checked saved game state, recurrent memory, optimizer state,
+random streams, recording, validation roots and parent-file immutability. Short
+runs and synthetic selection records establish software behavior, not learning
+quality or sample efficiency.
+
+The internal RTX 5090 checks used 32 environments and two-step rollouts. Earlier
+MAPPO and PQN-VDN parent → child → completed-resume runs passed at their recorded
+source versions. They exposed a second cold child block caused by changed array
+placement. After preserving the restored placement, an instrumented MAPPO child
+completed eight collection and update calls with one compiled cache entry for
+each function and no input-signature change. This checks that specific GPU path;
+it does not establish the same cost for every learner or model.
+
+That instrumented run shared GPU 0 with other work. Its parent took 124.95 seconds
+and its child took 450.00 seconds. It hit its 600-second limit while preparing
+content for completed resume; that resume is not a passing result. The child
+spent 157.63 seconds repeating an installed-content check already performed by
+restore. The child now reuses that check. A focused call-count check proves that
+restore still checks installed content and the child still rejects changed
+source-bank data and random roots. These contended, instrumented numbers explain
+the removed work; they are not an isolated speedup measurement.
+
+A final-source CPU check extended a real checkpoint from the pinned earlier
+source in 31.05 seconds and resumed the completed child in 17.61 seconds. The
+parent stayed unchanged. Existing restore still constructs an initial learner
+and prepares content before reading saved state; these remain setup costs, not
+warm learning costs. Different hardware, caches and background work can change
+those times substantially.
+
+Recording checks validate the complete saved boundary before creating child
+output. In a small CPU check, verifying and preparing one 112,481-byte unfinished
+prefix took 143.21 ms; attaching its prepared stream took 2.36 ms. A completed
+291,708-byte replay plus 1,473 bytes of CSV required 57.63 ms of checking and no
+replay copy. The required history check grows with the saved recording history.
+Recording-disabled runs skip this work. Raw outputs and source identities are
+retained under `artifacts/m9-m10/closeout/b2/`; those local files are not shipped
+with the package.
+
+
+### Run A Declared Study
+
+Use a study when several explicit configurations or seeds need the same launch,
+recovery and reporting steps. It runs one case at a time through the ordinary
+trainer. It does not choose recipes, add replacement seeds or change experience
+budgets for you. The earlier fixed MAPPO search keeps its original declaration
+and commands.
+
+```python
+from marl_battlegrounds import training
+
+report = training.run_study(
+    "examples/training_study.json", output_dir="artifacts/my-study"
+)
+```
+
+The [small study declaration](../../examples/training_study.json) runs two short
+FF-IPPO seeds. It demonstrates the software and cannot establish useful learning.
+The [Python example](../../examples/training_study.py) uses the same API. A real
+study should declare its intended experience, validation panel and selection
+settings in each ordinary training config.
+
+```shell
+python -m marl_battlegrounds study run \
+  --config examples/training_study.json --output-dir artifacts/my-study
+python -m marl_battlegrounds study status artifacts/my-study
+```
+
+Use `study start` in place of `study run` to launch in the background. Python
+provides `start_study(config, output_dir=...)`, `study_status(study_dir)` and
+`stop_study(study_dir)`. Status reads saved files without loading JAX or a model.
+Stop asks only the study's identified live processes to stop; it does not stop
+other experiments.
+
+```shell
+python -m marl_battlegrounds study start \
+  --config examples/training_study.json --output-dir artifacts/background-study
+python -m marl_battlegrounds study status artifacts/background-study
+python -m marl_battlegrounds study stop artifacts/background-study
+python -m marl_battlegrounds study run --resume-from artifacts/background-study
+```
+
+A new study needs an exact new or empty output folder. In an editable Git
+checkout, use an ignored folder such as `artifacts/`, `runs/` or `outputs/`, or
+put the study outside that checkout. Git source identity includes non-ignored
+files, so study output there would change its own source identity. Resume takes
+the saved study folder and inherits its frozen declaration. Python uses
+`training.run_study(resume_from="artifacts/background-study")`; a supplied config
+is an equality check, not a replacement. Paths inside a JSON declaration resolve
+beside that file. Mapping inputs resolve paths from the current directory.
+
+A declaration contains `schema_version: 1`, a name and ordered `cases`. Each fresh
+case has an `id`, a normal method `config` and an explicit `seeds` list. The seed
+list owns the seeds; leave `config.seed` out. Training supplies and freezes its
+ordinary defaults. A continuation case instead names a full learner `checkpoint`,
+`additional_env_steps` and optional future `changes`, using the same rules as
+`extend_training`. The study records checkpoint identities, source bytes and method dependency
+versions automatically. It also pins external panel/result files and actor
+checkpoint descriptions. Each worker refuses changed inputs or a changed install
+before training. The trainer still checks all checkpoint payloads. Declaration
+checks and report generation use CPU subprocesses. Training workers inherit your
+Python paths and device settings; the study does not select a GPU for you.
+Factory references use the ordinary System loader. A reference cannot freeze a
+remote service or hidden provider state; its repeatability limits still apply.
+
+Optional `duration_seconds` sets the study's wall-clock budget. A case may also
+have its own duration. The first launch fixes the study deadline; the first
+attempt fixes each case deadline. Stopping, a crash and time offline do not add
+time. Training stops early enough to leave the shared launcher's cleanup reserve
+(currently 15 seconds). A remaining budget smaller than that reserve starts no
+worker. Saved-result analysis may finish later; a failed operating-system cleanup
+remains a reported failure. Completed work remains available when time runs out.
+An expired resume
+may rebuild reports but starts no further training. Explicit resume may recover
+unfinished work from that case's complete saved checkpoint. The saved seed and
+config must still match; an extension must match its declared parent, added
+budget and changes. A checkpoint that changes those settings or points outside
+the case's run folder is refused. Explicit resume may start the same case again
+only when no checkpoint exists and its run folder is missing or empty. It keeps
+the saved config, seed, attempt history and original deadlines. A nonempty run
+without a complete checkpoint is refused; preserve its partial work and restore
+a complete checkpoint, or declare a new study in another output folder.
+
+The saved `failure_policy` defaults to `stop`. Set it to `continue` in the original
+declaration to continue to the next declared case after a failure. Failed and
+incomplete cases remain visible. A worker that has not stopped blocks further
+cases even with `continue`; a second model must not start beside an unclosed
+worker. Ordinary training owns checkpoint selection
+within each run. Comparing or selecting across runs requires its own declared
+rule; the study does not invent one. Plot-generation failures are reported
+separately and do not discard completed training results. A foreground study
+command exits with code 0 only when its training work is complete, or code 1
+when it is incomplete, stopped or out of time. Read the report for each case
+and for the separate analysis status.
+
+Declare finalists as a second study with `finalist_of` naming the discovery
+study's folder. Its saved declaration binds the earlier study and the chosen
+parent checkpoint identities. Declare any longer-training budgets and schedule
+changes before running the finalist study. The discovery declaration stays
+unchanged. Related continuations remain one training lineage, not new
+independent seeds.
+
+
+### Study Engineering Checks
+
+A CPU FF-IPPO check ran the actual study route with 4 environments, a 4-step
+rollout and 32 training transitions. It completed training, native 300-tick
+ALPHA validation, checkpoint selection and analysis in 145.77 seconds. It wrote
+33.00 MB across 148 files. The largest recorded child-process memory reading was
+2.48 GiB; this is not the simultaneous sum of all processes. These are small
+workflow costs, not GPU speed or learning results.
+
+The first check caught a stale process-status entry after analysis. After the
+host-only repair, rebuilding the completed study's report took 0.63 seconds.
+Every training-file hash, original deadline and attempt count stayed unchanged,
+and no finished worker remained listed as live. Focused checks also cover all
+six method configs and all eighteen supported method/treatment combinations,
+fixed deadlines, failures, explicit recovery and detached launch. Existing
+learner proofs supply the numerical coverage: six complete Plain workflows and
+twelve treatment checks combined with their method's Plain workflow. This does
+not claim eighteen new full training runs or scientific qualification.
+
+The study adds no work to action selection or learner updates. It runs ordinary
+training workers in order, with one CPU declaration check and saved-result
+analysis around them. The earlier MAPPO search keeps its saved clocks and
+records. Raw checks, exact source identities and the coverage map are retained
+under `artifacts/m9-m10/closeout/b3/`; these local files are not shipped.

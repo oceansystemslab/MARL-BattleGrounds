@@ -11,12 +11,15 @@ how to report uncertainty, and how to select checkpoints. It also owns actor
 information records, cross-play, controlled scenarios, runtime measurements,
 and the treatment of failures and unobserved endpoints.
 
-**Current reading rule, 2026-09-17:** a protocol requirement is not proof of
+**Current reading rule, updated 2026-09-26:** a protocol requirement is not proof of
 scientific qualification. The package implements native reset/step and Systems,
 evaluation, custom and canonical tournaments, verified game reuse, headlines,
 recording, recorded restart, result reading, commands and portable replay viewing.
 Separate maintainer admission and release machinery is tested with fixtures.
-There is no qualified official Big 12 bundle or trained baseline population.
+There is no qualified released official field or scientifically qualified
+trained baseline population. Six learner implementations and their software
+checks do not establish that qualification. The scientific campaign follows
+completion of all software.
 Official numerical game/resource budgets and the remaining approval gates stay open. This update
 supersedes the older weekly review and fixed 100-game official budget; it does
 not change old records or the current custom runner's default of 100.
@@ -423,9 +426,10 @@ deterministic controller through `pressure_protocol`, identically for the full
 method and matched ablation. Merely selecting a controller in the DevClient or
 passing its physical regression does not qualify official scenario evidence.
 [Amendment A27](../design/specification_amendments.md#a27-rolling-big-12-and-baseline-library-governance)
-records the earlier rolling Big 12 and cumulative Baseline Library direction.
+records the current Big N and cumulative Baseline Library contract, while
+preserving the historical version-1 field.
 The accepted monthly snapshot, optional challenger, and admission rules in
-[Big 12 tournament and Baseline Library](#big-12-tournament-and-baseline-library)
+[Big N Tournament And Baseline Library](#big-n-tournament-and-baseline-library)
 supersede its earlier weekly/fixed-budget details. These governance changes do
 not alter the simulator, generic cross-play rules, or the slot-based focal,
 partner, and opponent roles.
@@ -950,46 +954,77 @@ fixed.
 Matched-partner metrics are `structurally_inapplicable` for a monolithic
 full-team policy without separable partner assignments.
 
-## Big 12 tournament and Baseline Library
+<a id="big-12-tournament-and-baseline-library"></a>
+
+## Big N Tournament And Baseline Library
 
 **Canonical execution, reuse and separate maintainer admission machinery are
 implemented. Official rules, trained controllers and a qualified released bundle
-are still required.** A released Big 12 snapshot contains exactly
-twelve method-level entrants. Each has one fixed executable system and one Elo
-value. An ordinary canonical call evaluates those twelve alone, or adds one
-challenger to make thirteen. A system may contain several internal policies;
-those components do not become extra entrants. Larger or edited populations
-use the custom tournament route.
+are still required.** A version-1 released Big 12 snapshot retains exactly
+twelve method-level entrants. Version 2 takes N from its frozen participant list,
+with at least two entrants and no separate size setting. Each entrant has one
+fixed executable System and one Elo value. An ordinary canonical call evaluates
+that field alone or adds one challenger. Internal policies do not become extra
+entrants. An edited release uses the custom tournament route; a separately
+approved version-2 release may have a different size.
 
-The tentative Paper 1 roster remains:
+The initial scientific plan covers eighteen settings from six implemented
+learners. Recurrent MAPPO, recurrent IPPO, QMIX and PQN-VDN each have Plain,
+curriculum, reward-shaping and combined settings. Feedforward MAPPO and
+feedforward IPPO each have Plain only. These settings are candidates for a
+campaign, not already qualified members of a release. Complete all software
+before running that campaign.
 
-1. RNN-IPPO with parameter sharing.
-2. RNN-MAPPO with parameter sharing.
-3. RNN-MAPPO with class-specific actors.
-4. RNN-HAPPO.
-5. HyperMARL-PPO.
-6. RNN-QMIX.
-7. RNN-PQN-VDN.
-8. MAPPO-PFSP League.
-9. MAPPO-PSRO.
-10. `S*-Curriculum`.
-11. `S*-Curriculum-Shaped`.
-12. Qwen-Five.
+Three independently initialized training seeds per setting are the initial
+scientific plan. They are not a fixed software requirement or evidence that
+three seeds give adequate uncertainty. Declare comparable search and extension
+effort for the learner families, or disclose differences. Before training,
+freeze the validation panel, metric, cadence, checkpoint eligibility and tie
+rules. Each run selects its eligible checkpoint using validation only; a
+separately declared rule compares run finalists and chooses one fixed System
+per setting. Keep all run, checkpoint, selection and failure records. Protected
+scenario and test results cannot make those choices.
 
-For rows 1–11, retain three independently initialized training runs and their
-eligible checkpoint histories. A rule fixed before training selects one
-checkpoint from each run using validation only, then selects the best eligible
-validation checkpoint of the three as that method's tournament system. Record
-the validation metric, cadence, eligibility, and every tie-break rule in the
-manifest. Scenario or tournament results cannot select the checkpoint. Keep
-all training-run and selection evidence even though only one system enters.
+Scripted controllers and LLMs, including the former Qwen-Five proposal, are
+excluded from the official candidate field and ladder. Valid scripted and host
+Systems remain supported for custom research and local comparisons against the
+released field. This eligibility rule does not block inference loading based
+on training history or add an admission side effect to a local run. Diagnostic,
+scenario and declared one-day competence comparisons retain their own roles.
 
-Qwen-Five remains tentative. It must pass measured throughput, latency,
-resource, reproducibility, and protocol-compatibility checks. It is not assumed
-to fit a JAX training loop. If it fails, its place stays unresolved until an
-explicit governance decision chooses what happens next.
+### Initial Population Selection
 
-An immutable monthly configuration names the exact twelve controller
+Freeze the complete eligible field and its declared entrant order, requested N,
+validation conditions, seed schedule, game budget, draw/selection rule and
+failure policy before the selection tournament begins. The initial plan seeks
+one fixed candidate from each of the eighteen settings; missing qualification
+must stay visible. Actual candidate identities, final N, game budget and official
+resource limits are later scientific decisions.
+
+Fit the existing joint Elo estimator once on the complete validation field and
+take the top N. Break a cutoff tie by equal-weight expected score against that
+same field, then by declared entrant order. No learner family receives a reserved
+place. Weak valid entrants remain eligible. Follow the declared failure policy;
+do not silently select from an incomplete subset, replace failed seeds or invent
+outcomes. Missing required evidence produces an incomplete decision.
+
+Save the exact selected System identities and freeze membership before any fit
+restricted to those members. A refit may change ratings and order; it cannot
+change membership. The selection workflow admits its separate test-map stage
+only after that freeze. Validation records on maps 42–46 cannot substitute for
+test-map records on maps 47–51. Keep the complete field results, selection
+decision, restricted refit and held-out test records distinct. An unrelated
+custom evaluation remains possible; it does not acquire this predeclared status.
+
+Selection is a saved-result operation through `select_initial_population` and
+the matching `select-population` CLI. Its declaration must already be bound to
+the tournament before games begin. An optional supplied declaration only checks
+that binding; it cannot introduce a new rule after seeing the results. Software
+proofs use synthetic records and fixture catalogs, not a fabricated release.
+
+### Released Fields And Local Comparisons
+
+An immutable monthly configuration names the exact N controller
 versions, approved maps and mirrored rosters, SharedObs input contract, game
 budget, seed schedule, memory/rating settings, and artifact references with
 hashes and sizes. Resolve it once. Resume must use the saved resolved version;
@@ -997,23 +1032,28 @@ a newer installed default must not change an existing run. Missing official
 assets must produce a clear error, never substitute ALPHA, BETA, or another
 library member. Models and reports remain separate from the small configuration.
 
-The resolved field has 66 unordered matchups for twelve entrants and 78 for
-thirteen. Every matchup uses the same game budget, equal coverage across the
-five test maps, and complete default/swapped spawn pairs. The challenger stays
-Team A; incumbent games keep their recorded A/B assignments. Exchange complete
+The field has N*(N-1)/2 unordered matchups; a challenger adds N. Twelve entrants
+therefore have 66 matchups alone and 78 with a challenger. Every matchup uses the
+same game budget, equal coverage across the configured registered test maps, and
+complete default/swapped spawn pairs. Version 1 official fields retain five test
+maps and the canonical ordered five-agent roster. Version 2 allows a nonempty
+registered test-map list and supported mirrored rosters of one through five
+agents. Both versions keep equal official opponent weights and the existing
+5,000 bootstrap resamples. The challenger stays Team A; incumbent games keep
+their recorded A/B assignments. Exchange complete
 ordered spawn banks, including respawns. Keep roster order, world directions,
 action meanings, map/seed pairing, and fresh per-game memory fixed.
 
 **The official numerical game budget is not yet approved.** An omitted
 `games_per_opponent` inherits the snapshot's positive integer budget. An
-explicit budget must be positive, nonboolean, and divisible by ten for five
-maps. It applies to every incumbent and challenger matchup. A different budget
+explicit budget must be positive, nonboolean and divisible by twice the map
+count: ten for five maps. It applies to every incumbent and challenger matchup. A different budget
 is a declared research override and cannot qualify promotion; an explicit equal
 budget remains compatible with the official rule. These argument rules are
 implemented; they do not settle the official numerical budget.
 
-By default, the canonical runner verifies and reuses all 66 incumbent matchups.
-With a challenger, it runs twelve more matchups and fits all thirteen systems
+By default, the canonical runner verifies and reuses all N*(N-1)/2 incumbent
+matchups. With a challenger, it runs N more matchups and fits all N+1 Systems
 together. Reuse raw games, never old Elo as rating credit. Check controller,
 protocol, environment/schema, map, roster, assignment, spawn, budget, and random
 stream identities before reuse. Preserve original game IDs and seeds when an
@@ -1030,8 +1070,9 @@ claim a finished tournament or headline result.
 
 **Implemented custom behavior:** `run_tournament` accepts an explicit System or
 Policy population, or an immutable configuration. Its programmatic default is
-`episodes_per_pair=100`, with fixed Team A/B ownership and opposite complete
-spawn banks. There is no twelve-entry limit on custom fields. Canonical calls
+`games_per_opponent=100`, with `episodes_per_pair` retained as an alias, fixed
+Team A/B ownership and opposite complete spawn banks. Custom and version-2
+released fields have no twelve-entry limit. Canonical calls
 use the same execution, statistics and result authorities, with verified reuse
 and one optional challenger. See [Canonical Tournaments](canonical_tournaments.md).
 A qualified official bundle and its numerical budget remain separate release
@@ -1117,21 +1158,22 @@ not establish competence or sample efficiency. Report learning curves, environme
 transitions, peak memory, hardware/software identity and the result for every
 predeclared training seed, including failures.
 
-The accepted post-Paper-1 process publishes one immutable twelve-system
+The accepted post-Paper-1 process publishes one immutable N-System
 snapshot at **00:00 Europe/London on the first of each month**. The submission
 cutoff is **72 elapsed hours** before that instant. Publish both local and UTC
 times; three local calendar dates are not always 72 elapsed hours.
 
 Maintainers process complete, qualified submissions in arrival order against
-a provisional Big 12. Each admission freezes that provisional population. The
-published twelve stay unchanged until monthly release. Failed or unfinished
+a provisional field. Each admission freezes that population and its size. The
+published field stays unchanged until monthly release. Failed or unfinished
 work leaves membership unchanged and rolls forward without losing queue order.
 A local researcher call neither promotes a challenger nor publishes a snapshot.
 
-Use the complete joint thirteen-system Elo fit for promotion. A challenger
+Use the complete joint N+1-System Elo fit for promotion. A challenger
 strictly above the lowest incumbent replaces it; an exact cutoff tie does not
-promote. After promotion, retain the surviving twelve's 66 matchups: 55 among
-old incumbents plus eleven involving the new member. Refit those twelve from
+promote. After promotion, retain N Systems and their N*(N-1)/2 matchups:
+(N-1)*(N-2)/2 among old incumbents and N-1 involving the new member. For a
+twelve-entry field those are 55 and 11. Refit the retained field from
 those games before evaluating the next challenger. Do not carry the old Elo
 numbers forward as evidence. Apply each admission once and preserve removed
 members and their historical games.
@@ -1146,27 +1188,27 @@ become invented wins, losses, or draws to meet a release date.
 resource limits, timing definitions, the eviction rule when several incumbents
 tie for last, revised-method admission/replacement, episode-local adaptation,
 and remaining eligibility, reproduction, and public-test-feedback rules. The
-monthly cadence and 12-or-13 population are settled design choices; these open
-gates still block official launch. Ratings from different snapshot populations
+monthly cadence and use of a frozen N-System field are settled design choices;
+these open gates still block official launch. This closeout chooses neither a
+new official N nor a numerical game or resource limit. Ratings from different snapshot populations
 are not directly comparable without a separate model for changes over time.
 Paper 1's frozen snapshot and results remain permanent.
 
-The Baseline Library keeps growing as the active Big 12 changes; removing a
-member from the active twelve does not remove its historical record. It retains every current and former member's implementation, official
+The Baseline Library keeps growing as the active field changes; removing a
+member does not remove its historical record. It retains every current and former member's implementation, official
 configuration, provenance, designated retained checkpoints, selected final
 system, compatibility metadata, and historical membership and results. A
 legitimate training workflow may consume compatible library material only
 through an immutable manifest declaring exact identities and weights. It must
 never resolve a mutable `latest_big_12` population.
 
-Scenario pressure controllers, general Reactive TDM, Random, privileged
-policies, intermediate unqualified checkpoints, and PSRO's internal population
-members are not Big 12 entrants. Scenario controllers are also outside the
-Baseline Library. Qwen artifacts may be retained after admission, but their use
-in training remains separately capability- and cost-gated. Maintainers must be
-able to reproduce every admitted fixed system under its frozen protocol; an
-unreproducible result is ineligible, without that failure alone constituting a
-fraud finding.
+Scripted controllers, LLMs, Random, scenario pressure controllers, privileged
+policies, intermediate unqualified checkpoints and internal training-population
+members are not official entrants. Scenario controllers remain outside the
+Baseline Library. Other research artifacts, including Qwen experiments, may be
+retained without being labelled admitted members. Maintainers must reproduce
+every admitted fixed System under its frozen protocol. An unreproducible claim
+is ineligible; that failure alone is not a finding of fraud.
 
 ## Learning and sample efficiency
 
@@ -1489,15 +1531,19 @@ Before a suite is used for an official claim, verify:
     trained paired runs as the replication unit;
 16. the complete public scenario closure is digest-disjoint from training and
     validation manifests and has not influenced any adaptive decision;
-17. a frozen Big 12 snapshot contains exactly twelve fixed systems and one
-    Elo value per method; a canonical run covers those twelve alone or adds
-    one challenger, with 66 or 78 matchups respectively, one approved uniform
+17. a frozen released snapshot contains N fixed Systems and one Elo value per
+    method; v1 official snapshots retain N=12, while v2 takes N from its frozen
+    participants. A canonical run covers the field alone or adds one challenger,
+    with N*(N-1)/2 or N*(N+1)/2 matchups respectively, one approved uniform
     budget, complete paired coverage, stable origin identities, and the full
     raw outcome/failure matrix; any research budget override is labelled and
     cannot qualify promotion;
-18. rows 1–11 retain three independent training runs and select one tournament
-    system using only the predeclared validation rule; Qwen-Five has separately
-    passed its measured cost and compatibility gate;
+18. each candidate retains its declared independent training runs and selects
+    one fixed System using validation only; the initial three-seed plan is
+    assessed scientifically rather than treated as proof of adequate evidence.
+    The complete eligible validation field determines the top N under the
+    predeclared Elo/expected-score/entrant-order rule; membership freezes before
+    refit or test-map evaluation. Scripts and LLMs remain outside this field;
 19. the rating estimator, uncertainty, convergence/failure behavior, verified
     reuse, monthly admission/publication, and immutable snapshot identities
     have passed their explicit gates; all remaining official launch decisions

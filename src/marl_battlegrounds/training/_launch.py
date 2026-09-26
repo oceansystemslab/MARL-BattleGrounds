@@ -5,7 +5,9 @@ a separate pinned environment and copies the frozen panel when needed.
 Launching is a separate explicit action. The
 detached supervisor owns process logs and exit status; the ordinary trainer
 still owns learning, its run lock and scientific completion. Status reads files
-and /proc only. This module starts no device when imported.
+and /proc only. Shared clock, locking and detached-process helpers also serve
+declared studies without changing their inherited environment. This module
+starts no device when imported.
 """
 
 from __future__ import annotations
@@ -25,6 +27,8 @@ import tarfile
 import tempfile
 import time
 import traceback
+from collections.abc import Generator, Mapping, Sequence
+from contextlib import contextmanager
 from pathlib import Path
 from typing import Any, cast
 
@@ -71,6 +75,186 @@ def _read(path: Path) -> Record:
     if not isinstance(value, dict):
         raise ValueError(f"Expected a JSON object in {path}")
     return cast(Record, value)
+
+
+def write_once(path: Path, value: Mapping[str, Any]) -> None:
+    """Save a JSON object once, or require the same existing object.
+
+    path is a regular JSON file. value must be JSON-safe. The caller holds its
+    launch lock when writers can compete. Existing equal records keep their
+    original bytes; unequal records raise ValueError. New files use atomic_json.
+    """
+    if path.exists() or path.is_symlink():
+        if _read(path) != value:
+            raise ValueError(f"Frozen declaration changed: {path}")
+    else:
+        atomic_json(path, value)
+
+
+@contextmanager
+def launch_lock(root: Path, *, blocking: bool = False) -> Generator[None]:
+    """Hold an existing job directory's .launch.lock until the context exits.
+
+    root owns the lock file; it must already exist. The default raises
+    BlockingIOError if another launcher holds the lock. blocking=True waits,
+    which lets a child wait for its parent to publish its process identity.
+    The caller chooses the protected lifetime. A foreground study may keep
+    this lock until its case loop has stopped; a detached launcher releases it
+    after publishing the supervisor's identity.
+    """
+    with (root / ".launch.lock").open("a+b") as lock:
+        flags = fcntl.LOCK_EX if blocking else fcntl.LOCK_EX | fcntl.LOCK_NB
+        fcntl.flock(lock.fileno(), flags)
+        yield
+
+
+def launch_clock(
+    path: Path,
+    *,
+    durations: Mapping[str, float],
+    binding: Mapping[str, Any],
+    create: bool = False,
+    recorded: Mapping[str, Any] | None = None,
+) -> Record:
+    """Read or freeze one launch time and its declared absolute deadlines.
+
+    Parameters
+    ----------
+    path : Path
+        JSON clock file. The caller holds the job's launch lock when creating it.
+    durations : Mapping[str, float]
+        Deadline field names and positive finite durations in seconds. Each
+        saved deadline is the first start time plus that duration. An empty
+        mapping creates a start time without imposing a deadline.
+    binding : Mapping[str, Any]
+        JSON-safe declaration or budget identities to store unchanged. Keys
+        cannot overlap deadline names or started_at_seconds.
+    create : bool, optional
+        False requires an existing clock. True creates a missing clock; an
+        existing clock is always checked and never extended, even after expiry.
+    recorded : Mapping[str, Any] or None, optional
+        A second record whose clock fields must agree. None checks only path.
+
+    Returns
+    -------
+    Record
+        The original start time, deadlines and binding. Reading an existing
+        valid clock does not write it or change its bytes.
+
+    Raises
+    ------
+    ValueError
+        Fields overlap, a time is invalid, the file is missing when required,
+        or the saved clock or mirrored fields differ from the declaration.
+    """
+    if (
+        "started_at_seconds" in durations
+        or "started_at_seconds" in binding
+        or (durations.keys() & binding.keys())
+    ):
+        raise ValueError("Launch clock fields must have distinct names")
+    for name, seconds in durations.items():
+        if (
+            not isinstance(cast(object, name), str)
+            or not name
+            or isinstance(seconds, bool)
+            or not isinstance(cast(object, seconds), (int, float))
+            or not math.isfinite(seconds)
+            or seconds <= 0
+        ):
+            raise ValueError("Launch clock durations must be positive finite seconds")
+    exists = path.exists() or path.is_symlink()
+    saved = _read(path) if exists or not create else None
+    started = saved.get("started_at_seconds") if saved is not None else time.time()
+    if (
+        isinstance(started, bool)
+        or not isinstance(started, (int, float))
+        or not math.isfinite(started)
+        or started <= 0
+    ):
+        raise ValueError("Original launch clock must have a positive finite start time")
+    expected = {
+        "started_at_seconds": started,
+        **{name: started + seconds for name, seconds in durations.items()},
+        **binding,
+    }
+    if any(not math.isfinite(expected[name]) for name in durations):
+        raise ValueError("Launch clock deadlines must be finite")
+    if saved is not None and saved != expected:
+        raise ValueError("Original launch clock or declaration binding changed")
+    if recorded is not None and any(
+        recorded.get(key) != value for key, value in expected.items()
+    ):
+        raise ValueError("Original launch clock or mirrored record changed")
+    if saved is None:
+        write_once(path, expected)
+    return expected
+
+
+def spawn_detached(
+    root: Path,
+    command: list[str],
+    *,
+    log_path: Path,
+    mode: str,
+    env: dict[str, str] | None = None,
+    cwd: Path | None = None,
+) -> Record:
+    """Start an owned detached command only after its identity is saved.
+
+    The caller holds launch_lock(root), checks for live owners and validates
+    its declaration first. command is an executable and arguments without a
+    shell. log_path receives appended stdout/stderr; its parent must exist.
+    mode labels this start, usually start or resume. env=None and cwd=None
+    inherit this process's environment and directory. No GPU policy is added.
+
+    A pipe keeps the child waiting until process.json is durable. If this
+    parent dies or publication fails before release, the child exits without
+    running command. The command must retain or finish its process record;
+    supervisors use supervise_command for bounded shutdown and result recording.
+    Return the starting process record. Launch, publication or release errors
+    propagate after the owned child session receives bounded cleanup. This
+    also handles interruption just after the pipe releases the command.
+    """
+    read_fd, write_fd = os.pipe()
+    child: subprocess.Popen[bytes] | None = None
+    try:
+        with log_path.open("ab", buffering=0) as log:
+            child = subprocess.Popen(
+                [sys.executable, "-I", "-c", _TRAINER_GATE, str(read_fd), *command],
+                stdin=subprocess.DEVNULL,
+                stdout=log,
+                stderr=subprocess.STDOUT,
+                start_new_session=True,
+                pass_fds=(read_fd,),
+                env=env,
+                cwd=cwd,
+            )
+        record = {
+            "schema_version": 1,
+            "state": "starting",
+            "process": process_identity(child.pid),
+            "command": command,
+            "mode": mode,
+            "started_at": utc_now(),
+        }
+        atomic_json(root / "process.json", record)
+        os.write(write_fd, b"1")
+        return record
+    except BaseException:
+        os.close(write_fd)
+        write_fd = -1
+        if child is not None:
+            _finish_trainer(
+                child,
+                signal.SIGTERM,
+                stop_grace_seconds=_NESTED_STOP_TIMEOUT_SECONDS,
+            )
+        raise
+    finally:
+        os.close(read_fd)
+        if write_fd >= 0:
+            os.close(write_fd)
 
 
 def _hash(path: Path) -> str:
@@ -687,6 +871,47 @@ def _alive(record: Record) -> bool:
     return bool(_group_members(group["pid"]))
 
 
+def live_process_records(paths: Sequence[Path]) -> list[Path]:
+    """Return existing process records that still own a live process or worker.
+
+    paths are explicit record locations. Missing files are skipped; malformed
+    files raise ValueError. Reuses exact PID, start-time and boot checks plus
+    conservative orphan detection. An exited label alone cannot hide workers.
+    This reads files and /proc only and never signals or changes a process.
+    """
+    return [path for path in paths if path.is_file() and _alive(_read(path))]
+
+
+def request_stop(paths: Sequence[Path]) -> list[int]:
+    """Ask exact live supervisors named by process records to stop.
+
+    paths are explicit record files; missing files are skipped. Each process
+    identity is rechecked immediately before SIGTERM. A reused PID, trainer
+    group or exited supervisor receives no signal. Supervisors remain
+    responsible for stopping their own workers. Several records naming the same
+    supervisor cause only one signal. Return the signalled PIDs in first-seen
+    order; an already exited process is skipped. Other OS errors propagate.
+    """
+    signalled: list[int] = []
+    sent: set[int] = set()
+    for path in paths:
+        if not path.is_file():
+            continue
+        owner = _read(path).get("process")
+        if not isinstance(owner, dict) or not _alive({"process": owner}):
+            continue
+        pid = int(cast(Record, owner)["pid"])
+        if pid in sent:
+            continue
+        try:
+            os.kill(pid, signal.SIGTERM)
+        except ProcessLookupError:
+            continue
+        sent.add(pid)
+        signalled.append(pid)
+    return signalled
+
+
 def cleanup_reserve_seconds(*, stop_grace_seconds: float | None = None) -> float:
     """Return the time to reserve before a deadline for bounded process cleanup.
 
@@ -942,8 +1167,10 @@ def supervise_command(
 
     def forward(number: int, _frame: object) -> None:
         """Request group cleanup in the main loop without reaping the leader."""
-        record.setdefault("stop_signal", number)
-        record.setdefault("stop_reason", "signal")
+        # An explicit stop wins even when deadline cleanup already began.
+        # The saved deadline remains available to explain that earlier event.
+        record["stop_signal"] = number
+        record["stop_reason"] = "signal"
 
     def deadline_expired() -> bool:
         """Request a deadline stop using the attempt's fixed monotonic clock."""

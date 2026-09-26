@@ -81,6 +81,12 @@ from marl_battlegrounds.policies.input import (
     mirror_team_view,
 )
 from marl_battlegrounds.training._content import PreparedTrainingContent
+from marl_battlegrounds.training._continuation_schedules import (
+    ContinuationExploration,
+    LearnerContinuation,
+    continuation_config,
+    schedule_continuation,
+)
 
 # Collection's padding template, failure and continuation checks, and the PPO
 # learner's summary and error codes keep one owner each.
@@ -999,6 +1005,7 @@ def update_qmix_learner(
     rollout: TrainingRollout,
     *,
     qmix: QMIXConfig = DEFAULT_QMIX_CONFIG,
+    continuation: LearnerContinuation | None = None,
 ) -> tuple[QMIXLearnerState, QMIXUpdateResult]:
     """Accept one collected block: store it, and learn once replay is ready.
 
@@ -1016,6 +1023,10 @@ def update_qmix_learner(
     qmix : QMIXConfig, default=DEFAULT_QMIX_CONFIG
         Same static settings used at initialization; capture them in the jit
         wrapper.
+
+    continuation : LearnerContinuation or None, default=None
+        Checked static child rule for future rate and exploration changes.
+        Replay, target, optimizer and sample clocks keep their saved counts.
 
     Returns
     -------
@@ -1048,6 +1059,7 @@ def update_qmix_learner(
     analysis gives 1.30 GB inputs, 1.13 GB outputs and 1.57 GB temporaries
     (2.92 GB before this layout). Pure JAX; wrap in jit with a fixed qmix.
     """
+    qmix = continuation_config(qmix, continuation)
     length, games = _rollout_shapes(state, rollout, qmix)
     validate_qmix_batch_size(games, qmix)
     del length
@@ -1065,6 +1077,8 @@ def update_qmix_learner(
     ).astype(jnp.int32)
     rounds = collected.progress.rounds
     epsilon = epsilon_at(rounds, games, qmix.eps_min, qmix.eps_decay)
+    if continuation is not None and continuation.exploration is not None:
+        epsilon = ContinuationExploration(continuation.exploration, games).rate(rounds)
     # Insert once, outside every branch. Branches return the state without its
     # replay plus whether to keep the inserted rows; one select at the end
     # chooses the replay, so XLA keeps no extra replay copy per branch level.
@@ -1301,7 +1315,9 @@ def validate_qmix_learner(
     readiness-aware block rule (``_block_counts_possible``). The replay index
     must be ``rounds % buffer_size`` and full exactly once rounds reach it.
     Every stored epsilon (current and each occupied history slot) must match
-    the clock at its round count. With hard updates, targets must equal the
+    the clock at its round count. A child reads its declared future rule from
+    collection.schedule.continuation['learner']; inherited slots keep the
+    verified parent rates. With hard updates, targets must equal the
     online networks at count 0 and when a block's last step was a copy step.
     Because a block takes epochs steps, the second case needs a copy step to
     land at the end of a block; with the defaults (4 epochs, period 200) it
@@ -1314,14 +1330,20 @@ def validate_qmix_learner(
         raise TypeError("recheck_installed_content must be a Python bool")
     if not isinstance(cast(object, qmix), QMIXConfig):
         raise TypeError("qmix must be a QMIXConfig")
+    continuation = schedule_continuation(collection.schedule)
+    qmix = continuation_config(qmix, continuation)
     games = _state_shapes(state, qmix)
     validate_qmix_batch_size(games, qmix)
     hook = collection.actor_variables_at_step
+    expected_hook = (
+        ContinuationExploration(continuation.exploration, games)
+        if continuation is not None and continuation.exploration is not None
+        else QMIXExploration(qmix.eps_min, qmix.eps_decay, games)
+    )
     if (
         not collection.collect_training_state
         or hook is None
-        or hook.identity
-        != QMIXExploration(qmix.eps_min, qmix.eps_decay, games).identity
+        or hook.identity != expected_hook.identity
     ):
         raise ValueError("Learner descriptor does not match these QMIX settings")
     if bool(state.failed) or int(state.failure_reason) != LEARNER_ERROR_NONE:
@@ -1382,14 +1404,24 @@ def validate_qmix_learner(
             raise ValueError("QMIX optimizer count differs from completed updates")
     if not bool(_saved_boundary_valid(state)):
         raise ValueError("QMIX learner contains nonfinite values")
-    if not _epsilon_matches(
-        float(history.current_variables.epsilon), rounds, games, qmix
-    ):
+
+    def epsilon_matches(value: float, at_round: int) -> bool:
+        """Use the active future curve, or the unchanged original QMIX curve."""
+        if continuation is not None and continuation.exploration is not None:
+            expected = continuation.exploration.at(at_round * games)
+            return abs(value - expected) <= 2e-6
+        return _epsilon_matches(value, at_round, games, qmix)
+
+    if not epsilon_matches(float(history.current_variables.epsilon), rounds):
         raise ValueError("Current exploration rate disagrees with the clock")
     captured = np.asarray(history.captured_rounds)
     rates = np.asarray(history.historical_variables.epsilon)
     for slot in range(int(history.count)):
-        if not _epsilon_matches(float(rates[slot]), int(captured[slot]), games, qmix):
+        if continuation is not None and slot < len(continuation.frozen_epsilon):
+            matches = float(rates[slot]) == continuation.frozen_epsilon[slot]
+        else:
+            matches = epsilon_matches(float(rates[slot]), int(captured[slot]))
+        if not matches:
             raise ValueError("A frozen opponent's exploration rate disagrees")
     copied = updates == 0 or (
         qmix.hard_update and (updates - 1) % qmix.update_period == 0

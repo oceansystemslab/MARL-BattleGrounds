@@ -8,10 +8,12 @@ belong to the called APIs. Absent scientific options stay absent during resume.
 from __future__ import annotations
 
 import argparse
+import json
 import math
 import sys
 from collections.abc import Sequence
-from typing import TYPE_CHECKING, Any
+from pathlib import Path
+from typing import TYPE_CHECKING, Any, cast
 
 if TYPE_CHECKING:
     from marl_battlegrounds.evaluation.policy_execution import Policy, System
@@ -87,7 +89,12 @@ def _capture_ids(text: str) -> tuple[int, ...]:
 
 
 def _execution_options(parser: argparse.ArgumentParser) -> None:
-    """Add common recording and execution flags without asserting absent science."""
+    """Add recording and execution flags without asserting absent science.
+
+    Evaluation and tournaments use at most 128 parallel games by default, with
+    16 ticks per compiled chunk. Tournaments run one matchup at a time. Omitted
+    scientific settings inherit saved run settings.
+    """
     for flag, choices, kind, meaning in (
         ("metrics", ("priority", "full", "none"), str, "priority"),
         ("save-replays", None, _integer, "0"),
@@ -108,7 +115,7 @@ def _execution_options(parser: argparse.ArgumentParser) -> None:
         "--num-envs",
         type=_integer,
         default=128,
-        help="Parallel environments (default: 128)",
+        help="Parallel environments in the active matchup (default: 128)",
     )
     parser.add_argument(
         "--chunk-size",
@@ -150,14 +157,75 @@ def build_parser() -> argparse.ArgumentParser:
     )
     analysis.add_argument("run_dirs", nargs="+", help="Saved training run directories")
     analysis.add_argument("--output-dir", required=True, help="Report output directory")
+    analysis.add_argument(
+        "--selection", help="Completed separate selection decision JSON"
+    )
+    analysis.add_argument("--grouping", help="Declared training-run comparison JSON")
+    selection = commands.add_parser(
+        "reselect-checkpoint",
+        allow_abbrev=False,
+        help="Write a separate checkpoint decision from saved validation",
+    )
+    selection.add_argument("run_dirs", nargs="+", help="Saved training run directories")
+    selection.add_argument(
+        "--declaration", required=True, help="Named selection rule JSON"
+    )
+    selection.add_argument(
+        "--output-dir", required=True, help="Exact new or empty directory"
+    )
+    extension = commands.add_parser(
+        "extend-training",
+        allow_abbrev=False,
+        help="Continue a full learner checkpoint into a new child run",
+    )
+    extension.add_argument("checkpoint", help="Complete checkpoints/<id> folder")
+    extension.add_argument("--additional-env-steps", required=True, type=_integer)
+    extension.add_argument(
+        "--output-dir", required=True, help="Exact new or empty child folder"
+    )
+    extension.add_argument(
+        "--changes",
+        help="JSON with future validation, rate, exploration or history changes",
+    )
+    study = commands.add_parser(
+        "study", allow_abbrev=False, help="Run or inspect a declared training study"
+    )
+    study_actions = study.add_subparsers(dest="study_action", required=True)
+    for action, description in (
+        ("run", "Run the study in the foreground"),
+        ("start", "Start the study in the background"),
+    ):
+        study_action = study_actions.add_parser(
+            action, allow_abbrev=False, help=description
+        )
+        study_action.add_argument("--config", help="Study declaration JSON")
+        study_output = study_action.add_mutually_exclusive_group(required=True)
+        study_output.add_argument(
+            "--output-dir", help="Exact new or empty study directory"
+        )
+        study_output.add_argument(
+            "--resume-from", help="Saved study directory; keep its original deadline"
+        )
+    for action, description in (
+        ("status", "Read saved progress without starting a numerical backend"),
+        ("stop", "Ask the study's exact live processes to stop"),
+    ):
+        study_action = study_actions.add_parser(
+            action, allow_abbrev=False, help=description
+        )
+        study_action.add_argument("study_dir", help="Saved study directory")
     evaluate = commands.add_parser(
         "evaluate", allow_abbrev=False, help="Evaluate two frozen methods"
     )
     evaluate.add_argument(
-        "--system", required=True, help="Team A name or module:factory"
+        "--system",
+        required=True,
+        help="Team A name, actor export/checkpoint folder or module:factory",
     )
     evaluate.add_argument(
-        "--opponent", required=True, help="Team B name or module:factory"
+        "--opponent",
+        required=True,
+        help="Team B name, actor export/checkpoint folder or module:factory",
     )
     evaluate.add_argument(
         "--episodes",
@@ -213,12 +281,15 @@ def build_parser() -> argparse.ArgumentParser:
     canonical = commands.add_parser(
         "canonical",
         allow_abbrev=False,
-        help="Compare the released twelve, optionally with a challenger",
+        help="Compare the released field, optionally with a challenger",
     )
     canonical.add_argument(
         "--system",
         default=argparse.SUPPRESS,
-        help="Challenger name or module:factory; omission inherits on resume",
+        help=(
+            "Challenger name, actor export/checkpoint folder or module:factory; "
+            "omission inherits on resume"
+        ),
     )
     canonical.add_argument(
         "--config",
@@ -239,14 +310,85 @@ def build_parser() -> argparse.ArgumentParser:
     )
     _execution_options(canonical)
     tournament = commands.add_parser(
-        "tournament", allow_abbrev=False, help="Run a custom configuration's population"
+        "tournament", allow_abbrev=False, help="Run an entrant list or saved field"
     )
-    tournament.add_argument(
+    population = tournament.add_mutually_exclusive_group()
+    population.add_argument(
         "--config",
         default=argparse.SUPPRESS,
-        help="JSON configuration; required for a new run",
+        help="JSON field and rules; use this or --entrants for a new run",
+    )
+    population.add_argument(
+        "--entrants",
+        dest="policies",
+        type=_tokens,
+        default=argparse.SUPPRESS,
+        help=(
+            "Comma-separated names, actor/checkpoint folders or "
+            "module:factory references"
+        ),
+    )
+    tournament.add_argument(
+        "--challenger",
+        default=argparse.SUPPRESS,
+        help="System reference to compare against the supplied field",
+    )
+    for flag in ("games-per-opponent", "episodes-per-pair"):
+        tournament.add_argument(
+            f"--{flag}",
+            type=_integer,
+            default=argparse.SUPPRESS,
+            help=(
+                "Games per opponent; omission inherits field or saved settings"
+                if flag == "games-per-opponent"
+                else "Alias for --games-per-opponent; both values must agree"
+            ),
+        )
+    tournament.add_argument(
+        "--maps",
+        type=_ids,
+        default=argparse.SUPPRESS,
+        help="Ordered comma-separated map IDs; omission inherits field or API defaults",
+    )
+    for flag in ("seed", "score-threshold", "max-steps"):
+        tournament.add_argument(
+            f"--{flag}",
+            type=_integer,
+            default=argparse.SUPPRESS,
+            help=(
+                "Omission inherits field or API defaults; resume checks saved settings"
+            ),
+        )
+    tournament.add_argument(
+        "--red-zone-depth",
+        type=_decimal,
+        default=argparse.SUPPRESS,
+        help=(
+            "Red Zone depth in map units; 0 turns it off. Omission inherits "
+            "field or API defaults; resume checks saved settings"
+        ),
+    )
+    tournament.add_argument(
+        "--rerun-existing",
+        action=argparse.BooleanOptionalAction,
+        default=argparse.SUPPRESS,
+        help="Explicitly rerun the whole field; omission inherits on resume",
     )
     _execution_options(tournament)
+
+    population_selection = commands.add_parser(
+        "select-population",
+        allow_abbrev=False,
+        help="Freeze the declared initial population from saved tournament results",
+    )
+    population_selection.add_argument("result", help="Saved tournament run directory")
+    population_selection.add_argument(
+        "--output-dir", required=True, help="Exact new or empty decision directory"
+    )
+    population_selection.add_argument(
+        "--declaration",
+        help="Optional JSON assertion of the selection rule saved before games",
+    )
 
     models = commands.add_parser(
         "models",
@@ -339,20 +481,22 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def _load_method(reference: str) -> System | Policy | str:
-    """Return a bare name, or call one trusted factory without choosing an action.
+    """Resolve saved actors and trusted factories through the shared loader.
 
-    Text without a colon is returned unchanged for the evaluator to resolve.
-    Text with a colon is a ``module:function`` factory, run through
-    ``load_factory``, the one owner of that rule; any error it raises,
-    including a factory's own error or a wrong return type, becomes a
-    _FactoryError whose cause is the original exception.
+    Bare names stay strings for the evaluator. Existing folders take priority
+    over factory syntax, including folders containing a colon. Both actor exports
+    and complete learner checkpoints load only their actor arrays. Factory errors
+    retain their original cause through _FactoryError. Folder errors retain their
+    loader error type. No action is chosen and no learner is constructed.
     """
+    from marl_battlegrounds._method_loading import load_method
+
+    if Path(reference).is_dir():
+        return load_method(reference)
     if ":" not in reference:
         return reference
-    from marl_battlegrounds._method_loading import load_factory
-
     try:
-        return load_factory(reference)
+        return load_method(reference)
     except TypeError as error:
         raise _FactoryError(str(error)) from error
     except Exception as error:
@@ -430,12 +574,18 @@ def _print_result(
 
 
 def _run_experiment(command: str, arguments: dict[str, Any]) -> None:
-    """Load supplied methods once and forward remaining arguments unchanged."""
+    """Call the shared API once, preserving tournament references for its loader.
+
+    Evaluation methods load here once. Tournament APIs own entrant and
+    challenger loading, including capacity checks, so their references reach
+    those APIs unchanged. No parser path imports a researcher factory.
+    """
     import marl_battlegrounds as marl_bgs
 
-    for key in ("system", "opponent"):
-        if key in arguments:
-            arguments[key] = _load_method(arguments[key])
+    if command == "evaluate":
+        for key in ("system", "opponent"):
+            if key in arguments:
+                arguments[key] = _load_method(arguments[key])
     if command == "evaluate":
         result = marl_bgs.evaluate(**arguments)
     elif command == "canonical":
@@ -461,9 +611,10 @@ def main(argv: Sequence[str] | None = None) -> int:
     if (
         command == "tournament"
         and "config" not in arguments
+        and "policies" not in arguments
         and not arguments["resume_from"]
     ):
-        parser.error("tournament requires --config for a new run")
+        parser.error("tournament requires --config or --entrants for a new run")
     try:
         if command in {"evaluate", "canonical", "tournament"}:
             _run_experiment(command, arguments)
@@ -478,11 +629,67 @@ def main(argv: Sequence[str] | None = None) -> int:
             arguments.pop("config", None)
             result = train(config, **arguments)
             print(f"Training Complete: {result.run_dir}")
+        elif command == "study":
+            from marl_battlegrounds.training import study
+
+            action = arguments.pop("study_action")
+            if action in {"run", "start"}:
+                if not arguments["resume_from"] and not arguments["config"]:
+                    parser.error("study requires --config for a new study")
+                function = study.run_study if action == "run" else study.start_study
+                result = function(**arguments)
+            else:
+                function = (
+                    study.study_status if action == "status" else study.stop_study
+                )
+                result = function(arguments["study_dir"])
+            print(json.dumps(result, indent=2, allow_nan=False))
+            if action == "run":
+                return 0 if result["status"] == "complete" else 1
+        elif command == "extend-training":
+            from marl_battlegrounds.training.runner import extend_training
+
+            changes_path = arguments.pop("changes")
+            changes = (
+                None
+                if changes_path is None
+                else json.loads(Path(changes_path).read_text())
+            )
+            if changes is not None and not isinstance(changes, dict):
+                raise ValueError("Continuation changes must be a JSON object")
+            changes = cast(dict[str, Any] | None, changes)
+            if changes is not None and isinstance(changes.get("validation"), dict):
+                validation = cast(dict[str, Any], changes["validation"])
+                panel = validation.get("panel")
+                if panel is not None and not isinstance(panel, str):
+                    raise ValueError("Continuation validation panel must be a path")
+                if panel is not None and not Path(panel).is_absolute():
+                    validation["panel"] = str(
+                        (Path(str(changes_path)).resolve().parent / panel).resolve()
+                    )
+            result = extend_training(**arguments, changes=changes)
+            print(f"Training Continued: {result.run_dir}")
         elif command == "analyze-training":
             from marl_battlegrounds.training.analysis import analyze
 
             result = analyze(**arguments)
             print(f"Training Reports: {result['artifacts']['summary']}")
+        elif command == "reselect-checkpoint":
+            from marl_battlegrounds.training.selection import reselect_checkpoint
+
+            result = reselect_checkpoint(**arguments)
+            print(f"Selection {result['status']}: {arguments['output_dir']}")
+            for run in result["runs"]:
+                if run["winner"] is not None:
+                    print(f"Selected Actor: {run['winner']['actor_path']}")
+                for request in run["needs_confirmation"]:
+                    print(request["python"])
+        elif command == "select-population":
+            import marl_battlegrounds as marl_bgs
+
+            result = marl_bgs.select_initial_population(**arguments)
+            print(json.dumps(result, indent=2, allow_nan=False))
+            return 0 if result["status"] == "complete" else 1
         elif command == "models":
             from marl_battlegrounds._cli_assets import run_models
 

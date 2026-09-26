@@ -1895,7 +1895,7 @@ def preflight_replay_destination(path: str | os.PathLike[str]) -> ReplayDestinat
     Returns
     -------
     ReplayDestination
-        ReplayDestination for one V2/V3 replay file.
+        ReplayDestination for one V2/V3/V4 replay file.
 
     Raises
     ------

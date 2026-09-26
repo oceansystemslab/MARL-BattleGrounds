@@ -1,0 +1,24 @@
+{
+  "schema_version": 1,
+  "name": "Two Short FF-IPPO Runs",
+  "duration_seconds": 1800,
+  "failure_policy": "stop",
+  "cases": [
+    {
+      "id": "ff-ippo-plain",
+      "seeds": [190601, 190602],
+      "config": {
+        "method": "ff_ippo",
+        "num_envs": 32,
+        "total_env_steps": 128,
+        "ppo": {
+          "rollout_length": 2,
+          "epochs": 1,
+          "minibatches": 1
+        },
+        "metrics": "none",
+        "verbose": false
+      }
+    }
+  ]
+}

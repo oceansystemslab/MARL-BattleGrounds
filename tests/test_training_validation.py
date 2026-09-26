@@ -31,7 +31,7 @@ depth is refused before any game. A short real pass at depth 6.0 saves 6.0 in
 every game configuration for the panel/Random and slot routes, and after one
 warm pass, fresh passes at depths 5.0 and 0.0 reuse the compiled game program
 (no new compilation for a new depth). load_panel admits a directly frozen
-panel at every depth, a ranked panel only at its ranked float32 depth
+panel and ranked actors at every valid depth, preserving the ranking depth
 (unversioned ranking evidence means 0.0), and refuses an unknown evidence
 version. mean_kill_difference and the selection tiebreak use
 recorded kills, not points (two points for one Red Zone kill), and selection
@@ -766,7 +766,7 @@ def test_task_descriptions_record_the_depth_and_keep_legacy_bytes(
     assert not wide.exists()
 
 
-def test_ranked_panel_is_admitted_only_at_its_ranked_depth(
+def test_ranked_actors_load_at_new_depth_without_relabelling_ranking(
     actors: tuple[Path, Path], tmp_path: Path
 ) -> None:
     direct = create_panel(opponents=[str(actors[0])], output_dir=tmp_path / "direct")
@@ -801,9 +801,10 @@ def test_ranked_panel_is_admitted_only_at_its_ranked_depth(
             == json.loads((folder / "panel.json").read_text())["panel_digest"]
         )
         assert load_panel(folder).digest == admitted.digest
-        with pytest.raises(ValueError, match="ranked with red_zone_depth"):
-            load_panel(folder, red_zone_depth=5.0)
-    # Depths are compared as the float32 values the game configs store.
+        before = (folder / "panel.json").read_bytes()
+        assert load_panel(folder, red_zone_depth=5.0).digest == admitted.digest
+        assert (folder / "panel.json").read_bytes() == before
+    # Nearby valid task depths do not change the frozen panel identity.
     assert load_panel(tmp_path / "ranked", red_zone_depth=6.0000001).digest
     unknown = write("unknown", {**evidence, "schema_version": 3, "red_zone_depth": 5.0})
     with pytest.raises(ValueError, match="ranking evidence"):

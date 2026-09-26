@@ -290,7 +290,8 @@ _ACTOR_LAYOUT_1: _Layout = (
     ("source_availability", (5,), 5),
 )
 # Current actor input schema 2: schema 1 with the context entry widened to 20
-# columns, so the Red Zone depth is flat feature 1128. Nothing else moves.
+# columns, so the Red Zone depth is flat feature 1128. Later flat offsets
+# shift by one; their field order and values stay the same.
 _ACTOR_LAYOUT: _Layout = tuple(
     (name, (_CONTEXT_WIDTHS[2],), _CONTEXT_WIDTHS[2])
     if name == _CONTEXT_FIELD

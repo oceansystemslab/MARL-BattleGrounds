@@ -9,8 +9,10 @@ read-only mechanics catalog; commands may allocate JAX arrays, read/write local
 drafts, or replace the live endpoint according to their explicit operation.
 
 Scenario drafts: the editor edits only version 2, which declares a Red Zone
-depth. New blank scenarios, scenarios copied from a map and the default map
-preview use ``marl_battlegrounds.tasks.DEFAULT_TDM_RED_ZONE_DEPTH`` (5.0).
+depth. New blank scenarios and scenarios copied from a map use
+``marl_battlegrounds.tasks.DEFAULT_TDM_RED_ZONE_DEPTH`` (5.0). A map preview
+uses that depth where it fits; narrower maps use an explicitly labelled preview
+with Red Zone off. Authored scenarios always validate their declared depth.
 Duplicate keeps the source's depth. Open turns a saved version 1 scenario into
 version 2 at depth 0.0 in memory, keeping its revision; the saved file is not
 changed. Commands still accept version 1 payloads, which Save and Save As store
@@ -505,8 +507,10 @@ def debugger_scenario_from_snapshot(
     -----
     Does not load new source bytes or install the scenario. Future resets use the same
     compiled source, even when the editor or saved draft changes. A map preview's
-    source identity ends with ``:profile:default-tdm-map-preview@2``; version 2 of
-    the profile plays at Red Zone depth ``DEFAULT_TDM_RED_ZONE_DEPTH``.
+    source identity ends with ``:profile:default-tdm-map-preview@2`` when it uses
+    ``DEFAULT_TDM_RED_ZONE_DEPTH``. A map too narrow for that depth uses
+    ``:profile:red-zone-off-tdm-map-preview@1`` at depth 0.0. Both are temporary
+    preview setups; authored scenarios keep their own declared depth.
     """
     compiled = snapshot.compiled
     source = snapshot.source
@@ -521,7 +525,11 @@ def debugger_scenario_from_snapshot(
             f"revision:{source.revision}"
         )
     if snapshot.summary.debug_profile == "default_tdm_map_preview":
-        source_identity += ":profile:default-tdm-map-preview@2"
+        source_identity += (
+            ":profile:red-zone-off-tdm-map-preview@1"
+            if compiled.config.team_deathmatch_red_zone_depth == 0.0
+            else ":profile:default-tdm-map-preview@2"
+        )
 
     controlled_slot = next(
         row.global_slot
@@ -745,9 +753,10 @@ class DevScenarioLoadService:
         map.
 
         A scenario of either version compiles at its declared depth (0.0 for
-        version 1). The preview is a version 2 scenario at Red Zone depth
-        ``DEFAULT_TDM_RED_ZONE_DEPTH``. Preview creation does not modify or save the
-        source map.
+        version 1). A map preview uses ``DEFAULT_TDM_RED_ZONE_DEPTH`` if it fits
+        the compiled map width. Otherwise its explicit preview-only setup has
+        Red Zone off, and its title and provenance say so. No policy is loaded.
+        Preview creation does not modify or save the source map.
         """
         if source.asset_kind == "scenario":
             if not isinstance(opened, (DevScenarioDraftV1, DevScenarioDraftV2)):
@@ -763,20 +772,31 @@ class DevScenarioLoadService:
         map_problems = validate_map_content(opened.content)
         if any(problem.severity == "error" for problem in map_problems):
             raise DevAuthoringValidationError(map_problems)
+        preview_depth = (
+            0.0
+            if np.float32(opened.content.width) < DEFAULT_TDM_RED_ZONE_DEPTH
+            else DEFAULT_TDM_RED_ZONE_DEPTH
+        )
         preview = new_scenario_draft(
             "default_tdm_map_preview",
             source_map=opened,
-            red_zone_depth=DEFAULT_TDM_RED_ZONE_DEPTH,
+            red_zone_depth=preview_depth,
         )
         preview = preview.model_copy(
             update={
                 "content": preview.content.model_copy(
                     update={
-                        "name": "Default TDM map preview",
+                        "name": (
+                            "TDM Map Preview (Red Zone Off)"
+                            if preview_depth == 0.0
+                            else "Default TDM map preview"
+                        ),
                         "description": (
-                            f"Transient deterministic 5v5 Team Deathmatch preview "
-                            f"of {opened.content.name}; the source map is not "
-                            "modified or saved."
+                            f"Temporary 5v5 Team Deathmatch preview of "
+                            f"{opened.content.name} at Red Zone depth "
+                            f"{preview_depth} map units. The source map is not "
+                            "modified or saved. Authored scenarios must use a "
+                            "valid declared depth."
                         ),
                     }
                 )

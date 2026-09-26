@@ -6592,6 +6592,15 @@ if (!isReplayMode()) {
       publishInstalledCombatConfiguration(state.frame);
     }
   });
+  // A rejected load has no new frame. Show its error without changing the
+  // current match; a later successful load uses the ordinary reconnect notice.
+  document.addEventListener("marl-devclient-debug-load-failed", (event) => {
+    const message = event instanceof CustomEvent ? event.detail?.message : null;
+    if (typeof message === "string" && message.length > 0) {
+      setNotice(message, "error");
+      renderConnection();
+    }
+  });
   document.addEventListener("marl-devclient-debug-session-replaced", () => {
     void loadCurrentFrame();
   });

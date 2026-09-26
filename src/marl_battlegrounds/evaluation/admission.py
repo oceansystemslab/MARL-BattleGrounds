@@ -3,7 +3,7 @@
 These private host helpers manage one explicitly selected local store. They keep
 immutable snapshots and approval evidence, a qualified submission queue, and one
 monthly edition. Membership changes only after complete game evidence and the
-retained twelve's refit are durable. Nothing here downloads assets, edits the
+retained field's refit are durable. Nothing here downloads assets, edits the
 installed catalog, chooses scientific rules, or publishes to a remote service.
 """
 
@@ -161,14 +161,28 @@ def _commit(root: Path, state: dict[str, Any]) -> None:
     _publish_json(root / "admission_state.json", state)
 
 
+def _admission_population_size(config: Mapping[str, Any]) -> int:
+    """Read the frozen field size, preserving version 1's twelve-entry admission.
+
+    The shared descriptor validator checks participant uniqueness and the minimum
+    field size. Version 2 uses that declared field throughout admission; a
+    version-1 custom tournament does not gain historical admission rights.
+    """
+    size = len(config["participants"])
+    if config["version"] == 1 and size != 12:
+        raise ValueError("Version-1 admission requires exactly twelve entrants")
+    return size
+
+
 def _snapshot(root: Path, identifier: str) -> dict[str, Any]:
-    """Read a pinned twelve-entry snapshot without consulting an installed alias."""
+    """Read a pinned field without consulting today's installed release alias."""
     config = load_tournament_config(
         root / "snapshots" / f"{_digest(identifier, 'snapshot_id')}.json",
         official=False,
     )
-    if config["snapshot_id"] != identifier or len(config["participants"]) != 12:
-        raise ValueError("Admission needs its exact pinned twelve-entry snapshot")
+    if config["snapshot_id"] != identifier:
+        raise ValueError("Admission needs its exact pinned snapshot")
+    _admission_population_size(config)
     return config
 
 
@@ -187,14 +201,15 @@ def initialize_admission_store(
     *,
     rules: Mapping[str, object],
 ) -> dict[str, Any]:
-    """Create an explicit maintainer store from a pinned twelve and approved rules.
+    """Create a maintainer store from a pinned field and approved rules.
 
     Parameters
     ----------
     store : path-like
         New or empty directory. This never targets the installed catalog.
     config : path-like or mapping
-        Existing immutable twelve-entry description. A real store requires an
+        Existing immutable field description. Version 1 requires twelve entrants;
+        version 2 uses the frozen participant list. A real store requires an
         unchanged snapshot pinned by the installed release catalog. An
         unpublished fixture is allowed only when fixture_only is true.
         Initialization does not itself qualify a new official population.
@@ -205,6 +220,8 @@ def initialize_admission_store(
         episode_local_adaptation, revised_method_policy and
         tied_incumbent_eviction. Use null for unresolved rules. Non-null
         values are maintainer-supplied decisions, never library defaults.
+        The game budget must be a positive multiple of ten for version 1,
+        or twice the configured map count for version 2.
         A supplied tied-incumbent rule uses an explicit entrant_order list;
         the library does not choose an ordering. Fixture-only stores stay
         separate from installed official releases.
@@ -229,11 +246,24 @@ def initialize_admission_store(
     if type(approvals["fixture_only"]) is not bool:
         raise ValueError("fixture_only must be a boolean")
     resolved = load_tournament_config(config, official=not approvals["fixture_only"])
-    if len(resolved["participants"]) != 12:
-        raise ValueError("A maintainer store starts with exactly twelve entrants")
+    _admission_population_size(resolved)
     budget = approvals["games_per_opponent"]
-    if budget is not None and (type(budget) is not int or budget <= 0 or budget % 10):
-        raise ValueError("Approved official budget must be a positive multiple of ten")
+    budget_unit = (
+        10
+        if resolved["version"] == 1
+        else 2 * len(resolved["conditions"]["map_sources"])
+    )
+    if budget is not None and (
+        type(budget) is not int or budget <= 0 or budget % budget_unit
+    ):
+        if resolved["version"] == 1:
+            raise ValueError(
+                "Approved official budget must be a positive multiple of ten"
+            )
+        raise ValueError(
+            "Approved official budget must be a positive multiple of "
+            f"{budget_unit}, twice the configured map count"
+        )
     canonical_json(approvals)
     root = Path(store).expanduser().resolve()
     _make_directory(root)
@@ -459,14 +489,32 @@ def _snapshot_inputs(
     from marl_battlegrounds.evaluation.tournament_assets import AssetVerifier
 
     verifier = AssetVerifier(config)
-    paths = verifier.require(
+    paths = _verify_assets(
+        verifier,
         tuple(
             identifier
             for identifier, asset in config["assets"].items()
             if asset["role"] not in {"model", "replay"}
-        )
+        ),
     )
     return verifier, paths
+
+
+def _verify_assets(
+    verifier: AssetVerifier, identifiers: Sequence[str]
+) -> dict[str, Path]:
+    """Verify host files and inline metadata through the shared asset owner.
+
+    Inline version-2 records have no filesystem path. Return paths only for
+    file-backed assets; callers read either form through verifier.read_json.
+    """
+    paths = verifier.require(
+        tuple(key for key in identifiers if "inline" not in verifier.assets[key])
+    )
+    for key in identifiers:
+        if "inline" in verifier.assets[key]:
+            verifier.read_json(key)
+    return paths
 
 
 def _population_evidence(
@@ -474,7 +522,7 @@ def _population_evidence(
     *,
     _inputs: tuple[AssetVerifier, dict[str, Path]] | None = None,
 ) -> dict[str, Any]:
-    """Check all twelve's retained outcomes, full rows and actual physical pairs.
+    """Check the frozen field's outcomes, full rows and actual physical pairs.
 
     This delegates schedule, stored-row and physical checks to their existing
     authorities. It runs no games or fit. The returned compact digest records
@@ -489,9 +537,13 @@ def _population_evidence(
     )
 
     verifier, paths = _snapshot_inputs(config) if _inputs is None else _inputs
-    plan = resolve_reuse_plan(config, paths, require_reuse=True)
-    if plan.jobs or len(plan.participant_ids) != 12:
-        raise ValueError("Admission population needs twelve fully recorded entrants")
+    size = _admission_population_size(config)
+    plan = resolve_reuse_plan(
+        config, paths, asset_reader=verifier.read_json, require_reuse=True
+    )
+    expected_ids = {item["entrant_id"] for item in config["participants"]}
+    if plan.jobs or set(plan.participant_ids) != expected_ids:
+        raise ValueError("Admission needs the complete recorded participant field")
     records = TournamentRecords(
         config, plan.games, (), verifier, manifest={"run_id": "admission-check"}
     )
@@ -527,11 +579,13 @@ def _population_evidence(
     return {
         "snapshot_id": config["snapshot_id"],
         "games": len(plan.games),
-        "matchups": 66,
+        "matchups": size * (size - 1) // 2,
         "full_rows": full_count,
         "physical_evidence_id": _identity(evidence),
         "asset_ids": {
-            identifier: config["assets"][identifier]["sha256"] for identifier in paths
+            identifier: config["assets"][identifier]["sha256"]
+            for identifier, asset in config["assets"].items()
+            if asset["role"] not in {"model", "replay"}
         },
     }
 
@@ -543,7 +597,7 @@ def prepare_admission(
 
     The caller names a registered submission and a monthly release instant.
     Complete eligible submissions run in their saved completion order. This
-    verifies the provisional twelve's existing full reports and freezes the
+    verifies the provisional field's existing full reports and freezes the
     challenger schedule, but makes no action or model call. The executor must
     use the returned snapshot/schedule and metrics="full" from the first game.
     Repeating an active attempt returns the same schedule and random streams.
@@ -619,7 +673,7 @@ def prepare_admission(
             for item in config["participants"]
         ):
             raise ValueError(
-                "Exact incumbent duplicate; use the twelve-only researcher route"
+                "Exact incumbent duplicate; use the configured-field researcher route"
             )
         if any(
             item["entrant_id"] == participant["entrant_id"]
@@ -647,9 +701,37 @@ def prepare_admission(
                 raise ValueError(
                     "Official admission needs a complete controller identity"
                 )
-        _, paths = inputs
+        verifier, paths = inputs
+        from marl_battlegrounds.evaluation.tournament_assets import AssetVerifier
+
+        participant_kinds: dict[str, str] | None = None
+        if config["version"] == 2:
+            manifest = verifier.read_json(config["conditions"]["schedule_asset"])
+            if isinstance(manifest, Mapping) and "companion_stream_rule" in manifest:
+                candidate_verifier = AssetVerifier(candidate)
+                participant_kinds = {}
+                for item in candidate["participants"]:
+                    owner = (
+                        candidate_verifier
+                        if item["entrant_id"] == participant["entrant_id"]
+                        else verifier
+                    )
+                    registration = owner.read_json(item["registration_asset"])
+                    if not isinstance(registration, Mapping):
+                        raise ValueError(
+                            "Participant registration must be a JSON object"
+                        )
+                    participant_kinds[item["entrant_id"]] = _text(
+                        cast(Mapping[str, object], registration).get("kind", "policy"),
+                        "Participant kind",
+                    )
         plan = resolve_reuse_plan(
-            config, paths, challenger_id=participant["entrant_id"], require_reuse=True
+            config,
+            paths,
+            asset_reader=verifier.read_json,
+            challenger_id=participant["entrant_id"],
+            participant_kinds=participant_kinds,
+            require_reuse=True,
         )
         schedule = {
             "format": "marlbg-admission-schedule",
@@ -812,12 +894,12 @@ def execute_admission(
 def apply_admission(
     store: str | Path, attempt_id: str, result: object
 ) -> dict[str, Any]:
-    """Apply one complete thirteen-entry result once, after shared evidence checks.
+    """Apply one complete field-plus-challenger result after shared evidence checks.
 
     ``result`` must come from the full-capture canonical executor for this saved
     attempt. It is checked before any membership change. Exact cutoff ties do
     not promote. An unresolved tied-incumbent eviction stores a blocked decision.
-    A promotion prepares and refits the retained twelve first, then commits its
+    A promotion prepares and refits the retained field first, then commits its
     pointer and applied-attempt entry atomically. The release deadline is checked
     again after preparation, just before that commit. Repeating identical applied
     evidence is a no-op; different evidence raises ValueError.
@@ -985,8 +1067,10 @@ def _check_release_population(
 
     _validate(config, official=True)
     rosters = config["conditions"]["rosters"]
-    if (tuple(rosters["team_a"]), tuple(rosters["team_b"])) != (
-        canonical_tournament_rosters()
+    if (
+        config["version"] == 1
+        and (tuple(rosters["team_a"]), tuple(rosters["team_b"]))
+        != canonical_tournament_rosters()
     ):
         raise ValueError("Official release needs the canonical ordered rosters")
     for participant in config["participants"]:
@@ -1000,7 +1084,7 @@ def _check_release_population(
 
 
 def prepare_release(store: str | Path, release_at: str | datetime) -> dict[str, Any]:
-    """Freeze and verify one monthly twelve-entry snapshot without publishing it.
+    """Freeze and verify one monthly field snapshot without publishing it.
 
     The release instant must have arrived. Complete outcomes, full reports,
     physical pairs, referenced assets and explicit rule approvals are checked
@@ -1015,7 +1099,7 @@ def prepare_release(store: str | Path, release_at: str | datetime) -> dict[str, 
         _require_release_rules(rules, config)
         inputs = _snapshot_inputs(config)
         evidence = _population_evidence(config, _inputs=inputs)
-        inputs[0].require(tuple(config["assets"]))
+        _verify_assets(inputs[0], tuple(config["assets"]))
         released = copy.deepcopy(config)
         released["release"] = {
             key: frozen[key]
@@ -1118,7 +1202,7 @@ def publish_release(
         inputs = _snapshot_inputs(base)
         if _population_evidence(base, _inputs=inputs) != prepared["asset_evidence"]:
             raise ValueError("Prepared release evidence has changed")
-        inputs[0].require(tuple(config["assets"]))
+        _verify_assets(inputs[0], tuple(config["assets"]))
         _check_release_population(config, rules, inputs[0])
         catalog_path = root / "catalog.json"
         catalog: dict[str, Any] = (
@@ -1148,7 +1232,7 @@ def publish_release(
 
 
 def defer_release(store: str | Path, edition_id: str, reason: str) -> dict[str, Any]:
-    """Close an unpublished edition and carry its completed twelve into next month.
+    """Close an unpublished edition and carry its completed field into next month.
 
     The release instant must have arrived. The reason is retained in a separate
     immutable closure record. This explicit action does not move the catalog
@@ -1216,7 +1300,7 @@ def _result_context(
 def _admission_evidence(
     result: object, *, config: Mapping[str, Any], attempt: Mapping[str, Any]
 ) -> dict[str, Any]:
-    """Check a saved thirteen-entry fit against its frozen attempt and raw records.
+    """Check a saved field-plus-challenger fit against its attempt and raw records.
 
     This reuses physical and report authorities; it does not fit a second rating
     model. The existing summary transaction binds the stored unrounded ratings
@@ -1247,8 +1331,12 @@ def _admission_evidence(
         item["entrant_id"]: item for item in metadata["participant_descriptors"]
     }
     challenger = tournament.challenger_id
+    expected_ids = {item["entrant_id"] for item in config["participants"]} | {
+        challenger
+    }
     if (
-        len(participants) != 13
+        len(participants) != _admission_population_size(config) + 1
+        or set(participants) != expected_ids
         or participants[challenger]["controller_id"] != attempt["controller_id"]
     ):
         raise ValueError("Admission result used another challenger version")
@@ -1305,7 +1393,7 @@ def _admission_evidence(
         names[row["policy"]]: row["elo"] for row in tournament.tournament_results
     }
     if set(ratings) != set(participants):
-        raise ValueError("Admission ratings do not cover all thirteen entrants")
+        raise ValueError("Admission ratings do not cover the field and challenger")
     return {
         "snapshot_id": config["snapshot_id"],
         "challenger_id": challenger,
@@ -1485,7 +1573,7 @@ def _retained_admission_snapshot(
     *,
     retained_ids: Sequence[str],
 ) -> dict[str, Any]:
-    """Retain 55+11 original matchups, refit once, and allocate the next companion.
+    """Retain the selected field's original games, refit, and prepare its companion.
 
     Raw games and full reports remain immutable source references. New local
     rows are frozen through bounded prefix copies; the existing writer publishes
@@ -1515,16 +1603,26 @@ def _retained_admission_snapshot(
         snapshot = _snapshot(root, read_config_json(cached)["snapshot_id"])
         _population_evidence(snapshot)
         return snapshot
+    size = _admission_population_size(config)
     chosen = set(retained_ids)
-    if len(chosen) != 12 or not chosen <= set(plan.participant_ids):
-        raise ValueError("Promotion must retain exactly twelve current participants")
+    if (
+        len(chosen) != size
+        or len(retained_ids) != size
+        or not chosen <= set(plan.participant_ids)
+    ):
+        raise ValueError(
+            f"Promotion must retain exactly {size} distinct current participants"
+        )
     selected = [
         copy.deepcopy(game)
         for game in plan.games
         if game["team_a"] in chosen and game["team_b"] in chosen
     ]
-    if len(selected) != 66 * tournament.games_per_opponent:
-        raise ValueError("Promotion is missing one of the 66 retained matchups")
+    matchups = size * (size - 1) // 2
+    if len(selected) != matchups * tournament.games_per_opponent:
+        raise ValueError(
+            f"Promotion is missing games from its {matchups} retained matchups"
+        )
     next_config = copy.deepcopy(metadata["canonical_config"])
     assets = next_config["assets"]
     _merge_assets(assets, metadata.get("participant_assets", {}))
@@ -1571,6 +1669,14 @@ def _retained_admission_snapshot(
         outcomes,
         seed=config["analysis"]["bootstrap_seed"],
         opponent_weights=weights,
+        method_sampling=(
+            {
+                name: metadata["statistics"]["method_sampling"][name]
+                for name in names.values()
+            }
+            if metadata.get("statistics", {}).get("method_sampling") is not None
+            else None
+        ),
     )
     with RunWriter(
         root / "refits",
@@ -1628,7 +1734,7 @@ def _retained_admission_snapshot(
 def _prune_snapshot_assets(
     config: dict[str, Any], games: Sequence[Mapping[str, Any]]
 ) -> None:
-    """Keep active snapshot references bounded by its twelve and retained origins.
+    """Keep active snapshot references bounded by its field and retained origins.
 
     The caller owns this newly prepared mapping. Historical files and snapshots
     are never changed. Original run manifests are complete immutable evidence,
@@ -1674,9 +1780,10 @@ def _prune_snapshot_assets(
             "run_manifest",
         }:
             continue
-        path = verifier.require((identifier,))[identifier]
-        if role == "schedule" and _is_game_list(path):
-            continue
+        if "inline" not in config["assets"][identifier]:
+            path = verifier.require((identifier,))[identifier]
+            if role == "schedule" and _is_game_list(path):
+                continue
         pending.update(_references(verifier.read_json(identifier)))
     config["assets"] = {
         identifier: asset

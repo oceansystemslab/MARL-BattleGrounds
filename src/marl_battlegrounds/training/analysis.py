@@ -5,7 +5,8 @@ generation here. M8 remains the owner of recorded game scores and metrics.
 Score fields are points and kill fields are kills: under the Red Zone rule a
 death can give 2 points but is still one kill, so _kill_columns names where each
 result's kills live. Reports read committed trainer records and never rewrite
-original evidence.
+original evidence. Training and validation Red Zone depths keep separate labels;
+missing historical values stay unknown, distinct from recorded zero.
 analyze_screen also reports an unfinished configuration screen, retaining shared
 Random checks as one statistical task while plotting each case's own timing.
 """
@@ -112,6 +113,7 @@ def summarize_validation(
     bootstrap_seed: int = 19_044_001,
     independent_opponents: bool = False,
     actual_kills: bool = False,
+    sampling_evidence: Mapping[str, Any] | None = None,
 ) -> Record:
     """Reduce complete frozen-panel games with their shared random seeds intact.
 
@@ -143,6 +145,15 @@ def summarize_validation(
         because a Red Zone death gives 2 points but is still one kill. False
         keeps the historical rule and bytes: kills are read from the Team A
         and Team B scores, which were equal to kills before the rule.
+    sampling_evidence : mapping or None, default=None
+        Shared versioned sampling evidence for these completed games. Unsupported
+        sampling leaves ci_low/ci_high unavailable; conditional_ci_low/high retain
+        only the mathematical calculation under an explicitly unsupported sampling
+        assumption. Each stratum also needs at least two seed pairs. None preserves
+        historical outputs and their original conditional interpretation. Supplied
+        evidence keeps independent_blocks as the declared block count and adds
+        supported_independent_sampling_units: zero for deterministic conditions
+        and None when the sampling mechanism is unknown.
 
     Returns
     -------
@@ -162,7 +173,7 @@ def summarize_validation(
         No original metrics are recomputed and no file or global RNG is changed.
     """
     if independent_opponents:
-        return _independent_validation_summary(
+        summary = _independent_validation_summary(
             rows,
             maps=maps,
             opponents=opponents,
@@ -171,6 +182,7 @@ def summarize_validation(
             bootstrap_seed=bootstrap_seed,
             actual_kills=actual_kills,
         )
+        return _validation_sampling_interval(summary, sampling_evidence, seed_pairs)
     _integer(seed_pairs, "seed_pairs", minimum=1)
     map_ids, names = tuple(maps), tuple(opponents)
     if not map_ids or not names or len(set(map_ids)) != len(map_ids):
@@ -243,7 +255,7 @@ def summarize_validation(
             cells.append(cell)
         blocks.append(values.mean(axis=(1, 2)))
     low, high = _bootstrap(blocks, draws=bootstrap_draws, seed=bootstrap_seed)
-    return {
+    summary = {
         "complete": True,
         "score": float(np.mean([values.mean() for values in blocks])),
         "ci_low": low,
@@ -258,6 +270,64 @@ def summarize_validation(
         "bootstrap_draws": bootstrap_draws,
         "bootstrap_seed": bootstrap_seed,
     }
+    return _validation_sampling_interval(summary, sampling_evidence, seed_pairs)
+
+
+def _validation_sampling_interval(
+    summary: Record, evidence: Mapping[str, Any] | None, seed_pairs: int
+) -> Record:
+    """Label fixed-System intervals using the shared sampling-evidence contract.
+
+    None preserves historical numerical fields and meaning. Supplied evidence is
+    checked against the completed games. independent_blocks and declared_blocks
+    retain the historical declared-group count. The separate supported count is
+    zero for deterministic conditions and None when unknown. Repeated calls
+    preserve the original declared count.
+    Unsupported sampling or fewer than two seed pairs per estimator stratum
+    suppresses public ci_low/high. The former calculation remains only as
+    explicitly conditional bounds, with its assumption stated. This does not
+    establish that a provider obeys the declared mechanism.
+    """
+    if evidence is None:
+        return summary
+    from marl_battlegrounds.evaluation.sampling_evidence import (
+        validate_sampling_evidence,
+    )
+
+    checked = validate_sampling_evidence(evidence, completed_games=summary["games"])
+    status = checked["interval_status"]
+    if status == "Available" and seed_pairs < 2:
+        status = "Unavailable: Each validation stratum needs at least two seed pairs"
+    result = {
+        **summary,
+        "declared_blocks": summary.get(
+            "declared_blocks", summary["independent_blocks"]
+        ),
+        "independent_blocks": summary.get(
+            "declared_blocks", summary["independent_blocks"]
+        ),
+        "supported_independent_sampling_units": checked[
+            "supported_independent_sampling_units"
+        ],
+        "sampling_evidence": checked,
+        "interval_status": status,
+        "confidence": 0.95,
+        "sampling_unit": "Paired game-seed blocks within declared validation strata",
+        "interval_method": "Stratified percentile bootstrap for fixed Systems",
+    }
+    if status != "Available":
+        result.update(
+            conditional_ci_low=result.get("conditional_ci_low", result["ci_low"]),
+            conditional_ci_high=result.get("conditional_ci_high", result["ci_high"]),
+            conditional_interval_assumption=(
+                "Assumes independent random game-seed blocks within every "
+                "validation stratum; that assumption is unsupported here"
+            ),
+            ci_low=None,
+            ci_high=None,
+            uncertainty=f"Fixed-System game interval {status.lower()}",
+        )
+    return result
 
 
 def _independent_validation_summary(
@@ -767,6 +837,24 @@ def _settings(config: Mapping[str, Any]) -> Record:
     return cast(Record, block) if isinstance(block, dict) else {}
 
 
+def _red_zone_label(depth: object) -> str:
+    """Format a saved depth in map units; absent values stay explicitly unknown.
+
+    This host report helper reads no defaults or files. None means no value was
+    recorded; it is distinct from an explicit zero. Invalid saved depths fail.
+    """
+    if depth is None:
+        return "Unknown (not recorded)"
+    if (
+        isinstance(depth, bool)
+        or not isinstance(depth, (int, float))
+        or not math.isfinite(depth)
+        or depth < 0
+    ):
+        raise ValueError("Saved Red Zone depth must be a finite nonnegative number")
+    return f"{float(depth)} map units"
+
+
 def _summary(directory: Path) -> Record:
     """Read run facts, withholding active results while checkpoint recovery is open.
 
@@ -807,6 +895,7 @@ def _summary(directory: Path) -> Record:
         "shaping_mode": config.get("shaping_mode", "potential"),
         "input_scale": _settings(config).get("input_scale", 1.0),
         "spawn_frame": _settings(config).get("spawn_frame", "world"),
+        "red_zone_depth": config.get("red_zone_depth"),
         "pinned_opponent": config.get("pinned_opponent"),
         "pinned_opponent_share": config.get("pinned_opponent_share", 0.0),
         "seed": config.get("seed"),
@@ -846,6 +935,13 @@ def _summary(directory: Path) -> Record:
         if updates
         else 0,
         "validation_checkpoints": len(cast(list[object], results)),
+        "validation_red_zone_depths": list(
+            dict.fromkeys(
+                cast(Record, row).get("red_zone_depth")
+                for row in cast(list[object], results)
+                if isinstance(row, dict)
+            )
+        ),
         "recorded_failures": sum(
             row.get("event") in ("failure", "attempt_failed") for row in events
         ),
@@ -951,6 +1047,17 @@ def _write_summary(summaries: Sequence[Record], destination: Path) -> Path:
                 f"Shaping Mode: {summary['shaping_mode']}. "
                 f"Input Scale: {summary['input_scale']}. "
                 f"Spawn Frame: {summary['spawn_frame']}.",
+                "Training Red Zone Depth: "
+                f"{_red_zone_label(summary['red_zone_depth'])}.",
+                "Recorded Validation Red Zone Depths: "
+                + (
+                    "; ".join(
+                        _red_zone_label(depth)
+                        for depth in summary["validation_red_zone_depths"]
+                    )
+                    or "No recorded validation"
+                )
+                + ".",
                 *(
                     [
                         f"Pinned Opponent: {summary['pinned_opponent']} in "
@@ -1052,6 +1159,26 @@ def _write_summary(summaries: Sequence[Record], destination: Path) -> Path:
                     "",
                 ]
             )
+        decision = summary.get("selection_decision")
+        if decision is not None:
+            original = summary.get("original_selection")
+            original_id = (
+                cast(Record, original).get("checkpoint_id")
+                if isinstance(original, dict)
+                else None
+            )
+            lines.extend(
+                [
+                    "Selection Source: Separate declared decision "
+                    f"[{decision['name']}](<{decision['path']}>) "
+                    f"(`{decision['decision_id']}`).",
+                    "Original Saved Selection: "
+                    f"[selection.json](<{summary['original_selection_path']}>); "
+                    f"checkpoint `{original_id or 'Unavailable'}`. "
+                    "The original record remains unchanged.",
+                    "",
+                ]
+            )
         selected = summary["selection"]
         if isinstance(selected, dict):
             selection = cast(Record, selected)
@@ -1059,12 +1186,17 @@ def _write_summary(summaries: Sequence[Record], destination: Path) -> Path:
                 [
                     "Selected checkpoint: "
                     f"`{selection.get('checkpoint_id', 'Unavailable')}`. "
-                    f"Confirmation score: {selection.get('score', 'Unavailable')}.",
+                    f"Confirmation score: {selection.get('score', 'Unavailable')}. "
+                    "Confirmation Red Zone Depth: "
+                    f"{_red_zone_label(selection.get('red_zone_depth'))}.",
                     "",
                 ]
             )
         for key, label in (
-            ("final_actor", "Final Actor"),
+            (
+                "final_actor",
+                "Final Actor (Extra Result)" if decision else "Final Actor",
+            ),
             ("selected_actor", "Selected Actor"),
         ):
             actor = summary[key]
@@ -1188,7 +1320,8 @@ def _write_summary(summaries: Sequence[Record], destination: Path) -> Path:
             )
     lines.extend(
         [
-            "Intervals describe game sampling for fixed actors. They do not "
+            "Per-run validation intervals describe game sampling for fixed actors. "
+            "They do not "
             "measure training-seed variation.",
             "Task reward and shaping remain separate. Confirmation scores are "
             "used for selection and are not held-out test results.",
@@ -1235,7 +1368,633 @@ def refresh_summary(run_dirs: Sequence[str | Path], *, output_dir: str | Path) -
     )
 
 
-def analyze(run_dirs: Sequence[str | Path], *, output_dir: str | Path) -> Record:
+def _training_grouping(
+    grouping: str | Path | Mapping[str, Any], run_dirs: Sequence[str | Path]
+) -> Record:
+    """Check a declared training comparison and resolve its exact input paths.
+
+    grouping is a schema-1 mapping or JSON file. File-relative run paths resolve
+    from that file; mapping paths resolve from the current directory. Require
+    explicit cells, panel, depth, groups and independent-run units. Available
+    run_dirs must match the declaration exactly; missing declared runs remain
+    reportable. Return a copied declaration with absolute paths. Invalid fields,
+    duplicate paths, unknown groups or undeclared inputs raise ValueError.
+    """
+    if isinstance(grouping, (str, Path)):
+        source = Path(grouping).resolve()
+        base = source.parent
+        raw = _read_json(source, None)
+    else:
+        base = Path.cwd()
+        raw = dict(grouping)
+    required = {
+        "schema_version",
+        "maps",
+        "opponents",
+        "panel_digest",
+        "red_zone_depth",
+        "runs",
+    }
+    allowed = required | {"comparisons", "bootstrap_draws", "bootstrap_seed"}
+    if not isinstance(raw, dict) or not required <= raw.keys() or raw.keys() - allowed:
+        raise ValueError("Grouping needs the schema-1 declared fields only")
+    raw = cast(Record, raw)
+    if type(raw["schema_version"]) is not int or raw["schema_version"] != 1:
+        raise ValueError("Grouping schema_version must be 1")
+    maps, opponents = raw["maps"], raw["opponents"]
+    if not isinstance(maps, list) or not maps:
+        raise ValueError("Grouping maps must be a nonempty list")
+    maps = [_integer(value, "grouping map") for value in cast(list[Any], maps)]
+    if len(set(maps)) != len(maps):
+        raise ValueError("Grouping maps must be distinct")
+    if (
+        not isinstance(opponents, list)
+        or not opponents
+        or any(
+            not isinstance(name, str) or not name for name in cast(list[Any], opponents)
+        )
+        or len(set(cast(list[Any], opponents))) != len(cast(list[Any], opponents))
+    ):
+        raise ValueError("Grouping opponents must be distinct nonempty names")
+    opponents = cast(list[str], opponents)
+    if not isinstance(raw["panel_digest"], str) or not raw["panel_digest"]:
+        raise ValueError("Grouping needs the saved panel_digest")
+    _red_zone_label(raw["red_zone_depth"])
+    draws = _integer(raw.get("bootstrap_draws", 2000), "bootstrap_draws", minimum=1)
+    seed = _integer(raw.get("bootstrap_seed", 19_044_003), "bootstrap_seed")
+    if not isinstance(raw["runs"], list) or not raw["runs"]:
+        raise ValueError("Grouping runs must declare every planned run")
+    runs: list[Record] = []
+    for raw_row in cast(list[Any], raw["runs"]):
+        if not isinstance(raw_row, dict):
+            raise ValueError("Each grouped run must be an object")
+        row = cast(Record, raw_row)
+        if set(row) != {"run_dir", "group", "unit"}:
+            raise ValueError("Each grouped run needs run_dir, group and unit")
+        if any(not isinstance(row[key], str) or not row[key] for key in row):
+            raise ValueError(
+                "Grouped run paths, groups and units must be nonempty text"
+            )
+        runs.append({**row, "run_dir": str((base / row["run_dir"]).resolve())})
+    declared = [row["run_dir"] for row in runs]
+    supplied = [str(Path(path).resolve()) for path in run_dirs]
+    if len(set(declared)) != len(declared) or len(set(supplied)) != len(supplied):
+        raise ValueError("Grouping and analysis cannot repeat a run directory")
+    if set(supplied) - set(declared) or any(
+        Path(path).exists() and path not in supplied for path in declared
+    ):
+        raise ValueError(
+            "Available analysis inputs must match the declared grouped runs"
+        )
+    names = {row["group"] for row in runs}
+    comparisons = raw.get("comparisons", [])
+    if not isinstance(comparisons, list):
+        raise ValueError("Grouping comparisons must be a list")
+    comparisons = cast(list[Any], comparisons)
+    seen: set[tuple[str, str, bool]] = set()
+    for raw_row in comparisons:
+        if not isinstance(raw_row, dict):
+            raise ValueError("Each comparison must be an object")
+        row = cast(Record, raw_row)
+        if set(row) != {"left", "right", "paired"}:
+            raise ValueError("Each comparison needs left, right and paired")
+        if not isinstance(row["left"], str) or not isinstance(row["right"], str):
+            raise ValueError("Comparison groups must be names")
+        if (
+            row["left"] not in names
+            or row["right"] not in names
+            or row["left"] == row["right"]
+        ):
+            raise ValueError("Comparisons must name two distinct declared groups")
+        if type(row["paired"]) is not bool:
+            raise ValueError("Comparison paired must be true or false")
+        identity = row["left"], row["right"], row["paired"]
+        if identity in seen:
+            raise ValueError("Grouping cannot repeat a comparison")
+        seen.add(identity)
+    return {
+        **raw,
+        "maps": maps,
+        "opponents": list(opponents),
+        "runs": runs,
+        "comparisons": [dict(row) for row in comparisons],
+        "bootstrap_draws": draws,
+        "bootstrap_seed": seed,
+    }
+
+
+def _training_lineage(details: Mapping[str, Any]) -> str | None:
+    """Read a saved independent training root; unknown continuations stay unknown.
+
+    A valid training_lineage.root_run_id takes precedence. Historical fresh runs
+    use their own saved run_id. Parent/continuation markers without that saved
+    lineage prevent an independence claim. This reads metadata only.
+    """
+    lineage = details.get("training_lineage")
+    if lineage is not None:
+        root = (
+            cast(Record, lineage).get("root_run_id")
+            if isinstance(lineage, dict)
+            else None
+        )
+        return root if isinstance(root, str) and root else None
+    if any(
+        details.get(key) is not None
+        for key in (
+            "continuation",
+            "parent_run",
+            "parent_run_id",
+            "parent_checkpoint",
+            "extended_from",
+        )
+    ):
+        return None
+    run_id = details.get("run_id")
+    return run_id if isinstance(run_id, str) and run_id else None
+
+
+def _training_run_vector(
+    entry: Mapping[str, Any],
+    declaration: Mapping[str, Any],
+    summary: Mapping[str, Any] | None,
+    details: Mapping[str, Any],
+) -> Record:
+    """Keep one declared run and every selected map/opponent cell in the report.
+
+    Missing or failed runs, unknown lineage and incomplete selected evidence get
+    explicit reasons and cannot support a group interval. No final checkpoint is
+    substituted. Cell scores remain descriptive evidence even when unavailable
+    for aggregation; invalid or absent cell values stay None. No files change.
+    """
+    selected = summary.get("selection") if summary is not None else None
+    selected = cast(Record, selected) if isinstance(selected, dict) else {}
+    status = summary.get("status", "unknown") if summary is not None else "missing"
+    root = _training_lineage(details)
+    reasons = []
+    if status != "complete":
+        reasons.append(f"Run status is {status}")
+    if root is None and summary is not None:
+        reasons.append("Independent training lineage is unknown")
+    if not selected or selected.get("complete") is not True:
+        reasons.append("A complete selected-checkpoint result is unavailable")
+    if selected.get("purpose") != "confirmation":
+        reasons.append("Selected evidence is not a confirmation result")
+    if not isinstance(selected.get("checkpoint_id"), str) or not selected.get(
+        "checkpoint_id"
+    ):
+        reasons.append("Selected checkpoint identity is unavailable")
+    if selected.get("panel_digest") != declaration["panel_digest"]:
+        reasons.append("Selected panel does not match the declaration")
+    if selected.get("red_zone_depth") != declaration["red_zone_depth"]:
+        reasons.append("Selected Red Zone depth does not match the declaration")
+    expected = [
+        (map_id, name)
+        for map_id in declaration["maps"]
+        for name in declaration["opponents"]
+    ]
+    expected_set = set(expected)
+    raw_cells = selected.get("cells", [])
+    indexed: dict[tuple[int, str], Record] = {}
+    malformed = not isinstance(raw_cells, list)
+    if isinstance(raw_cells, list):
+        for raw_cell in cast(list[Any], raw_cells):
+            if not isinstance(raw_cell, dict):
+                malformed = True
+                continue
+            cell = cast(Record, raw_cell)
+            map_id, opponent = cell.get("map_id"), cell.get("opponent")
+            if type(map_id) is not int or not isinstance(opponent, str):
+                malformed = True
+                continue
+            key = map_id, opponent
+            if key not in expected_set or key in indexed:
+                malformed = True
+            indexed[key] = cell
+    cells: list[Record] = []
+    for map_id, opponent in expected:
+        raw = indexed.get((map_id, opponent), {})
+        score = raw.get("score")
+        if (
+            isinstance(score, bool)
+            or not isinstance(score, (int, float))
+            or not math.isfinite(score)
+            or not 0 <= score <= 1
+        ):
+            score = None
+            malformed = True
+        cells.append({"map_id": map_id, "opponent": opponent, "score": score})
+    if malformed or set(indexed) != expected_set:
+        reasons.append("Selected results lack the complete declared map/opponent cells")
+    config = details.get("config", {})
+    seed = cast(Record, config).get("seed") if isinstance(config, dict) else None
+    return {
+        **entry,
+        "run_id": summary.get("run_id") if summary else None,
+        "training_seed": seed if type(seed) is int and seed >= 0 else None,
+        "status": status,
+        "lineage_root_run_id": root,
+        "checkpoint_id": selected.get("checkpoint_id"),
+        "actor_digest": selected.get("actor_digest"),
+        "cells": cells,
+        "available": not reasons,
+        "unavailable_reasons": reasons,
+    }
+
+
+def _training_vector_estimate(
+    left: np.ndarray[Any, np.dtype[np.float64]],
+    *,
+    draws: int,
+    seed: int,
+    right: np.ndarray[Any, np.dtype[np.float64]] | None = None,
+) -> Record:
+    """Resample independent rows intact, retaining their cross-cell dependence.
+
+    left has one full condition vector per independent run or matched run pair.
+    Optional right contains an independent comparison group; its sampled mean
+    is subtracted from left. Rows in separate arrays are never treated as paired.
+    Return equal-cell mean score and 95% percentile bounds, plus each cell's
+    descriptive mean and bounds. One-row groups retain means but no interval.
+    Draw indices are reused across all cells and use a private NumPy generator.
+    Memory grows with draws times runs, not draws times runs times cells.
+    """
+    valid_interval = len(left) >= 2 and (right is None or len(right) >= 2)
+    random = np.random.default_rng(seed)
+    left_indices = (
+        random.integers(len(left), size=(draws, len(left))) if valid_interval else None
+    )
+    right_indices = (
+        random.integers(len(right), size=(draws, len(right)))
+        if valid_interval and right is not None
+        else None
+    )
+    sampled_means = np.zeros(draws, np.float64)
+    cells: list[Record] = []
+    for index in range(left.shape[1]):
+        score = float(left[:, index].mean())
+        if right is not None:
+            score -= float(right[:, index].mean())
+        low, high = None, None
+        if left_indices is not None:
+            samples = left[:, index][left_indices].mean(axis=1)
+            if right_indices is not None and right is not None:
+                samples -= right[:, index][right_indices].mean(axis=1)
+            sampled_means += samples / left.shape[1]
+            bounds = np.percentile(samples, (2.5, 97.5))
+            low, high = float(bounds[0]), float(bounds[1])
+        cells.append({"score": score, "ci_low": low, "ci_high": high})
+    bounds = np.percentile(sampled_means, (2.5, 97.5)) if valid_interval else None
+    return {
+        "score": float(np.mean([row["score"] for row in cells])),
+        "ci_low": float(bounds[0]) if bounds is not None else None,
+        "ci_high": float(bounds[1]) if bounds is not None else None,
+        "cells": cells,
+        "unavailable_reasons": []
+        if valid_interval
+        else ["Fewer than two independent training units"],
+    }
+
+
+def _training_variation(
+    declaration: Mapping[str, Any],
+    summaries: Sequence[Mapping[str, Any]],
+    details_by_path: Mapping[str, Mapping[str, Any]],
+) -> Record:
+    """Report declared training groups from saved per-run selected records.
+
+    declaration is checked by _training_grouping. summaries provide each run's
+    selection, status and identity; explicit re-selection may replace selection
+    before this call. details_by_path provides saved lineage facts. Missing runs,
+    cells or pairs invalidate the full declared comparison rather than shrinking
+    it. independent_units counts only supported independent runs; unit, seed or
+    lineage conflicts leave that count unknown. Shared saved seeds and lineage
+    across groups require pairing; each shared identity must stay within one
+    declared pair. Missing cell results alone do not change a known independent
+    count. Return JSON-safe group/cell estimates, exact run identities, counts
+    and reasons. Fixed-actor game intervals are a separate
+    report, never resampled as training runs. No source file, learner state or
+    global random generator changes.
+    """
+    summaries_by_path = {str(row["run_dir"]): row for row in summaries}
+    runs = [
+        _training_run_vector(
+            entry,
+            declaration,
+            summaries_by_path.get(entry["run_dir"]),
+            details_by_path.get(entry["run_dir"], {}),
+        )
+        for entry in declaration["runs"]
+    ]
+    cell_keys = [
+        {"map_id": map_id, "opponent": name}
+        for map_id in declaration["maps"]
+        for name in declaration["opponents"]
+    ]
+    common: Record = {
+        "confidence": 0.95,
+        "uncertainty": "Training variation; fixed validation field and selection rule",
+        "bootstrap_draws": declaration["bootstrap_draws"],
+        "bootstrap_seed": declaration["bootstrap_seed"],
+    }
+    groups: list[Record] = []
+    members: dict[str, list[Record]] = {}
+    arrays: dict[str, np.ndarray[Any, np.dtype[np.float64]]] = {}
+    for name in dict.fromkeys(row["group"] for row in runs):
+        rows = [row for row in runs if row["group"] == name]
+        members[name] = rows
+        roots = [row["lineage_root_run_id"] for row in rows]
+        units = [row["unit"] for row in rows]
+        reasons = []
+        if not all(row["available"] for row in rows):
+            reasons.append(
+                "Not every declared run has complete compatible selected evidence"
+            )
+        independence_reasons = []
+        if len(set(units)) != len(units):
+            independence_reasons.append(
+                "Declared runs repeat an independent training unit"
+            )
+        saved_seeds = [
+            row["training_seed"] for row in rows if row["training_seed"] is not None
+        ]
+        if len(set(saved_seeds)) != len(saved_seeds):
+            independence_reasons.append(
+                "Saved runs repeat the same training seed within this group"
+            )
+        if len({root for root in roots if root is not None}) != len(roots):
+            independence_reasons.append(
+                "Saved training lineage is unknown or repeats within this group"
+            )
+        reasons.extend(independence_reasons)
+        estimate: Record = {
+            "score": None,
+            "ci_low": None,
+            "ci_high": None,
+            "cells": [
+                {"score": None, "ci_low": None, "ci_high": None} for _ in cell_keys
+            ],
+            "unavailable_reasons": reasons,
+        }
+        if not reasons:
+            values = np.asarray(
+                [[cell["score"] for cell in row["cells"]] for row in rows], np.float64
+            )
+            arrays[name] = values
+            estimate = _training_vector_estimate(
+                values, draws=common["bootstrap_draws"], seed=common["bootstrap_seed"]
+            )
+        groups.append(
+            {
+                **common,
+                "group": name,
+                "sampling_unit": "Whole independent training run",
+                "method": "Percentile bootstrap of whole run vectors",
+                "declared_runs": len(rows),
+                "complete_runs": sum(row["status"] == "complete" for row in rows),
+                "available_runs": sum(row["available"] for row in rows),
+                "independent_units": len(rows) if not independence_reasons else None,
+                **estimate,
+                "cells": [
+                    {**key, **value}
+                    for key, value in zip(cell_keys, estimate["cells"], strict=True)
+                ],
+            }
+        )
+    comparisons = []
+    for comparison in declaration["comparisons"]:
+        left, right = comparison["left"], comparison["right"]
+        paired = comparison["paired"]
+        left_rows, right_rows = members[left], members[right]
+        left_units, right_units = (
+            [row["unit"] for row in left_rows],
+            [row["unit"] for row in right_rows],
+        )
+        reasons = []
+        if left not in arrays or right not in arrays:
+            reasons.append(
+                "Both full declared groups need complete independent-run evidence"
+            )
+        if paired and set(left_units) != set(right_units):
+            reasons.append(
+                "Paired groups must contain the same declared training units"
+            )
+        left_roots = {row["lineage_root_run_id"] for row in left_rows}
+        right_roots = {row["lineage_root_run_id"] for row in right_rows}
+        root_units: dict[str, set[str]] = {}
+        seed_units: dict[int, set[str]] = {}
+        for row in (*left_rows, *right_rows):
+            root = row["lineage_root_run_id"]
+            if root is not None:
+                root_units.setdefault(root, set()).add(row["unit"])
+            saved_seed = row["training_seed"]
+            if saved_seed is not None:
+                seed_units.setdefault(saved_seed, set()).add(row["unit"])
+        if paired and any(len(units) > 1 for units in root_units.values()):
+            reasons.append("Saved training lineage crosses declared run pairs")
+        if paired and any(len(units) > 1 for units in seed_units.values()):
+            reasons.append("Saved training seeds cross declared run pairs")
+        left_seeds = {row["training_seed"] for row in left_rows}
+        right_seeds = {row["training_seed"] for row in right_rows}
+        if not paired and (left_seeds & right_seeds) - {None}:
+            reasons.append(
+                "Shared saved training seeds require a declared paired comparison"
+            )
+        if not paired and (
+            set(left_units) & set(right_units) or (left_roots & right_roots) - {None}
+        ):
+            reasons.append(
+                "Related training units require a declared paired comparison"
+            )
+        estimate = {
+            "score": None,
+            "ci_low": None,
+            "ci_high": None,
+            "cells": [
+                {"score": None, "ci_low": None, "ci_high": None} for _ in cell_keys
+            ],
+            "unavailable_reasons": reasons,
+        }
+        if not reasons:
+            left_values, right_values = arrays[left], arrays[right]
+            if paired:
+                order = [right_units.index(unit) for unit in left_units]
+                estimate = _training_vector_estimate(
+                    left_values - right_values[order],
+                    draws=common["bootstrap_draws"],
+                    seed=common["bootstrap_seed"],
+                )
+            else:
+                estimate = _training_vector_estimate(
+                    left_values,
+                    right=right_values,
+                    draws=common["bootstrap_draws"],
+                    seed=common["bootstrap_seed"],
+                )
+        comparisons.append(
+            {
+                **common,
+                **comparison,
+                "score_direction": "Left minus right",
+                "sampling_unit": "Whole matched training-run pair"
+                if paired
+                else "Whole independent training run in each group",
+                "method": "Percentile bootstrap of matched run differences"
+                if paired
+                else "Independent percentile bootstrap of whole run vectors",
+                "left_declared_runs": len(left_rows),
+                "right_declared_runs": len(right_rows),
+                "paired_units": len(left_units)
+                if paired
+                and set(left_units) == set(right_units)
+                and len(set(left_units)) == len(left_units)
+                else None,
+                **estimate,
+                "cells": [
+                    {**key, **value}
+                    for key, value in zip(cell_keys, estimate["cells"], strict=True)
+                ],
+            }
+        )
+    return {
+        "schema_version": 1,
+        "declaration": dict(declaration),
+        "runs": runs,
+        "groups": groups,
+        "comparisons": comparisons,
+    }
+
+
+def _write_training_variation(
+    report: Mapping[str, Any], destination: Path
+) -> dict[str, str]:
+    """Write declared training variation beside the ordinary read-only report.
+
+    Return JSON/CSV paths and append a plain Markdown summary to run_summary.md.
+    Every run remains visible with identity, status and unavailable reasons. CSV
+    rows distinguish group means from left-minus-right comparisons and retain
+    each declared cell. Only derived report files change, using atomic writes.
+    """
+    json_path, csv_path = (
+        destination / "training_variation.json",
+        destination / "training_variation.csv",
+    )
+    _atomic_text(
+        json_path, json.dumps(report, indent=2, sort_keys=True, allow_nan=False) + "\n"
+    )
+    rows: list[Record] = []
+    lines = [
+        "",
+        "## Declared Training Variation",
+        "",
+        "These 95% intervals resample whole independent training runs, keeping "
+        "their map/opponent cells together. They do not replace fixed-actor "
+        "game-sampling intervals. Missing runs or cells never become losses "
+        "or a smaller comparison.",
+        "",
+        "### Runs",
+        "",
+    ]
+    for row in report["runs"]:
+        lines.append(
+            f"- {row['group']} / {row['unit']}: {row['status']}; "
+            f"checkpoint `{row['checkpoint_id']}`; "
+            + (
+                "Complete selected evidence."
+                if row["available"]
+                else "; ".join(row["unavailable_reasons"]) + "."
+            )
+        )
+    for kind in ("groups", "comparisons"):
+        for estimate in report[kind]:
+            label = estimate.get(
+                "group", f"{estimate.get('left')} minus {estimate.get('right')}"
+            )
+            reasons = "; ".join(estimate["unavailable_reasons"])
+            lines.extend(
+                [
+                    "",
+                    f"### {label}",
+                    "",
+                    f"Sampling Unit: {estimate['sampling_unit']}. "
+                    f"Method: {estimate['method']}.",
+                    f"Score: {estimate['score']}. 95% Interval: "
+                    + (
+                        f"{estimate['ci_low']} to {estimate['ci_high']}."
+                        if not reasons
+                        else f"Unavailable. {reasons}."
+                    ),
+                    "",
+                ]
+            )
+            for cell in estimate["cells"]:
+                rows.append(
+                    {
+                        "kind": kind,
+                        "name": label,
+                        **{
+                            key: value
+                            for key, value in estimate.items()
+                            if not isinstance(value, (dict, list))
+                        },
+                        **cell,
+                        "unavailable_reasons": reasons,
+                    }
+                )
+    _atomic_text(csv_path, _csv(rows))
+    summary_path = destination / "run_summary.md"
+    _atomic_text(summary_path, summary_path.read_text() + "\n".join(lines) + "\n")
+    return {
+        "training_variation": str(json_path),
+        "training_variation_cells": str(csv_path),
+    }
+
+
+def _analysis_selection(
+    selection: str | Path, run_dirs: Sequence[str | Path]
+) -> tuple[Record, dict[str, Record]]:
+    """Verify one completed saved decision and its exact requested run identities.
+
+    selection names a decision JSON file. The shared reader verifies current actor
+    and game bytes and rebuilds the declared selection without restoring a model.
+    Then require the exact run path set and current saved run IDs. Return its
+    reference and per-run winners. Missing confirmations, altered evidence or
+    mismatched inputs raise before any report is written. No source file changes.
+    """
+    from marl_battlegrounds.training.selection import read_selection_decision
+
+    path = Path(selection).resolve()
+    decision = read_selection_decision(path, verify_evidence=True)
+    requested = [str(Path(value).resolve()) for value in run_dirs]
+    if len(set(requested)) != len(requested) or set(requested) != set(
+        decision["run_dirs"]
+    ):
+        raise ValueError(
+            "The selection decision must name exactly the requested run directories"
+        )
+    runs = {row["run_dir"]: row for row in decision["runs"]}
+    for directory in requested:
+        details = _read_json(Path(directory) / "run_details.json", None)
+        if (
+            not isinstance(details, dict)
+            or details.get("run_id") != runs[directory]["run_id"]
+        ):
+            raise ValueError(
+                "The selection decision run identity differs from run_details.json"
+            )
+    return {
+        "path": str(path),
+        "decision_id": decision["decision_id"],
+        "name": decision["name"],
+    }, runs
+
+
+def analyze(
+    run_dirs: Sequence[str | Path],
+    *,
+    output_dir: str | Path,
+    grouping: str | Path | Mapping[str, Any] | None = None,
+    selection: str | Path | None = None,
+) -> Record:
     """Write factual training curves and summaries from saved trainer records.
 
     Parameters
@@ -1249,6 +2008,30 @@ def analyze(run_dirs: Sequence[str | Path], *, output_dir: str | Path) -> Record
         recovery finishes; preserved old files are not treated as current results.
     output_dir : path
         Report directory. Only derived CSV, PNG, SVG and run_summary.md are replaced.
+    grouping : path or mapping, optional
+        An explicit schema-1 declaration of maps, opponents, panel_digest,
+        red_zone_depth and runs. Each run names run_dir, group and unit (one
+        independent training family). Optional comparisons name left, right and
+        paired; paired groups match unit names exactly. bootstrap_draws defaults
+        to 2000 and bootstrap_seed to 19044003; confidence is 95%. File-relative
+        paths resolve from the declaration; mapping paths resolve from the current
+        directory. Available input paths must match the declaration. Missing paths
+        remain visible. Only complete selected-checkpoint vectors enter estimates;
+        no final actor or missing-cell score is substituted. Whole run vectors stay
+        together during resampling. Related continuations do not add independent
+        units. Shared saved training seeds or lineage across groups require pairing
+        and must stay within the same declared pair. None leaves the historical
+        per-run artifact set unchanged.
+    selection : path or None, default=None
+        A completed re-selection decision JSON file for exactly these run paths
+        and saved run IDs. Before writing reports, recheck its source/actor/game
+        identities and declared winner through the shared selection reader. This
+        hashes artifacts and reads saved games but restores no model; large
+        artifacts can make the check take time. Missing confirmations or changed
+        evidence raise. Each run summary and grouping uses that decision's winner,
+        with original selection records kept separately by reference. The final
+        actor remains an extra result. None uses each original selection.json and
+        continues to support ordinary unfinished-run reports.
 
     Returns
     -------
@@ -1259,7 +2042,11 @@ def analyze(run_dirs: Sequence[str | Path], *, output_dir: str | Path) -> Record
         rate. When any run is PQN-VDN, "pqn_png" and "pqn_svg" add a figure of
         loss, TD pairs used per generated transition, the share of used pairs
         starting on kept rows and exploration rate. PPO-only reports keep their
-        historical artifact set.
+        historical artifact set. Explicit grouping adds training_variation.json,
+        training_variation.csv and a separately labelled Markdown section, plus a
+        training_variation result containing every declared run, cell, method,
+        confidence, count and unavailable reason. Explicit selection adds its
+        decision path/ID and per-run original-selection references.
         A successful report does not certify useful learning or general competence.
         Summaries retain saved schemas, initial/per-attempt runtime and terminal
         memory snapshots. Missing historical facts stay unknown; no device query
@@ -1275,10 +2062,22 @@ def analyze(run_dirs: Sequence[str | Path], *, output_dir: str | Path) -> Record
     Notes
     -----
         Host-only and headless. Plotting uses original task/shaping units and splits
-        different frozen panels. Missing results stay missing. No learner is loaded.
+        different frozen panels and recorded validation Red Zone depths. Training
+        and validation depth labels come from their own records; missing historical
+        values remain unknown, distinct from recorded zero. CSV rows carry both
+        training_red_zone_depth and the row's red_zone_depth. No learner is loaded.
     """
     if not run_dirs:
         raise ValueError("analyze needs at least one exact run directory")
+    declared_grouping = (
+        _training_grouping(grouping, run_dirs) if grouping is not None else None
+    )
+    selection_reference, selected_runs = (
+        _analysis_selection(selection, run_dirs)
+        if selection is not None
+        else (None, {})
+    )
+    details_by_path: dict[str, Mapping[str, Any]] = {}
     import matplotlib
 
     matplotlib.use("Agg")
@@ -1292,19 +2091,36 @@ def analyze(run_dirs: Sequence[str | Path], *, output_dir: str | Path) -> Record
     qmix_runs: list[tuple[str, list[Record]]] = []
     pqn_runs: list[tuple[str, list[Record]]] = []
     figure, axes = plt.subplots(
-        2, 2, figsize=(12, 8), constrained_layout=True, sharex="col"
+        2, 2, figsize=(14, 10), constrained_layout=True, sharex="col"
     )
     for value in run_dirs:
         directory = Path(value).resolve()
+        if declared_grouping is not None and not directory.exists():
+            continue
         raw_details = _read_json(directory / "run_details.json", None)
         if not isinstance(raw_details, dict):
             raise ValueError(f"Missing run_details.json in {directory}")
         details = cast(Record, raw_details)
+        details_by_path[str(directory)] = details
         run_id = str(details.get("run_id", directory.name))
         config = details.get("config", {})
         treatment = _treatment(config)
-        run_label = f"{run_id[:8]} / Seed {config.get('seed', '?')} / {treatment}"
+        depth = config.get("red_zone_depth")
+        run_label = (
+            f"{run_id[:8]} / Seed {config.get('seed', '?')} / {treatment} / "
+            f"\nTraining Red Zone: {_red_zone_label(depth)}"
+        )
         summary = _summary(directory)
+        if selection_reference is not None:
+            choice = selected_runs[str(directory)]
+            summary.update(
+                original_selection=summary["selection"],
+                original_selection_path=str(directory / "selection.json"),
+                original_selected_actor=summary["selected_actor"],
+                selection_decision=selection_reference,
+                selection=choice["winner"],
+                selected_actor=choice["winner"]["actor_path"],
+            )
         recovering = summary["status"] == "recovering"
         updates = [] if recovering else _read_rows(directory / "training_updates.jsonl")
         raw_results: object = (
@@ -1326,6 +2142,8 @@ def analyze(run_dirs: Sequence[str | Path], *, output_dir: str | Path) -> Record
                 {
                     "run_id": run_id,
                     "kind": "update",
+                    "training_red_zone_depth": depth,
+                    "red_zone_depth": depth,
                     **{
                         key: value
                         for key, value in row.items()
@@ -1338,6 +2156,8 @@ def analyze(run_dirs: Sequence[str | Path], *, output_dir: str | Path) -> Record
                 {
                     "run_id": run_id,
                     "kind": str(result.get("purpose", "validation")),
+                    "training_red_zone_depth": depth,
+                    "red_zone_depth": result.get("red_zone_depth"),
                     **{
                         key: result.get(key)
                         for key in (
@@ -1363,6 +2183,8 @@ def analyze(run_dirs: Sequence[str | Path], *, output_dir: str | Path) -> Record
                         "purpose": result.get("purpose"),
                         "panel_digest": result.get("panel_digest"),
                         **cell,
+                        "training_red_zone_depth": depth,
+                        "red_zone_depth": result.get("red_zone_depth"),
                     }
                 )
         for x_index, x_name in enumerate(("env_steps", "elapsed_seconds")):
@@ -1376,14 +2198,22 @@ def analyze(run_dirs: Sequence[str | Path], *, output_dir: str | Path) -> Record
                     label=f"{run_label}: {label}",
                 )
             panels = sorted(
-                {str(row.get("panel_digest", "Unknown Panel")) for row in results}
+                {
+                    (
+                        str(row.get("panel_digest", "Unknown Panel")),
+                        _red_zone_label(row.get("red_zone_depth")),
+                    )
+                    for row in results
+                }
             )
-            for panel in panels:
+            for panel, validation_depth in panels:
                 selected = sorted(
                     (
                         row
                         for row in results
                         if str(row.get("panel_digest", "Unknown Panel")) == panel
+                        and _red_zone_label(row.get("red_zone_depth"))
+                        == validation_depth
                         and row.get("purpose") in ("routine", "initialization")
                     ),
                     key=lambda row: row.get("env_steps", 0),
@@ -1398,7 +2228,13 @@ def analyze(run_dirs: Sequence[str | Path], *, output_dir: str | Path) -> Record
                         for row in selected
                     ]
                     plotted = axes[0, x_index].plot(
-                        x, scores, marker="o", label=f"{run_label} / Panel {panel[:8]}"
+                        x,
+                        scores,
+                        marker="o",
+                        label=(
+                            f"{run_label}\nPanel {panel[:8]} / "
+                            f"Validation Red Zone: {validation_depth}"
+                        ),
                     )
                     lower = [
                         row.get("ci_low")
@@ -1470,10 +2306,24 @@ def analyze(run_dirs: Sequence[str | Path], *, output_dir: str | Path) -> Record
         _atomic_text(target, _csv(rows))
         paths[key] = str(target)
     paths["summary"] = str(_write_summary(summaries, destination))
+    variation = None
+    if declared_grouping is not None:
+        variation = _training_variation(declared_grouping, summaries, details_by_path)
+        paths.update(_write_training_variation(variation, destination))
     return {
         "artifacts": paths,
         "runs": summaries,
-        "complete": all(row["status"] == "complete" for row in summaries),
+        **(
+            {"selection_decision": selection_reference}
+            if selection_reference is not None
+            else {}
+        ),
+        **({"training_variation": variation} if variation is not None else {}),
+        "complete": all(row["status"] == "complete" for row in summaries)
+        and (
+            variation is None
+            or all(row["status"] == "complete" for row in variation["runs"])
+        ),
         "qualification": (
             "Provisional; inspect saved evidence before making learning claims"
         ),
@@ -1726,7 +2576,9 @@ def _screen_statistics(
     matching resamples across cases. Kills come from the columns _kill_columns
     names for this result (recorded kills when it carries a Red Zone depth,
     otherwise its scores). Optional kills must be finite and nonnegative when
-    present; absent kills leave that diagnostic unavailable.
+    present; absent kills leave that diagnostic unavailable. Shared sampling
+    evidence also applies to the kill interval. Unsupported bounds remain only
+    explicitly conditional, while the descriptive mean remains available.
     """
     team_a, team_b = _kill_columns(result)
     if summary is None:
@@ -1737,6 +2589,9 @@ def _screen_statistics(
             seed_pairs=result["seed_pairs"],
             actual_kills=(team_a, team_b) == _KILL_COLUMNS,
         )
+    summary = _validation_sampling_interval(
+        summary, result.get("sampling_evidence"), result["seed_pairs"]
+    )
     if summary["score"] != result.get("score") or summary["cells"] != result.get(
         "cells"
     ):
@@ -1777,8 +2632,16 @@ def _screen_statistics(
         )
     else:
         margin, low, high = None, None, None
+    conditional_bounds = {}
+    if summary.get("interval_status", "Available") != "Available":
+        conditional_bounds = {
+            "conditional_kill_margin_ci_low": low,
+            "conditional_kill_margin_ci_high": high,
+        }
+        low, high = None, None
     return {
         **summary,
+        **conditional_bounds,
         **{
             name: (
                 math.fsum(cell[column] for cell in summary["cells"])
@@ -1808,6 +2671,8 @@ def _screen_change(current: Record, initial: Record) -> Record:
     Both inputs are _screen_statistics results. Missing or changed map/seed
     coverage raises ValueError; no unpaired fallback is used. Return descriptive
     mean changes and intervals for fixed actors, never training-seed uncertainty.
+    Either input's unsupported sampling suppresses the public change interval;
+    it cannot regain support by subtracting initialization.
     """
     before, after = initial["blocks"], current["blocks"]
     if before.keys() != after.keys() or any(
@@ -1833,6 +2698,16 @@ def _screen_change(current: Record, initial: Record) -> Record:
         if all(np.isfinite(block).all() for block in values):
             mean = float(np.mean([block.mean() for block in values]))
             low, high = _bootstrap(values, draws=2000, seed=19_044_001)
+        unsupported = [
+            row["interval_status"]
+            for row in (current, initial)
+            if row.get("interval_status", "Available") != "Available"
+        ]
+        if unsupported:
+            result[f"conditional_{name}_change_ci_low"] = low
+            result[f"conditional_{name}_change_ci_high"] = high
+            low, high = None, None
+            result["change_interval_status"] = "; ".join(dict.fromkeys(unsupported))
         result[f"{name}_change_from_initial"] = mean
         result[f"{name}_change_ci_low"] = low
         result[f"{name}_change_ci_high"] = high
@@ -1887,7 +2762,9 @@ def _screen_reference(result: Record, package: Path) -> None:
 def _screen_plot(points: Sequence[Record], destination: Path) -> dict[str, str]:
     """Plot combat improvement and task score against elapsed minutes and steps.
 
-    Missing x values are not invented. Each case references its shared initial
+    Different recorded validation depths have separate curves, even before
+    initialization completes. Missing x values are not invented. Each case
+    references its shared initial
     task, but intervals were computed only once for each unique task. Write two
     derived images atomically; original evidence and numerical state stay intact.
     The first row uses paired kill-margin change since initialization, which can
@@ -1899,17 +2776,28 @@ def _screen_plot(points: Sequence[Record], destination: Path) -> dict[str, str]:
     import matplotlib.pyplot as plt
 
     figure, axes = plt.subplots(2, 3, figsize=(16, 9), constrained_layout=True)
-    names = tuple(dict.fromkeys(row["case"] for row in points))
+    groups = tuple(
+        dict.fromkeys((row["case"], row.get("red_zone_depth")) for row in points)
+    )
     batches = sorted({row["num_envs"] for row in points})
     lengths = sorted({row["rollout_length"] for row in points})
     colors = plt.get_cmap("tab10")
     styles = ("-", "--", "-.", ":")
     handles: list[Any] = []
     labels: list[str] = []
-    for name in names:
+    for name, depth in groups:
         rows = sorted(
-            (row for row in points if row["case"] == name),
+            (
+                row
+                for row in points
+                if row["case"] == name and row.get("red_zone_depth") == depth
+            ),
             key=lambda row: row["env_steps"],
+        )
+        label = (
+            f"{name} / Training Red Zone: "
+            f"{_red_zone_label(rows[0].get('training_red_zone_depth'))}"
+            f"\nValidation Red Zone: {_red_zone_label(rows[0].get('red_zone_depth'))}"
         )
         color = colors(batches.index(rows[0]["num_envs"]) % 10)
         style = styles[lengths.index(rows[0]["rollout_length"]) % len(styles)]
@@ -1940,7 +2828,7 @@ def _screen_plot(points: Sequence[Record], destination: Path) -> dict[str, str]:
                     linewidth=1.4,
                     color=color,
                     linestyle=style,
-                    label=name,
+                    label=label,
                 )[0]
                 axes[index, column].vlines(
                     x,
@@ -1949,9 +2837,9 @@ def _screen_plot(points: Sequence[Record], destination: Path) -> dict[str, str]:
                     colors=line.get_color(),
                     alpha=0.3,
                 )
-                if name not in labels:
+                if label not in labels:
                     handles.append(line)
-                    labels.append(name)
+                    labels.append(label)
     for column, label in enumerate(
         (
             "Elapsed Run Time (Minutes, Including Overhead)",
@@ -2127,6 +3015,7 @@ def analyze_screen(
             "declared_updates": budget.get("updates"),
             "calibration_median_update_seconds": budget.get("median_update_seconds"),
             "complete": False,
+            "red_zone_depth": None,
         }
         cases.append(case)
         if not (directory / "run_details.json").exists():
@@ -2154,6 +3043,7 @@ def analyze_screen(
                         "final_actor",
                         "seed",
                         "details_path",
+                        "red_zone_depth",
                     )
                 }
             )
@@ -2222,6 +3112,8 @@ def analyze_screen(
                     {
                         "case": name,
                         "kind": "update",
+                        "red_zone_depth": summary["red_zone_depth"],
+                        "training_red_zone_depth": summary["red_zone_depth"],
                         **{
                             key: value
                             for key, value in row.items()
@@ -2334,6 +3226,8 @@ def analyze_screen(
                 point: Record = {
                     "case": name,
                     "kind": "random",
+                    "red_zone_depth": result.get("red_zone_depth"),
+                    "training_red_zone_depth": summary["red_zone_depth"],
                     "num_envs": definition["num_envs"],
                     "rollout_length": definition["rollout_length"],
                     "env_steps": steps,
@@ -2359,6 +3253,11 @@ def analyze_screen(
             if initial is not None:
                 reference = tasks[initial["task_id"]]["statistics"]
                 for point in local:
+                    if point["red_zone_depth"] != initial["red_zone_depth"]:
+                        raise ValueError(
+                            "Random diagnostic depth differs from initialization; "
+                            "paired changes need the same recorded rules"
+                        )
                     point.update(
                         _screen_change(tasks[point["task_id"]]["statistics"], reference)
                     )
@@ -2377,11 +3276,15 @@ def analyze_screen(
                     "checkpoint_env_steps", budget.get("checkpoint_env_steps", [])
                 )
             )
+            case["validation_red_zone_depths"] = list(
+                dict.fromkeys(row["red_zone_depth"] for row in local)
+            )
             completed = {row["env_steps"] for row in local}
             case["expected_diagnostic_steps"] = sorted(expected)
             case["completed_diagnostic_steps"] = sorted(completed)
             final = next((row for row in local if row["env_steps"] == total), None)
             if final is not None:
+                case["final_validation_red_zone_depth"] = final["red_zone_depth"]
                 case.update(
                     {
                         f"final_{key}": final.get(key)
@@ -2403,6 +3306,8 @@ def analyze_screen(
                             "kill_margin_change_from_initial",
                             "kill_margin_change_ci_low",
                             "kill_margin_change_ci_high",
+                            "interval_status",
+                            "change_interval_status",
                             "task_id",
                         )
                     }
@@ -2431,6 +3336,7 @@ def analyze_screen(
                     "env_steps": result["env_steps"],
                     "summary_path": result.get("summary_path"),
                     **cell,
+                    "red_zone_depth": result.get("red_zone_depth"),
                     "mean_kill_margin": (
                         cell[kills_for] - cell[kills_against]
                         if cell.get(kills_for) is not None
@@ -2517,10 +3423,12 @@ def analyze_screen(
         "",
         "## Cases",
         "",
-        "| Configuration | State | Steps Completed | Elapsed Run Time | "
+        "| Configuration | Training Red Zone Depth | Final Validation Red Zone Depth | "
+        "State | Steps Completed | "
+        "Elapsed Run Time | "
         "Kills / Deaths Per Game | Change In Kills Minus Deaths | "
         "Wins / Draws / Losses |",
-        "| --- | --- | ---: | --- | ---: | ---: | --- |",
+        "| --- | --- | --- | --- | ---: | --- | ---: | ---: | --- |",
     ]
     for case in cases:
 
@@ -2532,7 +3440,9 @@ def analyze_screen(
             return f"{value:.2f}" if isinstance(value, float) else str(value)
 
         lines.append(
-            f"| {case['case']} | {shown('status')} | {shown('env_steps')} | "
+            f"| {case['case']} | {_red_zone_label(case['red_zone_depth'])} | "
+            f"{_red_zone_label(case.get('final_validation_red_zone_depth'))} | "
+            f"{shown('status')} | {shown('env_steps')} | "
             f"{_screen_duration(case.get('wall_seconds'))} | "
             f"{shown('final_mean_kills_for')} / {shown('final_mean_kills_against')} | "
             f"{shown('final_kill_margin_change_from_initial')} | "
@@ -2546,16 +3456,30 @@ def analyze_screen(
                 f"### {case['case']}",
                 "",
                 f"Original run: [{case['run_dir']}]({case['run_dir']}).",
+                "Recorded Validation Red Zone Depths: "
+                + (
+                    "; ".join(
+                        _red_zone_label(depth)
+                        for depth in case.get("validation_red_zone_depths", [])
+                    )
+                    or "No recorded validation"
+                )
+                + ".",
             ]
         )
         change = case.get("final_kill_margin_change_from_initial")
         if change is not None:
+            low = case.get("final_kill_margin_change_ci_low")
+            high = case.get("final_kill_margin_change_ci_high")
+            interval = (
+                f"{low:+.2f} to {high:+.2f}"
+                if low is not None and high is not None
+                else case.get("final_change_interval_status") or "Unavailable"
+            )
             lines.append(
                 f"Change In Kills Minus Deaths: {change:+.2f} per game since "
-                "before training. Paired Game Interval: "
-                f"{case['final_kill_margin_change_ci_low']:+.2f} to "
-                f"{case['final_kill_margin_change_ci_high']:+.2f}. "
-                "This range reflects the sampled games, not different training seeds."
+                f"before training. Paired Game Interval: {interval}. "
+                "An available range reflects sampled games, not training seeds."
             )
         if case.get("error") or case.get("evidence_error"):
             lines.append(

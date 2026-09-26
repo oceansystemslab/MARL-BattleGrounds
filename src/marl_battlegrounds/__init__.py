@@ -4,8 +4,9 @@ Use import marl_battlegrounds as marl_bgs, then call make for the environment,
 evaluate for frozen-System games, or run_tournament for cross-play. System,
 init_systems and apply_systems support researcher-owned methods in raw loops.
 Setup helpers and the existing Policy adapter use the same package entry point.
-run_canonical_tournament uses a released Big 12 snapshot and verified records.
+run_canonical_tournament uses a released tournament snapshot and verified records.
 It requires a separately installed, qualified bundle; none is fabricated here.
+select_initial_population freezes a declared choice from saved tournament games.
 
 Exports load their owning module when first requested and are then cached here.
 Importing this package alone does not import the environment or start JAX.
@@ -43,6 +44,9 @@ if TYPE_CHECKING:
         policy,
         shared_policy,
         system_step_data,
+    )
+    from marl_battlegrounds.evaluation.population_selection import (
+        select_initial_population,
     )
     from marl_battlegrounds.evaluation.results import (
         CanonicalTournamentResult,
@@ -95,6 +99,7 @@ __all__ = [
     "policy",
     "run_canonical_tournament",
     "run_tournament",
+    "select_initial_population",
     "shared_policy",
     "system_step_data",
     "track_episode_step",
@@ -131,6 +136,7 @@ _MODULES = {
     "TournamentResult": "evaluation.tournament",
     "run_tournament": "evaluation.tournament",
     "run_canonical_tournament": "evaluation.canonical",
+    "select_initial_population": "evaluation.population_selection",
     "balanced_spawn_configs": "tasks",
     "canonical_tournament_rosters": "tasks",
     "list_tdm_maps": "tasks",

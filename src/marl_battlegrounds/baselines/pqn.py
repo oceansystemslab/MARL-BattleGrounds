@@ -869,7 +869,13 @@ def _network_variables(
     return PQNInferenceVariables(variables["params"], variables["batch_stats"])
 
 
-def pqn_optimizer(pqn: PQNConfig, planned_learning_blocks: int) -> Any:  # noqa: ANN401
+def pqn_optimizer(
+    pqn: PQNConfig,
+    planned_learning_blocks: int,
+    *,
+    learning_rate: Callable[[Array], Array] | None = None,
+    optimizer_count: Array | None = None,
+) -> Any:  # noqa: ANN401
     """Return the donor's optimizer for one declared run.
 
     Parameters
@@ -878,6 +884,14 @@ def pqn_optimizer(pqn: PQNConfig, planned_learning_blocks: int) -> Any:  # noqa:
         Settings giving q_lr, lr_linear_decay, max_grad_norm, E and M.
     planned_learning_blocks : int
         Plain positive N; the rate schedule spans N * E * M optimizer steps.
+
+    learning_rate : callable or None, default=None
+        Explicit future float32 rate at the absolute optimizer count. None
+        keeps the original rule. The original lr_linear_decay flag still
+        decides the optimizer tree, so saved counts and moments stay valid.
+    optimizer_count : Array or None, default=None
+        Int32 scalar before the next optimizer call. Required for an override
+        when the original optimizer used a constant rate; otherwise unused.
 
     Returns
     -------
@@ -909,6 +923,15 @@ def pqn_optimizer(pqn: PQNConfig, planned_learning_blocks: int) -> Any:  # noqa:
         if pqn.lr_linear_decay
         else pqn.q_lr
     )
+    if learning_rate is not None:
+        if pqn.lr_linear_decay:
+            rate = learning_rate
+        else:
+            if optimizer_count is None:
+                raise ValueError(
+                    "A future constant-tree rate needs the optimizer count"
+                )
+            rate = learning_rate(optimizer_count)
     return optax.chain(
         optax.clip_by_global_norm(pqn.max_grad_norm), optax.radam(learning_rate=rate)
     )
@@ -1406,6 +1429,7 @@ def update_pqn(
     *,
     pqn: PQNConfig,
     planned_learning_blocks: int,
+    learning_rate: Callable[[Array], Array] | None = None,
 ) -> tuple[PQNTrainState, PQNMetrics]:
     """Compute one PQN-VDN optimizer step on one expanded minibatch.
 
@@ -1419,6 +1443,10 @@ def update_pqn(
         Static settings: gamma, td_lambda, input_scale and the optimizer.
     planned_learning_blocks : int
         Static positive N that fixes the learning-rate schedule.
+
+    learning_rate : callable or None, default=None
+        Checked future rate at the absolute optimizer count. None preserves
+        the original rule. It changes no optimizer state or counter layout.
 
     Returns
     -------
@@ -1446,7 +1474,12 @@ def update_pqn(
     jit with fixed settings.
     """
     _check_batch(batch)
-    optimizer = pqn_optimizer(pqn, planned_learning_blocks)
+    optimizer = pqn_optimizer(
+        pqn,
+        planned_learning_blocks,
+        learning_rate=learning_rate,
+        optimizer_count=state.optimizer_steps,
+    )
     pair = batch.valid[:-1] & batch.valid[1:]
     count = jnp.sum(pair, dtype=jnp.int32)
 

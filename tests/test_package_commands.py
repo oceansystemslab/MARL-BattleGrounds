@@ -3,9 +3,12 @@
 Call spies prove that command parsing does not replace scientific authority.
 Fresh processes check lazy help. Short CPU games compare Python/CLI outcomes,
 full measurements and submitted replay actions under the same exact conditions.
-evaluate's --red-zone-depth reaches the API as a Python float ("6" gives 6.0);
-text with an exponent, NaN, infinity, underscores or a second point is a usage
-error, and tournament and canonical have no such flag.
+Evaluation and tournament rule flags keep ordinary Python types. Entrant and
+challenger references reach the tournament API unchanged; factories never run
+while parsing. Evaluation and tournaments default to 128 environments; explicit
+capacities pass through unchanged. Fresh-execution flags preserve explicit true
+and false values; omission inherits saved settings. Canonical conditions remain
+owned by its released field.
 """
 
 from __future__ import annotations
@@ -126,6 +129,167 @@ def test_exact_forwarding_keeps_omitted_keys_absent(
             },
         )
     ]
+
+
+@pytest.mark.parametrize("command", ("canonical", "tournament"))
+@pytest.mark.parametrize(
+    ("options", "expected"),
+    (((), None), (("--rerun-existing",), True), (("--no-rerun-existing",), False)),
+)
+def test_rerun_option_reaches_the_same_python_owner(
+    command: str,
+    options: tuple[str, ...],
+    expected: bool | None,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[dict[str, Any]] = []
+
+    def receive(**arguments: object) -> None:
+        calls.append(arguments)
+
+    def ignore(*args: object, **kwargs: object) -> None:
+        pass
+
+    monkeypatch.setattr(
+        marl_bgs,
+        "run_canonical_tournament" if command == "canonical" else "run_tournament",
+        receive,
+    )
+    monkeypatch.setattr(_cli, "_print_result", ignore)
+    assert _cli.main([command, "--resume-from", "saved", *options]) == 0
+    assert len(calls) == 1
+    if expected is None:
+        assert "rerun_existing" not in calls[0]
+    else:
+        assert calls[0]["rerun_existing"] is expected
+    assert calls[0]["resume_from"] == "saved"
+
+
+@pytest.mark.parametrize("other_budget", (8, 10))
+def test_tournament_references_rules_and_budget_aliases_reach_the_api(
+    other_budget: int, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    received: dict[str, Any] = {}
+
+    def tournament(**values: object) -> None:
+        received.update(values)
+
+    def forbidden(*args: object, **kwargs: object) -> None:
+        raise AssertionError("The tournament API owns reference loading")
+
+    monkeypatch.setattr(marl_bgs, "run_tournament", tournament)
+    monkeypatch.setattr(_cli, "_load_method", forbidden)
+
+    def ignore(*args: object, **kwargs: object) -> None:
+        pass
+
+    monkeypatch.setattr(_cli, "_print_result", ignore)
+    assert (
+        _cli.main(
+            [
+                "tournament",
+                "--entrants",
+                "random, research:make, /saved/actor",
+                "--challenger",
+                "challenger:make",
+                "--games-per-opponent",
+                "8",
+                "--episodes-per-pair",
+                str(other_budget),
+                "--maps",
+                "47,48",
+                "--seed",
+                "7",
+                "--score-threshold",
+                "5",
+                "--max-steps",
+                "20",
+                "--red-zone-depth",
+                "6",
+                "--num-envs",
+                "3",
+                "--chunk-size",
+                "2",
+            ]
+        )
+        == 0
+    )
+    assert received == {
+        "policies": ("random", "research:make", "/saved/actor"),
+        "challenger": "challenger:make",
+        "games_per_opponent": 8,
+        "episodes_per_pair": other_budget,
+        "maps": (47, 48),
+        "seed": 7,
+        "score_threshold": 5,
+        "max_steps": 20,
+        "red_zone_depth": 6.0,
+        "num_envs": 3,
+        "chunk_size": 2,
+        "output_dir": None,
+        "resume_from": None,
+    }
+    assert type(received["red_zone_depth"]) is float
+
+
+def test_tournament_config_challenger_uses_the_same_api(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    received: dict[str, Any] = {}
+
+    def tournament(**values: object) -> None:
+        received.update(values)
+
+    monkeypatch.setattr(marl_bgs, "run_tournament", tournament)
+
+    def ignore(*args: object, **kwargs: object) -> None:
+        pass
+
+    monkeypatch.setattr(_cli, "_print_result", ignore)
+    assert (
+        _cli.main(
+            ["tournament", "--config", "field.json", "--challenger", "research:make"]
+        )
+        == 0
+    )
+    assert received == {
+        "config": "field.json",
+        "challenger": "research:make",
+        "output_dir": None,
+        "resume_from": None,
+        "num_envs": 128,
+        "chunk_size": 16,
+    }
+
+
+def test_tournament_api_budget_conflict_is_reported_without_retry(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    calls: list[dict[str, Any]] = []
+
+    def tournament(**values: object) -> None:
+        calls.append(values)
+        raise ValueError("games_per_opponent and episodes_per_pair must agree")
+
+    monkeypatch.setattr(marl_bgs, "run_tournament", tournament)
+    assert (
+        _cli.main(
+            [
+                "tournament",
+                "--entrants",
+                "random,tdm-alpha",
+                "--games-per-opponent",
+                "8",
+                "--episodes-per-pair",
+                "10",
+            ]
+        )
+        == 1
+    )
+    assert len(calls) == 1
+    assert calls[0]["games_per_opponent"] == 8
+    assert calls[0]["episodes_per_pair"] == 10
+    assert "must agree" in capsys.readouterr().err
 
 
 def test_ordered_rosters_and_all_explicit_evaluation_options(
@@ -261,7 +425,9 @@ def test_ordered_rosters_and_all_explicit_evaluation_options(
             ]
             for text in ("abc", "nan", "inf", "1e3", "1_0", "1.2.3", "", "+", "\u0665")
         ),
-        ["tournament", "--config", "population.json", "--red-zone-depth", "5.0"],
+        ["tournament", "--entrants", "random,,tdm-alpha"],
+        ["tournament", "--entrants", "random,tdm-alpha", "--config", "field.json"],
+        ["tournament", "--entrants", "random,tdm-alpha", "--red-zone-depth", "nan"],
         ["canonical", "--red-zone-depth", "5.0"],
     ),
 )
@@ -492,6 +658,7 @@ def test_cpu_evaluation_matches_python_and_preserves_replays(
 def test_custom_command_uses_existing_results_without_refitting_on_resume(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
 ) -> None:
     from canonical_record_fixtures import build_record_bundle
     from marl_battlegrounds.evaluation import tournament_statistics
@@ -528,6 +695,33 @@ def test_custom_command_uses_existing_results_without_refitting_on_resume(
     monkeypatch.setattr(tournament_statistics, "summarize_tournament", forbidden)
     assert _cli.main(["tournament", "--resume-from", str(first.run_dir)]) == 0
     assert received[-1].matches == first.matches
+    assert (
+        _cli.main(
+            [
+                "tournament",
+                "--resume-from",
+                str(first.run_dir),
+                "--no-rerun-existing",
+            ]
+        )
+        == 0
+    )
+    assert received[-1].matches == first.matches
+    before = {
+        path: path.read_bytes() for path in first.run_dir.rglob("*") if path.is_file()
+    }
+    completed_calls = len(received)
+    assert (
+        _cli.main(
+            ["tournament", "--resume-from", str(first.run_dir), "--rerun-existing"]
+        )
+        == 1
+    )
+    assert "rerun_existing" in capsys.readouterr().err
+    assert len(received) == completed_calls
+    assert before == {
+        path: path.read_bytes() for path in first.run_dir.rglob("*") if path.is_file()
+    }
 
 
 def test_canonical_command_reuses_twelve_and_resumes_saved_snapshot(

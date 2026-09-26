@@ -10,6 +10,7 @@ Argument discovery avoids importing JAX until a live session is requested.
 from __future__ import annotations
 
 import argparse
+import os
 import sys
 from collections.abc import Sequence
 from dataclasses import dataclass
@@ -330,6 +331,27 @@ def _recording_policy_execution_included(session: object) -> bool:
     return any(controller != "manual" for controller in controllers)
 
 
+def _configure_allocation() -> None:
+    """Default this DevClient process to allocating GPU memory as needed.
+
+    Call before importing the simulator or creating arrays. Keep an explicit
+    caller setting. Inspect an already imported JAX bridge without initializing
+    a backend; warn if settings may be too late. This is a startup default, not
+    a memory cap or protection against a provider allocating too much memory.
+    """
+    bridge = sys.modules.get("jax._src.xla_bridge")
+    initialized = getattr(bridge, "backends_are_initialized", None)
+    if "jax" in sys.modules and (not callable(initialized) or initialized()):
+        print(
+            "Warning: JAX is already initialized, or its initialization state "
+            "is unavailable. DevClient startup cannot change existing memory "
+            "reservations. Set XLA_PYTHON_CLIENT_PREALLOCATE=false before "
+            "starting Python to allocate GPU memory as needed.",
+            file=sys.stderr,
+        )
+    os.environ.setdefault("XLA_PYTHON_CLIENT_PREALLOCATE", "false")
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     """Validate launch options and open the manual combat arena.
 
@@ -352,6 +374,9 @@ def main(argv: Sequence[str] | None = None) -> int:
     Notes
     -----
     Live mode initializes the simulator and serves a loopback browser application.
+    Before numerical imports, GPU preallocation defaults to off. An explicit
+    XLA_PYTHON_CLIENT_PREALLOCATE setting is preserved. An initialized caller
+    gets a warning: startup settings cannot change existing reservations.
     Static mode opens a Matplotlib window. Recording mode may save replay evidence and
     switch the same server to review. The launcher reports handled errors on stderr.
     """
@@ -360,6 +385,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     _reject_moved_options(parser, namespace)
     options = _resolve_launch_options(namespace)
     _validate_option_matrix(parser, options)
+    _configure_allocation()
 
     try:
         recording_destination = None

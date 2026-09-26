@@ -5,6 +5,8 @@ The configuration, asset and canonical runners share these host-only checks.
 ``resolve_tournament_config`` applies saved-first resume. Neither function reads
 payload assets, imports JAX, executes factories, opens a writer or changes files.
 Configuration integrity is separate from physical game and controller evidence.
+Version 1 preserves twelve-entry releases and variable-size custom fields.
+Version 2 also permits releases with any frozen population of at least two.
 """
 
 from __future__ import annotations
@@ -20,6 +22,9 @@ from typing import Any, cast
 
 CONFIG_FORMAT = "marlbg-tournament-config"
 CONFIG_VERSION = 1
+INLINE_METADATA_ROLES = frozenset(
+    {"registration", "configuration", "schedule", "dependencies", "qualification"}
+)
 ASSET_ROLES = frozenset(
     {
         "model",
@@ -217,8 +222,34 @@ def _asset_ref(value: object, assets: Mapping[str, Any], name: str) -> str:
     return identifier
 
 
-def _assets(value: object) -> dict[str, Any]:
-    """Validate asset declarations; content verification belongs to the loader."""
+def validate_inline_asset(descriptor: Mapping[str, Any], *, version: int) -> None:
+    """Check optional v2 metadata against its canonical JSON size and digest.
+
+    Inline metadata is an object or array in ``inline``. It has no file or URL,
+    and only the roles in INLINE_METADATA_ROLES may use it. Version 1 forbids
+    this field. This host-only check never writes files or imports controllers.
+    Invalid roles, content, byte counts and digests raise ValueError.
+    """
+    if "inline" not in descriptor:
+        return
+    if version != 2 or descriptor.get("role") not in INLINE_METADATA_ROLES:
+        raise ValueError("Only version-2 metadata assets may contain inline JSON")
+    if descriptor.get("path") is not None or descriptor.get("url") is not None:
+        raise ValueError("Inline metadata cannot also have a file path or URL")
+    content = descriptor["inline"]
+    if not isinstance(content, (dict, list)):
+        raise ValueError("Inline metadata must contain a JSON object or array")
+    encoded = canonical_json(cast(object, content))
+    if (
+        descriptor.get("sha256") != sha256(encoded).hexdigest()
+        or type(descriptor.get("size_bytes")) is not int
+        or descriptor["size_bytes"] != len(encoded)
+    ):
+        raise ValueError("Inline metadata differs from its declared size or digest")
+
+
+def _assets(value: object, *, version: int = 1) -> dict[str, Any]:
+    """Validate file declarations and verify embedded version-2 metadata."""
     if not isinstance(value, dict):
         raise ValueError("assets must be an object keyed by asset ID")
     result = cast(dict[str, Any], value)
@@ -228,7 +259,7 @@ def _assets(value: object) -> dict[str, Any]:
             raw,
             f"asset {identifier}",
             {"sha256", "size_bytes", "role"},
-            optional={"path", "url"},
+            optional={"path", "url", "inline"} if version == 2 else {"path", "url"},
         )
         _digest(row["sha256"], "asset sha256")
         _integer(row["size_bytes"], "asset size_bytes")
@@ -237,10 +268,11 @@ def _assets(value: object) -> dict[str, Any]:
         for key in ("path", "url"):
             if row.get(key) is not None:
                 _text(row[key], f"asset {key}")
+        validate_inline_asset(row, version=version)
     return result
 
 
-def _controller(value: object, assets: Mapping[str, Any]) -> None:
+def _controller(value: object, assets: Mapping[str, Any], *, version: int = 1) -> None:
     """Check controller loader and evidence declarations without importing code."""
     if not isinstance(value, dict):
         raise ValueError("controller must be an object")
@@ -249,13 +281,24 @@ def _controller(value: object, assets: Mapping[str, Any]) -> None:
         "factory": {"factory"},
         "bundle": {"loader", "asset_ids"},
     }
+    if version == 2:
+        variants["reference"] = {"reference"}
     raw = cast(dict[str, Any], value)
     kind = raw.get("kind")
     if not isinstance(kind, str) or kind not in variants:
-        raise ValueError("controller kind must be builtin, factory or bundle")
+        raise ValueError("Unsupported controller kind for this descriptor version")
     row = _object(raw, "controller", {"kind", "content", *variants[kind]})
     if kind == "builtin":
         _text(row["name"], "builtin name")
+    elif kind == "reference":
+        reference = _text(row["reference"], "controller reference")
+        if not Path(reference).is_absolute():
+            if "/" in reference or "\\" in reference:
+                raise ValueError("Controller folder references must be absolute")
+            if ":" in reference:
+                pieces = reference.split(":")
+                if len(pieces) != 2 or not all(pieces) or "." in pieces[1]:
+                    raise ValueError("Controller factory must use module:function")
     else:
         reference = _text(
             row["factory" if kind == "factory" else "loader"], "controller loader"
@@ -292,14 +335,21 @@ def _controller(value: object, assets: Mapping[str, Any]) -> None:
 
 
 def _participants(
-    value: object, assets: Mapping[str, Any], *, official: bool
+    value: object, assets: Mapping[str, Any], *, official: bool, version: int = 1
 ) -> list[dict[str, Any]]:
-    """Validate population declarations while keeping labels separate from versions."""
+    """Check ordered participants under the declared descriptor version.
+
+    Every field needs at least two entrants. Official version-1 releases retain
+    exactly twelve. Official releases of either version require distinct
+    controller identities, saved ratings and rating order. Custom populations
+    may give different labels to the same controller for declared comparisons.
+    """
     rows = _array(value, "participants")
-    if len(rows) < 2 or (official and len(rows) != 12):
+    if len(rows) < 2:
+        raise ValueError("Tournament fields need at least two participants")
+    if official and version == 1 and len(rows) != 12:
         raise ValueError(
-            "An official snapshot needs exactly twelve participants; "
-            "custom fields need at least two"
+            "An official version-1 snapshot needs exactly twelve participants"
         )
     result: list[dict[str, Any]] = []
     for raw in rows:
@@ -320,7 +370,7 @@ def _participants(
             _text(row[key], f"participant {key}")
         _digest(row["controller_id"], "controller_id")
         _asset_ref(row["registration_asset"], assets, "registration_asset")
-        _controller(row["controller"], assets)
+        _controller(row["controller"], assets, version=version)
         rating = row["elo"]
         if rating is not None and (
             type(rating) not in (int, float) or not isfinite(rating)
@@ -346,15 +396,25 @@ def _participants(
             raise ValueError(
                 f"Participant {key} collision; supply distinct declared labels and IDs"
             )
-    if official and len({row["controller_id"] for row in result}) != 12:
+    if official and len({row["controller_id"] for row in result}) != len(result):
         raise ValueError("Official participants repeat a controller version")
-    if official and any(result[i]["elo"] < result[i + 1]["elo"] for i in range(11)):
+    if official and any(
+        result[i]["elo"] < result[i + 1]["elo"] for i in range(len(result) - 1)
+    ):
         raise ValueError("Official participants must follow their stored Elo order")
     return result
 
 
-def _conditions(value: object, assets: Mapping[str, Any], *, official: bool) -> None:
-    """Validate declared game conditions without constructing simulator configs."""
+def _conditions(
+    value: object, assets: Mapping[str, Any], *, official: bool, version: int = 1
+) -> None:
+    """Check game conditions without constructing simulator configs.
+
+    Version-1 releases retain five maps and five agents per team. Version-2
+    releases use their nonempty map list and one through five agents per team.
+    Both retain registered test maps, mirrored rosters and equal coverage of
+    maps and spawn choices. Custom fields keep their supported choices.
+    """
     row = _object(
         value,
         "conditions",
@@ -379,11 +439,10 @@ def _conditions(value: object, assets: Mapping[str, Any], *, official: bool) -> 
         _integer(row[key], key, 1)
     _asset_ref(row["schedule_asset"], assets, "schedule_asset")
     maps = _array(row["map_sources"], "map_sources")
-    if not maps or (official and len(maps) != 5):
-        raise ValueError(
-            "Tournament maps must be nonempty; "
-            "official snapshots require five test maps"
-        )
+    if not maps:
+        raise ValueError("Tournament maps must be nonempty")
+    if official and version == 1 and len(maps) != 5:
+        raise ValueError("Official version-1 snapshots require five test maps")
     map_ids: set[int] = set()
     for raw in maps:
         item = _object(
@@ -428,10 +487,10 @@ def _conditions(value: object, assets: Mapping[str, Any], *, official: bool) -> 
             raise ValueError("Each roster needs one through five agent classes")
         for entry in entries:
             _text(entry, "roster class")
-    if official and (
-        len(rosters["team_a"]) != 5 or rosters["team_a"] != rosters["team_b"]
-    ):
-        raise ValueError("Official rosters must be mirrored five-agent rosters")
+    if official and rosters["team_a"] != rosters["team_b"]:
+        raise ValueError("Official rosters must be mirrored")
+    if official and version == 1 and len(rosters["team_a"]) != 5:
+        raise ValueError("Official version-1 rosters must have five agents")
 
 
 def _records(value: object, assets: Mapping[str, Any]) -> set[str]:
@@ -496,17 +555,26 @@ def _validate(config: dict[str, Any], *, official: bool) -> None:
     values in a mixed combination raise "Unsupported tournament schema
     combination".
     """
-    _object(config, "tournament config", _CONFIG_FIELDS, optional={"source_location"})
+    _object(
+        config,
+        "tournament config",
+        _CONFIG_FIELDS,
+        optional={"source_location", "selection"},
+    )
     if (
         config["format"] != CONFIG_FORMAT
         or type(config["version"]) is not int
-        or config["version"] != CONFIG_VERSION
+        or config["version"] not in (1, 2)
     ):
         raise ValueError("Unsupported tournament configuration format/version")
     _digest(config["snapshot_id"], "snapshot_id")
-    assets = _assets(config["assets"])
-    participants = _participants(config["participants"], assets, official=official)
-    _conditions(config["conditions"], assets, official=official)
+    assets = _assets(config["assets"], version=config["version"])
+    participants = _participants(
+        config["participants"], assets, official=official, version=config["version"]
+    )
+    _conditions(
+        config["conditions"], assets, official=official, version=config["version"]
+    )
     sources = _records(config["record_sources"], assets)
     for participant in participants:
         if (
@@ -536,7 +604,7 @@ def _validate(config: dict[str, Any], *, official: bool) -> None:
         [row["entrant_id"] for row in participants], analysis["opponent_weights"]
     )
     if official and analysis["opponent_weights"] is not None:
-        raise ValueError("Released format-1 snapshots use equal opponent weights")
+        raise ValueError("Released snapshots use equal opponent weights")
     compatibility = _object(
         config["compatibility"],
         "compatibility",
@@ -611,6 +679,12 @@ def _validate(config: dict[str, Any], *, official: bool) -> None:
             moment = datetime.fromisoformat(_text(row[key], key))
             if moment.tzinfo is None or moment.utcoffset() is None:
                 raise ValueError(f"{key} must include its UTC offset")
+    if "selection" in config:
+        from marl_battlegrounds.evaluation.population_selection import (
+            validate_bound_selection,
+        )
+
+        validate_bound_selection(config)
     if config["snapshot_id"] != snapshot_identity(config):
         raise ValueError("Tournament snapshot content differs from snapshot_id")
 
@@ -676,13 +750,17 @@ def load_tournament_config(
     Parameters
     ----------
     config : path, mapping or None
-        JSON path or parsed format-1 descriptor. None selects the installed
-        official default; it fails clearly before a real bundle is released.
+        JSON path or parsed version-1 or version-2 descriptor. Version 1 keeps
+        twelve-entry releases; version 2 permits any frozen release population
+        of at least two. Both allow custom fields of at least two. Version 2
+        also supports inline metadata and shared method references. None picks
+        the installed official default and fails before a bundle is released.
         File-relative asset paths use the file's parent. Parsed mappings need
         absolute asset paths or an absolute ``source_location``.
     official : bool or None
         None checks release pins for descriptors with a release record. True
-        always requires an unchanged pinned twelve-entry official snapshot.
+        always requires an unchanged pinned official snapshot, using its
+        descriptor version's population and game-condition checks.
         False performs structural checks for custom or private provisional
         descriptors; public canonical calls must never use this bypass.
 
@@ -718,7 +796,7 @@ def load_tournament_config(
         selected = catalog.get("default")
         if selected is None or selected not in catalog.get("snapshots", {}):
             raise ValueError(
-                "No released official Big 12 snapshot is installed; prepare an "
+                "No released official tournament snapshot is installed; prepare an "
                 "approved bundle or use run_tournament with a custom config"
             )
         config = catalog["snapshots"][selected]["config"]
@@ -776,3 +854,45 @@ def resolve_tournament_config(
     if current["snapshot_id"] != previous["snapshot_id"]:
         raise ValueError("Tournament config differs from the saved resolved snapshot")
     return current
+
+
+def tournament_qualification(
+    config: Mapping[str, Any],
+    budget: Mapping[str, Any],
+    *,
+    official_verified: bool,
+) -> dict[str, Any]:
+    """Describe release verification and budget compliance without catalog access.
+
+    config is the checked saved or freshly resolved descriptor. budget holds its
+    original and requested games-per-opponent counts. official_verified records
+    the resolver's approval check, not the presence of self-declared release text.
+    Return the two distinct flags and a readable reason. Invalid count/flag
+    combinations raise ValueError; no files, models or current catalog are read.
+    """
+    original = config["conditions"]["games_per_opponent"]
+    resolved = budget["resolved_games_per_opponent"]
+    if (
+        type(official_verified) is not bool
+        or type(original) is not int
+        or type(resolved) is not int
+        or resolved <= 0
+        or budget["official_games_per_opponent"] != original
+        or type(budget["budget_override"]) is not bool
+        or budget["budget_override"] != (resolved != original)
+        or (official_verified and config.get("release") is None)
+    ):
+        raise ValueError("Tournament qualification has inconsistent release or budget")
+    compliant = official_verified and resolved == original
+    reason = (
+        "Released snapshot verified; original game budget retained"
+        if compliant
+        else "Released snapshot verified; game budget changed"
+        if official_verified
+        else "Snapshot has no recorded official verification"
+    )
+    return {
+        "official_snapshot_verified": official_verified,
+        "protocol_compliant": compliant,
+        "qualification_reason": reason,
+    }

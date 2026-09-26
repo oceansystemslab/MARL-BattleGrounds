@@ -275,8 +275,9 @@ there is no separate Red Zone reward.
 
 This changes the training objective; it is not a donor calculation or a claim
 of policy-invariant shaping. It addresses the absence of lasting feedback in
-drawn games, including some small-team rosters that cannot reach K20 within
-H300. Evaluation keeps native task reward and win rules. Saved configuration
+drawn games, including historical depth-zero small-team runs where the damage
+bound prevented K20 within H300. Red Zone scoring can award two points per kill,
+so that old bound does not establish a draw under current rules. Evaluation keeps native task reward and win rules. Saved configuration
 binds the chosen mode; old configurations continue to mean potential shaping.
 Learning benefit requires a controlled comparison on development seeds.
 
@@ -875,3 +876,18 @@ and makes no trajectory-equivalence claim. Full costs and memory limits are in
 [the measured engineering checks](README.md#measured-mappo-engineering-checks).
 The evidence concerns the declared workload and software stack, not equality
 across devices, library upgrades, arbitrary compiler flags or all JAX programs.
+
+## Declared Training Continuation
+
+Explicit continuation adds future work to a saved learner. Ordinary training
+and exact-config resume retain their previous rules. Continuation keeps the
+optimizer's saved arrays and update counts. A new future learning-rate or
+exploration rule must be declared before the child takes a step.
+
+For PQN, this preserves the donor's original constant-versus-scheduled optimizer
+layout and the existing RAdam moments. A larger child budget never stretches the
+original decay horizon. A declared future linear learning rate reaches the same
+terminal value, `1e-10`; using that rate during added optimizer work requires an
+explicit choice. Keeping the terminal rate does not freeze the actor: BatchNorm
+statistics can still change. Each child records its parent, actual source,
+future rules and cumulative counts. Related children are not independent seeds.

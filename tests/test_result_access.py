@@ -746,3 +746,69 @@ def test_original_coordinator_qualifies_only_complete_recorded_population(
     )
     _save(directory, manifest)
     assert load_results(directory).status == "incomplete"
+
+
+@pytest.mark.parametrize("supported", [None, 0, 2])
+def test_saved_sampling_summary_keeps_text_exact_counts_and_missing_units(
+    tmp_path: Path, supported: int | None
+) -> None:
+    directory, manifest = _fixture(tmp_path, modes=("none",))
+    games = manifest["passes"]["0"]
+    games["phase"] = "tournament"
+    games.pop("result_state")
+    games["details"].pop("evaluation_contract")
+    manifest["passes"]["coordinator"] = {
+        "phase": "tournament",
+        "pass_id": "schedule",
+        "episodes": {},
+        "completed_episode_ids": [],
+        "details": {},
+    }
+    manifest["details"] = {
+        "schedule_digest": "saved",
+        "policies": ["a", "b"],
+        "map_ids": [0],
+        "num_matches": 2,
+        "configuration_ids_by_map": {"0": "cfg"},
+    }
+    manifest["tournament_summary"] = {"digest": "saved-summary"}
+    _table(
+        directory,
+        manifest,
+        "match_results.csv",
+        MATCH_COLUMNS,
+        [_row(phase="tournament"), _row(phase="tournament", episode_id=2)],
+    )
+    label = {None: "Determinism Unknown", 0: "Deterministic", 2: "Stochastic"}[
+        supported
+    ]
+    saved = {
+        "policy": "a",
+        "elo": 1200,
+        "determinism": label,
+        "conditional_interval_assumption": "Independence is not established",
+        "sampling_interval_status": "Unavailable: Sampling mechanism unknown",
+        "declared_blocks": 2**24 + 1,
+        "scheduled_games": 4,
+        "completed_games": 4,
+        "supported_independent_sampling_units": supported,
+        "independent_blocks": supported,
+    }
+    for filename in (
+        "tournament_results.csv",
+        "matchup_results.csv",
+        "map_results.csv",
+    ):
+        _table(directory, manifest, filename, tuple(saved), [saved])
+    _save(directory, manifest)
+    result = load_results(directory)
+    assert result.status == "complete"
+    columns = result.table("tournament_results")
+    assert columns["determinism"].tolist() == [label]
+    assert columns["conditional_interval_assumption"].tolist() == [
+        "Independence is not established"
+    ]
+    assert columns["declared_blocks"].dtype == np.int64
+    assert columns["declared_blocks"].tolist() == [2**24 + 1]
+    assert columns["supported_independent_sampling_units"].tolist() == [supported]
+    assert columns["independent_blocks"].tolist() == [supported]

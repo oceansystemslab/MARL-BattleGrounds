@@ -71,6 +71,8 @@ _TEXT = frozenset(
         "system_name",
         "policy",
         "opponent",
+        "determinism",
+        "conditional_interval_assumption",
     }
 )
 _INTS = frozenset(
@@ -83,6 +85,10 @@ _INTS = frozenset(
         "rank",
         "matches",
         "independent_blocks",
+        "declared_blocks",
+        "scheduled_games",
+        "completed_games",
+        "supported_independent_sampling_units",
         "games_played",
         "completed_pairs",
         "total_steps_played",
@@ -1449,8 +1455,9 @@ class TournamentResult(_ResultAccess):
         run_tournament's policies route records "red_zone_depth" here (the Red
         Zone depth in map units; 0.0 means the rule is off); such a run saved
         before the rule has no such key and played at 0.0. Configured and
-        canonical results (CanonicalTournamentResult) never carry this key, so
-        a missing key says nothing about their depth. For every result, each
+        canonical results may omit this convenience key, so a missing key says
+        nothing about their depth. New list and short-config results preserve it
+        while using the same CanonicalTournamentResult as full configs. For each result,
         game's depth is team_deathmatch_red_zone_depth in its configuration
         under "configurations"; content saved before the rule lacks that field
         and played at 0.0.
@@ -1512,8 +1519,10 @@ class CanonicalTournamentResult(TournamentResult):
         in metadata. Fixture snapshots do not establish official qualification.
     challenger_id : str or None
         Logical entrant ID of the optional canonical challenger. None means
-        twelve only for a canonical call. Custom configuration results describe
-        their selected population, of any supported size, with no separate challenger.
+        the released field alone for a canonical call. Version 1 official fields
+        have twelve entrants; version 2 follows the frozen participant list.
+        Custom configuration results may have any supported size. The generic config
+        route also supports a separate challenger.
     planned_games, reused_games, executed_games : int
         Whole logical-run counts, including durable games from earlier attempts.
         Metadata ``executed_this_call`` counts only new work in this call.

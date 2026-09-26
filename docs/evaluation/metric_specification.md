@@ -1549,34 +1549,69 @@ Matched partners, held-out partners, and held-out opponents answer different
 questions. Label the population; one unexplained “robustness” number cannot
 stand for all of them.
 
-The accepted future Big 12 design uses an immutable monthly snapshot of
-exactly twelve systems. A canonical run will use those twelve alone or add one
-challenger: 66 or 78 unordered matchups. Every matchup has one uniform game
-budget and complete paired map/spawn coverage. The official numerical budget
-is still awaiting approval. The earlier 100-game, 6,600-episode workload remains
-a historical reference and the current custom runner's twelve-policy example;
-it is not the future official budget.
+A canonical rating names an immutable released field. Version 1 official fields
+retain exactly twelve systems; version 2 takes N from its frozen participant list.
+A field alone has N*(N-1)/2 unordered matchups; adding one challenger adds N.
+Every matchup has one uniform game budget and complete paired map/spawn coverage.
+The official numerical budget is still awaiting approval. The earlier 100-game,
+6,600-episode twelve-entry workload remains a historical reference, not an
+approved official budget.
 
 The complete raw win/draw/loss matrix is the outcome authority. Ratings use one
 joint draw-aware Bradley–Terry–Davidson fit centred at 1200, with the
 [existing uncertainty and convergence contract](protocol.md#frozen-rating-and-uncertainty-contract).
-The accepted future runner will verify and reuse incumbent games, add challenger
-games, and refit the complete population. A local call will not promote or
-publish. Monthly admission, provisional replacement/refit, complete full-report
-coverage, and the remaining launch gates are specified in the
-[Big 12 protocol](protocol.md#big-12-tournament-and-baseline-library).
-The current custom executor uses opposite policy-side assignments; its records
-must not be relabelled as fixed-team spawn pairs. Canonical enrollment, verified
-reuse, and maintainer admission are not claimed as implemented here.
+The shared runner verifies and reuses compatible incumbent games, adds challenger
+games and refits the complete population. Both descriptor versions keep the
+existing 5,000 bootstrap resamples; the reported count is the executed count.
+A local call does not promote or publish. Monthly admission, provisional
+replacement/refit, full-report coverage and the remaining release gates are in the
+[tournament protocol](protocol.md#big-n-tournament-and-baseline-library).
+New tournaments keep fixed Team A/B ownership and exchange spawn ends. Historical
+team-swapped records keep their original conditions and are never relabelled.
 
-The rating implementation has bounded synthetic-tournament qualification.
-That does not qualify manuscript training, a full Paper 1 tournament, or the
-future admission pipeline. Rows 1–11 keep three independent training runs and
-select one system using the fixed validation-only rule. Locked scenarios and
-tournament outcomes cannot select it. Qwen-Five remains tentative until measured
-cost, throughput, reproducibility, and compatibility gates pass. Keep ratings
-bound to their immutable snapshot; scores from changing populations are not
-directly comparable without a separate model for changes over time.
+New tournament summaries record sampling facts separately from the raw game
+count. `independent_blocks` keeps its original declared paired-group count;
+`declared_blocks` reports the same count. `supported_independent_sampling_units`
+is separate and may be zero or unknown. Unknown sampling keeps calculated ranges
+in the ordinary confidence columns, labelled **Conditional: Sampling not verified**.
+These ranges assume independent groups; they do not prove independence. Known
+determinism, too few groups, lack of variation and failed fits keep their existing
+safeguards. Saved historical summaries keep their original meaning. The
+[workflow guide](workflows.md#sampling-evidence-and-uncertainty) defines these
+fields and their limits. Fixed-System uncertainty does not measure variation
+between independently trained Systems.
+
+Initial membership selection uses the complete eligible validation field's
+existing joint Elo fit. Select the top N; break cutoff ties by equal-weight
+expected score against that same field, then by the predeclared entrant order.
+The declaration, candidate identities, conditions, maps, seeds, requested size
+and failure policy must be saved before those games. Weak valid candidates stay
+eligible. Failed work stays visible; missing required evidence produces an
+incomplete decision, not invented outcomes or replacement seeds.
+
+Freeze the selected identities before any selected-field refit. That refit may
+change ratings and order, but never membership. Test-map evaluation follows the
+freeze and has separate records; validation games cannot count as test games.
+Repeated deterministic trajectories do not gain independent-sample status from
+extra seed labels. Keep scheduled games, supported sampling units and observed
+repetition separate in population-selection reports too.
+
+The initial scientific plan contains eighteen settings from six learners:
+Plain, curriculum, reward shaping and combined settings for recurrent MAPPO,
+recurrent IPPO, QMIX and PQN-VDN, plus Plain feedforward MAPPO and feedforward
+IPPO. Three independent training seeds per setting are the initial campaign
+plan, not proof of adequate uncertainty or a fixed tool requirement. Checkpoint
+selection uses its declared validation-only rule and retains all run evidence.
+Training-run uncertainty remains separate from uncertainty for fixed Systems.
+
+Scripts and LLMs, including the former Qwen-Five proposal, are excluded from the
+official candidate field and ladder. Valid Systems remain available for custom
+and local comparisons; inference loading does not confer admission. The rating
+and admission software's fixture checks do not qualify trained Systems or a
+Paper 1 result. Finish all software before the scientific campaign. No official
+N, numerical budget or resource rule is selected here. Keep ratings bound to
+their snapshot; different populations are not directly comparable over time
+without a separate validated model.
 
 ## Reward-shaping classification
 
@@ -1694,8 +1729,8 @@ Before a metric becomes active, its owner must provide:
 - matched full-method/ablation scenario evidence with independently trained
   pairs, one predeclared primary endpoint, and proof that no scenario content or
   result entered training, selection, shaping, or curriculum decisions;
-- for a future canonical Big 12 rating, the exact twelve-system snapshot with
-  at most one challenger, complete 66- or 78-matchup coverage at the same
+- for a canonical rating, the exact released N-system snapshot with at most
+  one challenger, complete N*(N-1)/2 or N*(N+1)/2 matchup coverage at the same
   resolved budget, intact paired blocks, verified origin/asset identities,
   complete outcome/failure accounting, validation-only system selection, and
   the qualified draw-aware estimator; official promotion also requires every

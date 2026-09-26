@@ -8,7 +8,7 @@ configurations and metric coverage before execution or publication.
 """
 
 from collections import defaultdict
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from copy import deepcopy
 from dataclasses import dataclass
 from hashlib import sha256
@@ -296,6 +296,60 @@ def _groups(manifest: Mapping[str, Any]) -> dict[str, dict[str, Any]]:
     return result
 
 
+def _bind_companion_streams(
+    rows: Sequence[Mapping[str, object]],
+    groups: dict[str, dict[str, Any]],
+    incumbent_games: Sequence[Mapping[str, Any]],
+    challenger_id: str,
+    participant_kinds: Mapping[str, str] | None,
+) -> list[dict[str, Any]]:
+    """Bind declared v2 companion streams to verified Policy/System kinds.
+
+    Return copied never-played template rows and update only their separate
+    group stream fields. Root seeds, episode/seed IDs, maps and spawn choices
+    remain unchanged. Missing kinds, shared incumbent groups or a companion
+    group requiring conflicting streams raise ValueError. The caller saves the
+    resolved plan, while the original descriptor and template stay immutable.
+    """
+    if participant_kinds is None:
+        raise ValueError("Companion insertion needs checked Policy/System kinds")
+    incumbent_groups = {game["execution"]["group_id"] for game in incumbent_games}
+    selected: dict[str, str] = {}
+    result: list[dict[str, Any]] = []
+    for raw_row in rows:
+        row = deepcopy(_object(raw_row, "companion game"))
+        execution = _object(row.get("execution"), "companion execution")
+        group_id = _text(execution.get("group_id"), "companion group_id")
+        if group_id not in groups or group_id in incumbent_groups:
+            raise ValueError("Deferred companion streams need separate declared groups")
+        opponent = _text(row.get("team_b"), "companion opponent")
+        first, second = (
+            participant_kinds.get(challenger_id),
+            participant_kinds.get(opponent),
+        )
+        if first not in {"policy", "system"} or second not in {"policy", "system"}:
+            raise ValueError(
+                "Companion insertion needs checked Policy/System kinds for every pair"
+            )
+        stream = (
+            "episode-fold-in-v1"
+            if first == second == "policy"
+            else "evaluation-systems-v1"
+        )
+        if selected.setdefault(group_id, stream) != stream:
+            raise ValueError("A companion group mixes incompatible method streams")
+        execution.update(
+            action_stream_version=stream, initialization_stream_version=stream
+        )
+        row["execution"] = execution
+        result.append(row)
+    for identifier, stream in selected.items():
+        groups[identifier].update(
+            action_stream_version=stream, initialization_stream_version=stream
+        )
+    return result
+
+
 def _games(
     rows: Sequence[Mapping[str, object]],
     groups: Mapping[str, dict[str, Any]],
@@ -502,6 +556,56 @@ def selection_unit_id(game: Mapping[str, Any]) -> str:
     ).decode("utf-8")
 
 
+def _execution_highwater(
+    games: Sequence[Mapping[str, Any]],
+) -> dict[str, tuple[int, int]]:
+    """Find each group's largest episode and seed IDs with one pass over games.
+
+    This checks reserved coordinates only, not statistical independence. Callers
+    compare the returned maxima with existing counters and keep their own error
+    messages. Missing groups have no game coordinates to check.
+    """
+    result: dict[str, tuple[int, int]] = {}
+    for game in games:
+        execution = game["execution"]
+        identifier = execution["group_id"]
+        episode_id, seed_id = result.get(identifier, (0, 0))
+        result[identifier] = (
+            max(episode_id, execution["episode_id"]),
+            max(seed_id, execution["seed_id"]),
+        )
+    return result
+
+
+def _root_allocation_counters(
+    groups: Mapping[str, Mapping[str, Any]],
+) -> dict[int, dict[str, int]]:
+    """Copy the highest reserved episode/seed counters for each existing root.
+
+    Marked version-2 schedules share these counters across their separate method
+    groups. Changing a group or its method stream does not create a new random
+    root. Include unused groups: their counters can reserve previously played
+    or still unplayed coordinates. The caller advances these copies and saves
+    them back to every group sharing that root after allocation succeeds.
+    """
+    result: dict[int, dict[str, int]] = {}
+    for group in groups.values():
+        counters = result.setdefault(
+            group["root_seed"], {"next_episode_id": 1, "next_seed_id": 0}
+        )
+        for field in counters:
+            counters[field] = max(counters[field], group[field])
+    return result
+
+
+def _save_root_allocation_counters(
+    groups: Mapping[str, dict[str, Any]], counters: Mapping[int, Mapping[str, int]]
+) -> None:
+    """Save advanced root-wide reservations without changing group stream fields."""
+    for group in groups.values():
+        group.update(counters[group["root_seed"]])
+
+
 def _extend(
     games: list[dict[str, Any]],
     groups: dict[str, dict[str, Any]],
@@ -511,8 +615,14 @@ def _extend(
     map_order: Sequence[int],
     *,
     reserved_games: Sequence[dict[str, Any]] = (),
+    shared_root_counters: bool = False,
 ) -> None:
-    """Append whole independent rounds using declared counters and known configs."""
+    """Append whole independent rounds using declared counters and known configs.
+
+    Marked v2 schedules set shared_root_counters so separate method groups with
+    the same root cannot allocate overlapping coordinates. Unmarked schedules
+    retain their existing per-group allocation. Existing rows remain unchanged.
+    """
     rounds = max(target - len(pairs) for pairs in cells.values())
     if rounds <= 0:
         return
@@ -522,19 +632,16 @@ def _extend(
     next_logical = max(game["logical_game_id"] for game in declared) + 1
     if next_logical + 2 * rounds * len(cells) - 1 > _INT32_MAX:
         raise ValueError("Extended logical game IDs exceed int32")
+    highwater = _execution_highwater(declared)
     for group_id, group in groups.items():
-        owned = [
-            game["execution"]
-            for game in declared
-            if game["execution"]["group_id"] == group_id
-        ]
-        if owned and (
-            group["next_episode_id"] <= max(item["episode_id"] for item in owned)
-            or group["next_seed_id"] <= max(item["seed_id"] for item in owned)
+        owned = highwater.get(group_id)
+        if owned is not None and (
+            group["next_episode_id"] <= owned[0] or group["next_seed_id"] <= owned[1]
         ):
             raise ValueError(
                 "Extension counters overlap declared execution coordinates"
             )
+    root_counters = _root_allocation_counters(groups) if shared_root_counters else None
     for round_index in range(rounds):
         for a, b in combinations(allocation_order, 2):
             for map_id in map_order:
@@ -546,7 +653,15 @@ def _extend(
                     raise ValueError(
                         "Requested budget exceeds coverage; this schedule cannot extend"
                     )
-                episode_id, seed_id = group["next_episode_id"], group["next_seed_id"]
+                counters = (
+                    group
+                    if root_counters is None
+                    else root_counters[group["root_seed"]]
+                )
+                episode_id, seed_id = (
+                    counters["next_episode_id"],
+                    counters["next_seed_id"],
+                )
                 if episode_id + 1 > _INT32_MAX or seed_id > _UINT32_MAX:
                     raise ValueError(
                         "Extended execution coordinates exceed int32/uint32 limits"
@@ -576,8 +691,10 @@ def _extend(
                     )
                     games.append(new)
                     next_logical += 1
-                group["next_episode_id"] += 2
-                group["next_seed_id"] += 1
+                counters["next_episode_id"] += 2
+                counters["next_seed_id"] += 1
+    if root_counters is not None:
+        _save_root_allocation_counters(groups, root_counters)
 
 
 def _select(
@@ -746,7 +863,9 @@ def resolve_reuse_plan(
     config: Mapping[str, object],
     asset_paths: Mapping[str, Path],
     *,
+    asset_reader: Callable[[str], object] | None = None,
     challenger_id: str | None = None,
+    participant_kinds: Mapping[str, str] | None = None,
     games_per_opponent: int | None = None,
     rerun_existing: bool = False,
     require_reuse: bool | None = None,
@@ -757,13 +876,24 @@ def resolve_reuse_plan(
     Parameters
     ----------
     config : Mapping[str, object]
-        Format-1 descriptor checked by the shared configuration authority.
+        Version-1 or version-2 descriptor checked by the shared authority.
     asset_paths : Mapping[str, pathlib.Path]
         Paths whose bytes were checked by the asset authority. This function
-        reads only the schedule manifest and game JSONL assets.
+        reads only the schedule manifest and game JSONL assets. Inline assets
+        need no path.
+    asset_reader : callable or None
+        Optional checked JSON reader, normally AssetVerifier.read_json. Version-2
+        inline schedules and game arrays require it. File-backed game lists keep
+        the existing JSONL reader and need asset_paths even when this is supplied.
+        The caller owns asset integrity checks, as with asset_paths.
     challenger_id : str | None
         Distinct entrant ID to place in every companion game's Team A. None
         selects the configured population alone.
+    participant_kinds : mapping or None
+        Checked entrant-ID to "policy"/"system" kinds, including the challenger.
+        Required only when inserting into a v2 schedule declaring
+        companion_stream_rule="participant-method-v1". That rule binds only
+        fresh companion streams; fixed v1 and unmarked v2 plans are unchanged.
     games_per_opponent : int | None
         Equal completed-game count for every unordered matchup. None inherits
         the config. Values must be positive, nonboolean integers divisible by
@@ -856,8 +986,21 @@ def resolve_reuse_plan(
         ):
             raise ValueError("Duplicate or mismatching record source identity")
         sources[identifier] = source
+
+    def read_schedule(identifier: object, *, games: bool = False) -> object:
+        """Read checked inline JSON or retain the existing file/JSONL route."""
+        name = _text(identifier, "schedule asset ID")
+        descriptor = _object(assets.get(name, {}), "schedule asset descriptor")
+        if "inline" in descriptor:
+            if raw.get("version") != 2 or asset_reader is None:
+                raise ValueError("Inline schedules need version 2 and a checked reader")
+            return asset_reader(name)
+        if games:
+            return _read_jsonl(_path(name, asset_paths))
+        return read_config_json(_path(name, asset_paths))
+
     manifest = deepcopy(
-        read_config_json(_path(conditions.get("schedule_asset"), asset_paths))
+        _object(read_schedule(conditions.get("schedule_asset")), "schedule")
     )
     allowed = {
         "format",
@@ -869,10 +1012,18 @@ def resolve_reuse_plan(
         "allocation_order",
     }
     if (
-        set(manifest) != allowed
+        set(manifest) - {"companion_stream_rule"} != allowed
         or manifest.get("format") != "marlbg-tournament-schedule"
     ):
         raise ValueError("Expected exact tournament schedule format 1")
+    if "companion_stream_rule" in manifest and (
+        raw.get("version") != 2
+        or manifest["companion_stream_rule"] != "participant-method-v1"
+    ):
+        raise ValueError(
+            "Deferred companion streams require the version-2 "
+            "participant-method-v1 rule"
+        )
     _integer(manifest.get("version"), "schedule version", lower=1, upper=1)
     groups = _groups(manifest)
     allocation = [
@@ -885,7 +1036,7 @@ def resolve_reuse_plan(
     if challenger_id is not None:
         allocation.append(challenger_id)
     games = _games(
-        _read_jsonl(_path(manifest["games_asset"], asset_paths)),
+        _sequence(read_schedule(manifest["games_asset"], games=True), "games"),
         groups,
         sources,
         set(incumbents),
@@ -899,8 +1050,16 @@ def resolve_reuse_plan(
         and manifest["challenger_games_asset"] is not None
     ):
         template_id = CHALLENGER_PLACEHOLDER if challenger_id is None else challenger_id
+        companion_rows = _sequence(
+            read_schedule(manifest["challenger_games_asset"], games=True),
+            "challenger games",
+        )
+        if challenger_id is not None and "companion_stream_rule" in manifest:
+            companion_rows = _bind_companion_streams(
+                companion_rows, groups, games, challenger_id, participant_kinds
+            )
         companion = _games(
-            _read_jsonl(_path(manifest["challenger_games_asset"], asset_paths)),
+            companion_rows,
             groups,
             sources,
             {*incumbents, template_id},
@@ -938,6 +1097,9 @@ def resolve_reuse_plan(
             allocation,
             tuple(map_sources),
             reserved_games=companion if challenger_id is None else (),
+            shared_root_counters=(
+                manifest.get("companion_stream_rule") == "participant-method-v1"
+            ),
         )
         pairs = _pairs(games)
         cells = _cells(pairs)
@@ -963,33 +1125,39 @@ def resolve_reuse_plan(
                 "rerun_existing=True for fresh execution"
             )
     manifest["execution_groups"] = list(groups.values())
+    from marl_battlegrounds.evaluation.tournament_config import tournament_qualification
+
+    budget_record = {
+        "official_games_per_opponent": original_budget,
+        "resolved_games_per_opponent": budget,
+        "budget_override": budget != original_budget,
+    }
+    budget_record["protocol_compliant"] = tournament_qualification(
+        raw, budget_record, official_verified=official_verified
+    )["protocol_compliant"]
     return ReusePlan(
         tuple(selected),
         _jobs(selected),
         tuple(sources.values()),
-        {
-            "official_games_per_opponent": original_budget,
-            "resolved_games_per_opponent": budget,
-            "budget_override": budget != original_budget,
-            "protocol_compliant": official_verified
-            and official
-            and budget == original_budget,
-        },
+        budget_record,
         manifest,
         tuple(entrant_ids),
     )
 
 
 def analysis_schedule(
-    plan: ReusePlan, participant_names: Mapping[str, str] | None = None
+    plan: ReusePlan | Sequence[Mapping[str, Any]],
+    participant_names: Mapping[str, str] | None = None,
 ) -> tuple[TournamentMatch, ...]:
     """Project verified logical records into the existing statistical schedule.
 
     Parameters
     ----------
-    plan : ReusePlan
-        Declared plan. The runner must verify physical/report evidence before
-        fitting; this projection alone does not certify a completed population.
+    plan : ReusePlan or sequence of mappings
+        Declared plan, or the same immutable logical game rows read from disk.
+        A row sequence takes its participant IDs from the games. The runner must
+        verify physical/report evidence before fitting; this projection alone
+        does not certify a completed population or read any model/report files.
     participant_names : Mapping[str, str] | None
         Optional complete entrant-ID to distinct output-label mapping. None uses
         entrant IDs directly, which avoids confusing labels from foreign runs.
@@ -1007,21 +1175,25 @@ def analysis_schedule(
     """
     from marl_battlegrounds.evaluation.tournament_schedule import TournamentMatch
 
+    games = plan.games if isinstance(plan, ReusePlan) else plan
+    participant_ids = (
+        set(plan.participant_ids)
+        if isinstance(plan, ReusePlan)
+        else {game[team] for game in games for team in ("team_a", "team_b")}
+    )
     labels = (
-        {identifier: identifier for identifier in plan.participant_ids}
+        {identifier: identifier for identifier in participant_ids}
         if participant_names is None
         else dict(participant_names)
     )
-    if set(labels) != set(plan.participant_ids) or len(set(labels.values())) != len(
-        labels
-    ):
+    if set(labels) != participant_ids or len(set(labels.values())) != len(labels):
         raise ValueError("Analysis labels must cover every entrant distinctly")
     for value in labels.values():
         _text(value, "analysis label")
     blocks: dict[str | int, int] = {}
     seeds: dict[tuple[object, ...], int] = {}
     result: list[TournamentMatch] = []
-    for game in plan.games:
+    for game in games:
         execution = game["execution"]
         block = blocks.setdefault(game["pair_id"], len(blocks) + 1)
         coordinate = tuple(
@@ -1101,7 +1273,12 @@ def rebuild_companion(
     -----
     Call only after promotion. A failed or nonpromoted challenger leaves the
     population and its existing companion unchanged. Retrying that comparison
-    keeps its saved schedule. This helper creates no global per-attempt allocator.
+    keeps its saved schedule. Marked version-2 schedules give each new opponent
+    and source-group template a separate fresh group; only those new groups may
+    bind the next challenger's method stream. Counters stay shared by root.
+    Existing game rows and group stream fields are never changed. Unmarked
+    schedules retain their original group allocation. This helper creates no
+    global per-attempt allocator.
     """
     ids = [_text(value, "retained entrant ID") for value in participant_ids]
     old_order = list(plan.schedule_manifest["allocation_order"])
@@ -1156,17 +1333,17 @@ def rebuild_companion(
         raise ValueError("Retained games must have complete equal matchup/map coverage")
     manifest = deepcopy(plan.schedule_manifest)
     groups = {row["group_id"]: row for row in manifest["execution_groups"]}
+    highwater = _execution_highwater(plan.games)
     for group_id, group in groups.items():
-        executions = [
-            row["execution"]
-            for row in plan.games
-            if row["execution"]["group_id"] == group_id
-        ]
-        if executions and (
-            group["next_episode_id"] <= max(row["episode_id"] for row in executions)
-            or group["next_seed_id"] <= max(row["seed_id"] for row in executions)
+        executions = highwater.get(group_id)
+        if executions is not None and (
+            group["next_episode_id"] <= executions[0]
+            or group["next_seed_id"] <= executions[1]
         ):
             raise ValueError("Companion allocation counters overlap previous games")
+    deferred = manifest.get("companion_stream_rule") == "participant-method-v1"
+    root_counters = _root_allocation_counters(groups) if deferred else None
+    companion_groups: dict[tuple[str, str], dict[str, Any]] = {}
     order = [identifier for identifier in old_order if identifier in ids]
     order.append(challenger)
     next_logical = max(row["logical_game_id"] for row in plan.games) + 1
@@ -1205,13 +1382,36 @@ def rebuild_companion(
                 raise ValueError(
                     "A coupled challenger template needs an approved extension rule"
                 )
+            group = groups[template[0]["execution"]["group_id"]]
+            if deferred:
+                template_key = entrant, group["group_id"]
+                if template_key not in companion_groups:
+                    identifier = (
+                        "companion-group:"
+                        + sha256(
+                            canonical_json([generation, *template_key])
+                        ).hexdigest()
+                    )
+                    if identifier in groups:
+                        raise ValueError("A new companion group repeats an existing ID")
+                    fresh_group = {**group, "group_id": identifier}
+                    groups[identifier] = fresh_group
+                    companion_groups[template_key] = fresh_group
+                group = companion_groups[template_key]
             for pair_order in range(count):
-                group = groups[template[0]["execution"]["group_id"]]
                 if group["extension"] != "independent-pairs-v1":
                     raise ValueError(
                         "The declared group cannot allocate a new companion"
                     )
-                episode_id, seed_id = group["next_episode_id"], group["next_seed_id"]
+                counters = (
+                    group
+                    if root_counters is None
+                    else root_counters[group["root_seed"]]
+                )
+                episode_id, seed_id = (
+                    counters["next_episode_id"],
+                    counters["next_seed_id"],
+                )
                 if episode_id + 1 > _INT32_MAX or seed_id > _UINT32_MAX:
                     raise ValueError("New companion execution IDs exceed int32/uint32")
                 pair_id = (
@@ -1242,12 +1442,17 @@ def rebuild_companion(
                         prior_origin=None,
                     )
                     row["execution"].update(
-                        episode_id=episode_id + spawn, seed_id=seed_id
+                        group_id=group["group_id"],
+                        episode_id=episode_id + spawn,
+                        seed_id=seed_id,
                     )
                     companion.append(row)
                     next_logical += 1
-                group["next_episode_id"] += 2
-                group["next_seed_id"] += 1
+                counters["next_episode_id"] += 2
+                counters["next_seed_id"] += 1
+    if root_counters is not None:
+        _save_root_allocation_counters(groups, root_counters)
+        manifest["execution_groups"] = list(groups.values())
     manifest.update(
         games_asset=games_asset,
         challenger_games_asset=challenger_games_asset,

@@ -1,6 +1,6 @@
 """Run immutable tournament plans through the existing evaluator and recorder.
 
-run_canonical_tournament selects a released Big 12 snapshot, with one optional
+run_canonical_tournament selects a released tournament snapshot, with one optional
 challenger. The private resolved route also serves custom configs and maintainer
 admission. Original game records keep their identities. Models are loaded only
 for unfinished jobs, and complete saved summaries are read without fitting again.
@@ -23,9 +23,12 @@ from typing import TYPE_CHECKING, Any, cast
 from uuid import uuid4
 
 from marl_battlegrounds.evaluation.evaluation_conditions import OMITTED, Omitted
+from marl_battlegrounds.evaluation.sampling_evidence import (
+    combine_sampling_facts,
+    method_sampling_fact,
+)
 from marl_battlegrounds.evaluation.tournament_assets import (
     AssetVerifier,
-    active_tournament_pair,
     asset_location_config,
     controller_content_identity,
     duplicate_controller_id,
@@ -137,7 +140,8 @@ def _source_configs(
 
     conditions = config["conditions"]
     if (
-        config["release"] is not None
+        config["version"] == 1
+        and config["release"] is not None
         and tuple(tuple(conditions["rosters"][team]) for team in ("team_a", "team_b"))
         != canonical_tournament_rosters()
     ):
@@ -276,7 +280,7 @@ def _plan_paths(
 
     config and verifier describe one immutable snapshot. challenger says whether
     an explicit companion schedule is required. An existing companion is also
-    read for twelve-only allocation bounds. Missing required references fail;
+    read for field-only allocation bounds. Missing required references fail;
     this never downloads, loads models or opens optional report payloads.
     """
     schedule_id = config["conditions"]["schedule_asset"]
@@ -289,7 +293,9 @@ def _plan_paths(
         if schedule.get("challenger_games_asset") is None:
             raise ValueError("This snapshot has no declared challenger schedule")
         identifiers.append(schedule["challenger_games_asset"])
-    return verifier.require(identifiers)
+    return verifier.require(
+        [key for key in identifiers if "inline" not in verifier.assets[key]]
+    )
 
 
 def _specs(
@@ -344,6 +350,47 @@ def _specs(
             )
         result[job["job_id"]] = tuple(values)
     return result
+
+
+def _check_saved_job_options(
+    manifest: Mapping[str, Any],
+    plan: ReusePlan,
+    *,
+    metrics: str,
+    full: Mapping[int, Sequence[int]],
+    replays: Mapping[int, Sequence[int]],
+) -> None:
+    """Check saved local pass settings before any recovery or completed return.
+
+    plan contains the checked jobs; full and replays use their execution IDs.
+    Missing passes are unstarted jobs. Existing passes must retain their seed,
+    episode list and effective captures. Full mode selects every job episode.
+    This check does not constrain batch/chunk settings or inspect reused sources;
+    TournamentRecords owns source evidence. Mismatches raise without writes.
+    """
+    games = {row["logical_game_id"]: row for row in plan.games}
+    passes = {
+        (row["phase"], row["pass_id"]): row for row in manifest["passes"].values()
+    }
+    for job in plan.jobs:
+        entry = passes.get((job["phase"], job["pass_id"]))
+        if entry is None:
+            continue
+        ids = sorted(
+            games[key]["execution"]["episode_id"] for key in job["logical_game_ids"]
+        )
+        expected = {
+            "seed": job["root_seed"],
+            "metrics": metrics,
+            "episode_ids": ids,
+            "num_episodes": len(ids),
+            "full_metrics_episodes": ids
+            if metrics == "full"
+            else sorted(full[job["job_id"]]),
+            "replay_episodes": sorted(replays[job["job_id"]]),
+        }
+        if any(entry["details"].get(name) != value for name, value in expected.items()):
+            raise ValueError("Saved tournament pass scientific conditions differ")
 
 
 def _match_rows(records: TournamentRecords, metrics: str) -> list[dict[str, Any]]:
@@ -527,6 +574,9 @@ def _result(
         if config["release"]
         else config["conditions"]["pairing_protocol"],
     }
+    for key in ("execution_resources", "execution_layouts"):
+        if key in manifest:
+            details[key] = manifest[key]
     return CanonicalTournamentResult(
         tuple(dict(row) for row in matches),
         tuple(dict(row) for row in ratings),
@@ -548,6 +598,21 @@ def _result(
     )
 
 
+def _resident_request_key(
+    identifier: str, participant: Mapping[str, Any]
+) -> tuple[str, bytes, str]:
+    """Name one exact entrant request without retaining its model or loading it.
+
+    identifier is the participant ID. The checked controller descriptor and
+    unchanged-placement marker distinguish requests made to the resident cache.
+    """
+    return (
+        identifier,
+        canonical_json(participant["controller"]),
+        "unchanged-placement",
+    )
+
+
 @contextmanager
 def _active_pair(
     first: str,
@@ -556,31 +621,138 @@ def _active_pair(
     verifier: AssetVerifier,
     challenger_id: str | None,
     method: System | Policy | None,
+    bindings: Mapping[str, System | Policy] | None = None,
+    *,
+    residents: dict[tuple[str, bytes, str], System | Policy] | None = None,
 ) -> Generator[tuple[System | Policy, System | Policy]]:
-    """Yield one active ordered pair, then release library-owned model references.
+    """Borrow supplied methods and lazily reuse each exact entrant reference.
 
-    first and second are entrant IDs in participants. verifier checks their assets.
-    When method is supplied for challenger_id it is borrowed; the other method is
-    loaded through the shared asset authority. Otherwise load both declared models.
-    Synchronize pending effects before dropping owned references. The caller must
-    also release its borrowed pair references before loading another pair.
-    Loader/action exceptions propagate; no implicit retries or downloads occur.
+    first and second select checked participant IDs. bindings and the optional
+    challenger method stay caller-owned. residents is the current run's plain
+    dictionary; None keeps loaded references only for this pair. Each key names
+    the entrant and its full controller descriptor, so distinct host entrants
+    are never merged because their model labels happen to match.
+
+    Loading and calls stay in the caller's context. Errors propagate without
+    retry. No provider is closed, moved to another device or sent to a worker.
+    Dropping references makes no promise about allocator or provider memory.
     """
-    if challenger_id not in (first, second) or method is None:
-        with active_tournament_pair(
-            participants[first], participants[second], verifier
-        ) as pair:
-            yield pair
-        return
-    other = second if first == challenger_id else first
-    loaded = load_tournament_controller(participants[other], verifier)
-    try:
-        yield (method, loaded) if first == challenger_id else (loaded, method)
-    finally:
-        import jax
+    cache = {} if residents is None else residents
+    available: dict[str, System | Policy] = {}
+    for identifier in dict.fromkeys((first, second)):
+        if challenger_id == identifier and method is not None:
+            available[identifier] = method
+        elif bindings is not None and identifier in bindings:
+            available[identifier] = bindings[identifier]
+        else:
+            participant = participants[identifier]
+            request = _resident_request_key(identifier, participant)
+            if request not in cache:
+                cache[request] = load_tournament_controller(participant, verifier)
+            available[identifier] = cache[request]
+    yield available[first], available[second]
 
-        jax.effects_barrier()
-        del loaded
+
+def _recorded_method_sampling(
+    records: TournamentRecords,
+    participants: Mapping[str, Mapping[str, Any]],
+    observed: Mapping[str, Mapping[str, Any]],
+    completed_before: set[int],
+) -> dict[str, dict[str, Any]]:
+    """Recover sampling facts only from each game's checked original evidence.
+
+    Call after prepare_reuse_evidence has checked every origin, pass and method
+    identity. completed_before names games already durable before this call;
+    only newly played local games may use observed loaded-method facts. Saved
+    pass facts are bound to that pass's team registrations. Older input/summary
+    facts need the matching original registration ID. Missing or conflicting
+    facts stay unknown. No actor is loaded and no saved record is rewritten.
+    """
+    facts: dict[str, dict[bytes, dict[str, Any]]] = {
+        item["name"]: {} for item in participants.values()
+    }
+    with records.verifier.verification_scope():
+        for game in records.games:
+            origin = records.origin(game)
+            manifest = records.source_manifest(game)
+            entry = records.entry(game)
+            assert entry is not None
+            declaration = entry["episodes"][str(origin["episode_id"])]
+            owners = declaration.get("system_ids", entry.get("system_ids", {}))
+            source_input = manifest.get("details", {}).get("input_metadata", {})
+            summary = manifest.get("tournament_summary", {})
+            summary_systems = (
+                summary.get("qualification", {}).get("evidence", {}).get("systems", {})
+            )
+            for team in ("team_a", "team_b"):
+                name = participants[game[team]]["name"]
+                registration_id = owners[team]
+                original_name = manifest["systems"][registration_id]["name"]
+                candidates: list[Mapping[str, Any]] = []
+                saved_fact = entry["details"].get("method_sampling", {}).get(team)
+                if saved_fact is not None:
+                    candidates.append(saved_fact)
+                if (
+                    source_input.get("participants", {}).get(original_name)
+                    == registration_id
+                ):
+                    previous = source_input.get("method_sampling", {}).get(
+                        original_name
+                    )
+                    if previous is not None:
+                        candidates.append(previous)
+                if any(
+                    item.get("name") == original_name
+                    and registration_id in item.get("registration_ids", ())
+                    for item in summary_systems.values()
+                ):
+                    previous = (
+                        summary.get("metadata", {})
+                        .get("method_sampling", {})
+                        .get(original_name)
+                    )
+                    if previous is not None:
+                        candidates.append(previous)
+                if (
+                    origin.get("source_id") is None
+                    and game["logical_game_id"] not in completed_before
+                    and name in observed
+                ):
+                    candidates.append(observed[name])
+                try:
+                    combine_sampling_facts(candidates)
+                    known = [
+                        fact for fact in candidates if fact["determinism"] != "unknown"
+                    ]
+                    # An original pass can explain an older summary's missing
+                    # support. Conflicting known facts cannot explain each other.
+                    selected = known or candidates
+                    value = (
+                        {
+                            "determinism": "unknown",
+                            "basis": "Original sampling facts conflict",
+                        }
+                        if len({fact["determinism"] for fact in selected}) > 1
+                        else combine_sampling_facts(selected)
+                    )
+                except TypeError, ValueError:
+                    value = {
+                        "determinism": "unknown",
+                        "basis": "Original sampling facts are invalid",
+                    }
+                facts[name][canonical_json(value)] = value
+    result: dict[str, dict[str, Any]] = {}
+    for name, unique in facts.items():
+        values = tuple(unique.values())
+        result[name] = (
+            {
+                "determinism": "unknown",
+                "basis": "Original sampling facts conflict across games",
+            }
+            if len({fact["determinism"] for fact in values} - {"unknown"}) > 1
+            else combine_sampling_facts(values)
+        )
+    return result
 
 
 def _run_resolved_tournament(
@@ -601,6 +773,9 @@ def _run_resolved_tournament(
     resume_from: str | Path | None = None,
     num_envs: int = 128,
     chunk_size: int = 16,
+    _bindings: Mapping[str, System | Policy] | None = None,
+    _system_prepared: bool = False,
+    _input_metadata: Mapping[str, Any] | None = None,
     _explicit_config: bool = True,
     _official_snapshot_verified: bool = False,
 ) -> CanonicalTournamentResult:
@@ -620,7 +795,12 @@ def _run_resolved_tournament(
     when None. Metric and capture settings use public canonical meanings.
 
     output_dir and resume_from are mutually exclusive; neither means no files.
-    num_envs and chunk_size are positive execution limits. _explicit_config is
+    num_envs is the positive fixed number of parallel game lanes per matchup;
+    chunk_size is a positive tick count. Pair scheduling stays sequential.
+    _bindings borrows already frozen local entrants. _system_prepared=True
+    borrows the challenger frozen by list preparation, without another model copy.
+    _input_metadata carries the
+    short/list result aliases from their shared normalizer. _explicit_config is
     private: True applies the supplied config's current asset hints; False keeps
     durable hints from an omitted saved config. It never changes scientific
     identity. _official_snapshot_verified records the public canonical resolver
@@ -633,10 +813,7 @@ def _run_resolved_tournament(
     rerun_existing=True), ValueError "Snapshot configurations were saved before
     the Red Zone rule; ..." is raised before any output is created.
     """
-    from marl_battlegrounds.evaluation.evaluate import (
-        _evaluate_tournament_episodes,
-        positive_int,
-    )
+    from marl_battlegrounds.evaluation.evaluate import positive_int
     from marl_battlegrounds.evaluation.evaluation_conditions import capture_ids
     from marl_battlegrounds.evaluation.metric_catalog import METRIC_SCHEMA_ID
     from marl_battlegrounds.evaluation.policy_execution import Policy
@@ -645,15 +822,24 @@ def _run_resolved_tournament(
         RunWriter,
         _json_bytes,
     )
-    from marl_battlegrounds.evaluation.system_evaluation import freeze_evaluation_method
     from marl_battlegrounds.evaluation.tournament import _memory_matches, _merge_columns
     from marl_battlegrounds.evaluation.tournament_evidence import prepare_reuse_evidence
+    from marl_battlegrounds.evaluation.tournament_execution import (
+        TournamentJob,
+        execute_tournament_jobs,
+    )
     from marl_battlegrounds.evaluation.tournament_headlines import (
         content_digest,
         summarize_headlines,
     )
+    from marl_battlegrounds.evaluation.tournament_inputs import (
+        _prepare_tournament_method,
+    )
     from marl_battlegrounds.evaluation.tournament_schedule import TournamentMatch
-    from marl_battlegrounds.evaluation.tournament_statistics import summarize_tournament
+    from marl_battlegrounds.evaluation.tournament_statistics import (
+        summarize_tournament,
+        validate_opponent_weights,
+    )
 
     if output_dir is not None and resume_from is not None:
         raise ValueError("output_dir and resume_from are mutually exclusive")
@@ -711,7 +897,14 @@ def _run_resolved_tournament(
             raise ValueError(
                 "Participant content differs from its declared controller ID"
             )
-    method = None if system is None else freeze_evaluation_method(system)
+    prepared_system = None
+    if _system_prepared:
+        if isinstance(system, str):
+            raise TypeError("A prepared challenger must be a loaded method")
+        prepared_system = system
+    method = prepared_system
+    if system is not None and not _system_prepared:
+        method = _prepare_tournament_method(system)
     challenger_id = None
     if method is not None or challenger_descriptor is not None:
         if challenger_descriptor is None:
@@ -730,7 +923,7 @@ def _run_resolved_tournament(
             is not None
         ):
             raise ValueError(
-                "Exact incumbent duplicate; use the twelve-only route with system=None"
+                "Exact incumbent duplicate; run the field without a challenger"
             )
         if any(row["name"] == candidate["name"] for row in descriptors):
             raise ValueError(
@@ -741,7 +934,7 @@ def _run_resolved_tournament(
         )
         if known and any(row["controller_id"] == identifier for row in descriptors):
             raise ValueError(
-                "Exact incumbent duplicate; use the twelve-only route with system=None"
+                "Exact incumbent duplicate; run the field without a challenger"
             )
         challenger_id = candidate["entrant_id"]
         registrations[challenger_id] = registration
@@ -749,10 +942,27 @@ def _run_resolved_tournament(
     participants = {row["entrant_id"]: row for row in descriptors}
     if len(participants) != len(descriptors):
         raise ValueError("Challenger entrant identity collides with an incumbent")
+    declared_weights = config["analysis"]["opponent_weights"]
+    weights = (
+        None
+        if declared_weights is None
+        else {
+            participants[key]["name"]: value for key, value in declared_weights.items()
+        }
+    )
+    # Check the complete field before actions; a challenger has no invented weight.
+    validate_opponent_weights(tuple(row["name"] for row in descriptors), weights)
+    bindings = dict(_bindings or {})
+    if set(bindings) - participants.keys():
+        raise ValueError("Supplied tournament bindings name an unknown entrant")
+    for identifier, bound in bindings.items():
+        validate_loaded_controller(bound, participants[identifier], verifier)
     paths = _plan_paths(config, verifier, challenger_id is not None)
     resolved_plan = resolve_reuse_plan(
         config,
         paths,
+        asset_reader=verifier.read_json,
+        participant_kinds={key: value["kind"] for key, value in registrations.items()},
         challenger_id=challenger_id,
         games_per_opponent=games_per_opponent,
         rerun_existing=rerun_existing,
@@ -764,6 +974,14 @@ def _run_resolved_tournament(
     ):
         raise ValueError("Supplied frozen plan differs from the resolved tournament")
     plan = resolved_plan
+    if "selection" in config:
+        from marl_battlegrounds.evaluation.population_selection import (
+            check_selection_plan,
+        )
+
+        check_selection_plan(
+            config, plan.games, challenger_id=challenger_id, budget=plan.budget
+        )
     full_ids = tuple(full_metrics_episodes)
     selected_replays = capture_ids(
         [game["logical_game_id"] for game in plan.games],
@@ -797,6 +1015,11 @@ def _run_resolved_tournament(
         "schedule_digest": schedule_digest,
         "pairing_protocol": "fixed-team-spawn-v1",
     }
+    input_metadata = (
+        _input_metadata if saved is None else saved[0]["details"].get("input_metadata")
+    )
+    if input_metadata is not None:
+        metadata["input_metadata"] = copy.deepcopy(dict(input_metadata))
     if saved is not None:
         old = saved[0]["details"]
         if canonical_json(saved[2]) != canonical_json(plan.games):
@@ -819,6 +1042,13 @@ def _run_resolved_tournament(
         "details": metadata,
     }
     initial_manifest = memory_manifest if saved_manifest is None else saved_manifest
+    _check_saved_job_options(
+        initial_manifest,
+        plan,
+        metrics=metrics,
+        full=per_job_full,
+        replays=per_job_replay,
+    )
     preflight = TournamentRecords(
         record_config,
         plan.games,
@@ -888,9 +1118,14 @@ def _run_resolved_tournament(
         )
     for job in pending_jobs:
         for entrant in (job["team_a"], job["team_b"]):
-            if entrant == challenger_id and method is not None:
+            if entrant in bindings or (entrant == challenger_id and method is not None):
                 continue
             controller = participants[entrant]["controller"]
+            if controller.get("factory") == "unknown:requires_supplied_system":
+                raise ValueError(
+                    "Saved entrant has no reload reference; supply its matching "
+                    f"System or Policy: {participants[entrant]['name']}"
+                )
             if controller["kind"] == "bundle":
                 verifier.require(controller["asset_ids"])
     if (
@@ -991,8 +1226,14 @@ def _run_resolved_tournament(
         full_tables: list[dict[str, Any]] = []
         replays: list[Any] = []
         executed = 0
+        observed_sampling: dict[str, dict[str, Any]] = {}
+        residents: dict[tuple[str, bytes, str], System | Policy] = {}
+        cleanup.callback(residents.clear)
         by_id = {game["logical_game_id"]: game for game in plan.games}
-        for job in plan.jobs:
+        jobs_by_id = {job["job_id"]: job for job in plan.jobs}
+
+        def pending() -> Generator[TournamentJob]:
+            """Yield exact prepared jobs; completed games remain with the writer."""
             current = TournamentRecords(
                 record_config,
                 plan.games,
@@ -1002,19 +1243,48 @@ def _run_resolved_tournament(
                 run_dir=None if writer is None else writer.run_dir,
                 memory=memory_rows,
             )
-            if all(
-                current.completed(by_id[identifier])
-                for identifier in job["logical_game_ids"]
-            ):
-                continue
+            for job in plan.jobs:
+                if all(
+                    current.completed(by_id[identifier])
+                    for identifier in job["logical_game_ids"]
+                ):
+                    continue
+                identifier = job["job_id"]
+                yield TournamentJob(
+                    job_id=identifier,
+                    first=job["team_a"],
+                    second=job["team_b"],
+                    episodes=tuple(specs_by_job[identifier]),
+                    seed=job["root_seed"],
+                    phase=job["phase"],
+                    pass_id=job["pass_id"],
+                    full_metrics_episodes=tuple(per_job_full[identifier]),
+                    replay_episodes=tuple(per_job_replay[identifier]),
+                )
+
+        @contextmanager
+        def load_pair(
+            task: TournamentJob,
+        ) -> Generator[tuple[System | Policy, System | Policy]]:
+            """Check actual method sampling and streams before shared dispatch."""
+            job = jobs_by_id[task.job_id]
             with _active_pair(
-                job["team_a"],
-                job["team_b"],
+                task.first,
+                task.second,
                 participants,
                 verifier,
                 challenger_id,
                 method,
+                bindings,
+                residents=residents,
             ) as (first, second):
+                for loaded in (first, second):
+                    fact = method_sampling_fact(loaded)
+                    prior_fact = observed_sampling.setdefault(loaded.name, fact)
+                    if prior_fact != fact:
+                        raise ValueError(
+                            "Loaded method sampling behavior changed between jobs"
+                        )
                 expected_stream = (
                     "episode-fold-in-v1"
                     if isinstance(first, Policy) and isinstance(second, Policy)
@@ -1032,29 +1302,26 @@ def _run_resolved_tournament(
                         "Declared RNG stream is incompatible with "
                         "this job's method execution path"
                     )
-                result = _evaluate_tournament_episodes(
-                    first,
-                    second,
-                    specs_by_job[job["job_id"]],
-                    seed=job["root_seed"],
-                    num_envs=num_envs,
-                    metrics=metrics,
-                    full_metrics_episodes=per_job_full[job["job_id"]],
-                    replay_episodes=per_job_replay[job["job_id"]],
-                    writer=writer,
-                    phase=job["phase"],
-                    pass_id=job["pass_id"],
-                    chunk_size=chunk_size,
-                    run_id=manifest["run_id"],
-                    registered_maps={
-                        source["map_id"]: source["registered_map"]
-                        for source in config["conditions"]["map_sources"]
-                        if source["registered_map"] is not None
-                    },
-                )
-                executed += len(result.episodes)
-                first_name, second_name = first.name, second.name
-            del first, second
+                yield first, second
+
+        for task, result in execute_tournament_jobs(
+            pending(),
+            load_pair,
+            writer=writer,
+            run_id=manifest["run_id"],
+            num_envs=num_envs,
+            metrics=metrics,
+            chunk_size=chunk_size,
+            registered_maps={
+                source["map_id"]: source["registered_map"]
+                for source in config["conditions"]["map_sources"]
+                if source["registered_map"] is not None
+            },
+        ):
+            job = jobs_by_id[task.job_id]
+            executed += len(result.episodes)
+            first_name = participants[task.first]["name"]
+            second_name = participants[task.second]["name"]
             if writer is None:
                 entry = _memory_pass(result, per_job_full[job["job_id"]], metrics)
                 manifest["passes"][
@@ -1086,6 +1353,8 @@ def _run_resolved_tournament(
                         memory_rows["full_metrics.csv"].append(
                             {
                                 name: values[index].item()
+                                if hasattr(values[index], "item")
+                                else values[index]
                                 for name, values in result.full_metrics.items()
                             }
                         )
@@ -1122,17 +1391,17 @@ def _run_resolved_tournament(
             ]
             for game in plan.games
         }
-        weights = config["analysis"]["opponent_weights"]
-        weights = (
-            None
-            if weights is None
-            else {participants[key]["name"]: value for key, value in weights.items()}
-        )
         statistics = summarize_tournament(
             schedule,
             outcomes,
             seed=config["analysis"]["bootstrap_seed"],
             opponent_weights=weights,
+            method_sampling=_recorded_method_sampling(
+                records,
+                participants,
+                observed_sampling,
+                {game["logical_game_id"] for game in completed_games},
+            ),
         )
         headline = None if metrics == "none" else summarize_headlines(matches, evidence)
         qualification = {
@@ -1184,90 +1453,22 @@ def _run_resolved_tournament(
         )
 
 
-def run_canonical_tournament(
-    system: System | Policy | str | None | Omitted = OMITTED,
-    *,
-    config: str | Path | Mapping[str, Any] | None = None,
-    games_per_opponent: int | None | Omitted = OMITTED,
-    rerun_existing: bool | Omitted = OMITTED,
-    metrics: MetricMode | Omitted = OMITTED,
-    save_replays: int | Omitted = OMITTED,
-    full_metrics_episodes: Iterable[int] | Omitted = OMITTED,
-    replay_episodes: Iterable[int] | Omitted = OMITTED,
-    output_dir: str | Path | None = None,
-    resume_from: str | Path | None = None,
-    num_envs: int = 128,
-    chunk_size: int = 16,
-) -> CanonicalTournamentResult:
-    """Compare the released twelve controllers, optionally adding one challenger.
+def _resolve_challenger(
+    system: System | Policy | str | None | Omitted,
+    previous: Mapping[str, Any] | None,
+) -> tuple[
+    System | Policy | str | None, Mapping[str, Any] | None, Mapping[str, Any] | None
+]:
+    """Resolve one challenger while preserving saved loader and omission rules.
 
-    Parameters
-    ----------
-    system : System, Policy, str or None, default=None
-        One challenger, or None for the selected twelve alone. Resume inherits an
-        omitted challenger only when its saved loader can reproduce it; otherwise
-        supply the matching method. Explicit None asserts twelve-only execution.
-    config : JSON path, mapping or None
-        Unchanged pinned official snapshot. None selects the installed release
-        once, or the saved snapshot on resume. Missing releases fail; custom
-        populations/rules use run_tournament(config=...).
-    games_per_opponent : int or None
-        None inherits the snapshot budget. A positive integer divisible by twice
-        the map count applies equally to every matchup. A different budget is a
-        research override and cannot qualify promotion. Booleans are invalid.
-    rerun_existing : bool, default=False
-        Reuse verified incumbent games. True explicitly reruns the whole selected
-        schedule; missing coverage never triggers that choice automatically.
-    metrics : {'priority', 'full', 'none'}, default='priority'
-        Requested report coverage. None-mode still retains outcomes and rankings
-        but skips headline calculation. Full source reports satisfy priority.
-    save_replays : int, default=0
-        First N logical scheduled games to capture. Nonzero shorthand must agree
-        with a supplied replay_episodes selection.
-    full_metrics_episodes, replay_episodes : iterable of int, default=()
-        Logical scheduled IDs selected for capture. Original execution IDs and
-        stored replay identities remain unchanged. Missing reused assets fail.
-    output_dir, resume_from : path or None
-        New output parent or exact saved run; supply at most one. Neither means
-        no files. Omitted scientific/capture settings inherit saved conditions;
-        explicit conflicts fail before recovery or output creation.
-    num_envs, chunk_size : int, default=128 / 16
-        Positive execution batch limit and decisions per evaluator chunk. These
-        may change on resume and do not alter scientific schedule identities.
-
-    Returns
-    -------
-    CanonicalTournamentResult
-        Complete shared result tables and snapshot/budget/reuse metadata. Already
-        saved summaries load without fitting. No-file results borrow source files.
-
-    Raises
-    ------
-    ValueError, TypeError
-        Snapshot, method, budget, captures, evidence or resume settings conflict.
-        A snapshot saved before the Red Zone rule can only reuse recorded games;
-        a call that needs a new game raises ValueError before any output.
-    OSError, RuntimeError
-        Required assets, execution, fitting or durable output fail. Earlier saved
-        games remain resumable. No hidden download, retry or provider rollback.
-
-    Notes
-    -----
-    Host-only orchestration. It owns no learner and never admits, promotes or
-    publishes a controller. Fixture approval is not scientific qualification.
-    Models load only for active unfinished matchups. None-mode is the string
-    "none", not Python None. The signature's private omission marker preserves
-    explicit resume assertions; the ordinary defaults above remain unchanged.
+    Strings remain references until the resolved runner loads and freezes them.
+    An omitted saved live object cannot be reconstructed and raises a useful error.
+    Explicit None asserts no challenger. The returned descriptor/assets are
+    borrowed saved evidence. The resolved runner checks loaded identities before
+    writing results.
+    This helper does no loading or copying. The resolved runner prepares methods;
+    researchers own their provider processes and memory.
     """
-    saved = _saved_plan(resume_from)
-    previous = None if saved is None else saved[0]["details"]
-    if previous is not None and previous.get("official_snapshot_verified") is not True:
-        raise ValueError("Saved tournament is custom; resume it through run_tournament")
-    selected = resolve_tournament_config(
-        config,
-        official=True,
-        saved=None if previous is None else previous["canonical_config"],
-    )
     descriptor = None
     extra_assets = None
     if isinstance(system, Omitted):
@@ -1301,6 +1502,100 @@ def run_canonical_tournament(
             if row["entrant_id"] == previous["challenger_id"]
         )
         extra_assets = previous["participant_assets"]
+    return system, descriptor, extra_assets
+
+
+def run_canonical_tournament(
+    system: System | Policy | str | None | Omitted = OMITTED,
+    *,
+    config: str | Path | Mapping[str, Any] | None = None,
+    games_per_opponent: int | None | Omitted = OMITTED,
+    rerun_existing: bool | Omitted = OMITTED,
+    metrics: MetricMode | Omitted = OMITTED,
+    save_replays: int | Omitted = OMITTED,
+    full_metrics_episodes: Iterable[int] | Omitted = OMITTED,
+    replay_episodes: Iterable[int] | Omitted = OMITTED,
+    output_dir: str | Path | None = None,
+    resume_from: str | Path | None = None,
+    num_envs: int = 128,
+    chunk_size: int = 16,
+) -> CanonicalTournamentResult:
+    """Compare the released field, optionally adding one challenger.
+
+    Parameters
+    ----------
+    system : System, Policy, str or None, default=None
+        One challenger, or None for the selected field alone. Resume inherits an
+        omitted challenger only when its saved loader can reproduce it; otherwise
+        supply the matching method. Explicit None asserts field-only execution.
+    config : JSON path, mapping or None
+        Unchanged pinned official snapshot. None selects the installed release
+        once, or the saved snapshot on resume. Version 1 pins twelve entrants;
+        version 2 reads its size from the frozen field. Missing releases fail; custom
+        populations/rules use run_tournament(config=...).
+    games_per_opponent : int or None
+        None inherits the snapshot budget. A positive integer divisible by twice
+        the map count applies equally to every matchup. A different budget is a
+        research override and cannot qualify promotion. Booleans are invalid.
+    rerun_existing : bool, default=False
+        Reuse verified incumbent games. True explicitly reruns the whole selected
+        schedule; missing coverage never triggers that choice automatically.
+    metrics : {'priority', 'full', 'none'}, default='priority'
+        Requested report coverage. None-mode still retains outcomes and rankings
+        but skips headline calculation. Full source reports satisfy priority.
+    save_replays : int, default=0
+        First N logical scheduled games to capture. Nonzero shorthand must agree
+        with a supplied replay_episodes selection.
+    full_metrics_episodes, replay_episodes : iterable of int, default=()
+        Logical scheduled IDs selected for capture. Original execution IDs and
+        stored replay identities remain unchanged. Missing reused assets fail.
+    output_dir, resume_from : path or None
+        New output parent or exact saved run; supply at most one. Neither means
+        no files. Omitted scientific/capture settings inherit saved conditions;
+        explicit conflicts fail before recovery or output creation.
+    num_envs : int, default=128
+        Fixed maximum parallel games within the current matchup. Matchups run
+        one at a time. This execution setting may change on resume.
+    chunk_size : int, default=16
+        Decisions per evaluator chunk. Explicit values are honored; changing it
+        does not change the declared scientific schedule.
+
+    Returns
+    -------
+    CanonicalTournamentResult
+        Complete shared result tables and snapshot/budget/reuse metadata. Already
+        saved summaries load without fitting. No-file results borrow source files.
+
+    Raises
+    ------
+    ValueError, TypeError
+        Snapshot, method, budget, captures, evidence or resume settings conflict.
+        A snapshot saved before the Red Zone rule can only reuse recorded games;
+        a call that needs a new game raises ValueError before any output.
+    OSError, RuntimeError
+        Required assets, execution, fitting or durable output fail. Earlier saved
+        games remain resumable. Backend allocation and provider errors propagate;
+        no calls are automatically retried. Researchers own provider processes
+        and memory. Lowering num_envs does not reduce model weights.
+
+    Notes
+    -----
+    Host-only orchestration. It owns no learner and never admits, promotes or
+    publishes a controller. Fixture approval is not scientific qualification.
+    Models load only for active unfinished matchups. None-mode is the string
+    "none", not Python None. The signature's private omission marker preserves
+    explicit resume assertions; the ordinary defaults above remain unchanged.
+    """
+    saved = _saved_plan(resume_from)
+    previous = None if saved is None else saved[0]["details"]
+    if previous is not None and previous.get("official_snapshot_verified") is not True:
+        raise ValueError("Saved tournament is custom; resume it through run_tournament")
+    selected = resolve_tournament_config(
+        config,
+        official=True,
+        saved=None if previous is None else previous["canonical_config"],
+    )
+    system, descriptor, extra_assets = _resolve_challenger(system, previous)
     supplied_budget = games_per_opponent
     if isinstance(supplied_budget, Omitted):
         budget = (
@@ -1362,6 +1657,9 @@ def run_canonical_tournament(
 def _run_configured_tournament(
     config: str | Path | Mapping[str, Any] | None,
     *,
+    challenger: System | Policy | str | None | Omitted = OMITTED,
+    games_per_opponent: int | Omitted = OMITTED,
+    rerun_existing: bool | Omitted = OMITTED,
     metrics: MetricMode | Omitted,
     full_metrics_episodes: Iterable[int] | Omitted,
     replay_episodes: Iterable[int] | Omitted,
@@ -1370,13 +1668,23 @@ def _run_configured_tournament(
     resume_from: str | Path | None,
     num_envs: int,
     chunk_size: int,
+    bindings: Mapping[str, System | Policy] | None = None,
+    input_metadata: Mapping[str, Any] | None = None,
+    challenger_prepared: bool = False,
 ) -> CanonicalTournamentResult:
-    """Resolve the custom-config route without applying programmatic defaults.
+    """Resolve supplied or saved field conditions through the one tournament engine.
 
-    Scientific population and settings come only from the explicit or saved
-    config. Optional output selections inherit saved values only when omitted.
-    Existing game sources are reused when declared; fresh configs run their exact
-    schedule. This route does not assert official release qualification.
+    config is a checked full descriptor or its path. Omitted scientific/output
+    values inherit the saved run; a new supplied config owns its conditions.
+    A new explicit game budget must equal that config's budget. challenger uses
+    the same loading, identity and saved-omission rules as the canonical shortcut.
+    bindings contains frozen local entrants; input_metadata supplies generic
+    result aliases from short/list normalization. Neither is a new execution path.
+    Caller-owned methods keep their existing lifetime. challenger_prepared
+    borrows a method already frozen by list input preparation; references and
+    other live methods are prepared once by the resolved runner.
+    Invalid settings fail before writer recovery. This call does not grant
+    official release qualification or publish/admit any method.
     """
     saved = _saved_plan(resume_from)
     previous = None if saved is None else saved[0]["details"]
@@ -1385,10 +1693,26 @@ def _run_configured_tournament(
         official=False,
         saved=None if previous is None else previous["canonical_config"],
     )
-    if previous is not None and previous["challenger_id"] is not None:
-        raise ValueError("Resume a challenger run through run_canonical_tournament")
+    method, descriptor, assets = _resolve_challenger(challenger, previous)
+    expected_budget = (
+        selected["conditions"]["games_per_opponent"]
+        if previous is None
+        else previous["budget"]["resolved_games_per_opponent"]
+    )
+    if (
+        not isinstance(games_per_opponent, Omitted)
+        and games_per_opponent != expected_budget
+    ):
+        raise ValueError("games_per_opponent differs from the configured tournament")
     return _run_resolved_tournament(
         selected,
+        system=method,
+        challenger_descriptor=descriptor,
+        challenger_assets=assets,
+        games_per_opponent=expected_budget,
+        rerun_existing=cast(
+            bool, _option(rerun_existing, previous, "rerun_existing", False)
+        ),
         metrics=cast("MetricMode", _option(metrics, previous, "metrics", "priority")),
         full_metrics_episodes=cast(
             Iterable[int],
@@ -1417,6 +1741,9 @@ def _run_configured_tournament(
         resume_from=resume_from,
         num_envs=num_envs,
         chunk_size=chunk_size,
+        _bindings=bindings,
+        _system_prepared=challenger_prepared,
+        _input_metadata=input_metadata,
         _explicit_config=config is not None,
         _official_snapshot_verified=(
             previous is not None and previous.get("official_snapshot_verified") is True

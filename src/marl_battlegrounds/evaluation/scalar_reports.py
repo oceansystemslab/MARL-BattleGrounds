@@ -39,9 +39,12 @@ _TEXT_COLUMNS = frozenset(
         "team",
         "policy",
         "opponent",
+        "determinism",
+        "conditional_interval_assumption",
         "system_name",
         "elo_interval_status",
         "expected_score_interval_status",
+        "sampling_interval_status",
     }
 )
 _INTEGER_COLUMNS = frozenset(
@@ -67,6 +70,10 @@ _AGGREGATE_INTEGERS = frozenset(
     {
         "matches",
         "independent_blocks",
+        "declared_blocks",
+        "scheduled_games",
+        "completed_games",
+        "supported_independent_sampling_units",
         "wins",
         "draws",
         "losses",

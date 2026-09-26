@@ -267,6 +267,7 @@ def test_example_prepares_saved_snapshot_and_only_needed_payloads(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     from argparse import Namespace
+    from importlib import import_module
     from importlib.util import module_from_spec, spec_from_file_location
     from types import SimpleNamespace
 
@@ -304,6 +305,8 @@ def test_example_prepares_saved_snapshot_and_only_needed_payloads(
         assert kwargs["config"] == previous["canonical_config"]
         raise RuntimeError("ready to execute")
 
+    # Bind the real runner imports before replacing the example's dependencies.
+    import_module("marl_battlegrounds.evaluation.canonical")
     monkeypatch.setattr(tournament_config, "resolve_tournament_config", resolve)
     monkeypatch.setattr(tournament_assets, "prepare_tournament_assets", prepare)
     monkeypatch.setattr(marl_bgs, "run_canonical_tournament", stop)
@@ -324,3 +327,109 @@ def test_example_prepares_saved_snapshot_and_only_needed_payloads(
     with pytest.raises(RuntimeError, match="ready to execute"):
         example.compare(args)
     assert calls[0][1]["roles"] == ("outcomes_priority",)
+
+
+@pytest.mark.parametrize("challenger", [None, "tdm-beta"])
+def test_generic_metadata_matches_direct_saved_and_completed_resume(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, challenger: str | None
+) -> None:
+    from importlib import import_module
+
+    from marl_battlegrounds.evaluation.recording_context import (
+        capture_recording_provenance,
+    )
+    from marl_battlegrounds.evaluation.tournament import run_tournament
+
+    provenance = capture_recording_provenance()
+
+    def stable_source(**_: object) -> dict[str, object]:
+        return provenance
+
+    evaluator = import_module("marl_battlegrounds.evaluation.evaluate")
+    monkeypatch.setattr(evaluator, "capture_recording_provenance", stable_source)
+    direct = run_tournament(
+        config={
+            "entrants": ["random", "tdm-alpha"],
+            "maps": [47],
+            "games_per_opponent": 2,
+            "max_steps": 1,
+            "metrics": "none",
+        },
+        challenger=challenger,
+        num_envs=2,
+        chunk_size=1,
+        output_dir=tmp_path,
+    )
+    assert direct.paths is not None
+    directory = direct.paths["run_details"].parent
+    before = {
+        str(path.relative_to(directory)): path.read_bytes()
+        for path in directory.rglob("*")
+        if path.is_file()
+    }
+    saved = load_results(directory)
+    assert before == {
+        str(path.relative_to(directory)): path.read_bytes()
+        for path in directory.rglob("*")
+        if path.is_file()
+    }
+
+    def no_new_games(*_: object, **__: object) -> None:
+        pytest.fail("A complete resume must not play more games")
+
+    monkeypatch.setattr(evaluator, "_evaluate_tournament_episodes", no_new_games)
+    resumed = run_tournament(resume_from=directory, challenger=challenger)
+    names = {"random", "tdm-alpha"}
+    if challenger is not None:
+        names.add(challenger)
+    expected_games = 6 if challenger else 2
+    for field in (
+        "red_zone_depth",
+        "num_matches",
+        "schedule",
+        "schedule_digest",
+        "policies",
+        "participants",
+        "method_sampling",
+        "configuration_ids_by_map",
+        "input_metadata",
+    ):
+        assert (
+            direct.metadata[field] == saved.metadata[field] == resumed.metadata[field]
+        )
+    assert (
+        direct.metadata["num_matches"]
+        == len(saved.metadata["schedule"])
+        == expected_games
+    )
+    assert set(saved.metadata["participants"]) == names
+    assert set(saved.metadata["method_sampling"]) == names
+    assert {row["name"] for row in saved.metadata["policies"]} == names
+    assert set(saved.metadata["input_metadata"]["participants"]) == {
+        "random",
+        "tdm-alpha",
+    }
+    assert saved.metadata["participants"] == {
+        row["name"]: identifier for identifier, row in saved.metadata["systems"].items()
+    }
+    assert (
+        saved.metadata["method_sampling"]
+        == json.loads(before["run_details.json"])["tournament_summary"]["metadata"][
+            "method_sampling"
+        ]
+    )
+    script = """
+import sys
+import marl_battlegrounds as marl_bgs
+result = marl_bgs.load_results(sys.argv[1])
+assert result.metadata['num_matches'] == int(sys.argv[2])
+assert 'jax' not in sys.modules
+assert 'marl_battlegrounds.evaluation.policy_execution' not in sys.modules
+assert 'marl_battlegrounds.evaluation.evaluate' not in sys.modules
+"""
+    subprocess.run(
+        [sys.executable, "-c", script, str(directory), str(expected_games)],
+        check=True,
+        capture_output=True,
+        text=True,
+    )

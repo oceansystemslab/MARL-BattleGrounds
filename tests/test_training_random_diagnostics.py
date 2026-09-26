@@ -3,6 +3,8 @@
 Small CPU learners use real K20/H300 Random games on the five fixed validation
 maps. The checks keep native M8 records, prove diagnostics do not change learner
 state or keys, and reject altered shared evidence before recovery writes.
+New Random records retain sampling facts and unavailable public bounds through
+initialization reuse and resume; one paired draw per map is not an interval.
 A PQN-VDN run binds initialization reuse to its greedy identity over both
 parameters and BatchNorm statistics (a statistics-only change is a different
 actor), and its results name the method and optimizer count.
@@ -488,6 +490,13 @@ def test_native_random_captures_preserve_complete_learning_state(
         records = json.loads((result.run_dir / "random_diagnostics.json").read_text())
         assert [row["env_steps"] for row in records] == [0, 4, 8]
         assert all(row["games"] == 10 and row["complete"] for row in records)
+        for row in records:
+            assert row["sampling_evidence"]["determinism"] == "Stochastic"
+            assert row["independent_blocks"] == row["declared_blocks"] == 5
+            # One paired draw per map supports a mean, but no within-map interval.
+            assert row["ci_low"] is row["ci_high"] is None
+            assert "stratum" in row["interval_status"]
+            assert row["conditional_ci_low"] <= row["conditional_ci_high"]
         # At depth 20 every kill is a Red Zone kill: points are twice the kills.
         for row in records:
             assert row["red_zone_depth"] == 20.0 and row["schema_version"] == 3

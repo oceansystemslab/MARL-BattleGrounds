@@ -7,7 +7,7 @@
 from collections.abc import Callable, Mapping
 from dataclasses import replace
 from types import SimpleNamespace
-from typing import cast
+from typing import Any, cast
 
 import numpy as np
 import pytest
@@ -48,9 +48,15 @@ def _summary(
     replicates: int = 80,
     seed: int = 42,
     weights: Mapping[str, float] | None = None,
+    method_sampling: Mapping[str, Mapping[str, Any]] | None = None,
 ) -> stats.TournamentStatistics:
     return stats._summarize(
-        schedule, outcomes, seed=seed, opponent_weights=weights, replicates=replicates
+        schedule,
+        outcomes,
+        seed=seed,
+        opponent_weights=weights,
+        replicates=replicates,
+        method_sampling=method_sampling,
     )
 
 
@@ -476,7 +482,19 @@ def test_public_five_thousand_replicates_are_real_and_reproducible(
         return original(counts, contrasts, pairs, initial, context=context)
 
     monkeypatch.setattr(stats, "_fit", counted)
-    result = stats.summarize_tournament(schedule, outcomes, seed=113)
+    result = stats.summarize_tournament(
+        schedule,
+        outcomes,
+        seed=113,
+        method_sampling={
+            name: {
+                "determinism": "stochastic",
+                "basis": "Synthetic independent paired draws",
+            }
+            for match in schedule
+            for name in (match.team_a, match.team_b)
+        },
+    )
     assert calls == 5001
     assert result.metadata["bootstrap_replicates"] == 5000
     assert result.tournament_results[0]["elo_interval_status"] == "Available"
@@ -487,3 +505,156 @@ def test_public_five_thousand_replicates_are_real_and_reproducible(
         first,
         stats._sample_counts(population, np.random.Generator(np.random.PCG64(113))),
     )
+
+
+def test_mixed_field_counts_only_known_random_paired_groups() -> None:
+    schedule = build_tournament_schedule(
+        ("greedy", "script", "sampled"), (1, 9), episodes_per_pair=40
+    )
+    outcomes = _outcomes(schedule, ((1, 1), (3, 2), (2, 2), (1, 3)))
+    for match in schedule:
+        if {match.team_a, match.team_b} == {"greedy", "script"}:
+            outcomes[match.episode_id] = 3
+    facts = {
+        "greedy": {"determinism": "deterministic", "basis": "Verified epsilon zero"},
+        "script": {"determinism": "deterministic", "basis": "Exact fixed script"},
+        "sampled": {"determinism": "stochastic", "basis": "Verified native sampler"},
+    }
+    result = _summary(schedule, outcomes, method_sampling=facts)
+    deterministic = next(
+        row
+        for row in result.matchup_results
+        if row["policy"] == "greedy" and row["opponent"] == "script"
+    )
+    assert deterministic["matches"] == 40
+    assert deterministic["declared_blocks"] == 20
+    assert deterministic["independent_blocks"] == 20
+    assert deterministic["supported_independent_sampling_units"] == 0
+    assert deterministic["expected_score_ci_low"] is None
+    assert (
+        deterministic["expected_score_interval_status"]
+        == "Unavailable: No random sampling variation"
+    )
+    assert (
+        cast(dict[str, Any], result.metadata["sampling_evidence"])[
+            "supported_independent_sampling_units"
+        ]
+        == 40
+    )
+    sampled = _rows(result)["sampled"]
+    assert sampled["supported_independent_sampling_units"] == 40
+    assert sampled["determinism"] == "Stochastic"
+
+
+def test_unknown_methods_keep_ordinary_bounds_with_conditional_labels() -> None:
+    schedule = build_tournament_schedule(
+        ("QMIX", "tdm-alpha"), (1,), episodes_per_pair=40
+    )
+    outcomes = _outcomes(schedule, ((1, 1), (2, 2), (3, 2)))
+    facts = {
+        name: {"determinism": "unknown", "basis": "Names carry no behavior evidence"}
+        for name in ("QMIX", "tdm-alpha")
+    }
+    historical = _summary(schedule, outcomes)
+    current = _summary(schedule, outcomes, method_sampling=facts)
+    for old, new in zip(
+        historical.tournament_results, current.tournament_results, strict=True
+    ):
+        assert new["elo"] == old["elo"]
+        for metric in ("elo", "expected_score"):
+            for end in ("low", "high"):
+                assert new[f"{metric}_ci_{end}"] == old[f"{metric}_ci_{end}"]
+                assert (
+                    new[f"conditional_{metric}_ci_{end}"] == old[f"{metric}_ci_{end}"]
+                )
+            assert (
+                new[f"{metric}_interval_status"] == "Conditional: Sampling not verified"
+            )
+        assert new["independent_blocks"] == old["independent_blocks"]
+        assert new["supported_independent_sampling_units"] is None
+        assert "independent" in str(new["conditional_interval_assumption"])
+        assert new["determinism"] == "Determinism Unknown"
+    assert "sampling_evidence" not in historical.metadata
+
+
+def test_equal_stochastic_outcomes_leave_declared_groups_intact() -> None:
+    schedule = build_tournament_schedule(("a", "b"), (1,), episodes_per_pair=40)
+    facts = {
+        name: {"determinism": "stochastic", "basis": "Declared independent native keys"}
+        for name in ("a", "b")
+    }
+    result = _summary(schedule, _outcomes(schedule, ((3, 3),)), method_sampling=facts)
+    assert (
+        cast(dict[str, Any], result.metadata["sampling_evidence"])[
+            "supported_independent_sampling_units"
+        ]
+        == 20
+    )
+    for row in result.tournament_results:
+        assert row["expected_score_interval_status"] == "Insufficient Variation"
+        assert row["independent_blocks"] == 20
+        assert row["determinism"] == "Stochastic"
+    with pytest.raises(ValueError, match="every tournament entrant"):
+        _summary(
+            schedule, _outcomes(schedule, ((3, 3),)), method_sampling={"a": facts["a"]}
+        )
+
+
+def test_unknown_sampling_does_not_bypass_insufficient_variation() -> None:
+    schedule = build_tournament_schedule(("a", "b"), (1,), episodes_per_pair=4)
+    result = stats.summarize_tournament(schedule, _outcomes(schedule, ((3, 3),)))
+    assert result.metadata["method_sampling"] == {
+        name: {
+            "determinism": "unknown",
+            "basis": "No sampling facts were recorded for this tournament",
+        }
+        for name in ("a", "b")
+    }
+    for row in result.tournament_results:
+        assert row["determinism"] == "Determinism Unknown"
+        assert row["independent_blocks"] == 2
+        assert row["supported_independent_sampling_units"] is None
+        assert row["expected_score_ci_low"] is row["elo_ci_low"] is None
+        assert row["expected_score_interval_status"] == "Insufficient Variation"
+
+
+def test_joint_elo_uses_sampling_support_from_the_whole_field() -> None:
+    schedule = build_tournament_schedule(
+        ("a", "b", "unknown"), (1,), episodes_per_pair=12
+    )
+    outcomes = _outcomes(schedule, ((1, 1), (2, 2), (3, 2)))
+    facts = {
+        name: {
+            "determinism": "unknown" if name == "unknown" else "stochastic",
+            "basis": "Fixture sampling fact",
+        }
+        for name in ("a", "b", "unknown")
+    }
+    historical = _summary(schedule, outcomes)
+    current = _summary(schedule, outcomes, method_sampling=facts)
+    for old, new in zip(
+        historical.tournament_results, current.tournament_results, strict=True
+    ):
+        assert new["elo"] == old["elo"]
+        assert new["elo_ci_low"] == old["elo_ci_low"]
+        assert new["elo_interval_status"] == "Conditional: Sampling not verified"
+    known_pair = next(
+        row
+        for row in current.matchup_results
+        if row["policy"] == "a" and row["opponent"] == "b"
+    )
+    assert known_pair["expected_score_interval_status"] == "Available"
+
+
+def test_unknown_sampling_does_not_bypass_too_few_declared_groups() -> None:
+    schedule = build_tournament_schedule(("a", "b"), (1,), episodes_per_pair=2)
+    facts = {
+        name: {"determinism": "unknown", "basis": "Fixture unknown"}
+        for name in ("a", "b")
+    }
+    result = _summary(schedule, _outcomes(schedule, ((1, 2),)), method_sampling=facts)
+    for row in result.tournament_results:
+        assert row["independent_blocks"] == 1
+        assert row["supported_independent_sampling_units"] is None
+        assert row["elo_ci_low"] is row["expected_score_ci_low"] is None
+        assert row["elo_interval_status"] == "Insufficient Blocks"

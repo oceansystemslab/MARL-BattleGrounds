@@ -1000,8 +1000,8 @@ def _run_evaluation(
     Returns
     -------
     EvaluationResult
-        EvaluationResult. Without a writer, priority_metrics and full_metrics
-        map column names to one-dimensional NumPy arrays ordered by episode ID;
+        Without a writer, priority_metrics and full_metrics map column names to
+        one-dimensional NumPy arrays ordered by episode ID;
         metric values are float32 and unavailable values are NaN. Unselected
         tables are empty dicts. These columns can be passed to pandas.DataFrame.
         With a writer, metric tables and replays stay in its files, and their
@@ -1105,6 +1105,29 @@ def _run_evaluation(
     priority_ids = set(spec_by_id) if metrics != "none" else full_ids
     execution_a, variables_a, base_carry_a = prepare_evaluation_system(team_a)
     execution_b, variables_b, base_carry_b = prepare_evaluation_system(team_b)
+    native = team_a.execution == team_b.execution == "jax"
+    device = None
+    if native:
+        placements = {
+            current
+            for value in jax.tree.leaves((variables_a, variables_b))
+            if isinstance(value, Array)
+            for current in value.devices()
+        }
+        if len(placements) == 1:
+            device = next(iter(placements))
+        elif not placements:
+            device = cast(Any, jax.local_devices()[0])
+        # A caller's existing multi-device arrays keep their placement.
+
+    def place[T](value: T) -> T:
+        """Commit newly prepared numerical inputs once to the selected device."""
+        return cast(T, jax.device_put(value, device)) if device is not None else value
+
+    if native:
+        variables_a, variables_b, base_carry_a, base_carry_b = place(
+            (variables_a, variables_b, base_carry_a, base_carry_b)
+        )
     for cfg in {id(spec.env_config): spec.env_config for spec in specs}.values():
         validate_evaluation_rosters(execution_a, execution_b, cfg)
     recording = bool(
@@ -1142,7 +1165,37 @@ def _run_evaluation(
     if not legacy:
         metadata["rng_protocol"] = "evaluation-systems-v1"
     if recording:
+        from marl_battlegrounds.evaluation.evaluation_conditions import read_saved_pass
+        from marl_battlegrounds.evaluation.sampling_evidence import method_sampling_fact
+
+        saved_sampling_pass = (
+            saved
+            if saved is not None
+            else read_saved_pass(None, writer, phase, pass_id)
+        )
+        if saved_sampling_pass is None:
+            metadata["method_sampling"] = {
+                "team_a": method_sampling_fact(team_a),
+                "team_b": method_sampling_fact(team_b),
+            }
+        else:
+            previous_details = cast(
+                Mapping[str, object], saved_sampling_pass[1]["details"]
+            )
+            # Keep old pass facts or their absence; current actors cannot
+            # establish how earlier games used randomness.
+            if "method_sampling" in previous_details:
+                metadata["method_sampling"] = previous_details["method_sampling"]
         metadata.update(capture_recording_provenance(num_envs=batch_size))
+        if device is not None:
+            runtime = cast(dict[str, object], metadata["runtime_provenance"])
+            metadata["runtime_provenance"] = {
+                **runtime,
+                "backend": device.platform,
+                "device": device.device_kind,
+                "runtime_version": " ".join(device.client.platform_version.split())
+                or None,
+            }
     schedule: dict[int, dict[str, object]] = {}
     if contract is None:
         configs = {id(spec.env_config): spec.env_config for spec in specs}
@@ -1389,9 +1442,15 @@ def _run_evaluation(
 
             collector = ReplayCollector(context)
             cleanup.callback(collector.close)
+        env = place(env)
+        metadata["execution_layout"] = {
+            "device": str(device) if device is not None else "Caller context",
+            "allocated_lanes": batch_size,
+        }
         initial_a = initial_policy_carry(base_carry_a, batch_size) if legacy else ()
         initial_b = initial_policy_carry(base_carry_b, batch_size) if legacy else ()
-        root = jax.random.key(int(seed))
+        initial_a, initial_b = place((initial_a, initial_b))
+        root = place(jax.random.key(int(seed)))
         lanes = list(pending[:batch_size])
         real_lane_count = len(lanes)
         # Padding IDs cannot alias any real game, including completed resume rows.
@@ -1406,23 +1465,26 @@ def _run_evaluation(
 
         def seeds() -> Array:
             """Read the current lane schedule's independent uint32 random-stream IDs."""
-            return jnp.asarray(
-                [spec.random_seed_id for spec in lanes], dtype=jnp.uint32
+            return place(
+                jnp.asarray([spec.random_seed_id for spec in lanes], dtype=jnp.uint32)
             )
 
         def ids() -> Array:
             """Read current lane episode identities as positive int32 values."""
-            return jnp.asarray([spec.episode_id for spec in lanes], dtype=jnp.int32)
+            return place(
+                jnp.asarray([spec.episode_id for spec in lanes], dtype=jnp.int32)
+            )
 
-        reset_keys = episode_keys(root, seeds(), jnp.zeros(batch_size, jnp.int32), 0)
+        lane_seeds = seeds()
+        reset_keys = episode_keys(root, lane_seeds, jnp.zeros(batch_size, jnp.int32), 0)
         observations, state = cast(
             tuple[Observations, EnvironmentState],
             _reset(
                 env,
                 reset_keys,
-                _stack_configs(lanes),
+                place(_stack_configs(lanes)),
                 ids(),
-                initial=_initial_snapshots(lanes, reset_keys),
+                initial=place(_initial_snapshots(lanes, reset_keys)),
             ),
         )
         if padding_count:
@@ -1449,26 +1511,36 @@ def _run_evaluation(
                 (base_carry_a, base_carry_b),
                 observations,
                 state,
-                episode_keys(root, seeds(), jnp.zeros(batch_size, jnp.int32), 3),
+                episode_keys(root, lane_seeds, jnp.zeros(batch_size, jnp.int32), 3),
             )
             carry = _SystemCarry(observations, state, memory, _empty_completed(state))
+        carry = place(carry)
+        observed_devices = sorted(
+            {
+                str(placed_device)
+                for leaf in jax.tree.leaves((carry, variables_a, variables_b))
+                if isinstance(leaf, Array)
+                for placed_device in leaf.devices()
+            }
+        )
+        cast(dict[str, object], metadata["execution_layout"])[
+            "observed_numerical_devices"
+        ] = observed_devices
         next_episode = batch_size
         results: dict[int, EpisodeResult] = {}
+
+        empty_completed = place(jnp.zeros(batch_size, jnp.bool_))
         while len(results) < len(pending):
             carry = carry._replace(
                 completed=carry.completed._replace(
-                    completed=jnp.zeros(batch_size, jnp.bool_),
+                    completed=empty_completed,
                 )
             )
             before_chunk = carry.state
             assignments = None
             try:
                 if isinstance(carry, _SystemCarry):
-                    runner = (
-                        _jax_system_chunk
-                        if team_a.execution == team_b.execution == "jax"
-                        else _host_system_chunk
-                    )
+                    runner = _jax_system_chunk if native else _host_system_chunk
                     carry, (packets, assignments) = cast(
                         tuple[
                             _SystemCarry,
@@ -1482,12 +1554,12 @@ def _run_evaluation(
                             variables_b,
                             carry,
                             root,
-                            seeds(),
+                            lane_seeds,
                             chunk_size,
                             capture_routes=writer is not None,
                         ),
                     )
-                elif team_a.execution == team_b.execution == "jax":
+                elif native:
                     carry, packets = cast(
                         tuple[_Carry, ReplayPackets | None],
                         _jax_chunk(
@@ -1498,7 +1570,7 @@ def _run_evaluation(
                             variables_b,
                             carry,
                             root,
-                            seeds(),
+                            lane_seeds,
                             chunk_size,
                         ),
                     )
@@ -1511,7 +1583,7 @@ def _run_evaluation(
                         variables_b,
                         carry,
                         root,
-                        seeds(),
+                        lane_seeds,
                         chunk_size,
                     )
                 if writer is not None and assignments is not None:
@@ -1580,27 +1652,28 @@ def _run_evaluation(
                     next_episode += 1
                     replace[lane] = True
             if np.any(replace):
-                mask = jnp.asarray(replace)
+                lane_seeds = seeds()
+                mask = place(jnp.asarray(replace))
                 reset_keys = episode_keys(
-                    root, seeds(), jnp.zeros(batch_size, jnp.int32), 0
+                    root, lane_seeds, jnp.zeros(batch_size, jnp.int32), 0
                 )
                 observations, state = cast(
                     tuple[Observations, EnvironmentState],
                     _reset(
                         env,
                         reset_keys,
-                        _stack_configs(lanes),
+                        place(_stack_configs(lanes)),
                         ids(),
                         carry.state,
                         mask,
-                        _initial_snapshots(lanes, reset_keys),
+                        place(_initial_snapshots(lanes, reset_keys)),
                     ),
                 )
                 if isinstance(carry, _SystemCarry):
                     memory = replace_initialization_roots(
                         carry.memory,
                         episode_keys(
-                            root, seeds(), jnp.zeros(batch_size, jnp.int32), 3
+                            root, lane_seeds, jnp.zeros(batch_size, jnp.int32), 3
                         ),
                         mask,
                     )
@@ -1613,6 +1686,7 @@ def _run_evaluation(
                         select_policy_carry(mask, initial_b, carry.policy_b),
                         carry.completed,
                     )
+                carry = place(carry)
         if writer is not None:
             writer.flush()
             if contract is not None:
@@ -1779,7 +1853,8 @@ def _evaluate_tournament_episodes(
     registered_maps argument maps source map IDs to exact serialized TDMMapInfo
     identities; None uses current catalog metadata. Supplied identities undergo
     approved-history and source-geometry checks before writer mutation. No public
-    setting or alternate executor is introduced.
+    setting or alternate executor is introduced. Results are returned after
+    ordinary recording and pass completion through the shared RunWriter.
     """
     saved = read_saved_pass(resume_from, writer, phase, pass_id)
     details = None if saved is None else saved[1]["details"]

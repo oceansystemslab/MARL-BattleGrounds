@@ -15,12 +15,13 @@ import csv
 import json
 import os
 import re
-from collections.abc import Iterator
+import time
+from collections.abc import Iterator, Sequence
 from dataclasses import dataclass
 from hashlib import sha256
 from pathlib import Path
 from tempfile import TemporaryFile
-from typing import TYPE_CHECKING, Any, BinaryIO, cast
+from typing import TYPE_CHECKING, Any, BinaryIO, Never, cast
 from uuid import uuid4
 
 import jax
@@ -36,6 +37,7 @@ if TYPE_CHECKING:
     from _hashlib import HASH
 
     from marl_battlegrounds.core.types import EnvConfig
+    from marl_battlegrounds.evaluation.replay_recording import ContextFactory
     from marl_battlegrounds.evaluation.run_writer import RunWriter
 
 COPY_BLOCK_BYTES = 1024 * 1024
@@ -295,16 +297,20 @@ def _load_packet(stream: BinaryIO, template: ReplayPackets) -> ReplayPackets:
 
 
 def _restore_replays(
-    writer: RunWriter,
+    context_factory: ContextFactory,
     verified_paths: dict[str, Path],
     records: list[dict[str, Any]],
     saved: dict[str, Any],
+    *,
+    retain_episode_ids: set[int] | None = None,
 ) -> ReplayCollector:
     """Validate prefixes and prepare owned anonymous streams without publishing.
 
     Uses already checked file identities, bounded copies and one decoded packet
     at a time. On failure it closes all prepared streams. Original context and
     runtime remain unchanged. The caller checks every file before this call.
+    context_factory is used only for later new games. None retain_episode_ids
+    keeps every prefix; a set validates every prefix but copies only those IDs.
     """
     from marl_battlegrounds.evaluation.catalog import (
         _build_resolved_env_config_for,  # pyright: ignore[reportPrivateUsage]
@@ -315,7 +321,7 @@ def _restore_replays(
     from marl_battlegrounds.evaluation.replay import RuntimeProvenanceV1
     from marl_battlegrounds.evaluation.run_writer import configuration_identity
 
-    collector = ReplayCollector(writer._replay_context)
+    collector = ReplayCollector(context_factory)
     seen: set[int] = set()
     template: ReplayPackets | None = None
     try:
@@ -338,76 +344,88 @@ def _restore_replays(
             )
             if record.get("context_id") != context.identity.episode_id:
                 raise ValueError("open replay context identity differs")
-            if context.identity.run_id != saved["run_id"]:
+            origin = saved.get("recording_ancestry", {}).get(str(episode_id))
+            expected_run = saved["run_id"] if origin is None else origin["run_id"]
+            if context.identity.run_id != expected_run:
                 raise ValueError("open replay belongs to another run")
+            if (
+                origin is not None
+                and context.identity.episode_id != origin["context_id"]
+            ):
+                raise ValueError("open replay differs from its inherited context")
             if template is None:
                 template = _packet_template(reconstruct_env_config_v1(context))
             if record.get("layout") != packet_layout(template):
                 raise ValueError("replay prefix uses an unsupported packet layout")
             path = verified_paths[expected_path]
-            temporary = TemporaryFile()  # noqa: SIM115 - collector owns successful streams
+            retained = retain_episode_ids is None or episode_id in retain_episode_ids
+            temporary = TemporaryFile() if retained else None  # noqa: SIM115
             try:
                 with path.open("rb") as source:
-                    while block := source.read(COPY_BLOCK_BYTES):
-                        temporary.write(block)
-                temporary.seek(0)
-                first: ReplayPackets | None = None
-                for index in range(count):
-                    packet = _load_packet(temporary, template)
-                    if (
-                        not bool(packet.valid)
-                        or int(packet.episode_id) != episode_id
-                        or bool(packet.done.done)
-                    ):
-                        raise ValueError(
-                            "open replay prefix has invalid transition order"
+                    if temporary is not None:
+                        while block := source.read(COPY_BLOCK_BYTES):
+                            temporary.write(block)
+                        temporary.seek(0)
+                    stream = source if temporary is None else temporary
+                    first: ReplayPackets | None = None
+                    for index in range(count):
+                        packet = _load_packet(stream, template)
+                        if (
+                            not bool(packet.valid)
+                            or int(packet.episode_id) != episode_id
+                            or bool(packet.done.done)
+                        ):
+                            raise ValueError(
+                                "open replay prefix has invalid transition order"
+                            )
+                        validate_packet_epoch(
+                            int(packet.episode_id),
+                            int(packet.transition_index),
+                            expected=index,
+                            initial=bool(packet.initial),
+                            has_transition=bool(
+                                packet.info.transition_facts.has_transition
+                            ),
+                            completed=False,
                         )
-                    validate_packet_epoch(
-                        int(packet.episode_id),
-                        int(packet.transition_index),
-                        expected=index,
-                        initial=bool(packet.initial),
-                        has_transition=bool(
-                            packet.info.transition_facts.has_transition
-                        ),
-                        completed=False,
-                    )
-                    if first is None:
-                        first = packet
-                        identifier, content = configuration_identity(packet.config)
-                        if (
-                            identifier != record.get("config_id")
-                            or saved["configurations"].get(identifier, content)
-                            != content
-                        ):
-                            raise ValueError(
-                                "open replay config differs from its saved identity"
-                            )
-                        if (
-                            _build_resolved_env_config_for(
-                                restore_recording_config(packet.config),
-                                context.resolved_env_config,
-                            )
-                            != context.resolved_env_config
-                        ):
-                            raise ValueError(
-                                "open replay context differs from its actual config"
-                            )
-                if temporary.tell() != record["bytes"] or temporary.read(1):
-                    raise ValueError(
-                        "open replay prefix contains trailing or missing records"
-                    )
-                assert first is not None
-                collector.restore_stream(
-                    first,
-                    context=context,
-                    runtime=runtime,
-                    stream=temporary,
-                    count=count,
-                )
-            except BaseException:
-                temporary.close()
-                raise
+                        if first is None:
+                            first = packet
+                            identifier, content = configuration_identity(packet.config)
+                            if (
+                                identifier != record.get("config_id")
+                                or saved["configurations"].get(identifier, content)
+                                != content
+                            ):
+                                raise ValueError(
+                                    "open replay config differs from its saved identity"
+                                )
+                            if (
+                                _build_resolved_env_config_for(
+                                    restore_recording_config(packet.config),
+                                    context.resolved_env_config,
+                                )
+                                != context.resolved_env_config
+                            ):
+                                raise ValueError(
+                                    "open replay context differs from its actual config"
+                                )
+                    if stream.tell() != record["bytes"] or stream.read(1):
+                        raise ValueError(
+                            "open replay prefix contains trailing or missing records"
+                        )
+                    assert first is not None
+                    if temporary is not None:
+                        collector.restore_stream(
+                            first,
+                            context=context,
+                            runtime=runtime,
+                            stream=temporary,
+                            count=count,
+                        )
+                        temporary = None
+            finally:
+                if temporary is not None:
+                    temporary.close()
         return collector
     except BaseException:
         collector.close()
@@ -565,11 +583,21 @@ def _prefix_lines(path: Path, size: int) -> Iterator[str]:
 
 
 def _check_tables(
-    writer: RunWriter, saved: dict[str, Any], tables: object
+    run_dir: Path,
+    saved: dict[str, Any],
+    tables: object,
+    headers: dict[str, tuple[str, ...]],
 ) -> dict[str, Any]:
-    """Check all required CSV prefixes before rollback and rebuild hash caches."""
+    """Check saved CSV prefixes read-only and return their rolling hash states.
+
+    run_dir holds the original tables. saved and tables declare the selected
+    checkpoint boundary; later rows are ignored. headers comes from the writer's
+    shared schema. This never creates, truncates or rewrites a table.
+    """
+    from marl_battlegrounds.evaluation.run_writer import _SUMMARY_TABLES
+
     table_map = _object(tables, "checkpoint tables")
-    if set(table_map) != set(writer._rows):
+    if set(table_map) != set(headers) | set(_SUMMARY_TABLES):
         raise ValueError("checkpoint table roles differ from this writer")
     hashes: dict[str, Any] = {}
     for name, evidence in table_map.items():
@@ -581,13 +609,15 @@ def _check_tables(
         boundary = saved["tables"].get(name, {"durable_bytes": 0, "rows": 0})
         if boundary != {"durable_bytes": size, "rows": count}:
             raise ValueError("checkpoint table differs from its manifest")
-        path = writer._table_path(name)
+        path = run_dir / name
+        if path.is_symlink():
+            raise ValueError(f"run table must not be a symbolic link: {name}")
         digest = _hash_prefix(path, size)
         if digest.hexdigest() != _hex(info["sha256"], 64, "table prefix digest"):
             raise ValueError(f"recording checkpoint CSV prefix differs: {name}")
         if size:
             reader = csv.reader(_prefix_lines(path, size), strict=True)
-            if next(reader, None) != list(writer._headers.get(name, ())):
+            if next(reader, None) != list(headers.get(name, ())):
                 raise ValueError(f"checkpoint table header differs: {name}")
             if sum(1 for _ in reader) != count:
                 raise ValueError(f"checkpoint table row boundary differs: {name}")
@@ -657,25 +687,22 @@ def _check_manifest_references(saved: dict[str, Any], pass_key: str) -> None:
             _hex(resolved, 64, "scheduled configuration digest")
 
 
-def prepare_restore(
-    writer: RunWriter,
-    token: object,
-    *,
-    phase: str,
-    pass_id: str,
-    policies: dict[str, object] | None,
-    checkpoint_id: str | None,
-    details: dict[str, object] | None,
-) -> RecordingRestore:
-    """Validate one explicit token and prepare replay streams before any mutation.
+def _load_recording_bundle(
+    run_dir: Path, token: object
+) -> tuple[
+    dict[str, Any],
+    dict[str, Any],
+    dict[str, Path],
+    dict[str, Any],
+    list[dict[str, Any]],
+]:
+    """Read and verify one immutable recording bundle without a live writer.
 
-    Validate every referenced file and CSV prefix, pass compatibility, immutable
-    schemas and replay contents. Returns owned temporary streams and selected
-    metadata. No run files are truncated or rewritten here. The caller must close
-    the result if later constructor work fails.
+    run_dir is the parent recording folder and token names its exact saved
+    boundary. Check token, bundle, file roles and every file hash once. Return
+    the copied token, bundle, verified paths, saved manifest and replay rows.
+    This reads no mutable table tail, opens no spool and changes no file.
     """
-    from marl_battlegrounds.evaluation.replay_io import load_replay
-
     supplied = _object(token, "recording checkpoint token")
     if (
         set(supplied) != _TOKEN_KEYS
@@ -685,14 +712,8 @@ def prepare_restore(
         raise ValueError("unsupported recording checkpoint token")
     identifier = _hex(supplied["checkpoint_id"], 32, "checkpoint ID")
     token_digest = _hex(supplied["checkpoint_sha256"], 64, "checkpoint digest")
-    current = writer._details
-    if supplied["run_id"] != current["run_id"]:
-        raise ValueError("recording checkpoint belongs to another run")
-    marker = current.get("recording_restore")
-    if marker is not None and marker != {"schema_version": 1, "token": supplied}:
-        raise ValueError("interrupted restore requires its original checkpoint token")
     bundle_path = _regular(
-        writer.run_dir, f"recording_checkpoints/{identifier}/checkpoint.json"
+        run_dir, f"recording_checkpoints/{identifier}/checkpoint.json"
     )
     if sha256(bundle_path.read_bytes()).hexdigest() != token_digest:
         raise ValueError("recording checkpoint metadata digest differs")
@@ -734,9 +755,62 @@ def prepare_restore(
     saved = _json(root / "run_details.json")
     if (
         saved.get("recording_restore") is not None
-        or saved.get("run_id") != current["run_id"]
+        or saved.get("run_id") != supplied["run_id"]
     ):
         raise ValueError("checkpoint manifest has an invalid run or restore state")
+    return dict(supplied), bundle, verified_paths, saved, replays
+
+
+def _check_completed_replays(run_dir: Path, entry: dict[str, Any]) -> None:
+    """Check every completed replay's saved size and canonical identity read-only.
+
+    run_dir owns the files and entry is the checked training pass. Full replay
+    decoding stays with load_replay. No replay is copied or rewritten.
+    """
+    from marl_battlegrounds.evaluation.replay_io import load_replay
+
+    for replay in entry["replays"].values():
+        relative = replay["path"]
+        if (
+            not isinstance(relative, str)
+            or len(Path(relative).parts) != 2
+            or Path(relative).parts[0] != "replays"
+        ):
+            raise ValueError("completed replay path is unsafe")
+        path = _regular(run_dir, relative)
+        if path.stat().st_size != replay["bytes"]:
+            raise ValueError("completed replay byte length differs")
+        loaded = load_replay(path)
+        if loaded.replay.canonical_digest_sha256 != replay["canonical_digest_sha256"]:
+            raise ValueError("completed replay identity differs")
+
+
+def prepare_restore(
+    writer: RunWriter,
+    token: object,
+    *,
+    phase: str,
+    pass_id: str,
+    policies: dict[str, object] | None,
+    checkpoint_id: str | None,
+    details: dict[str, object] | None,
+) -> RecordingRestore:
+    """Validate one explicit token and prepare replay streams before any mutation.
+
+    Validate every referenced file and CSV prefix, pass compatibility, immutable
+    schemas and replay contents. Returns owned temporary streams and selected
+    metadata. No run files are truncated or rewritten here. The caller must close
+    the result if later constructor work fails.
+    """
+    current = writer._details
+    supplied, bundle, verified_paths, saved, replays = _load_recording_bundle(
+        writer.run_dir, token
+    )
+    if supplied["run_id"] != current["run_id"]:
+        raise ValueError("recording checkpoint belongs to another run")
+    marker = current.get("recording_restore")
+    if marker is not None and marker != {"schema_version": 1, "token": supplied}:
+        raise ValueError("interrupted restore requires its original checkpoint token")
     for name, bundle_name in (
         ("schema_version", "host_schema_version"),
         ("metric_schema_id", "metric_schema_id"),
@@ -765,23 +839,10 @@ def prepare_restore(
             raise ValueError("recording checkpoint pass differs from requested pass")
     finally:
         writer._details = current
-    hashes = _check_tables(writer, saved, bundle["tables"])
+    hashes = _check_tables(writer.run_dir, saved, bundle["tables"], writer._headers)
     entry = saved["passes"][pass_key]
-    for replay in entry["replays"].values():
-        relative = replay["path"]
-        if (
-            not isinstance(relative, str)
-            or len(Path(relative).parts) != 2
-            or Path(relative).parts[0] != "replays"
-        ):
-            raise ValueError("completed replay path is unsafe")
-        path = _regular(writer.run_dir, relative)
-        if path.stat().st_size != replay["bytes"]:
-            raise ValueError("completed replay byte length differs")
-        loaded = load_replay(path)
-        if loaded.replay.canonical_digest_sha256 != replay["canonical_digest_sha256"]:
-            raise ValueError("completed replay identity differs")
-    collector = _restore_replays(writer, verified_paths, replays, saved)
+    _check_completed_replays(writer.run_dir, entry)
+    collector = _restore_replays(writer._replay_context, verified_paths, replays, saved)
     try:
         collector.restore_completed(
             int(value) for value in entry["completed_episode_ids"]
@@ -833,3 +894,296 @@ def finish_restore(writer: RunWriter, prepared: RecordingRestore) -> None:
     writer._details.pop("recording_restore", None)
     _atomic_json(writer.run_dir / "run_details.json", writer._details)
     os.fsync(writer._lock)
+
+
+@dataclass
+class PreparedRecordingFork:
+    """Own a checked parent recording boundary until a child accepts it.
+
+    token and saved are read-only parent snapshots held in memory. replays and
+    episode_ids name the unfinished games to retain. collector owns anonymous
+    prefix streams until attach_recording_fork transfers it to the child.
+    costs records logical byte counts and host seconds for the separate checks.
+    Register close with an ExitStack before creating any child output. This
+    record is host-only and must not be passed to compiled learner code.
+    """
+
+    token: dict[str, Any]
+    saved: dict[str, Any]
+    replays: list[dict[str, Any]]
+    episode_ids: tuple[int, ...]
+    collector: ReplayCollector | None
+    costs: dict[str, object]
+
+    def close(self) -> None:
+        """Close still-owned streams; repeated calls and calls after attach are safe."""
+        if self.collector is not None:
+            self.collector.close()
+            self.collector = None
+
+
+def _unattached_replay_context(_packet: ReplayPackets) -> Never:
+    """Reject new games until the prepared collector has its real child owner."""
+    raise RuntimeError("Prepared recording prefixes need a child writer")
+
+
+def prepare_recording_fork(
+    parent_dir: Path,
+    token: object,
+    *,
+    episode_ids: Sequence[int],
+    policies: dict[str, object] | None,
+) -> PreparedRecordingFork:
+    """Check the full parent recording boundary before creating child output.
+
+    Parameters
+    ----------
+    parent_dir : Path
+        Original recording folder. The immutable token snapshot supplies the
+        boundary; later CSV rows and the latest mutable manifest are not used.
+    token : object
+        Exact recording token stored with the checked parent learner.
+    episode_ids : sequence of int
+        Unique positive IDs of live games that already played at that boundary.
+        Each needs a verified first start. A replay prefix is kept when present.
+    policies : dict or None
+        Child writer's policy registrations, already saved with the learner.
+        None means no registrations. Their normalized identity must match the
+        saved training pass before any child writer exists.
+
+    Returns
+    -------
+    PreparedRecordingFork
+        Checked snapshot and owned anonymous streams. Register its close method
+        with an ExitStack immediately; keep that scope around child directory,
+        lock and writer setup. Successful attachment transfers stream ownership.
+
+    Raises
+    ------
+    ValueError, OSError, ReplayLoadError
+        A token, schema, file, CSV boundary, replay, registration or needed start
+        is invalid or unreadable. Prepared streams are closed on failure. No
+        parent or child file is written, truncated or deleted.
+
+    Notes
+    -----
+    Reuses ordinary restore's bundle, table and replay checks. Every open prefix
+    is decoded once; only selected unfinished prefixes get owned bounded copies.
+    Complete history is checked read-only and is never copied into the child.
+    costs separates history reads from open-prefix preparation. Byte counts are
+    logical file/prefix bytes, not physical filesystem traffic.
+    """
+    from marl_battlegrounds.evaluation.run_writer import (
+        _INPUT_PROJECTIONS,
+        METRIC_SCHEMA_ID,
+        METRIC_SCHEMA_VERSION,
+        RUN_SCHEMA_VERSION,
+        _prepare_pass_identity,
+        _recording_table_headers,
+    )
+
+    started = time.monotonic()
+    supplied, bundle, paths, saved, replays = _load_recording_bundle(parent_dir, token)
+    schemas = {
+        "schema_version": RUN_SCHEMA_VERSION,
+        "metric_schema_id": METRIC_SCHEMA_ID,
+        "metric_schema_version": METRIC_SCHEMA_VERSION,
+        "actor_input_projections": _INPUT_PROJECTIONS,
+    }
+    for field, bundle_field in (
+        ("schema_version", "host_schema_version"),
+        ("metric_schema_id", "metric_schema_id"),
+        ("metric_schema_version", "metric_schema_version"),
+        ("actor_input_projections", "actor_input_projections"),
+    ):
+        if (
+            saved.get(field) != schemas[field]
+            or saved.get(field) != bundle[bundle_field]
+        ):
+            raise ValueError("Parent recording schemas differ from this writer")
+    pass_key = supplied["pass_key"]
+    passes = _object(saved.get("passes"), "parent recording passes")
+    if not isinstance(pass_key, str) or set(passes) != {pass_key}:
+        raise ValueError("Parent recording requires its dedicated training pass")
+    original = _object(passes[pass_key], "parent training pass")
+    if original["phase"] != "training":
+        raise ValueError("Parent recording requires its dedicated training pass")
+    _prepare_pass_identity(
+        saved,
+        "training",
+        original["pass_id"],
+        policies,
+        original["checkpoint_id"],
+        original["details"],
+    )
+    _check_manifest_references(saved, pass_key)
+    wanted = {_integer(value, "inherited episode ID", 1) for value in episode_ids}
+    if len(wanted) != len(episode_ids):
+        raise ValueError("Inherited episode IDs must be unique")
+    for episode_id in wanted:
+        start = original["episode_starts"].get(str(episode_id))
+        if (
+            start is None
+            or start["verification"] not in ("verified", "custom")
+            or episode_id in original["completed_episode_ids"]
+        ):
+            raise ValueError("An inherited game has no verified unfinished start")
+    completed = set(original["completed_episode_ids"])
+    if any(row["episode_id"] in completed for row in replays):
+        raise ValueError("Parent recording repeats a completed game as an open replay")
+    history_started = time.monotonic()
+    _check_tables(parent_dir, saved, bundle["tables"], _recording_table_headers())
+    _check_completed_replays(parent_dir, original)
+    history_seconds = time.monotonic() - history_started
+    prefixes_started = time.monotonic()
+    collector = _restore_replays(
+        _unattached_replay_context,
+        paths,
+        replays,
+        saved,
+        retain_episode_ids=wanted,
+    )
+    try:
+        selected = [row for row in replays if row["episode_id"] in wanted]
+        costs: dict[str, object] = {
+            "parent_recording_token": supplied,
+            "inherited_episode_ids": sorted(wanted),
+            "copied_prefix_bytes": sum(row["bytes"] for row in selected),
+            "copied_prefix_packets": sum(row["count"] for row in selected),
+            "checked_csv_prefix_bytes": sum(
+                row["durable_bytes"] for row in bundle["tables"].values()
+            ),
+            "checked_completed_replay_bytes": sum(
+                row["bytes"] for row in original["replays"].values()
+            ),
+            "checked_history_seconds": history_seconds,
+            "checked_open_prefix_bytes": sum(row["bytes"] for row in replays),
+            "prepared_prefix_seconds": time.monotonic() - prefixes_started,
+            "parent_check_seconds": time.monotonic() - started,
+        }
+        return PreparedRecordingFork(
+            supplied, saved, selected, tuple(sorted(wanted)), collector, costs
+        )
+    except BaseException:
+        collector.close()
+        raise
+
+
+def attach_recording_fork(
+    writer: RunWriter, prepared: PreparedRecordingFork
+) -> dict[str, object]:
+    """Install checked prefixes in an empty child without rereading the parent.
+
+    writer must be a fresh training writer under its caller-owned lock, with the
+    policy registrations checked during preparation. prepared must still own
+    its collector. On success the writer owns the streams and prepared.close()
+    is a no-op. The returned ancestry includes measured preflight costs.
+
+    Invalid child state raises ValueError before attachment. A closed or reused
+    prepared object raises RuntimeError. Child publication may raise OSError;
+    keep prepared.close registered until success so failed setup releases every
+    stream. This changes only child metadata and creates its empty spool folder;
+    it does no parent read, hash, packet decode or prefix copy.
+    """
+    from copy import deepcopy
+
+    from marl_battlegrounds.evaluation.run_writer import _atomic_json
+
+    writer._check_open()
+    collector = prepared.collector
+    if collector is None:
+        raise RuntimeError("Prepared recording was closed or already attached")
+    entry = writer._details["passes"][writer._pass_key]
+    if (
+        len(writer._details["passes"]) != 1
+        or entry["phase"] != "training"
+        or writer._collector is not None
+        or writer._details["tables"]
+        or entry["episode_starts"]
+        or any(writer._rows.values())
+    ):
+        raise ValueError("Recording continuation requires an empty child writer")
+    supplied, saved, selected = prepared.token, prepared.saved, prepared.replays
+    original = saved["passes"][supplied["pass_key"]]
+    if original["policies"] != entry["policies"]:
+        raise ValueError("Parent and child recording policies differ")
+    wanted = set(prepared.episode_ids)
+    details = deepcopy(writer._details)
+    for field in ("configurations", "source_banks", "systems"):
+        details[field].update(deepcopy(saved[field]))
+    child = details["passes"][writer._pass_key]
+    for field in ("episodes", "episode_starts", "trace_epochs", "trace_config_ids"):
+        child[field].update(
+            {
+                key: deepcopy(value)
+                for key, value in original[field].items()
+                if int(key) in wanted
+            }
+        )
+    details["recording_ancestry"] = {
+        str(episode_id): {
+            "run_id": saved["run_id"],
+            "context_id": None,
+            "parent_recording_token": supplied,
+            "prefix_packets": 0,
+            "prefix_sha256": None,
+        }
+        for episode_id in wanted
+    }
+    details["recording_ancestry"].update(
+        {
+            str(row["episode_id"]): {
+                "run_id": row["context"]["identity"]["run_id"],
+                "context_id": row["context_id"],
+                "parent_recording_token": supplied,
+                "prefix_packets": row["count"],
+                "prefix_sha256": row["sha256"],
+            }
+            for row in selected
+        }
+    )
+    spool_dir = writer.run_dir / ".replay_spool"
+    spool_dir.mkdir(exist_ok=True)
+    _atomic_json(writer.run_dir / "run_details.json", details)
+    collector._factory = writer._replay_context
+    collector._spool_dir = spool_dir
+    writer._details = details
+    writer._collector = collector
+    writer._replay_ids = {
+        str(row["context_id"]): int(row["episode_id"]) for row in selected
+    }
+    writer._replay_config_ids = {
+        int(row["episode_id"]): str(row["config_id"]) for row in selected
+    }
+    prepared.collector = None
+    return dict(prepared.costs)
+
+
+def fork_recording(
+    writer: RunWriter,
+    parent_dir: Path,
+    token: object,
+    *,
+    episode_ids: Sequence[int],
+) -> dict[str, object]:
+    """Prepare and attach parent recording state for an already-created child.
+
+    writer is a fresh locked training writer; parent_dir and token name the
+    exact parent recording boundary. episode_ids are its live, already-played
+    games. Return the ancestry and cost record from attach_recording_fork.
+    Parent integrity errors raise before attachment and never change parent
+    files. All temporary streams close on failure.
+
+    Call prepare_recording_fork before creating output when the caller promises
+    rejection without any child files. This convenience form cannot undo the
+    child writer that its caller already created. Existing replay contexts and
+    runtimes survive the fork; new games use the child's context.
+    """
+    entry = writer._details["passes"][writer._pass_key]
+    prepared = prepare_recording_fork(
+        parent_dir, token, episode_ids=episode_ids, policies=entry["policies"]
+    )
+    try:
+        return attach_recording_fork(writer, prepared)
+    finally:
+        prepared.close()

@@ -1,6 +1,7 @@
 /**
  * @file Check browser authoring, saved revision selectors, persistence through
- * restart and exact-start comparisons. Both teams offer the BETA (scenario_5)
+ * restart and exact-start comparisons. Combat Load failures stay visible without
+ * replacing the working match, and a later successful load clears the error. Both teams offer the BETA (scenario_5)
  * and GAMMA (tdm_gamma) controllers, disabled under NoSharedObs and enabled
  * under SharedObs. The scenario inspector shows the host's
  * Red Zone Depth with hover, focus and screen-reader help; a negative depth
@@ -397,6 +398,106 @@ test("saved asset selectors expose every naturally ordered identity beyond ten",
     expect(combatIds.slice(12)).toEqual(
       Array.from({ length: 11 }, (_, index) => `seed_scenario_${index}`),
     );
+  } finally {
+    await stopDebugger(devClient?.process ?? null);
+    await rm(artifactRoot, { recursive: true, force: true });
+  }
+});
+
+test("Combat Load failures stay visible and preserve the current match", async ({
+  page,
+}) => {
+  const artifactRoot = await mkdtemp(join(tmpdir(), "marl-devclient-load-error-"));
+  /** @type {Awaited<ReturnType<typeof startIsolatedDevClient>> | null} */
+  let devClient = null;
+  try {
+    devClient = await startIsolatedDevClient({ artifactRoot, seedScenarioCount: 1 });
+    await page.goto(devClient.url);
+    await expect(page.locator("#connection-status")).toHaveText("Online");
+    await selectPersistedAsset(page, "#devclient-scenario-select", "seed_scenario_0");
+    await applyLiveCommand(page, () => page.locator("#submit-turn-button").click());
+    const initialStep = Number(await page.locator("#step-value").textContent());
+    expect(initialStep).toBeGreaterThan(0);
+    const loadButton = page.locator("#devclient-scenario-load");
+    const notice = page.locator("#notice");
+    let loadAttempts = 0;
+    let replacementFrames = 0;
+    page.on("request", (request) => {
+      if (new URL(request.url()).pathname === "/api/presentation/frame") {
+        replacementFrames += 1;
+      }
+    });
+    /** @param {import("@playwright/test").Route} route */
+    const rejectLoad = async (route) => {
+      const command = route.request().postDataJSON();
+      if (command.command_type !== "open_in_debug") {
+        await route.continue();
+        return;
+      }
+      loadAttempts += 1;
+      const response = await route.fetch({
+        postData: {
+          ...command,
+          source: {
+            source_kind: "saved_draft",
+            asset_kind: "scenario",
+            asset_id: "missing_scenario",
+            revision: 1,
+          },
+        },
+      });
+      await route.fulfill({ response });
+    };
+    await page.route("**/api/dev/authoring/command", rejectLoad);
+    const rejected = await applyAuthoringCommand(page, "open_in_debug", () =>
+      loadButton.click(),
+    );
+    expect(rejected.ok).toBe(false);
+    await expectAuthoringIdle(page);
+    expect(await notice.isVisible()).toBe(true);
+    expect(await notice.textContent()).toContain(rejected.problems[0].message);
+    expect(await notice.getAttribute("data-level")).toBe("error");
+    await expect(page.locator("html")).toHaveAttribute("data-devclient-area", "combat");
+    await expect(page.locator("#authoring-shell")).toBeHidden();
+    await expect(page.locator("#step-value")).toHaveText(String(initialStep));
+    expect(replacementFrames).toBe(0);
+    expect(loadAttempts).toBe(1);
+    await applyLiveCommand(page, () => page.locator("#submit-turn-button").click());
+    await expect(page.locator("#step-value")).toHaveText(String(initialStep + 1));
+    await page.unroute("**/api/dev/authoring/command", rejectLoad);
+
+    /** @param {import("@playwright/test").Route} route */
+    const loseLoadConnection = async (route) => {
+      if (route.request().postDataJSON().command_type === "open_in_debug") {
+        loadAttempts += 1;
+        await route.abort("connectionfailed");
+      } else {
+        await route.continue();
+      }
+    };
+    await page.route("**/api/dev/authoring/command", loseLoadConnection);
+    const failedRequest = page.waitForEvent(
+      "requestfailed",
+      (request) => request.postDataJSON()?.command_type === "open_in_debug",
+    );
+    await loadButton.click();
+    await failedRequest;
+    await expectAuthoringIdle(page);
+    expect(await notice.isVisible()).toBe(true);
+    expect(await notice.textContent()).toContain("Authoring outcome is unknown");
+    expect(await notice.getAttribute("data-level")).toBe("error");
+    expect(loadAttempts).toBe(2);
+    await expect(page.locator("#step-value")).toHaveText(String(initialStep + 1));
+    await applyLiveCommand(page, () => page.locator("#submit-turn-button").click());
+    await expect(page.locator("#step-value")).toHaveText(String(initialStep + 2));
+    await page.unroute("**/api/dev/authoring/command", loseLoadConnection);
+
+    const loaded = await applyAuthoringCommand(page, "open_in_debug", () =>
+      loadButton.click(),
+    );
+    expect(loaded.ok).toBe(true);
+    await expect(notice).toHaveAttribute("data-level", "success");
+    await expect(page.locator("#step-value")).toHaveText("0");
   } finally {
     await stopDebugger(devClient?.process ?? null);
     await rm(artifactRoot, { recursive: true, force: true });

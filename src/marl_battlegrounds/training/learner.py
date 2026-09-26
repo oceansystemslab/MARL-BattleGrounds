@@ -64,6 +64,11 @@ from marl_battlegrounds.policies.input import (
     mirror_team_view,
 )
 from marl_battlegrounds.training._content import PreparedTrainingContent
+from marl_battlegrounds.training._continuation_schedules import (
+    LearnerContinuation,
+    continuation_config,
+    schedule_continuation,
+)
 
 # These package-private guards keep collection's lifecycle and restore rules
 # with their existing owner.
@@ -931,6 +936,7 @@ def update_learner(
     *,
     ppo: PPOConfig = DEFAULT_PPO_CONFIG,
     method: str = "mappo",
+    continuation: LearnerContinuation | None = None,
 ) -> tuple[LearnerState, UpdateResult]:
     """Accept one real collection block, update PPO and publish its actor once.
 
@@ -952,6 +958,10 @@ def update_learner(
     method : {"mappo", "ippo", "ff_mappo", "ff_ippo"}, default="mappo"
         Same static method used at initialization. Keep it in the compiled
         wrapper; it is not stored as a dynamic learner-state leaf.
+
+    continuation : LearnerContinuation or None, default=None
+        Checked static child declaration. It changes only explicitly declared
+        future constant rates; all saved state and absolute clocks continue.
 
     Returns
     -------
@@ -975,6 +985,7 @@ def update_learner(
     collect from a returned failed state. Host code must check result.failed
     before logging an accepted update, saving it or scheduling another action.
     """
+    ppo = continuation_config(ppo, continuation)
     length, games = _rollout_shapes(state, rollout, method=method)
     if length != ppo.rollout_length:
         raise ValueError("PPO needs T=rollout_length")
@@ -1122,6 +1133,7 @@ def validate_learner(
     """
     if type(recheck_installed_content) is not bool:
         raise TypeError("recheck_installed_content must be a Python bool")
+    ppo = continuation_config(ppo, schedule_continuation(collection.schedule))
     games = _state_shapes(state, method=method)
     _check_value_norm(state.value_norm, ppo.value_normalization)
     validate_ppo_batch_size(games, ppo, method=method)

@@ -2,7 +2,7 @@
 
 Run ``python examples/canonical_tournament.py --help`` after installing MARL-BGs.
 The fixture command creates clearly artificial local records, then exercises the
-custom configuration route. It never installs an official Big 12. The compare
+custom configuration route. It never installs an official release. The compare
 command needs a separately released bundle and prepared assets. The read command
 uses the host-only reader and performs no game, fitting or file repair.
 """
@@ -23,7 +23,7 @@ def fixture(
     """Create artificial records, read a complete field and optionally resume it.
 
     directory is explicit fixture storage. entrants selects 2 through 32 example
-    versions; twelve/thirteen show the intended population sizes. metrics is
+    versions; twelve is only this example's default. metrics is
     priority, full or none. save=False creates no result directory; the source
     fixture files still exist because this command explicitly creates them.
     True saves a result, reloads bounded tables and resumes without new games.
@@ -52,7 +52,7 @@ def fixture(
         metrics=metrics,
         output_dir=directory / "results" if save else None,
     )
-    print("Artificial Fixture — Not A Released Big 12")
+    print("Artificial Fixture — Not A Released Snapshot")
     print("Imported Package:", marl_bgs.__file__)
     print("Status:", result.status)
     print("Rankings:", result.table("tournament_rankings"))
@@ -205,7 +205,12 @@ def main() -> None:
     )
     canonical.add_argument("--output-dir", type=Path)
     canonical.add_argument("--resume-from", type=Path)
-    canonical.add_argument("--num-envs", type=int, default=128)
+    canonical.add_argument(
+        "--num-envs",
+        type=int,
+        default=128,
+        help="Parallel games within one matchup (default: 128)",
+    )
     canonical.add_argument("--chunk-size", type=int, default=16)
     canonical.add_argument(
         "--prepare",

@@ -75,6 +75,7 @@ from tests.test_training_pinned_resume import (
 )
 
 import marl_battlegrounds.training.checkpoints as checkpoints
+from marl_battlegrounds._method_loading import load_method
 from marl_battlegrounds.baselines import pqn
 from marl_battlegrounds.baselines.inputs import spawn_frame_flag
 from marl_battlegrounds.baselines.ppo import PPOConfig
@@ -571,7 +572,7 @@ def test_a_greedy_export_loads_as_the_network(tmp_path: Path) -> None:
         SystemOutput, reference.apply(reference.variables, memory, inputs, keys)
     )
     _equal(loaded, expected)
-    _equal(load_system(learner_path).variables, system.variables)
+    _equal(cast(System, load_method(str(learner_path))).variables, system.variables)
     # A changed payload byte stops the export from loading.
     corrupt = tmp_path / "corrupt"
     shutil.copytree(export, corrupt)

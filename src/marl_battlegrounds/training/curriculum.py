@@ -4,13 +4,15 @@ make_training_schedule is host setup and reads no content files. Its arrays
 travel through compiled collection without changing shape. The private progress
 helpers count already tracked real transitions and finish accounting stages;
 they never reset games, apply policies or change live episode configurations.
+Private continuation helpers give added work a fresh bounded stage proof while
+retaining original distributions, old proofs and cumulative experience.
 """
 
 from collections.abc import Mapping
 from dataclasses import dataclass, replace
 from fractions import Fraction
 from types import MappingProxyType
-from typing import NamedTuple, cast
+from typing import Any, NamedTuple, cast
 
 import jax
 import jax.numpy as jnp
@@ -45,11 +47,13 @@ class ScheduleArrays(NamedTuple):
     Attributes
     ----------
     stage_count : Array
-        Int32 scalar: 1 without curriculum, 17 for team/map curriculum, or
-        13 for score-threshold curriculum.
+        Int32 scalar active accounting stages: 1 without curriculum, 17 for
+        fresh team/map curriculum, 13 for fresh score curriculum, or the number
+        of remaining original distributions in a child segment (at most 17).
     round_budgets, round_ends : Array
-        Int32 (17,) stage round budgets and cumulative ends. Active budgets are
-        positive. Unused budgets are zero and ends repeat total_rounds.
+        Int32 (17,) local stage round budgets and absolute cumulative ends.
+        Active budgets are positive. Unused budgets are zero and ends repeat
+        total_rounds. The first child budget starts at round_offset.
     team_sizes : Array
         Int32 (17,) equal team sizes in 1..5; unused rows contain 5.
     eligible_maps : Array
@@ -64,6 +68,16 @@ class ScheduleArrays(NamedTuple):
     score_thresholds : Array
         Int32 (17,) winning scores requested at future resets. Unused rows
         contain 20. Continuing games keep their previous threshold.
+    round_offset, distribution_offset, distribution_count : Array or None
+        Child segments use int32 scalars: cumulative rounds before this segment,
+        the first original distribution it requests, and the original number of
+        distributions. Stage budgets/proofs use local slots; distribution tables
+        and episode exposure keep their original slots. Ends and total_rounds
+        stay cumulative. Fresh schedules use None, preserving their array layout.
+    history_threshold_count : Array or None
+        Optional int32 scalar length of the active prefix of the 20 history
+        thresholds. Inactive rows are zero and never trigger a capture. None
+        keeps the original all-20 contract and its checkpoint array layout.
 
     Notes
     -----
@@ -80,6 +94,10 @@ class ScheduleArrays(NamedTuple):
     total_rounds: Array
     history_threshold_rounds: Array
     score_thresholds: Array
+    round_offset: Array | None = None
+    distribution_offset: Array | None = None
+    distribution_count: Array | None = None
+    history_threshold_count: Array | None = None
 
 
 @dataclass(frozen=True)
@@ -89,7 +107,8 @@ class TrainingSchedule:
     Attributes
     ----------
     total_env_steps : int
-        Exact whole-batch experience requested; may exceed int32.
+        Exact whole-batch target; may exceed int32. For a child this includes
+        its parent experience. continuation records the added budget separately.
     num_envs : int
         Positive even number of fixed environment lanes.
     curriculum : bool
@@ -109,6 +128,10 @@ class TrainingSchedule:
         Capture the first self-play snapshot after the first completed update
         instead of at 5%, keeping the 5% through 95% captures and dropping the
         never-played 100% capture. Required by a positive pinned opponent share.
+    continuation : Mapping[str, object] or None, default=None
+        Read-only child declaration, including the original schedule, cumulative
+        offset, parent stage proof and new budget. Nested records are also frozen.
+        Use _continuation_details for a JSON-ready copy. None means a fresh run.
 
     Notes
     -----
@@ -124,6 +147,7 @@ class TrainingSchedule:
     rounding_report: Mapping[str, object]
     score_threshold_curriculum: bool = False
     early_history_capture: bool = False
+    continuation: Mapping[str, object] | None = None
 
     @property
     def score_thresholds(self) -> tuple[int, ...]:
@@ -137,9 +161,11 @@ class TrainingProgress(NamedTuple):
     Attributes
     ----------
     rounds : Array
-        Int32 scalar counting successful full real rounds.
+        Int32 scalar counting cumulative successful full real rounds, including
+        parent segments. A child accounting boundary does not reset this count.
     episode_stage : Array
-        Int32 (B,) distribution selected at each lane's latest reset. Collection
+        Int32 (B,) original distribution slot selected at each lane's latest
+        reset. Child segments retain these IDs for inherited games. Collection
         changes selected rows only when those games reset; initial rows are 0.
     starts, exposure : Array
         Int32 (17,B) first real decisions and real transitions, grouped by each
@@ -148,7 +174,9 @@ class TrainingProgress(NamedTuple):
         Int32 (17,B,5) Team A decisions by active, living pre-action actor.
     completed_stage_counts : Array
         Int32 (17,B,3) frozen default/swapped/unknown tracker counts, grouped by
-        the accounting stage in which experience occurred.
+        the current segment's accounting stage in which experience occurred.
+        A checked child boundary archives the old proof and clears only these
+        counts and stage_complete; all exposure counters remain cumulative.
     stage_complete : Array
         Bool (17,) successful accounting-stage completions.
     map_steps : Array
@@ -339,6 +367,562 @@ def make_training_schedule(
     )
 
 
+def _freeze_continuation(value: Mapping[str, object]) -> Mapping[str, object]:
+    """Copy a finite JSON-like declaration into read-only nested records.
+
+    Mapping keys must be strings; leaves must be None, strings, booleans, finite
+    numbers or sequences of these. Raises ValueError for other values. No input
+    is retained as mutable storage. Use _continuation_details to encode a schedule.
+    """
+
+    def freeze(item: object) -> object:
+        """Freeze one mapping or sequence, checking its scalar leaves."""
+        if isinstance(item, Mapping):
+            mapping = cast(Mapping[object, object], item)
+            if any(type(key) is not str for key in mapping):
+                raise ValueError("Continuation keys must be strings")
+            return MappingProxyType(
+                {cast(str, key): freeze(val) for key, val in mapping.items()}
+            )
+        if isinstance(item, (tuple, list)):
+            return tuple(
+                freeze(val) for val in cast(tuple[object, ...] | list[object], item)
+            )
+        if item is None or type(item) in (str, bool, int):
+            return item
+        if type(item) is float and np.isfinite(item):
+            return item
+        raise ValueError("Continuation must contain finite JSON values")
+
+    if not isinstance(cast(object, value), Mapping):
+        raise ValueError("Continuation declaration must be a mapping")
+    return cast(Mapping[str, object], freeze(value))
+
+
+def _continuation_details(schedule: TrainingSchedule) -> dict[str, Any] | None:
+    """Return a separate JSON-ready copy of a schedule's child declaration.
+
+    None means a fresh schedule. Nested read-only mappings become dictionaries
+    and tuples become lists. This reads host metadata only and changes no input.
+    """
+
+    def plain(item: object) -> object:
+        """Copy one frozen JSON value into ordinary JSON containers."""
+        if isinstance(item, Mapping):
+            return {
+                key: plain(val) for key, val in cast(Mapping[str, object], item).items()
+            }
+        if isinstance(item, (tuple, list)):
+            return [plain(val) for val in cast(tuple[object, ...] | list[object], item)]
+        return item
+
+    return cast(dict[str, Any] | None, plain(schedule.continuation))
+
+
+def _segment_arrays(
+    root: TrainingSchedule,
+    *,
+    start: int,
+    stop: int,
+    thresholds: tuple[int, ...],
+    threshold_count: int | None,
+) -> tuple[ScheduleArrays, Mapping[str, object]]:
+    """Build one bounded suffix while keeping original distribution tables.
+
+    start/stop are checked cumulative rounds with 0 <= start < stop <= int32.
+    thresholds is the complete 20-row absolute history table; threshold_count
+    is its active prefix or None for all rows. The final distribution keeps
+    extra work in its own slot. Return dynamic arrays and an immutable report;
+    no original array is changed and no random key is consumed.
+    """
+    original_count = int(root.arrays.stage_count)
+    original_ends = tuple(
+        int(value) for value in np.asarray(root.arrays.round_ends)[:original_count]
+    )
+    first = min(sum(end <= start for end in original_ends), original_count - 1)
+    ends = tuple(end for end in original_ends[first:-1] if start < end < stop)
+    ends = (*ends, stop)
+    budgets = tuple(
+        end - previous for previous, end in zip((start, *ends[:-1]), ends, strict=True)
+    )
+    arrays = root.arrays._replace(
+        stage_count=jnp.int32(len(ends)),
+        round_budgets=jnp.asarray(
+            (*budgets, *((0,) * (_STAGES - len(ends)))), jnp.int32
+        ),
+        round_ends=jnp.asarray((*ends, *((stop,) * (_STAGES - len(ends)))), jnp.int32),
+        total_rounds=jnp.int32(stop),
+        history_threshold_rounds=jnp.asarray(thresholds, jnp.int32),
+        round_offset=jnp.int32(start),
+        distribution_offset=jnp.int32(first),
+        distribution_count=jnp.int32(original_count),
+        history_threshold_count=None
+        if threshold_count is None
+        else jnp.int32(threshold_count),
+    )
+    report = MappingProxyType(
+        {
+            "total_env_steps": stop * root.num_envs,
+            "num_envs": root.num_envs,
+            "assigned_round_counts": budgets,
+            "cumulative_round_ends": ends,
+            "distribution_indices": tuple(range(first, first + len(ends))),
+            "score_thresholds": tuple(
+                int(root.arrays.score_thresholds[i])
+                for i in range(first, first + len(ends))
+            ),
+            "rounding_rule": "Whole rounds; retain original distribution boundaries",
+        }
+    )
+    return arrays, report
+
+
+def _make_continuation_schedule(  # pyright: ignore[reportUnusedFunction]
+    parent_schedule: TrainingSchedule,
+    *,
+    completed_rounds: int,
+    additional_env_steps: int,
+    history_threshold_rounds: tuple[int, ...] | None = None,
+) -> TrainingSchedule:
+    """Declare added whole-batch work after a parent's actual saved boundary.
+
+    Parameters
+    ----------
+    parent_schedule : TrainingSchedule
+        Original or checked child schedule. Its root distribution tables and
+        old boundaries remain the authority across repeated extensions.
+    completed_rounds : int
+        Cumulative real rounds at the parent checkpoint, within its segment.
+    additional_env_steps : int
+        Positive new transitions, divisible by the parent's num_envs. No silent
+        rounding is performed; the cumulative per-lane total must fit int32.
+    history_threshold_rounds : tuple[int, ...] or None, default=None
+        Explicit replacement active history thresholds in cumulative rounds,
+        sorted and positive, with at most 20 entries. Unused rows are zero.
+        None preserves the parent's exact thresholds and active count. The
+        checked collection boundary also proves that old snapshots remain bound.
+
+    Returns
+    -------
+    TrainingSchedule
+        A pending child declaration with fixed 17-row arrays. Its parent proof
+        is None until collection._begin_training_segment binds the actual carry.
+        The learner context, if any, is added by the learner/runner owner.
+
+    Raises
+    ------
+    ValueError
+        The parent declaration, boundary, budget or history table is invalid.
+
+    Notes
+    -----
+    Host-only; reads small schedule arrays, consumes no keys, writes no files
+    and never initializes or resets a game. Completed parent proofs stay in
+    their parent segment. Extra work in the final distribution shares its last
+    child slot, retaining the original final endpoint in the root declaration.
+    """
+    _check_training_schedule(parent_schedule)
+    start = (
+        0
+        if parent_schedule.arrays.round_offset is None
+        else int(parent_schedule.arrays.round_offset)
+    )
+    if type(completed_rounds) is not int or not start <= completed_rounds <= int(
+        parent_schedule.arrays.total_rounds
+    ):
+        raise ValueError("Parent rounds must lie within its declared segment")
+    if (
+        type(additional_env_steps) is not int
+        or additional_env_steps <= 0
+        or additional_env_steps % parent_schedule.num_envs
+    ):
+        raise ValueError(
+            "Additional experience must be positive whole-batch transitions"
+        )
+    stop = completed_rounds + additional_env_steps // parent_schedule.num_envs
+    if stop > _MAX_COUNT:
+        raise ValueError("Cumulative continuation rounds must fit int32")
+    previous = _continuation_details(parent_schedule)
+    root = (
+        {
+            "total_env_steps": parent_schedule.total_env_steps,
+            "num_envs": parent_schedule.num_envs,
+            "curriculum": parent_schedule.curriculum,
+            "score_threshold_curriculum": parent_schedule.score_threshold_curriculum,
+            "early_history_capture": parent_schedule.early_history_capture,
+        }
+        if previous is None
+        else previous["root_schedule"]
+    )
+    old_thresholds = tuple(
+        int(value)
+        for value in np.asarray(parent_schedule.arrays.history_threshold_rounds)
+    )
+    old_count = parent_schedule.arrays.history_threshold_count
+    if history_threshold_rounds is not None and not isinstance(
+        cast(object, history_threshold_rounds), tuple
+    ):
+        raise ValueError("History thresholds must be a tuple of absolute rounds")
+    thresholds = (
+        old_thresholds if history_threshold_rounds is None else history_threshold_rounds
+    )
+    count = (
+        (None if old_count is None else int(old_count))
+        if history_threshold_rounds is None
+        else len(thresholds)
+    )
+    if (
+        not isinstance(cast(object, thresholds), tuple)
+        or len(thresholds) > 20
+        or any(
+            type(value) is not int or not 0 < value <= _MAX_COUNT
+            for value in thresholds[: 20 if count is None else count]
+        )
+        or tuple(sorted(thresholds[: 20 if count is None else count]))
+        != thresholds[: 20 if count is None else count]
+    ):
+        raise ValueError(
+            "History thresholds must be at most 20 ordered positive rounds"
+        )
+    if history_threshold_rounds is not None:
+        thresholds = (*thresholds, *((0,) * (20 - len(thresholds))))
+    declaration = {
+        "schema_version": 1,
+        "root_schedule": root,
+        "root_rounding_report": dict(parent_schedule.rounding_report)
+        if previous is None
+        else previous["root_rounding_report"],
+        "segment_index": 1 if previous is None else previous["segment_index"] + 1,
+        "round_offset": completed_rounds,
+        "additional_env_steps": additional_env_steps,
+        "history_threshold_rounds": thresholds,
+        "history_threshold_count": count,
+        "parent_schedule": {
+            "round_offset": start,
+            "total_rounds": int(parent_schedule.arrays.total_rounds),
+            "stage_count": int(parent_schedule.arrays.stage_count),
+            "round_budgets": tuple(
+                int(value) for value in np.asarray(parent_schedule.arrays.round_budgets)
+            ),
+            "round_ends": tuple(
+                int(value) for value in np.asarray(parent_schedule.arrays.round_ends)
+            ),
+            "history_threshold_rounds": old_thresholds,
+            "history_threshold_count": None if old_count is None else int(old_count),
+        },
+        "parent_stage_proof": None,
+    }
+    return _build_continuation_schedule(declaration, require_parent_proof=False)
+
+
+def _build_continuation_schedule(
+    declaration: Mapping[str, object], *, require_parent_proof: bool
+) -> TrainingSchedule:
+    """Check host segment facts and reconstruct its numerical schedule.
+
+    declaration uses the private schema emitted by _make_continuation_schedule.
+    require_parent_proof=False permits only the pending in-memory builder result;
+    durable restoration requires its exact parent proof. The optional learner
+    mapping is retained for its own owner's validation. Raises ValueError on
+    malformed or self-inconsistent data; no files or live state are changed.
+    """
+    frozen = _freeze_continuation(declaration)
+    expected = {
+        "schema_version",
+        "root_schedule",
+        "root_rounding_report",
+        "segment_index",
+        "round_offset",
+        "additional_env_steps",
+        "history_threshold_rounds",
+        "history_threshold_count",
+        "parent_schedule",
+        "parent_stage_proof",
+    }
+    if (
+        set(frozen) - {"learner"} != expected
+        or type(frozen["schema_version"]) is not int
+        or frozen["schema_version"] != 1
+    ):
+        raise ValueError("Unsupported continuation schedule declaration")
+    root_record = frozen["root_schedule"]
+    if not isinstance(root_record, Mapping):
+        raise ValueError("Continuation root schedule must be a mapping")
+    root_record = cast(Mapping[str, Any], root_record)
+    root_keys = {
+        "total_env_steps",
+        "num_envs",
+        "curriculum",
+        "score_threshold_curriculum",
+        "early_history_capture",
+    }
+    if set(root_record) != root_keys:
+        raise ValueError("Continuation root schedule fields differ")
+    root = make_training_schedule(**cast(Any, dict(root_record)))
+    if frozen["root_rounding_report"] != _freeze_continuation(root.rounding_report):
+        raise ValueError(
+            "Continuation original boundaries differ from the root schedule"
+        )
+    start, added, index = (
+        frozen["round_offset"],
+        frozen["additional_env_steps"],
+        frozen["segment_index"],
+    )
+    if (
+        type(start) is not int
+        or start < 0
+        or type(added) is not int
+        or added <= 0
+        or added % root.num_envs
+        or type(index) is not int
+        or index < 1
+    ):
+        raise ValueError("Continuation budget and index must be valid whole counts")
+    stop = start + added // root.num_envs
+    if stop > _MAX_COUNT:
+        raise ValueError("Cumulative continuation rounds must fit int32")
+    thresholds = cast(tuple[int, ...], frozen["history_threshold_rounds"])
+    count = frozen["history_threshold_count"]
+    active = 20 if count is None else count
+    if (
+        type(active) is not int
+        or not 0 <= active <= 20
+        or not isinstance(cast(object, thresholds), tuple)
+        or len(thresholds) != 20
+        or any(type(value) is not int for value in thresholds)
+        or any(not 0 < value <= _MAX_COUNT for value in thresholds[:active])
+        or tuple(sorted(thresholds[:active])) != thresholds[:active]
+        or any(value != 0 for value in thresholds[active:])
+    ):
+        raise ValueError("Continuation history table is malformed")
+    parent = cast(Mapping[str, Any], frozen["parent_schedule"])
+    if not isinstance(cast(object, parent), Mapping) or set(parent) != {
+        "round_offset",
+        "total_rounds",
+        "stage_count",
+        "round_budgets",
+        "round_ends",
+        "history_threshold_rounds",
+        "history_threshold_count",
+    }:
+        raise ValueError("Continuation parent schedule is malformed")
+    parent_start, parent_stop = parent["round_offset"], parent["total_rounds"]
+    if (
+        type(parent_start) is not int
+        or type(parent_stop) is not int
+        or not 0 <= parent_start <= start <= parent_stop <= _MAX_COUNT
+        or parent_start == parent_stop
+    ):
+        raise ValueError("Continuation parent boundary is invalid")
+    if (
+        type(parent["stage_count"]) is not int
+        or not 1 <= parent["stage_count"] <= _STAGES
+    ):
+        raise ValueError("Continuation parent stage count is invalid")
+    for name in ("round_budgets", "round_ends"):
+        values = cast(tuple[int, ...], parent[name])
+        if (
+            not isinstance(cast(object, values), tuple)
+            or len(values) != _STAGES
+            or any(type(value) is not int for value in values)
+        ):
+            raise ValueError("Continuation parent stage counts must be integer rows")
+    parent_thresholds = cast(tuple[int, ...], parent["history_threshold_rounds"])
+    parent_active = (
+        20
+        if parent["history_threshold_count"] is None
+        else parent["history_threshold_count"]
+    )
+    if (
+        type(parent_active) is not int
+        or not 0 <= parent_active <= 20
+        or not isinstance(cast(object, parent_thresholds), tuple)
+        or len(parent_thresholds) != 20
+        or any(type(value) is not int for value in parent_thresholds)
+        or any(
+            not 0 < value <= _MAX_COUNT for value in parent_thresholds[:parent_active]
+        )
+        or tuple(sorted(parent_thresholds[:parent_active]))
+        != parent_thresholds[:parent_active]
+        or any(parent_thresholds[parent_active:])
+    ):
+        raise ValueError("Continuation parent history table is malformed")
+    parent_arrays, _ = _segment_arrays(
+        root,
+        start=parent_start,
+        stop=parent_stop,
+        thresholds=cast(tuple[int, ...], thresholds),
+        threshold_count=cast(int | None, count),
+    )
+    if (
+        int(parent_arrays.stage_count) != parent["stage_count"]
+        or tuple(np.asarray(parent_arrays.round_budgets).tolist())
+        != parent["round_budgets"]
+        or tuple(np.asarray(parent_arrays.round_ends).tolist()) != parent["round_ends"]
+    ):
+        raise ValueError("Continuation parent stages differ from original boundaries")
+    proof = frozen["parent_stage_proof"]
+    if proof is None:
+        if require_parent_proof:
+            raise ValueError("Continuation requires the checked parent stage proof")
+    else:
+        _check_parent_stage_proof(parent, proof, rounds=start, num_envs=root.num_envs)
+    arrays, report = _segment_arrays(
+        root,
+        start=start,
+        stop=stop,
+        thresholds=cast(tuple[int, ...], thresholds),
+        threshold_count=cast(int | None, count),
+    )
+    return replace(
+        root,
+        total_env_steps=stop * root.num_envs,
+        arrays=arrays,
+        rounding_report=report,
+        continuation=frozen,
+    )
+
+
+def _check_parent_stage_proof(
+    parent: Mapping[str, object], proof: object, *, rounds: int, num_envs: int
+) -> None:
+    """Check an archived stage proof against its exact parent segment budget.
+
+    The proof is the small host snapshot made by collection at a checked fork.
+    Counts must show the original completed stages and the current partial or
+    complete stage. Snapshot/history identities remain tied to the parent
+    checkpoint by the runner. Raises ValueError; never changes the proof.
+    """
+    checked_proof = cast(Mapping[str, Any], proof)
+    keys = {
+        "rounds",
+        "stage_ordinal",
+        "stage_round_budget",
+        "stage_rounds",
+        "stage_counts",
+        "full_batch_rounds_valid",
+        "completed_stage_counts",
+        "stage_complete",
+        "history_threshold_to_snapshot",
+    }
+    if (
+        not isinstance(proof, Mapping)
+        or set(checked_proof) != keys
+        or checked_proof["rounds"] != rounds
+        or checked_proof["full_batch_rounds_valid"] is not True
+    ):
+        raise ValueError("Continuation parent stage proof is malformed")
+    if any(
+        type(checked_proof[key]) is not int
+        for key in ("rounds", "stage_ordinal", "stage_round_budget", "stage_rounds")
+    ):
+        raise ValueError("Continuation parent proof counts must be integers")
+    for name, shape, kind in (
+        ("stage_counts", (num_envs, 3), "iu"),
+        ("completed_stage_counts", (_STAGES, num_envs, 3), "iu"),
+        ("stage_complete", (_STAGES,), "b"),
+        ("history_threshold_to_snapshot", (20,), "iu"),
+    ):
+        values = np.asarray(checked_proof[name])
+        if values.shape != shape or values.dtype.kind not in kind:
+            raise ValueError(
+                "Continuation parent proof rows have invalid types or shapes"
+            )
+    history_mapping = np.asarray(checked_proof["history_threshold_to_snapshot"])
+    if np.any(history_mapping < -1) or np.any(history_mapping >= 20):
+        raise ValueError("Continuation parent history mapping is outside its slots")
+    count = cast(int, parent["stage_count"])
+    ends = np.asarray(parent["round_ends"])
+    budgets = np.asarray(parent["round_budgets"])
+    stage = min(int(np.searchsorted(ends[:count], rounds, side="right")), count - 1)
+    current_rounds = rounds - (
+        int(ends[stage - 1]) if stage else cast(int, parent["round_offset"])
+    )
+    complete = (np.arange(_STAGES) < count) & (ends <= rounds)
+    expected = np.zeros((_STAGES, num_envs, 3), np.int64)
+    expected[complete, : num_envs // 2, 0] = budgets[complete, None]
+    expected[complete, num_envs // 2 :, 1] = budgets[complete, None]
+    current = np.zeros((num_envs, 3), np.int64)
+    current[: num_envs // 2, 0] = current_rounds
+    current[num_envs // 2 :, 1] = current_rounds
+    if (
+        checked_proof["stage_ordinal"] != stage
+        or checked_proof["stage_round_budget"] != int(budgets[stage])
+        or checked_proof["stage_rounds"] != current_rounds
+        or not np.array_equal(checked_proof["stage_counts"], current)
+        or not np.array_equal(checked_proof["stage_complete"], complete)
+        or not np.array_equal(checked_proof["completed_stage_counts"], expected)
+    ):
+        raise ValueError(
+            "Continuation parent stage proof differs from its exact budget"
+        )
+
+
+def _restore_continuation_schedule(
+    declaration: Mapping[str, object],
+) -> TrainingSchedule:
+    """Restore a checked child schedule from saved host metadata only.
+
+    declaration is a JSON mapping previously returned by _continuation_details.
+    It must include the frozen parent stage proof; malformed budgets, mappings
+    or proofs raise ValueError. The optional learner mapping is retained for
+    its learner owner to validate. No arrays from a live game, files or random
+    keys are read. Use this schedule only with its restored full learner state.
+    """
+    return _build_continuation_schedule(declaration, require_parent_proof=True)
+
+
+def _check_training_schedule(schedule: TrainingSchedule) -> None:
+    """Reject a schedule whose arrays or report differ from its declaration.
+
+    Fresh schedules reconstruct through make_training_schedule; children use
+    their saved root, offset and parent proof. Host-only, with small array reads.
+    Raises ValueError before a malformed schedule can run or fork.
+    """
+    if not isinstance(cast(object, schedule), TrainingSchedule):
+        raise ValueError("Schedule must be a TrainingSchedule")
+    checked = (
+        make_training_schedule(
+            total_env_steps=schedule.total_env_steps,
+            num_envs=schedule.num_envs,
+            curriculum=schedule.curriculum,
+            score_threshold_curriculum=schedule.score_threshold_curriculum,
+            early_history_capture=schedule.early_history_capture,
+        )
+        if schedule.continuation is None
+        else _restore_continuation_schedule(schedule.continuation)
+    )
+    if (
+        (
+            schedule.total_env_steps,
+            schedule.num_envs,
+            schedule.curriculum,
+            schedule.score_threshold_curriculum,
+            schedule.early_history_capture,
+        )
+        != (
+            checked.total_env_steps,
+            checked.num_envs,
+            checked.curriculum,
+            checked.score_threshold_curriculum,
+            checked.early_history_capture,
+        )
+        or jax.tree.structure(schedule.arrays) != jax.tree.structure(checked.arrays)
+        or any(
+            left.dtype != right.dtype or not np.array_equal(left, right)
+            for left, right in zip(
+                jax.tree.leaves(schedule.arrays),
+                jax.tree.leaves(checked.arrays),
+                strict=True,
+            )
+        )
+        or dict(schedule.rounding_report) != dict(checked.rounding_report)
+    ):
+        raise ValueError(
+            "Training schedule arrays and report must match its declared settings"
+        )
+
+
 def _init_training_progress(  # pyright: ignore[reportUnusedFunction]
     *, num_envs: int
 ) -> TrainingProgress:
@@ -392,7 +976,9 @@ def _advance_training_schedule(  # pyright: ignore[reportUnusedFunction]
     info : EpisodeInfo
         Already tracked producing result. Returned flags include new failures.
     schedule : ScheduleArrays
-        Host-validated dynamic controls for this same run and batch.
+        Host-validated dynamic controls for this segment and batch. Stage
+        proofs use local slots; distribution exposure keeps original slots and
+        real experience stays cumulative across the segment offset.
 
     Returns
     -------
@@ -424,7 +1010,15 @@ def _advance_training_schedule(  # pyright: ignore[reportUnusedFunction]
         raise ValueError("progress must match the tracker batch")
     ordinal = tracking.stage_ordinal
     safe_stage = jnp.clip(ordinal, 0, _STAGES - 1)
-    previous_end = jnp.where(safe_stage > 0, schedule.round_ends[safe_stage - 1], 0)
+    offset = 0 if schedule.round_offset is None else schedule.round_offset
+    distribution_count = (
+        schedule.stage_count
+        if schedule.distribution_count is None
+        else schedule.distribution_count
+    )
+    previous_end = jnp.where(
+        safe_stage > 0, schedule.round_ends[safe_stage - 1], offset
+    )
     full_round = jnp.all(episode_advanced(info))
     category = (jnp.arange(batch) >= batch // 2).astype(jnp.int32)
     expected = jax.nn.one_hot(category, 3, dtype=jnp.int32) * tracking.stage_rounds
@@ -439,7 +1033,7 @@ def _advance_training_schedule(  # pyright: ignore[reportUnusedFunction]
         | (tracking.stage_round_budget <= 0)
         | (tracking.stage_rounds <= 0)
         | (tracking.stage_rounds > tracking.stage_round_budget)
-        | (progress.rounds < 0)
+        | (progress.rounds < offset)
         | (progress.rounds >= schedule.total_rounds)
         | (progress.rounds - previous_end != tracking.stage_rounds - 1)
         | jnp.any(tracking.stage_counts != expected)
@@ -460,7 +1054,7 @@ def _advance_training_schedule(  # pyright: ignore[reportUnusedFunction]
         )
         | jnp.any(
             (progress.episode_stage < 0)
-            | (progress.episode_stage >= schedule.stage_count)
+            | (progress.episode_stage >= distribution_count)
         )
         | progress.stage_complete[safe_stage]
     )
