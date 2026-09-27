@@ -28,7 +28,13 @@ def _run(root: Path, seed: int) -> Record:
         if row["checkpoint_id"] == "a":
             row["score"] = 0.2
         row["cells"] = [
-            {"map_id": map_id, "opponent": "Opponent", "score": row["score"]}
+            {
+                "map_id": map_id,
+                "opponent": "Opponent",
+                "score": row["score"],
+                "mean_team_a_score": 10 + row["mean_kill_difference"],
+                "mean_team_b_score": 10,
+            }
             for map_id in row["maps"]
         ]
     original = next(

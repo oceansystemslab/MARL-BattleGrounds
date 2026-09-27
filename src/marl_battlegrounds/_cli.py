@@ -513,7 +513,7 @@ def _cell(value: object) -> str:
 def _print_result(
     result: EvaluationResult | TournamentResult, *, tournament: bool
 ) -> None:
-    """Print existing facts and one bounded preview, without fitting or saving."""
+    """Print bounded raw and head-to-head previews without fitting or saving."""
     print(f"Status: {result.status.capitalize()}")
     if result.run_dir is None:
         print("Results Were Not Saved")
@@ -562,6 +562,36 @@ def _print_result(
             print("\t".join(_cell(value) for value in row))
     else:
         print("No Available Rows")
+    try:
+        matchups = result.head_to_head()
+    except ValueError as error:
+        if "unavailable:" not in str(error):
+            raise
+        print(f"Head To Head: Unavailable ({error})")
+    else:
+        print("Head To Head — Up To 32 Rows")
+        fields = (
+            "system_id",
+            "system_name",
+            "opponent_id",
+            "opponent_name",
+            "games",
+            "wins",
+            "draws",
+            "losses",
+            "mean_points_for",
+            "mean_points_against",
+            "mean_point_margin",
+        )
+        if matchups:
+            print(
+                "System ID\tSystem\tOpponent ID\tOpponent\tGames\tWins\tDraws\tLosses\t"
+                "Points For\tPoints Against\tPoint Margin"
+            )
+            for row in zip(*(matchups[name][:32] for name in fields), strict=True):
+                print("\t".join(_cell(value) for value in row))
+        else:
+            print("No Completed Games")
     for path in result.replay_paths:
         print(f"Replay: {path}")
     if result.run_dir is None:

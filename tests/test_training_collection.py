@@ -8,8 +8,11 @@ training content. No case trains a learner or establishes GPU throughput.
 Both shaping modes use the producing game's scores. Disabled shaping traces
 neither reward helper, and invalid modes fail during setup. A zero pinned
 opponent share traces the same rollout program as today; a positive share needs
-early history capture, pins the first-update actor in slot 0 and keeps the
-21-row exposure layout.
+early history capture and keeps the first-update actor outside rotating slots.
+Stable capture IDs own exposure rows; a child can resize storage without
+renaming a copy, clearing counters or replacing a live game. Custom rewards
+keep exact producing states and the round clock, preserve native results, skip
+disabled facts/callback work, and remain separate in real and padded rows.
 """
 
 from __future__ import annotations
@@ -33,6 +36,7 @@ from tests.test_baseline_ppo import (
 )
 
 import marl_battlegrounds as marl_bgs
+import marl_battlegrounds.collection as recording_collection
 import marl_battlegrounds.training.collection as collection_module
 from marl_battlegrounds.baselines.actions import (
     NUM_ACTIONS,
@@ -44,7 +48,13 @@ from marl_battlegrounds.baselines.actions import (
 from marl_battlegrounds.baselines.inputs import encode_training_state
 from marl_battlegrounds.baselines.ppo import initialize_ppo, make_recurrent_mappo_system
 from marl_battlegrounds.core import env as core
-from marl_battlegrounds.environment import Environment, EnvironmentState, EpisodeInfo
+from marl_battlegrounds.core.types import EnvState
+from marl_battlegrounds.environment import (
+    Environment,
+    EnvironmentState,
+    EpisodeInfo,
+    TrainingFacts,
+)
 from marl_battlegrounds.episode_tracking import init_episode_tracking
 from marl_battlegrounds.evaluation.policy_execution import (
     PolicyTrace,
@@ -159,9 +169,19 @@ def _synthetic(context: Context, *, horizon: int = 2, partial: bool = False) -> 
         env_config=sampled.config,
         num_envs=2,
         metrics=cast(Any, collection.metrics),
+        training_facts=carry.env.training_facts,
     )
     observations, state = env.reset(
         training_keys(carry.root_key, generations, stream="reset")
+    )
+    a_values, b_values = collection_module._team_variables(  # pyright: ignore[reportPrivateUsage]
+        collection.actor,
+        collection.opponent,
+        carry.history,
+        carry.pinned_opponent,
+        carry.partner_selection,
+        carry.partner_values,
+        carry.partner_actions,
     )
     memory = init_systems(
         collection.actor,
@@ -169,8 +189,8 @@ def _synthetic(context: Context, *, horizon: int = 2, partial: bool = False) -> 
         observations,
         state,
         training_keys(carry.root_key, generations, stream="initialization"),
-        variables_a=carry.history.current_variables,
-        variables_b=carry.history,
+        variables_a=a_values,
+        variables_b=b_values,
     )
     tracking = init_episode_tracking(
         env,
@@ -933,8 +953,8 @@ def test_reset_selects_a_real_frozen_opponent_and_joins_version_exposure(
     np.testing.assert_array_equal(after.memory.team_b[:, 0], [10, 8])
     _equal(after.history.historical_variables, saved)
     summary = training_summary(collection, after)
-    assert summary["steps_by_opponent"] == [5, 1] + [0] * 19
-    assert summary["starts_by_opponent"] == [3, 1] + [0] * 19
+    assert summary["steps_by_opponent"] == [5, 0, 1] + [0] * 19
+    assert summary["starts_by_opponent"] == [3, 0, 1] + [0] * 19
 
 
 def test_pinned_share_and_early_capture_must_be_declared_together(
@@ -997,7 +1017,7 @@ def test_pinned_share_reaches_the_rollout_program_only_when_positive(
     )
 
 
-def test_early_capture_pins_the_first_update_actor_in_slot_zero(
+def test_early_capture_keeps_a_separate_first_update_pin(
     prepared: PreparedTrainingContent,
 ) -> None:
     actor = _actor()
@@ -1011,6 +1031,8 @@ def test_early_capture_pins_the_first_update_actor_in_slot_zero(
         prepared=prepared,
         metrics="none",
         pinned_opponent_share=0.5,
+        keep_past=0,
+        history_capture_capacity=0,
     )
     collection, real = context
     assert collection.pinned_opponent_share == 0.5
@@ -1027,11 +1049,10 @@ def test_early_capture_pins_the_first_update_actor_in_slot_zero(
         update_index=jnp.int32(1),
         schedule=first.schedule,
     )
-    assert bool(event.created)
-    assert int(event.slot) == 0
-    assert int(history.captured_rounds[0]) == 1
-    assert int(history.captured_updates[0]) == 1
-    assert int(history.count) == 1
+    assert not bool(event.created)
+    assert int(history.pinned_update) == 1
+    assert float(history.pinned_variables["value"]) == 7
+    assert int(history.count) == 0
     validate(collection, first._replace(history=history))
     # Short synthetic games then show the pinned actor actually being drawn.
     collection, current = _synthetic(context)
@@ -1043,23 +1064,20 @@ def test_early_capture_pins_the_first_update_actor_in_slot_zero(
         update_index=jnp.int32(1),
         schedule=current.schedule,
     )
-    assert bool(event.created)
+    assert not bool(event.created)
     current = current._replace(history=history)
     seen: set[int] = set()
     for _ in range(10):
         current, (row, _, _) = _stepper(collection)(current)
         seen.update(np.asarray(row.opponent_snapshot).tolist())
-    assert seen == {-1, 0}
+    assert seen == {-2, -1}
     summary = training_summary(collection, current)
     steps = cast(list[int], summary["steps_by_opponent"])
     starts = cast(list[int], summary["starts_by_opponent"])
-    assert len(steps) == 21
-    assert len(starts) == 21
+    assert len(steps) == 2
+    assert len(starts) == 2
     assert starts[1] > 0
     assert steps[1] > 0
-    # Trivial here: the bank holds one snapshot throughout, so no other slot can
-    # be drawn; the count-above-one split is proven at the assign_opponents level.
-    assert starts[2:] == [0] * 19
     assert sum(steps) == int(current.progress.rounds) * 2
 
 
@@ -1250,4 +1268,776 @@ def test_malformed_schedule_is_rejected_before_system_initialization(
     with pytest.raises(ValueError, match="schedule"):
         init_training_collection(
             actor, actor.variables, schedule=changed, prepared=prepared
+        )
+
+
+def test_history_resize_keeps_live_capture_identity_and_pads_counters(
+    prepared: PreparedTrainingContent,
+) -> None:
+    actor = _actor()
+    collection, carry = init_training_collection(
+        actor,
+        actor.variables,
+        prepared=prepared,
+        metrics="none",
+        keep_past=2,
+        schedule=make_training_schedule(total_env_steps=40, num_envs=2),
+    )
+    for update in range(1, 4):
+        carry, _ = _scan((collection, carry), length=1)
+        history, _ = refresh_opponents(
+            carry.history,
+            {"value": jnp.float32(update)},
+            completed_rounds=carry.progress.rounds,
+            update_index=jnp.int32(update),
+            schedule=carry.schedule,
+        )
+        carry = carry._replace(history=history)
+    carry = carry._replace(
+        history=carry.history._replace(lane_snapshot=jnp.asarray([0, 1], jnp.int32))
+    )
+    resize = collection_module._resize_training_history  # pyright: ignore[reportPrivateUsage]
+    with pytest.raises(ValueError, match="unfinished games still use capture IDs"):
+        resize(collection, carry, keep_past=1, history_capture_capacity=24)
+    grown, changed = resize(collection, carry, keep_past=3, history_capture_capacity=24)
+    np.testing.assert_array_equal(changed.history.captured_ids[:3], [0, 1, 2])
+    np.testing.assert_array_equal(changed.history.lane_snapshot, [0, 1])
+    _equal(changed.memory, carry.memory)
+    _equal(changed.state, carry.state)
+    _equal(changed.progress.opponent_steps[:22], carry.progress.opponent_steps)
+    assert changed.progress.opponent_steps.shape == (26, 2)
+    ended = changed._replace(
+        state=changed.state._replace(
+            done=changed.state.done._replace(terminated=jnp.asarray([True, False]))
+        )
+    )
+    _, shrunk = resize(grown, ended, keep_past=1, history_capture_capacity=24)
+    np.testing.assert_array_equal(shrunk.history.captured_ids, [1, 2])
+    np.testing.assert_array_equal(shrunk.history.lane_snapshot, [-1, 0])
+    np.testing.assert_array_equal(shrunk.history.eligible, [False, True])
+    _equal(shrunk.progress, changed.progress)
+    _equal(shrunk.memory, carry.memory)
+    with pytest.raises(ValueError, match="unfinished games"):
+        resize(grown, changed, keep_past=0, history_capture_capacity=24)
+
+
+def test_named_population_keeps_live_choices_and_records_actual_members(
+    prepared: PreparedTrainingContent, tmp_path: Path
+) -> None:
+    actor = _actor()
+    left = replace(actor, name="Left Counter", variables={"value": jnp.float32(11)})
+    right = replace(actor, name="Right Counter", variables={"value": jnp.float32(23)})
+    collection, initial = init_training_collection(
+        actor,
+        actor.variables,
+        schedule=make_training_schedule(total_env_steps=12, num_envs=2),
+        prepared=prepared,
+        metrics="none",
+        recording=True,
+        keep_past=0,
+        history_capture_capacity=0,
+        opponent_population={"left": left, "right": right},
+        opponent_selection=["left", "right", "self"],
+    )
+    assert initial.opponent_selection is not None
+    np.testing.assert_array_equal(initial.opponent_selection.choices, [0, 1])
+    assert int(initial.opponent_selection.game_starts) == 2
+    collection, initial = _synthetic((collection, initial))
+    with marl_bgs.RunWriter(
+        tmp_path, phase="training", policies=_writer_policies(collection)
+    ) as writer:
+        run_dir = writer.run_dir
+        middle, first = collect_training_rollout(
+            collection, initial, length=1, writer=writer
+        )
+        np.testing.assert_array_equal(first.transitions.opponent_snapshot, [[-3, -4]])
+        unchanged, changed = collection_module.update_opponent_selection(
+            collection, middle, selection={"right": 1.0}
+        )
+        assert unchanged is collection or unchanged.opponent is collection.opponent
+        _equal(changed.memory, middle.memory)
+        assert changed.opponent_selection is not None
+        np.testing.assert_array_equal(changed.opponent_selection.choices, [0, 1])
+        end, rest = collect_training_rollout(
+            unchanged, changed, length=3, writer=writer
+        )
+        np.testing.assert_array_equal(
+            rest.transitions.opponent_snapshot, [[-3, -4], [-4, -4], [-4, -4]]
+        )
+        assert end.opponent_selection is not None
+        assert int(end.opponent_selection.game_starts) == 4
+    summary = training_summary(unchanged, end)
+    assert summary["steps_by_opponent"] == [0, 0, 2, 6]
+    records = collection_module.opponent_member_records(unchanged, end)
+    assert [r["name"] for r in records] == ["self", "pin", "left", "right"]
+    assert records[2]["registration_id"] != records[3]["registration_id"]
+    from marl_battlegrounds.training.learner import (
+        _summary,  # pyright: ignore[reportPrivateUsage]
+    )
+
+    completed = _summary(rest, 4, 0)
+    np.testing.assert_array_equal(
+        np.sum(completed.per_member_completed, axis=1), [0, 0, 1, 3]
+    )
+    details = json.loads((run_dir / "run_details.json").read_text())
+    components = [
+        v["components"]
+        for v in details["systems"].values()
+        if len(v["components"]) == 4
+    ]
+    assert any(
+        [c["version"] for c in items]
+        == [
+            "opponent_snapshot_-1",
+            "opponent_snapshot_-2",
+            "opponent_snapshot_-3",
+            "opponent_snapshot_-4",
+        ]
+        for items in components
+    )
+
+
+@pytest.mark.parametrize("host", [False, True])
+def test_appending_member_keeps_full_live_memory_and_old_signed_ids(
+    prepared: PreparedTrainingContent, host: bool
+) -> None:
+    from tests.test_training_pinned_host import (
+        _Counter,  # pyright: ignore[reportPrivateUsage]
+    )
+
+    actor = _actor()
+    old_counter, new_counter = _Counter(), _Counter()
+    first = (
+        old_counter.system()
+        if host
+        else replace(actor, name="First", variables={"value": jnp.float32(13)})
+    )
+    second = (
+        new_counter.system()
+        if host
+        else replace(actor, name="Second", variables={"value": jnp.float32(29)})
+    )
+    context = init_training_collection(
+        actor,
+        actor.variables,
+        schedule=make_training_schedule(total_env_steps=12, num_envs=2),
+        prepared=prepared,
+        metrics="none",
+        keep_past=0,
+        history_capture_capacity=0,
+        opponent_population={"first": first},
+        opponent_selection={"first": 1.0},
+    )
+    collection, carry = _synthetic(context)
+    carry, _ = collect_training_rollout(collection, carry, length=1)
+    if host:
+        assert collection.host_opponent is not None
+        old_memory = collection.host_opponent.memory.members[0]
+        assert old_memory == [1, 1]
+    else:
+        old_memory = carry.memory.team_b[1].members[0]
+        np.testing.assert_array_equal(old_memory, 14)
+    changed, following = collection_module.append_training_opponents(
+        collection, carry, {"second": second}, selection={"second": 1.0}
+    )
+    assert changed.opponent_names == ("first", "second")
+    _equal(carry.progress.opponent_steps, following.progress.opponent_steps[:3])
+    if host:
+        assert changed.host_opponent is not None
+        assert changed.host_opponent.memory.members[0] is old_memory
+        assert old_counter.opened == 2 and new_counter.opened == 0
+    else:
+        _equal(following.memory.team_b[1].members[0], old_memory)
+    final, rollout = collect_training_rollout(changed, following, length=3)
+    np.testing.assert_array_equal(
+        rollout.transitions.opponent_snapshot, [[-3, -3], [-4, -4], [-4, -4]]
+    )
+    assert training_summary(changed, final)["steps_by_opponent"] == [0, 0, 4, 4]
+    if host:
+        assert old_counter.calls == 2 and new_counter.calls == 2
+        assert old_counter.opened == 2 and new_counter.opened == 2
+    with pytest.raises(ValueError, match="rebound"):
+        collection_module.append_training_opponents(changed, final, {"first": second})
+
+
+def test_recording_fork_keeps_old_component_indices_when_history_and_members_grow(
+    prepared: PreparedTrainingContent, tmp_path: Path
+) -> None:
+    import csv
+
+    from marl_battlegrounds.evaluation.recording_checkpoint import (
+        attach_recording_fork,
+        prepare_recording_fork,
+    )
+
+    actor = _actor()
+    context = init_training_collection(
+        actor,
+        actor.variables,
+        schedule=make_training_schedule(total_env_steps=12, num_envs=2),
+        prepared=prepared,
+        metrics="none",
+        recording=True,
+        keep_past=0,
+        history_capture_capacity=0,
+        opponent_population={"first": actor},
+        opponent_selection={"first": 1.0},
+    )
+    collection, carry = _synthetic(context)
+    with marl_bgs.RunWriter(
+        tmp_path / "parent", phase="training", policies=_writer_policies(collection)
+    ) as writer:
+        carry, _ = collect_training_rollout(collection, carry, length=1, writer=writer)
+        token = writer.checkpoint_recording()
+        parent_dir = writer.run_dir
+    changed, child = collection_module._resize_training_history(  # pyright: ignore[reportPrivateUsage]
+        collection, carry, keep_past=0, history_capture_capacity=2
+    )
+    changed, child = collection_module.append_training_opponents(
+        changed,
+        child,
+        {"second": replace(actor, name="Second")},
+        selection={"second": 1.0},
+    )
+    assert changed.opponent_trace_rows == (0, 1, 3, 4, 2, 5)
+    policies = _writer_policies(changed)
+    preparation = prepare_recording_fork(
+        parent_dir, token, episode_ids=[1, 2], policies=policies
+    )
+    try:
+        with marl_bgs.RunWriter(
+            tmp_path / "child", phase="training", policies=policies
+        ) as writer:
+            attach_recording_fork(writer, preparation)
+            child, _ = collect_training_rollout(changed, child, length=3, writer=writer)
+            child_dir = writer.run_dir
+    finally:
+        preparation.close()
+    before = json.loads((parent_dir / "run_details.json").read_text())
+    after = json.loads((child_dir / "run_details.json").read_text())
+    parent_pass = next(iter(before["passes"].values()))
+    child_pass = next(iter(after["passes"].values()))
+    assert child_pass["system_ids"]["team_b"] != parent_pass["system_ids"]["team_b"]
+    for episode in ("1", "2"):
+        assert (
+            child_pass["episodes"][episode]["system_ids"] == parent_pass["system_ids"]
+        )
+    with (child_dir / "policy_assignments.csv").open() as stream:
+        rows = [row for row in csv.DictReader(stream) if row["team"] == "team_b"]
+    assert {
+        int(row["policy_id"]) for row in rows if int(row["episode_id"]) in (1, 2)
+    } == {2}
+    assert {
+        int(row["policy_id"]) for row in rows if int(row["episode_id"]) not in (1, 2)
+    } == {5}
+
+
+def _slot_reward(
+    before: EnvState, facts: TrainingFacts, after: EnvState, progress: Array
+) -> Array:
+    advanced = (after.step_count - before.step_count).astype(jnp.float32)
+    return (
+        jnp.arange(10, dtype=jnp.float32)
+        + progress.astype(jnp.float32)
+        + advanced
+        + facts.is_newly_dead_by_recipient.astype(jnp.float32)
+    )
+
+
+def test_custom_rewards_keep_producing_state_rounds_and_native_results(
+    prepared: PreparedTrainingContent,
+) -> None:
+    actor = _actor()
+    options: dict[str, Any] = dict(
+        schedule=make_training_schedule(total_env_steps=8, num_envs=2),
+        prepared=prepared,
+        metrics="none",
+        keep_past=0,
+        history_capture_capacity=0,
+    )
+    identity: dict[str, object] = {"reference": "tests:slot_reward", "version": 1}
+    enabled = _synthetic(
+        init_training_collection(
+            actor,
+            actor.variables,
+            reward=_slot_reward,
+            reward_identity=identity,
+            **options,
+        )
+    )
+    identity["version"] = 2
+    assert enabled[0].reward_identity == {
+        "reference": "tests:slot_reward",
+        "version": 1,
+    }
+    disabled = _synthetic(init_training_collection(actor, actor.variables, **options))
+    end, actual = _scan(enabled, length=6)
+    expected_end, expected = _scan(disabled, length=6)
+    adjustment = actual.transitions.custom_rewards
+    assert adjustment is not None
+    values = (
+        np.arange(5, dtype=np.float32)[None, None, :]
+        + np.arange(1, 5, dtype=np.float32)[:, None, None]
+    )
+    np.testing.assert_array_equal(adjustment[:4], np.broadcast_to(values, (4, 2, 5)))
+    np.testing.assert_array_equal(adjustment[4:], 0)
+    assert np.any(np.asarray(actual.transitions.ended))
+    _equal(actual.transitions._replace(custom_rewards=None), expected.transitions)
+    _equal(end.state, expected_end.state)
+    _equal(end.memory, expected_end.memory)
+    assert int(end.progress.rounds) == 4
+    middle, _ = _scan(enabled, length=1)
+    _, suffix = _scan((enabled[0], middle), length=5)
+    assert suffix.transitions.custom_rewards is not None
+    np.testing.assert_array_equal(suffix.transitions.custom_rewards, adjustment[1:])
+
+
+def test_disabled_custom_reward_traces_no_facts_or_callback(
+    prepared: PreparedTrainingContent, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    def forbidden(*args: Tree, **kwargs: Tree) -> None:
+        pytest.fail("Disabled custom reward must not trace its validation or callback")
+
+    monkeypatch.setattr(collection_module, "validate_reward", forbidden)
+    monkeypatch.setattr(collection_module, "reward_adjustments", forbidden)
+    actor = _actor()
+    context = init_training_collection(
+        actor,
+        actor.variables,
+        schedule=make_training_schedule(total_env_steps=2, num_envs=2),
+        prepared=prepared,
+        metrics="none",
+        keep_past=0,
+        history_capture_capacity=0,
+    )
+    assert context[0].info_spec.training_facts is None
+    assert not context[1].env.training_facts
+    _, rollout = _scan(context, length=2)
+    assert rollout.transitions.custom_rewards is None
+
+
+@pytest.mark.parametrize(
+    "fault", ("shape", "dtype", "missing_identity", "nonfinite_identity")
+)
+def test_custom_reward_setup_rejects_invalid_contracts(
+    prepared: PreparedTrainingContent, fault: str
+) -> None:
+    def reward(
+        before: EnvState, facts: TrainingFacts, after: EnvState, progress: Array
+    ) -> Array:
+        del before, facts, after, progress
+        return jnp.zeros(
+            5 if fault == "shape" else 10,
+            jnp.int32 if fault == "dtype" else jnp.float32,
+        )
+
+    identity: dict[str, object] | None = (
+        None
+        if fault == "missing_identity"
+        else {"value": float("nan") if fault == "nonfinite_identity" else 0}
+    )
+    actor = _actor()
+    with pytest.raises((TypeError, ValueError)):
+        init_training_collection(
+            actor,
+            actor.variables,
+            schedule=make_training_schedule(total_env_steps=2, num_envs=2),
+            prepared=prepared,
+            metrics="none",
+            keep_past=0,
+            history_capture_capacity=0,
+            reward=reward,
+            reward_identity=identity,
+        )
+
+
+def test_custom_reward_facts_do_not_enter_recorded_evidence(
+    prepared: PreparedTrainingContent, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    original = recording_collection._append_evidence  # pyright: ignore[reportPrivateUsage]
+    calls: list[bool] = []
+
+    def append_evidence(*args: Tree, **kwargs: Tree) -> Tree:
+        info = args[2]
+        assert info.training_facts is None
+        calls.append(True)
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(recording_collection, "_append_evidence", append_evidence)
+    actor = _actor()
+    collection, carry = _synthetic(
+        init_training_collection(
+            actor,
+            actor.variables,
+            schedule=make_training_schedule(total_env_steps=4, num_envs=2),
+            prepared=prepared,
+            metrics="none",
+            keep_past=0,
+            history_capture_capacity=0,
+            recording=True,
+            reward=_slot_reward,
+            reward_identity={"reference": "tests:slot_reward"},
+        )
+    )
+    assert collection.info_spec.training_facts is not None
+    with marl_bgs.RunWriter(
+        tmp_path, phase="training", policies=_writer_policies(collection)
+    ) as writer:
+        _, rollout = collect_training_rollout(
+            collection, carry, length=3, writer=writer
+        )
+        run_dir = writer.run_dir
+    assert calls
+    assert rollout.transitions.custom_rewards is not None
+    for path in run_dir.rglob("*"):
+        if path.is_file() and path.suffix in {".json", ".jsonl", ".csv"}:
+            assert "training_facts" not in path.read_text()
+
+
+def test_change_training_reward_preserves_live_state_and_refreshes_optional_specs(
+    prepared: PreparedTrainingContent,
+) -> None:
+    actor = _actor()
+    collection, carry = init_training_collection(
+        actor,
+        actor.variables,
+        schedule=make_training_schedule(total_env_steps=8, num_envs=2),
+        prepared=prepared,
+        metrics="none",
+        keep_past=0,
+        history_capture_capacity=0,
+    )
+    carry, _ = _scan((collection, carry), length=1)
+    settings: dict[str, Any] = dict(
+        shaping=False,
+        shaping_mode="potential",
+        discount=float(carry.discount),
+        coefficient=float(carry.coefficient),
+    )
+    enabled, changed = collection_module.change_training_reward(
+        collection,
+        carry,
+        reward=_slot_reward,
+        reward_identity={"reference": "tests:slot_reward"},
+        **settings,
+    )
+    assert not carry.env.training_facts and changed.env.training_facts
+    assert collection.info_spec.training_facts is None
+    assert enabled.info_spec.training_facts is not None
+    assert enabled.carry_spec.env.training_facts
+    for name in carry._fields:
+        if name != "env":
+            _equal(getattr(carry, name), getattr(changed, name))
+    disabled, restored = collection_module.change_training_reward(
+        enabled, changed, **settings
+    )
+    assert not restored.env.training_facts
+    assert disabled.info_spec.training_facts is None
+    assert not disabled.carry_spec.env.training_facts
+    _equal(restored, carry)
+
+    def wrong(
+        before: EnvState, facts: TrainingFacts, after: EnvState, progress: Array
+    ) -> Array:
+        del before, facts, after, progress
+        return jnp.zeros(5, jnp.float32)
+
+    with pytest.raises(ValueError, match="shape"):
+        collection_module.change_training_reward(
+            collection,
+            carry,
+            reward=wrong,
+            reward_identity={"reference": "tests:wrong"},
+            **settings,
+        )
+    assert collection.reward is None and not carry.env.training_facts
+
+
+def test_fixed_partners_keep_same_call_learner_outputs_and_physical_slots(
+    prepared: PreparedTrainingContent,
+) -> None:
+    actor = _actor()
+    partner = replace(
+        _actor(), name="Fixed teammate", variables={"value": jnp.float32(17)}
+    )
+    collection, carry = init_training_collection(
+        actor,
+        actor.variables,
+        schedule=make_training_schedule(total_env_steps=8, num_envs=2),
+        prepared=prepared,
+        metrics="none",
+        keep_past=0,
+        learner_slots=(0, 2, 4),
+        partner_population={"friend": partner},
+        partner_selection={"friend": 1.0},
+    )
+    original_partner = carry.partner_values
+    changed, rollout = _scan((collection, carry), length=2)
+    rows = rollout.transitions
+    assert rows.learner_active is not None
+    np.testing.assert_array_equal(
+        rows.learner_active, np.tile([True, False, True, False, True], (2, 2, 1))
+    )
+    assert np.all(np.asarray(rows.active))
+    np.testing.assert_array_equal(rows.learning_outputs["weight"], 3)
+    np.testing.assert_array_equal(rows.learning_outputs["calls"][0], 4)
+    np.testing.assert_array_equal(rollout.initial_memory, 3)
+    np.testing.assert_array_equal(changed.memory.team_a.members[1].members[0], 19)
+    np.testing.assert_array_equal(changed.memory.team_b.members[1].members[0], 19)
+    _equal(changed.partner_values, original_partner)
+    assert rollout.final_learner_active is not None
+    np.testing.assert_array_equal(rollout.final_learner_active, rows.learner_active[-1])
+    collection_module._validate_training_continuation(collection, changed)  # pyright: ignore[reportPrivateUsage]
+
+
+@pytest.mark.parametrize("host", [False, True])
+def test_partner_append_keeps_both_live_memories_and_changes_only_new_games(
+    prepared: PreparedTrainingContent,
+    host: bool,
+) -> None:
+    from tests.test_training_pinned_host import (
+        _Counter,  # pyright: ignore[reportPrivateUsage]
+    )
+
+    actor = _actor()
+    counter, later = _Counter(), _Counter()
+    first = (
+        counter.system()
+        if host
+        else replace(actor, name="First partner", variables={"value": jnp.float32(13)})
+    )
+    second = (
+        later.system()
+        if host
+        else replace(actor, name="Later partner", variables={"value": jnp.float32(29)})
+    )
+    context = init_training_collection(
+        actor,
+        actor.variables,
+        prepared=prepared,
+        metrics="none",
+        keep_past=0,
+        schedule=make_training_schedule(total_env_steps=12, num_envs=2),
+        learner_slots=(0, 2, 4),
+        partner_population={
+            "first": first,
+            "unused": replace(actor, name="Unused partner"),
+        },
+        partner_selection={"first": 1.0},
+    )
+    collection, carry = _synthetic(context)
+    carry, _ = collect_training_rollout(collection, carry, length=1)
+    np.testing.assert_array_equal(carry.progress.partner_used, [True, False])
+    old = tuple(
+        collection.host_partners[side].memory.members[0]
+        if collection.host_partners is not None
+        else collection_module._partner_pool_memory(carry, side).members[0]  # pyright: ignore[reportPrivateUsage]
+        for side in range(2)
+    )
+    changed, following = collection_module.append_training_partners(
+        collection, carry, {"later": second}, selection=["later"]
+    )
+    assert following.partner_selection is not None
+    for side in range(2):
+        np.testing.assert_array_equal(following.partner_selection[side].choices, 0)
+        actual = (
+            changed.host_partners[side].memory.members[0]
+            if changed.host_partners is not None
+            else collection_module._partner_pool_memory(following, side).members[0]  # pyright: ignore[reportPrivateUsage]
+        )  # pyright: ignore[reportPrivateUsage]
+        if host:
+            assert actual is old[side]
+        else:
+            _equal(actual, old[side])
+    np.testing.assert_array_equal(following.progress.partner_used, [True, False, False])
+    final, _ = collect_training_rollout(changed, following, length=3)
+    assert final.partner_selection is not None
+    for settings in final.partner_selection:
+        np.testing.assert_array_equal(settings.choices, 2)
+        assert int(settings.game_starts) == 4
+    np.testing.assert_array_equal(final.progress.partner_used, [True, False, True])
+    if host:
+        assert counter.calls == 4 and later.calls == 4
+        assert counter.opened == 4 and later.opened == 4
+    with pytest.raises(ValueError, match="rebound"):
+        collection_module.append_training_partners(changed, final, {"first": second})
+
+
+def test_named_external_opponent_keeps_whole_team_beside_fixed_partners(
+    prepared: PreparedTrainingContent,
+) -> None:
+    def move(
+        variables: Tree, memory: Tree, inputs: SystemInput, keys: Array
+    ) -> SystemOutput:
+        del keys
+        zero = jnp.zeros_like(inputs.active_mask, jnp.int32)
+        return SystemOutput(
+            ActorAction(jnp.full_like(zero, variables, jnp.int32), zero, zero), memory
+        )
+
+    actor = _actor()
+    partner = System("Partner moves east", move, variables=jnp.int32(1))
+    opponent = System("Whole opponent moves west", move, variables=jnp.int32(5))
+    collection, carry = init_training_collection(
+        actor,
+        actor.variables,
+        prepared=prepared,
+        metrics="none",
+        keep_past=0,
+        schedule=make_training_schedule(total_env_steps=8, num_envs=2),
+        learner_slots=(0, 2, 4),
+        partner_population={"friend": partner},
+        opponent_population={"whole": opponent},
+        opponent_selection=["self", "whole"],
+    )
+    changed, rows = _scan((collection, carry), length=1)
+    np.testing.assert_array_equal(
+        rows.transitions.actions.move[0, :, :5], [[0, 1, 0, 1, 0]] * 2
+    )
+    np.testing.assert_array_equal(
+        rows.transitions.actions.move[0, 0, 5:], [0, 1, 0, 1, 0]
+    )
+    np.testing.assert_array_equal(rows.transitions.actions.move[0, 1, 5:], 5)
+    np.testing.assert_array_equal(changed.progress.partner_used, [True])
+
+
+def test_partner_recording_names_the_real_members_on_each_team(
+    prepared: PreparedTrainingContent,
+) -> None:
+    actor = _actor()
+    collection, carry = init_training_collection(
+        actor,
+        actor.variables,
+        prepared=prepared,
+        metrics="none",
+        keep_past=0,
+        recording=True,
+        schedule=make_training_schedule(total_env_steps=8, num_envs=2),
+        learner_slots=(0, 2, 4),
+        partner_population={
+            "first": actor,
+            "second": replace(actor, name="Second partner"),
+        },
+        partner_selection=["first", "second"],
+    )
+    _, (_, _, trace) = _stepper(collection)(carry)
+    for side in range(2):
+        recorded = np.asarray(trace.policy_ids)[:, side * 5 : (side + 1) * 5]
+        for lane in range(2):
+            np.testing.assert_array_equal(
+                recorded[lane, [1, 3]], collection.partner_trace_rows[side][lane]
+            )
+    assert collection.actor.components is not None
+    assert (
+        collection.actor.components[collection.partner_trace_rows[0][1]]["name"]
+        == "second"
+    )
+
+
+def test_native_past_mirrors_learner_slots_and_keeps_partner_weights(
+    prepared: PreparedTrainingContent,
+) -> None:
+    from marl_battlegrounds.training.curriculum import (
+        _with_history_capture_rounds,  # pyright: ignore[reportPrivateUsage]
+    )
+
+    actor = _actor()
+    partner = replace(actor, name="Fixed partner", variables={"value": jnp.float32(17)})
+    schedule = _with_history_capture_rounds(
+        make_training_schedule(total_env_steps=12, num_envs=2), (1,)
+    )
+    context = init_training_collection(
+        actor,
+        actor.variables,
+        prepared=prepared,
+        metrics="none",
+        keep_past=1,
+        schedule=schedule,
+        learner_slots=(0, 2, 4),
+        partner_population={"friend": partner},
+        opponent_selection={"self": 1.0},
+    )
+    collection, carry = _synthetic(context)
+    for value in (9, 19):
+        carry, _ = collect_training_rollout(collection, carry, length=1)
+        history, _ = refresh_opponents(
+            carry.history,
+            {"value": jnp.float32(value)},
+            completed_rounds=carry.progress.rounds,
+            update_index=jnp.int32(int(carry.history.current_update) + 1),
+            schedule=carry.schedule,
+        )
+        carry = carry._replace(history=history)
+    collection, carry = collection_module.update_opponent_selection(
+        collection, carry, selection={"past": 1.0}
+    )
+    carry, _ = collect_training_rollout(collection, carry, length=1)
+    np.testing.assert_array_equal(carry.memory.team_a.members[0], 20)
+    np.testing.assert_array_equal(carry.memory.team_b.members[0], 10)
+    np.testing.assert_array_equal(carry.memory.team_a.members[1].members[0], 18)
+    np.testing.assert_array_equal(carry.memory.team_b.members[1].members[0], 18)
+    assert carry.history.historical_variables["value"].shape == (2,)
+    assert carry.partner_values[0].members[0]["value"].shape == ()
+
+
+def test_appending_opponent_and_partner_preserves_old_composed_games(
+    prepared: PreparedTrainingContent,
+) -> None:
+    actor = _actor()
+    partner = replace(actor, name="First partner", variables={"value": jnp.float32(13)})
+    later = replace(actor, name="New partner", variables={"value": jnp.float32(29)})
+    whole = replace(
+        actor, name="New full opponent", variables={"value": jnp.float32(77)}
+    )
+    context = init_training_collection(
+        actor,
+        actor.variables,
+        prepared=prepared,
+        metrics="none",
+        keep_past=0,
+        schedule=make_training_schedule(total_env_steps=12, num_envs=2),
+        learner_slots=(0, 2, 4),
+        partner_population={"first": partner},
+        opponent_selection={"self": 1.0},
+    )
+    collection, carry = _synthetic(context)
+    carry, _ = collect_training_rollout(collection, carry, length=1)
+    old_native = carry.memory.team_b
+    collection, carry = collection_module.append_training_opponents(
+        collection, carry, {"whole": whole}, selection={"whole": 1.0}
+    )
+    _equal(carry.memory.team_b.members[0], old_native)
+    collection, carry = collection_module.append_training_partners(
+        collection, carry, {"later": later}, selection={"later": 1.0}
+    )
+    _equal(carry.memory.team_b.members[0].members[0], old_native.members[0])
+    final, rollout = collect_training_rollout(collection, carry, length=3)
+    np.testing.assert_array_equal(
+        rollout.transitions.opponent_snapshot, [[-1, -1], [-3, -3], [-3, -3]]
+    )
+    np.testing.assert_array_equal(final.memory.team_a.members[1].members[1], 31)
+    np.testing.assert_array_equal(final.memory.team_b.members[1].members[0], 79)
+    np.testing.assert_array_equal(final.progress.partner_used, [True, True])
+
+
+@pytest.mark.parametrize("slots", [(4,), (), (0, 0)])
+def test_invalid_partner_ownership_fails_before_any_action(
+    prepared: PreparedTrainingContent,
+    slots: tuple[int, ...],
+) -> None:
+    actor = _actor()
+    with pytest.raises(ValueError, match=r"learner slot|learner_slots"):
+        init_training_collection(
+            actor,
+            actor.variables,
+            prepared=prepared,
+            metrics="none",
+            keep_past=0,
+            schedule=make_training_schedule(
+                total_env_steps=8,
+                num_envs=2,
+                curriculum=[{"share": 1, "team_size": 2, "maps": [0]}],
+            ),
+            learner_slots=slots,
+            partner_population={"friend": actor},
         )

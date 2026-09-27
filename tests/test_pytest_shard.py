@@ -60,6 +60,8 @@ def indirect_affinity_anchor(module_affinity_anchor: object) -> object:
 def test_parse_shard_spec_uses_one_based_cli_and_zero_based_internal_index() -> None:
     assert parse_shard_spec("1/12") == (0, 12)
     assert parse_shard_spec("12/12") == (11, 12)
+    assert parse_shard_spec("1/19") == (0, 19)
+    assert parse_shard_spec("19/19") == (18, 19)
 
 
 @pytest.mark.parametrize("value", ("0/12", "13/12", "1/0", "1", "x/12", "1/x"))
@@ -628,8 +630,8 @@ def test_production_profile_is_the_checked_in_measured_cost_table() -> None:
     assert CI_SHARD_COST_PROFILE.split_file_family_cost_floors == {}
     assert CI_SHARD_COST_PROFILE.relocations_by_shard_count == {}
     assert CI_SHARD_COST_PROFILE.repeatable_module_fixtures == frozenset()
-    assert CI_SHARD_COST_PROFILE.reserved_costs_by_shard_count[12] == (
-        (0,) * 11 + (50,)
+    assert CI_SHARD_COST_PROFILE.reserved_costs_by_shard_count[19] == (
+        (0,) * 18 + (50,)
     )
     split_paths = {
         nodeid.split("::", maxsplit=1)[0]
@@ -805,14 +807,15 @@ def test_junit_rejects_invalid_durations(tmp_path: Path, duration: str) -> None:
 def test_cost_update_refuses_partial_reports_before_touching_table(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    expected = {f"tests/test_a.py::test_x[{i}]": 1 for i in range(13)}
+    shard_count = shard_costs_module.DEFAULT_SHARD_COUNT
+    expected = {f"tests/test_a.py::test_x[{i}]": 1 for i in range(shard_count + 1)}
     monkeypatch.setattr(
         shard_costs_module, "collect_tests", lambda: _collected(expected)
     )
     table = tmp_path / "costs.json"
     table.write_text("preserve this table\n", encoding="utf-8")
     monkeypatch.setattr(shard_costs_module, "MEASURED_COSTS_PATH", table)
-    for index in range(1, 13):
+    for index in range(1, shard_count + 1):
         (tmp_path / f"python-shard-{index}.xml").write_text(
             '<testsuite><testcase classname="tests.test_a" '
             f'name="test_x[{index}]" time="1"/></testsuite>',

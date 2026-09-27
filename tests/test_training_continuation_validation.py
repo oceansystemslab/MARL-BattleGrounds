@@ -3,7 +3,9 @@
 Short CPU learners use real schema-2 M8 validation under the fixed H300 rules.
 These tests inspect saved games and identities; they make no learning or speed
 claim. Small direct selection fixtures prove a better parent can remain selected
-while final always belongs to the child.
+while final always belongs to the child. Historical score-only fixtures request
+the saved ranking rule; live runs use their recorded rule and checkpoint IDs,
+never readable actor-folder names.
 """
 
 import json
@@ -72,11 +74,12 @@ def test_parent_best_is_distinct_from_child_final(tmp_path: Path) -> None:
         declaration=declared,
         panel=panel,
         final_checkpoint_id="child",
+        rule="saved",
     )
     from marl_battlegrounds.training.analysis import select_checkpoint
 
     assert candidates == ("parent", "child")
-    assert select_checkpoint(confirmed)["checkpoint_id"] == "parent"
+    assert select_checkpoint(confirmed, rule="saved")["checkpoint_id"] == "parent"
     assert parent_confirmation["checkpoint_id"] == "parent"
     changed = {**declared, "roots": {**panel.roots, "confirmation": 14}}
     _, confirmed, candidates = validation.selection_validation_results(
@@ -86,6 +89,7 @@ def test_parent_best_is_distinct_from_child_final(tmp_path: Path) -> None:
         declaration=changed,
         panel=panel,
         final_checkpoint_id="child",
+        rule="saved",
     )
     assert candidates == ("parent", "child") and not confirmed
 
@@ -125,6 +129,7 @@ def test_public_child_roots_resume_and_original_selected_owner(
             method="ff_ippo",
             num_envs=4,
             total_env_steps=8,
+            keep_past=0,
             seed=811,
             ppo=PPOConfig(rollout_length=2, epochs=1),
             checkpoint_interval_updates=1,
@@ -157,6 +162,12 @@ def test_public_child_roots_resume_and_original_selected_owner(
     assert declared["roots"]["confirmation"] == 7002
     assert [point["env_steps"] for point in declared["points"]] == [12]
     assert child.final_actor.parent == child.run_dir / "actors"
+    parent_id = checkpoints.read_checkpoint_description(parent.final_actor)["metadata"][
+        "checkpoint_id"
+    ]
+    child_id = checkpoints.read_checkpoint_description(child.final_actor)["metadata"][
+        "checkpoint_id"
+    ]
     evidence = read_run_evidence(child.run_dir)
     local = json.loads((child.run_dir / "validation_results.json").read_text())
     inherited = read_inherited_candidates(
@@ -168,15 +179,14 @@ def test_public_child_roots_resume_and_original_selected_owner(
         inherited,
         declaration=declared,
         panel=panel,
-        final_checkpoint_id=child.final_actor.name,
+        final_checkpoint_id=child_id,
+        rule=details["selection_rule"],
     )
     winner = select_checkpoint(confirmations)
     assert child.selected_actor == Path(
         evidence["actors"][winner["checkpoint_id"]]["actor_path"]
     )
-    assert (
-        parent.final_actor.name in candidates and child.final_actor.name in candidates
-    )
+    assert parent_id in candidates and child_id in candidates
     decision = reselect_checkpoint(
         [child.run_dir],
         declaration={"name": "Child Evidence", "allow_different_roots": True},
@@ -196,11 +206,9 @@ def test_public_child_roots_resume_and_original_selected_owner(
         child_checkpoint, declaration=declared
     )
     next_evidence = read_inherited_candidates(next_references, declaration=declared)
-    assert next_evidence["actors"][parent.final_actor.name]["actor_path"] == str(
-        parent.final_actor
-    )
+    assert next_evidence["actors"][parent_id]["actor_path"] == str(parent.final_actor)
     assert any(
-        row["root"] == 7002 and row["checkpoint_id"] == parent.final_actor.name
+        row["root"] == 7002 and row["checkpoint_id"] == parent_id
         for row in next_evidence["records"]
         if row["purpose"] == "confirmation"
     )
@@ -397,7 +405,11 @@ def test_warmup_child_run_setup_uses_saved_points_and_planned_learning_count(
         tmp_path,
         cast(Any, config),
         cast(Any, SimpleNamespace(schedule=None)),
-        SimpleNamespace(carry=None),
+        SimpleNamespace(
+            carry=SimpleNamespace(
+                progress=SimpleNamespace(opponent_steps=SimpleNamespace(shape=(2,)))
+            )
+        ),
         {
             "host_state": {},
             "continuation": {"inherited_candidates": [], "start_env_steps": 16},

@@ -244,7 +244,9 @@ successor.
 The eight supported rates are exactly **0.25×, 0.50×, 0.75×, 1.00×, 1.25×,
 1.50×, 1.75×, and 2.00×**. A rate scales the complete presentation clock,
 including animation phases, waits, and the replay terminal hold. It never
-changes simulator ticks or artifact contents.
+changes simulator ticks or artifact contents. A fresh Viewer starts at **0.50×**.
+Choosing **1.00×** uses normal speed. Your choice stays in place through pause,
+seeking and loading another replay in the same page.
 
 ### Document Keyboard Shortcuts and Exclusions
 
@@ -303,7 +305,9 @@ observation radius and static line of sight. The overlay is used for corpse
 painting and inspection and may additionally admit only a death/respawn
 presentation cue and that cue's owned endpoint. It never admits another event,
 moves an ability route, or changes policy input, masks, targeting, actions,
-simulator or recorded transition semantics, or the replay artifact.
+simulator or recorded transition semantics, or the replay artifact. Every allowed
+corpse is drawn below every living body, so a corpse cannot cover a living actor
+or take its mouse target when the bodies overlap.
 
 ### Technical Frame
 
@@ -398,8 +402,10 @@ or with depth 0, show no tint. Turning the filter off only hides the tint.
 Death Announcer names the killing team and shows a compact list of victims using
 numeric agent identities and classes. Hover or focus a victim to see its
 complete **Kill Contributors** list. Useful same-tick Priest support shares
-credit; healing that is all excess does not. Team A's kills appear in blue on
-the left, Team B's in red on the right. Contributor details use the existing
+credit; healing that is all excess does not. Team A's kills remain blue and
+Team B's remain red. Their cards, respawn banners and scoreboard entries follow
+their recorded spawn sides. Missing or non-left-right spawn banks use the older
+Team A left, Team B right layout. Contributor details use the existing
 accessible event tooltip; historical missing attribution is explicitly
 unavailable.
 
@@ -441,7 +447,10 @@ version 2, which records all 20 filter states; PNGs saved with version 1 and its
 replay frame.
 
 The scoreboard derives the task, participant identities, current scores and
-configured target from the captured episode. Victory, draw and defeat appear
+configured target from the captured episode. New recordings show the recorded
+System name. Exact IDs and checkpoint digests remain in the name tooltip. An old
+recording with only a hash shows **Recorded System** instead of using the hash
+as a player name. Victory, draw and defeat appear
 only when the current frame contains the task completion event. Seeking backward
 removes the later result. Legacy task-zero replays say **Combat diagnostic**.
 Changing between Oracle and Agent POV preserves the cursor and playing intent.

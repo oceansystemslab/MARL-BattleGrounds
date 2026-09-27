@@ -26,6 +26,9 @@ from marl_battlegrounds.evaluation.policy_execution import (
     System,
     SystemState,
     _adapter_template,
+    _check_weights,
+    _composition,
+    _CompositionVariables,
     _execution,
     _SystemExecution,
     _validate_adapter_roster,
@@ -217,20 +220,83 @@ def replace_initialization_roots(
 
 
 def validate_evaluation_rosters(
-    first: _SystemExecution, second: _SystemExecution, config: EnvConfig
+    first: _SystemExecution,
+    second: _SystemExecution,
+    config: EnvConfig,
+    *,
+    variables_a: PolicyTree = None,
+    variables_b: PolicyTree = None,
 ) -> None:
-    """Check adapter slot ownership before the runner opens a writer.
+    """Check every possible member's roster before the runner opens a writer.
 
-    first and second are stable descriptors for Team A/B. config is one exact
-    scalar episode configuration already checked by the setup authority. Each
-    independent adapter must match its team's active prefix, including repeated
-    classes and unequal teams. Shared Policies and generic Systems have no extra
-    roster-size rule. This host-only check copies only the ten Boolean activity
-    flags; it calls no initializer or action method. Invalid shapes or adapter
-    lengths raise ValueError before any recording mutation.
+    first and second describe Team A/B. config is one exact scalar episode
+    configuration already checked by the setup authority. variables_a and
+    variables_b are the corresponding frozen parameters; compositions require
+    them, while direct adapters and generic Systems may omit them.
+
+    Independent adapters must match the active prefix when used alone. Nested
+    adapters must contain every physical slot they control. Team selectors must
+    cover each incoming active slot exactly once, including repeated classes.
+    Every positive-share pool member is checked, regardless of a future draw.
+    Generic Systems and shared Policies have no extra roster-size rule.
+
+    Host setup only: copy the small roster/selector/share arrays, never method
+    parameters or memory. No initializer, action method or resource scope runs.
+    Invalid shapes, coverage or adapter lengths raise ValueError before any
+    recording mutation. Call once for each scheduled configuration, not per step.
     """
     active = np.asarray(config.agent_profile.active_mask)
     if active.shape != (10,) or active.dtype != np.bool_:
         raise ValueError("evaluation roster checks require a scalar ten-agent config")
-    _validate_adapter_roster(first, cast(Array, active[:5]))
-    _validate_adapter_roster(second, cast(Array, active[5:]))
+    classes = np.asarray(config.agent_profile.class_ids)
+
+    def validate(
+        execution: _SystemExecution,
+        variables: PolicyTree,
+        activity: np.ndarray[Any, Any],
+        class_ids: np.ndarray[Any, Any],
+        controlled: np.ndarray[Any, Any] | None = None,
+    ) -> None:
+        """Check one member and recurse only through slots it may control.
+
+        activity and class_ids retain five physical slots. controlled=None means
+        the top-level method; nested methods receive their exact owned subset.
+        variables is the member's frozen tree, never inspected for generic code.
+        """
+        composition = _composition(execution)
+        if composition is None:
+            _validate_adapter_roster(
+                execution,
+                cast(Array, activity),
+                controlled=cast(Array | None, controlled),
+            )
+            return
+        if not isinstance(variables, _CompositionVariables):
+            raise ValueError("composition roster checks require composition variables")
+        owned = activity if controlled is None else activity & controlled
+        if composition.pooled:
+            weights = _check_weights(variables.weights)
+            masks = tuple(owned & (weight > 0) for weight in weights)
+        else:
+            slots = np.asarray(variables.slots)
+            masks = tuple(
+                owned
+                & (
+                    row[:5]
+                    | np.any(row[5:] & (class_ids[:, None] == np.arange(1, 6)), axis=-1)
+                )
+                for row in slots
+            )
+            coverage = np.sum(np.stack(masks), axis=0)
+            if np.any(coverage[owned] != 1):
+                raise ValueError(
+                    "team slots must cover each controlled active slot exactly once"
+                )
+        for member, values, mask in zip(
+            composition.members, variables.members, masks, strict=True
+        ):
+            if np.any(mask):
+                validate(member, values, activity, class_ids, mask)
+
+    validate(first, variables_a, active[:5], classes[:5])
+    validate(second, variables_b, active[5:], classes[5:])

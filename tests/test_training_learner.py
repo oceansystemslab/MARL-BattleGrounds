@@ -12,7 +12,8 @@ spawn frame, at two input scales, the direct composition reflects the rebuilt
 view, mask and stored index the way the actor did, the stored log probabilities
 match that recomputation before any optimizer update, the update is accepted,
 and a stored index left in the reflected frame is rejected by the admission
-guard. No test claims useful
+guard. Warm starts load saved actor files, match inference and keep fresh learner
+state. No test claims useful
 learning or GPU performance. All three learner validators must reject a bad
 content-recheck flag before reading any state.
 """
@@ -20,6 +21,7 @@ content-recheck flag before reading any state.
 from collections.abc import Callable
 from dataclasses import replace
 from functools import partial
+from pathlib import Path
 from typing import Any, cast
 
 import jax
@@ -1001,3 +1003,80 @@ def test_completion_summary_keeps_outcomes_scores_and_valid_stage_ownership(
     np.testing.assert_array_equal(result.stage_completed[16], 0)
     np.testing.assert_array_equal(result.stage_score_sums[16], 0)
     assert int(result.stage_length_sum[16]) == int(result.stage_k20_count[16]) == 0
+
+
+@pytest.mark.parametrize("method", ["mappo", "ippo", "ff_mappo", "ff_ippo"])
+def test_warm_start_copies_actor_before_history_with_fresh_learner(
+    prepared: PreparedTrainingContent, method: str, tmp_path: Path
+) -> None:
+    config = PPOConfig(rollout_length=4, epochs=1)
+    schedule = make_training_schedule(total_env_steps=64, num_envs=4)
+    _, fresh = init_learner(
+        schedule=schedule,
+        ppo=config,
+        method=method,
+        seed=23,
+        prepared=prepared,
+        metrics="none",
+    )
+    imported = jax.tree.map(
+        partial(jnp.add, jnp.float32(0.125)), fresh.carry.history.current_variables
+    )
+    from marl_battlegrounds.evaluation.policy_execution import (
+        apply_systems,
+        init_systems,
+    )
+    from marl_battlegrounds.training import checkpoints
+
+    artifact = checkpoints.export_system(
+        imported,
+        tmp_path / "actor",
+        method=method,
+        input_scale=config.input_scale,
+        spawn_frame=config.spawn_frame,
+        metadata={
+            "run_id": "Warm Start Test",
+            "seed": 23,
+            "env_steps": 0,
+            "checkpoint_id": "a" * 64,
+            "optimizer_steps": 0,
+        },
+    )
+    loaded, _ = checkpoints.load_initial_actor(
+        artifact,
+        method=method,
+        input_scale=config.input_scale,
+        spawn_frame=config.spawn_frame,
+    )
+    collection, warm = init_learner(
+        schedule=schedule,
+        ppo=config,
+        method=method,
+        seed=23,
+        prepared=prepared,
+        metrics="none",
+        initial_actor=loaded.variables,
+    )
+    equal(warm.carry.history.current_variables, imported)
+    equal(warm.critic_params, fresh.critic_params)
+    equal(warm.actor_opt_state, fresh.actor_opt_state)
+    equal(warm.critic_opt_state, fresh.critic_opt_state)
+    equal(warm.value_norm, fresh.value_norm)
+    equal(warm.carry.memory, fresh.carry.memory)
+    assert int(warm.completed_updates) == int(warm.carry.history.count) == 0
+    variables = warm.carry.history.current_variables
+    observations, state = warm.carry.observations, warm.carry.state
+    memory = init_systems(loaded, loaded, observations, state, jax.random.key(71))
+    expected = apply_systems(
+        loaded, loaded, memory, observations, state, jax.random.key(72)
+    )
+    actual = apply_systems(
+        collection.actor,
+        loaded,
+        memory,
+        observations,
+        state,
+        jax.random.key(72),
+        variables_a=variables,
+    )
+    equal(actual, expected)

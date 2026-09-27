@@ -9,9 +9,10 @@ credit unknown. The module does not write files or advance the simulator.
 
 from __future__ import annotations
 
+import json
 import re
 from collections.abc import Callable
-from functools import cache
+from functools import cache, lru_cache
 from typing import TYPE_CHECKING, Annotated, Any, Literal, Self, cast
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
@@ -30,6 +31,7 @@ from marl_battlegrounds.evaluation.models import (
     RecipientHealthResolutionEventV1,
     SourceHealingOutputEventV1,
     TeamDeathmatchCompletedEventV1,
+    red_zone_team_on_right,
 )
 from marl_battlegrounds.rendering.scene import (
     AgentDiedEventV2,
@@ -58,10 +60,15 @@ class _MatchModel(BaseModel):
 
 
 class MatchTeamV1(_MatchModel):
-    """One team's display name and distinct recorded policy/checkpoint identities."""
+    """One team's name, policy identities and recorded horizontal display side.
+
+    display_side is None for missing or non-left-right spawn banks. Such records
+    keep the historical Team A left, Team B right layout.
+    """
 
     team_id: Literal[1, 2]
     display_name: _Name
+    display_side: Literal["left", "right"] | None = Field(default_factory=lambda: None)
     policy_ids: tuple[_Name, ...]
     checkpoint_digests: tuple[Annotated[str, Field(pattern=r"^[0-9a-f]{64}$")], ...]
 
@@ -147,6 +154,9 @@ class MatchSummaryV1(_MatchModel):
         """
         if tuple(team.team_id for team in self.teams) != (1, 2):
             raise ValueError("match teams must retain Team A then Team B order")
+        sides = tuple(team.display_side for team in self.teams)
+        if sides not in ((None, None), ("left", "right"), ("right", "left")):
+            raise ValueError("match display sides must be opposite or both unavailable")
         if len({death.public_agent_id for death in self.deaths}) != len(self.deaths):
             raise ValueError("match deaths must contain each incoming recipient once")
         if self.task_mode == 0:
@@ -326,9 +336,18 @@ def _death_contributors(
 
 
 def _controller_name(
-    context: EvaluationEpisodeContext, row: AssignedPolicySlot, team_id: int
+    context: EvaluationEpisodeContext,
+    row: AssignedPolicySlot,
+    team_id: int,
+    system_name: str | None = None,
 ) -> str:
-    """Name recognized scenario pressure from its recorded controller identity."""
+    """Name a recorded controller, keeping proven scenario names most specific.
+
+    context and row hold recorded identity facts; team_id is the physical team.
+    system_name is an optional saved name for an ordinary System. It takes
+    precedence over older policy labels, but not a proven scenario controller.
+    Exact policy IDs remain separate from this display text.
+    """
     scenario = context.identity.scenario
     match = (
         None
@@ -363,8 +382,43 @@ def _controller_name(
             else:
                 variant = variants.get(identity.identifier)
     if team_id == 2 and match is not None and variant is not None:
-        return f"tdm-scenario-{match[1]}-controller-{variant}"
-    return _CONTROLLER_NAMES.get(row.policy_kind, row.policy_id)
+        return f"TDM Scenario {match[1]} {variant.upper()} Controller"
+    if system_name is not None:
+        return _display_label(system_name)
+    return _CONTROLLER_NAMES.get(row.policy_kind, _display_label(row.policy_id))
+
+
+def _display_label(name: str) -> str:
+    """Turn an older file-style name into display text; keep hashes in provenance.
+
+    name is a recorded name or ID. Unknown hash-only identities use a plain label;
+    exact IDs remain in MatchTeamV1.policy_ids and its browser tooltip.
+    """
+    if re.fullmatch(r"[0-9a-f]{32,64}(?::component-\d+)?", name):
+        return "Recorded System"
+    label = " ".join(name.replace("_", " ").replace("-", " ").split())
+    return label[:1].upper() + label[1:]
+
+
+@lru_cache(maxsize=128)
+def _team_display_sides(
+    width: float, pads: tuple[tuple[tuple[float, float], ...], ...] | None
+) -> tuple[Literal["left", "right"] | None, Literal["left", "right"] | None]:
+    """Read immutable spawn banks once; ambiguous layouts return two None values.
+
+    width is the recorded map width. pads contains both five-pad banks, or None
+    for older recordings. Only banks wholly on opposite sides of the middle are
+    a horizontal layout. Red Zone need not be enabled. Actor positions are unused.
+    """
+    if pads is None:
+        return None, None
+    half = width / 2
+    left = tuple(all(x < half for x, _ in bank) for bank in pads)
+    right = tuple(all(x > half for x, _ in bank) for bank in pads)
+    if not ((left[0] and right[1]) or (right[0] and left[1])):
+        return None, None
+    on_right = red_zone_team_on_right(width, [x for x, _ in pads[0]])
+    return ("right", "left") if on_right else ("left", "right")
 
 
 def build_match_summary_v1(
@@ -457,6 +511,10 @@ def build_match_summary_v1(
                 contributors=credit,
             )
         )
+    display_sides = _team_display_sides(
+        context.resolved_env_config.map_width,
+        context.resolved_env_config.team_spawn_pad_positions,
+    )
     teams: list[MatchTeamV1] = []
     for team_id in (1, 2):
         assignments = tuple(
@@ -468,14 +526,35 @@ def build_match_summary_v1(
             and isinstance(assignment, (AssignedPolicySlotV1, AssignedPolicySlotV2))
         )
         policy_ids = tuple(dict.fromkeys(row.policy_id for row in assignments))
+        saved_name = next(
+            (
+                entry.value
+                for entry in context.aggregation_keys
+                if entry.name
+                == f"marl_bgs.system_name.team_{'a' if team_id == 1 else 'b'}"
+            ),
+            None,
+        )
+        system_name = None
+        if saved_name is not None:
+            try:
+                name = json.loads(saved_name)
+            except ValueError:
+                name = None
+            if isinstance(name, str) and name.strip():
+                system_name = name
         names = tuple(
             dict.fromkeys(
-                _controller_name(context, row, team_id) for row in assignments
+                _controller_name(context, row, team_id, system_name)
+                for row in assignments
             )
         )
+        if not names and system_name is not None:
+            names = (_display_label(system_name),)
         teams.append(
             MatchTeamV1(
                 team_id=team_id,
+                display_side=display_sides[team_id - 1],
                 display_name=" / ".join(names) if names else "No active policy",
                 policy_ids=policy_ids,
                 checkpoint_digests=tuple(

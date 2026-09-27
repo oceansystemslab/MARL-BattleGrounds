@@ -7,7 +7,9 @@ reuse for same-shaped changed parameters. No learner or Core rule changes here.
 Fixed batches also keep padding inactive before custom initialization, preserve
 real game keys through refill and resume, and never publish padded games. A
 default evaluation saves replay V4 files whose resolved config V2 and context
-column 19 record the default Red Zone depth 5.0.
+column 19 record the default Red Zone depth 5.0. All scheduled rosters are
+checked through nested teams and possible pool members before any method,
+resource scope or output file is opened.
 """
 
 # Public workflow proofs also inspect their shared compiled execution boundary.
@@ -24,6 +26,7 @@ import numpy as np
 import pytest
 from jax import Array
 
+import marl_battlegrounds as marl_bgs
 from marl_battlegrounds.evaluation.evaluate import (
     EpisodeSpec,
     evaluate,
@@ -45,6 +48,7 @@ from marl_battlegrounds.policies.actor import ActorAction
 from marl_battlegrounds.policies.random_valid import random_policy
 from marl_battlegrounds.tasks import (
     DEFAULT_TDM_RED_ZONE_DEPTH,
+    AgentClassName,
     make_standard_team_deathmatch_config,
 )
 
@@ -484,3 +488,91 @@ def test_fixed_batch_host_resume_initializes_only_real_pending_games(
     assert len(chosen_keys) == 33
     assert len(set(chosen_keys)) == 33
     assert calls == 3
+
+
+@pytest.mark.parametrize("kind", ["missing", "overlap", "pool", "short_adapter"])
+@pytest.mark.parametrize("side", [0, 1])
+def test_later_composed_roster_fails_before_methods_resources_or_output(
+    kind: str, side: int, tmp_path: Path
+) -> None:
+    from marl_battlegrounds.evaluation.system_evaluation import (
+        prepare_evaluation_system,
+        validate_evaluation_rosters,
+    )
+
+    def forbidden(*args: Any, **kwargs: Any) -> Any:  # noqa: ANN401
+        del args, kwargs
+        pytest.fail("roster checks must finish before methods or resources run")
+
+    provider = System(
+        "Unused provider",
+        forbidden,
+        init=forbidden,
+        execution="host",
+        resource_scope=forbidden,
+    )
+    first_roster: tuple[AgentClassName, ...]
+    second_roster: tuple[AgentClassName, ...]
+    if kind == "overlap":
+        first_roster, second_roster = ("priest", "mage"), ("mage", "mage")
+        method = marl_bgs.team(provider, provider, slots=[0, "mage"])
+    elif kind == "short_adapter":
+        first_roster, second_roster = ("mage", "priest"), ("priest", "mage")
+        short = marl_bgs.independent_policies(
+            (marl_bgs.Policy("One slot", forbidden, execution="host"),)
+        )
+        method = marl_bgs.team(short, provider, slots=["mage", "priest"])
+    else:
+        first_roster, second_roster = ("mage", "warrior"), ("mage", "priest")
+        method = marl_bgs.team(provider, provider, slots=["mage", "warrior"])
+        if kind == "pool":
+            method = marl_bgs.pool({provider: 1, method: 0.000001})
+    specs = tuple(
+        EpisodeSpec(
+            index + 1,
+            make_standard_team_deathmatch_config(
+                map_id=0,
+                team_a_roster=roster if side == 0 else ("mage",),
+                team_b_roster=roster if side == 1 else ("mage",),
+                max_steps=1,
+            ),
+            seed_id=index,
+        )
+        for index, roster in enumerate((first_roster, second_roster))
+    )
+    a, b = (method, provider) if side == 0 else (provider, method)
+    execution_a, variables_a, _ = prepare_evaluation_system(a)
+    execution_b, variables_b, _ = prepare_evaluation_system(b)
+    # Only the later refill is incompatible.
+    validate_evaluation_rosters(
+        execution_a,
+        execution_b,
+        specs[0].env_config,
+        variables_a=variables_a,
+        variables_b=variables_b,
+    )
+    output = tmp_path / "results"
+    error = "active prefix" if kind == "short_adapter" else "cover each"
+    with pytest.raises(ValueError, match=error):
+        evaluate_episodes(
+            a,
+            b,
+            specs,
+            num_envs=1,
+            chunk_size=1,
+            metrics="none",
+            output_dir=output,
+        )
+    assert not output.exists()
+    if kind == "pool":
+        disabled = marl_bgs.pool({provider: 1, method: 0})
+        execution, variables, _ = prepare_evaluation_system(disabled)
+        other, other_variables, _ = prepare_evaluation_system(provider)
+        # A zero-share member cannot own slots in these frozen games.
+        validate_evaluation_rosters(
+            execution if side == 0 else other,
+            other if side == 0 else execution,
+            specs[1].env_config,
+            variables_a=variables if side == 0 else other_variables,
+            variables_b=other_variables if side == 0 else variables,
+        )

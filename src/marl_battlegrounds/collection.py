@@ -442,7 +442,7 @@ def _consume(
 ) -> CollectedBatch:
     """Append one admitted step without retaining a dense info or final-data tree."""
     replay = raw_info.replay
-    info = raw_info._replace(replay=None, final=None)
+    info = raw_info._replace(replay=None, final=None, training_facts=None)
     if scalar:
 
         def add_batch(value: Array) -> Array:

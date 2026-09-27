@@ -48,6 +48,10 @@ historical panel) and every saved game configuration. On resume, a config
 declaring another depth, and a checkpoint re-signed with the pre-Red-Zone
 schemas (with or without a config), are refused before any file or array is
 touched and leave no recovery marker.
+Live callbacks receive saved finite rows once per block and isolate mutation.
+Children forward them; failed callbacks keep the row and allow normal recovery.
+Partner-only matchmaking leaves legacy opponents alone. Matchmaking receives
+copies of member records, so editing callback input cannot change saved identity.
 """
 
 # Failure injection inspects the private host coordinator, not a public API.
@@ -120,6 +124,7 @@ def test_public_run_resume_and_final_pending_work(
     monkeypatch.setattr(runner, "TrainingSpeedEstimate", forbidden_estimate)
     monkeypatch.setattr(runner._Run, "pending_seconds", forbidden_estimate)
     config = TrainConfig(
+        keep_past=0,
         method=method,
         num_envs=4,
         total_env_steps=12,
@@ -265,7 +270,10 @@ def test_public_run_resume_and_final_pending_work(
         with pytest.raises(OSError, match="after M8"):
             runner.train(resume_from=checkpoint)
         marker = json.loads((destination / "checkpoint_recovery.json").read_text())
-        assert marker["checkpoint_id"] == checkpoint.name
+        assert (
+            marker["checkpoint_id"]
+            == checkpoints.read_checkpoint_description(checkpoint)["checkpoint_id"]
+        )
         assert (destination / "training_updates.jsonl").read_bytes() == before_rows
         monkeypatch.setattr(runner, "restore_log_cursor", restore_cursor)
         finish_recovery = checkpoints.finish_checkpoint_recovery
@@ -376,6 +384,7 @@ def test_panel_backed_public_run_resume_selection_and_validation_isolation(
     assert panel.qualified == system_panel
     frozen_identities = [checkpoints.artifact_identity(actor) for actor in actors]
     config = TrainConfig(
+        keep_past=0,
         num_envs=4,
         total_env_steps=12,
         seed=711,
@@ -520,7 +529,12 @@ def test_panel_backed_public_run_resume_selection_and_validation_isolation(
     assert restored.selected_actor == restored.final_actor
     selection = json.loads((destination / "selection.json").read_text())
     assert selection["purpose"] == "confirmation"
-    assert selection["checkpoint_id"] == restored.final_actor.name
+    assert (
+        selection["checkpoint_id"]
+        == checkpoints.artifact_identity(restored.final_actor)["metadata"][
+            "checkpoint_id"
+        ]
+    )
     assert selection["actor_digest"] == restored_identity["actor_digest"]
     loaded = training.load_system(restored.selected_actor)
     assert tree_digest(loaded.variables) == restored_identity["actor_digest"]
@@ -701,6 +715,7 @@ def test_a_rejected_pqn_block_records_its_diagnostics_and_stops(
     monkeypatch.setattr(pqn_learner, "update_pqn_learner", rejected)
     monkeypatch.setattr(runner._Run, "__init__", counting_init)
     config = TrainConfig(
+        keep_past=0,
         method="pqn_vdn",
         seed=19049151,
         num_envs=4,
@@ -743,6 +758,7 @@ def test_pinned_share_flows_through_the_public_run_and_its_saved_records(
     identity = checkpoints.runtime_identity()
     monkeypatch.setattr(checkpoints, "runtime_identity", lambda: identity)
     config = TrainConfig(
+        keep_past=0,
         num_envs=4,
         total_env_steps=16,
         seed=711,
@@ -756,9 +772,7 @@ def test_pinned_share_flows_through_the_public_run_and_its_saved_records(
     assert result.completed_updates == 2
     details = json.loads((result.run_dir / "run_details.json").read_text())
     assert details["config"]["pinned_opponent_share"] == 0.1
-    assert details["schedule"]["history_thresholds"] == (
-        "first update, then 5% through 95%"
-    )
+    assert details["schedule"]["history_thresholds"] == "No explicit capture targets"
     latest = json.loads((result.run_dir / "latest_checkpoint.json").read_text())
     saved = checkpoints.read_checkpoint_details(
         result.run_dir / latest["relative_path"]
@@ -766,8 +780,8 @@ def test_pinned_share_flows_through_the_public_run_and_its_saved_records(
     assert saved["collection"]["pinned_opponent_share"] == 0.1
     assert saved["metadata"]["config"]["pinned_opponent_share"] == 0.1
     exposure = json.loads((result.run_dir / "exposure.json").read_text())
-    assert len(exposure["steps_by_opponent"]) == 21
-    assert len(exposure["starts_by_opponent"]) == 21
+    assert len(exposure["steps_by_opponent"]) == 2
+    assert len(exposure["starts_by_opponent"]) == 2
 
 
 def test_config_roundtrip_and_unknown_keys() -> None:
@@ -850,6 +864,7 @@ def test_a_depth_wider_than_a_map_is_refused_before_any_file(tmp_path: Path) -> 
     from marl_battlegrounds.training import runner
 
     config = TrainConfig(
+        keep_past=0,
         num_envs=4,
         total_env_steps=32,
         ppo=PPOConfig(rollout_length=4, epochs=1),
@@ -872,6 +887,7 @@ def test_ppo_method_config_roundtrip_and_method_specific_batch_rules(
     from marl_battlegrounds.baselines.ppo import PPOConfig
 
     config = TrainConfig(
+        keep_past=0,
         method=method,
         num_envs=4,
         total_env_steps=32,
@@ -888,8 +904,16 @@ def test_ppo_method_config_roundtrip_and_method_specific_batch_rules(
             replace(config, num_envs=6, total_env_steps=24)
 
 
-def test_retention_preserves_candidates_and_small_ancestry(tmp_path: Path) -> None:
-    from marl_battlegrounds.training import runner
+def test_retention_preserves_candidates_and_small_ancestry(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from marl_battlegrounds.training import checkpoints, runner
+
+    # Isolate retention; checkpoint tests resolve real saved payloads.
+    def saved_directory(root: Path, kind: str, identifier: str) -> Path:
+        return root / kind / identifier
+
+    monkeypatch.setattr(checkpoints, "artifact_directory", saved_directory)
 
     records = {letter: tmp_path / "checkpoints" / (letter * 64) for letter in "abcd"}
     for directory in records.values():
@@ -905,8 +929,10 @@ def test_retention_preserves_candidates_and_small_ancestry(tmp_path: Path) -> No
         "env_steps": 0,
     }
     execution.checkpoint = records["c"]
+    execution.checkpoint_id = "c" * 64
     execution.prune_recovery()
     execution.checkpoint = records["d"]
+    execution.checkpoint_id = "d" * 64
     execution.prune_recovery()
     assert (records["a"] / "state").is_dir()
     assert not (records["b"] / "state").exists()
@@ -965,3 +991,612 @@ def test_report_archive_preserves_raw_bytes_and_is_idempotent(tmp_path: Path) ->
     archived = list((tmp_path / "attempts" / "old-attempt" / "reports").iterdir())
     assert len(archived) == 1
     assert archived[0].read_bytes() == report.read_bytes()
+
+
+def test_actor_warm_start_and_resume_keep_distinct_state(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from tests.training_continuation_helpers import capture_runs
+    from tests.training_learner_helpers import equal
+
+    from marl_battlegrounds.baselines.ppo import PPOConfig
+    from marl_battlegrounds.training import checkpoints, runner
+
+    identity = checkpoints.runtime_identity()
+    monkeypatch.setattr(checkpoints, "runtime_identity", lambda: identity)
+    starts, ends = capture_runs(monkeypatch)
+    config = runner.TrainConfig(
+        keep_past=0,
+        method="ff_ippo",
+        num_envs=4,
+        total_env_steps=8,
+        ppo=PPOConfig(rollout_length=2, epochs=1),
+        metrics="none",
+        verbose=False,
+    )
+    parent = runner.train(config, output_dir=tmp_path / "parent")
+    warm = runner.train(
+        replace(config, initial_actor=str(parent.final_actor)),
+        output_dir=tmp_path / "warm",
+    )
+    imported = starts[warm.run_dir][1]
+    equal(
+        imported.carry.history.current_variables,
+        ends[parent.run_dir].carry.history.current_variables,
+    )
+    assert int(imported.completed_updates) == 0
+    origin = checkpoints.read_checkpoint_description(warm.final_actor)["metadata"][
+        "initial_actor"
+    ]
+    assert (
+        origin["actor_digest"]
+        == checkpoints.read_checkpoint_description(parent.final_actor)["actor_digest"]
+    )
+    assert origin["evidence"]["exposure"] == "none"
+    parent.final_actor.rename(parent.final_actor.with_name("moved_source"))
+    before = ends[warm.run_dir]
+    resumed = runner.train(resume_from=warm.final_checkpoint)
+    equal(ends[resumed.run_dir], before)
+    for field, value in (
+        ("method", "ff_mappo"),
+        ("ppo", replace(config.ppo, input_scale=0.5)),
+        ("ppo", replace(config.ppo, spawn_frame="world")),
+    ):
+        invalid = replace(config, initial_actor=str(warm.final_actor), **{field: value})
+        destination = tmp_path / f"invalid_{field}"
+        with pytest.raises(ValueError, match="Initial actor"):
+            runner.train(invalid, output_dir=destination)
+        assert not destination.exists()
+
+
+def test_custom_curriculum_config_round_trip_and_rejection() -> None:
+    from marl_battlegrounds.training.runner import (
+        TrainConfig,
+        config_from_dict,
+        config_to_dict,
+    )
+
+    stages = [
+        {"share": 0.5, "maps": [0], "team_size": 2},
+        {"share": 0.5, "maps": [0, 1], "team_size": 5, "score_threshold": 3},
+    ]
+    config = TrainConfig(curriculum=stages)
+    assert config_from_dict(config_to_dict(config)) == config
+    stages[0]["share"] = 0.25
+    assert not isinstance(config.curriculum, bool)
+    assert config.curriculum[0]["share"] == 0.5
+    with pytest.raises(ValueError, match="shares"):
+        TrainConfig(curriculum=stages)
+    with pytest.raises(ValueError, match="Choose"):
+        TrainConfig(curriculum=config.curriculum, score_threshold_curriculum=True)
+
+
+def test_custom_stages_extend_and_resume_with_the_full_source_bank(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from tests.training_continuation_helpers import capture_runs
+    from tests.training_learner_helpers import equal
+
+    from marl_battlegrounds.baselines.ppo import PPOConfig
+    from marl_battlegrounds.training import checkpoints, runner
+
+    identity = checkpoints.runtime_identity()
+    monkeypatch.setattr(checkpoints, "runtime_identity", lambda: identity)
+    starts, ends = capture_runs(monkeypatch)
+    parent = runner.train(
+        runner.TrainConfig(
+            keep_past=0,
+            method="ff_ippo",
+            num_envs=4,
+            total_env_steps=8,
+            ppo=PPOConfig(rollout_length=2, epochs=1),
+            metrics="none",
+            verbose=False,
+            curriculum=[
+                {"share": 1.0, "maps": [0], "team_size": 2, "score_threshold": 2}
+            ],
+        ),
+        output_dir=tmp_path / "parent",
+    )
+    child = runner.extend_training(
+        parent.final_checkpoint,
+        additional_env_steps=8,
+        output_dir=tmp_path / "child",
+        changes={
+            "curriculum": [
+                {"share": 1.0, "maps": [0, 1], "team_size": 3, "score_threshold": 3}
+            ]
+        },
+    )
+    collection, initial = starts[child.run_dir]
+    assert collection.binding.score_thresholds == (2, 3)
+    equal(initial.carry.state, ends[parent.run_dir].carry.state)
+    equal(initial.carry.source_indices, ends[parent.run_dir].carry.source_indices)
+    before = ends[child.run_dir]
+    result = runner.train(resume_from=child.final_checkpoint)
+    equal(ends[result.run_dir], before)
+    assert starts[result.run_dir][0].binding.score_thresholds == (2, 3)
+
+
+@pytest.mark.parametrize("method", ["ff_ippo", "qmix", "pqn_vdn"])
+def test_live_update_callback_matches_saved_rows_and_isolates_mutation(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    method: Literal["ff_ippo", "qmix", "pqn_vdn"],
+) -> None:
+    from tests.training_continuation_helpers import fixed_source
+
+    from marl_battlegrounds.baselines.ppo import PPOConfig
+    from marl_battlegrounds.baselines.pqn import PQNConfig
+    from marl_battlegrounds.baselines.qmix import QMIXConfig
+    from marl_battlegrounds.training import checkpoints, runner
+
+    fixed_source(monkeypatch, method)
+    config = TrainConfig(
+        keep_past=0,
+        method=method,
+        num_envs=4,
+        total_env_steps=24 if method == "pqn_vdn" else 16,
+        ppo=PPOConfig(rollout_length=2, epochs=1)
+        if method == "ff_ippo"
+        else PPOConfig(),
+        qmix=QMIXConfig(
+            rollout_length=2,
+            buffer_size=4,
+            min_buffer_size=2,
+            sample_sequence_length=2,
+            sample_batch_size=2,
+            epochs=1,
+            eps_min=1.0,
+        )
+        if method == "qmix"
+        else None,
+        pqn=PQNConfig(
+            rollout_length=2,
+            memory_window=1,
+            epochs=1,
+            num_minibatches=1,
+            lr_linear_decay=False,
+            eps_start=1.0,
+            eps_finish=1.0,
+        )
+        if method == "pqn_vdn"
+        else None,
+        checkpoint_interval_updates=1,
+        metrics="none",
+        verbose=False,
+    )
+    root = tmp_path / "run"
+    received: list[dict[str, Any]] = []
+
+    def log(row: dict[str, Any]) -> None:
+        saved = [json.loads(line) for line in (root / "training_updates.jsonl").open()]
+        assert len(saved) == len(received) + 1 and saved[-1] == row
+        received.append(json.loads(json.dumps(row, allow_nan=False)))
+        row["env_steps"] = -1
+        if "used_exposure" in row:
+            row["used_exposure"]["by_stage"][0] = -999
+
+    result = runner.train(config, output_dir=root, on_update=log)
+    saved = [json.loads(line) for line in (root / "training_updates.jsonl").open()]
+    assert received == saved
+    assert [row["env_steps"] for row in saved] == (
+        [8, 12, 20, 24] if method == "pqn_vdn" else [8, 16]
+    )
+    details = checkpoints.read_checkpoint_details(result.final_checkpoint)
+    assert {row["run_id"] for row in saved} == {details["metadata"]["run_id"]}
+    assert result.completed_env_steps == config.total_env_steps
+    assert "on_update" not in details["metadata"]["config"]
+    if method == "pqn_vdn":
+        assert (
+            details["metadata"]["host_state"]["used_exposure"]
+            == saved[-1]["used_exposure"]
+        )
+    elif method == "ff_ippo":
+        child_rows: list[dict[str, Any]] = []
+        child = runner.extend_training(
+            result.final_checkpoint,
+            additional_env_steps=8,
+            output_dir=tmp_path / "child",
+            on_update=child_rows.append,
+        )
+        child_saved = [
+            json.loads(line)
+            for line in (child.run_dir / "training_updates.jsonl").open()
+        ]
+        assert child_rows == child_saved and len(child_rows) == 1
+        assert child_rows[0]["env_steps"] == 24
+        assert child_rows[0]["run_id"] != received[0]["run_id"]
+
+
+def test_callback_failure_keeps_saved_row_and_resumes_from_normal_checkpoint(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from tests.training_continuation_helpers import fixed_source, latest
+
+    from marl_battlegrounds.baselines.ppo import PPOConfig
+    from marl_battlegrounds.training import checkpoints, runner
+
+    fixed_source(monkeypatch, "ff_ippo")
+    config = TrainConfig(
+        keep_past=0,
+        method="ff_ippo",
+        num_envs=4,
+        total_env_steps=16,
+        ppo=PPOConfig(rollout_length=2, epochs=1),
+        checkpoint_interval_updates=1,
+        metrics="none",
+        verbose=False,
+    )
+    root = tmp_path / "run"
+    calls: list[int] = []
+    failure = LookupError("Researcher logger failed")
+
+    def fail_second(row: dict[str, Any]) -> None:
+        calls.append(row["env_steps"])
+        if len(calls) == 2:
+            raise failure
+
+    with pytest.raises(RuntimeError, match="on_update failed after saving") as caught:
+        runner.train(config, output_dir=root, on_update=fail_second)
+    assert caught.value.__cause__ is failure and calls == [8, 16]
+    log = root / "training_updates.jsonl"
+    saved = [json.loads(line) for line in log.open()]
+    assert [row["env_steps"] for row in saved] == [8, 16]
+    first_line = log.read_bytes().splitlines()[0]
+    checkpoint = latest(root)
+    assert checkpoints.read_checkpoint_details(checkpoint)["counters"]["env_steps"] == 8
+    assert json.loads((root / "status.json").read_text())["status"] == "failed"
+    resumed_rows: list[dict[str, Any]] = []
+    resumed = runner.train(resume_from=checkpoint, on_update=resumed_rows.append)
+    after = [json.loads(line) for line in log.open()]
+    assert resumed.completed_env_steps == 16
+    assert [row["env_steps"] for row in after] == [8, 16]
+    assert resumed_rows == after[1:] and len(resumed_rows) == 1
+    assert log.read_bytes().splitlines()[0] == first_line
+    assert resumed_rows[0]["run_id"] == saved[-1]["run_id"]
+    assert resumed_rows[0]["attempt_id"] != saved[-1]["attempt_id"]
+
+
+def test_history_settings_and_actual_capture_spacing() -> None:
+    from types import SimpleNamespace
+
+    import jax.numpy as jnp
+
+    from marl_battlegrounds.baselines.ppo import PPOConfig
+    from marl_battlegrounds.training.curriculum import make_training_schedule
+    from marl_battlegrounds.training.runner import _history_setup
+
+    base = TrainConfig(
+        method="ff_ippo",
+        num_envs=2,
+        total_env_steps=64,
+        ppo=PPOConfig(rollout_length=8, epochs=1, minibatches=1),
+        keep_past=2,
+        history_capture_env_steps=(2, 18),
+    )
+    assert config_from_dict(config_to_dict(base)) == base
+    schedule = make_training_schedule(total_env_steps=64, num_envs=2)
+    prepared: Any = SimpleNamespace(
+        source_configs=SimpleNamespace(max_steps=jnp.asarray([8]))
+    )
+    resolved, options = _history_setup(base, schedule, prepared)
+    assert options == {
+        "keep_past": 2,
+        "history_capture_capacity": 2,
+        "minimum_capture_rounds": 8,
+        "capture_interval_rounds": 0,
+    }
+    assert resolved.arrays.history_threshold_count is not None
+    assert int(resolved.arrays.history_threshold_count) == 2
+    # These distinct requested steps both round to the same publication.
+    with pytest.raises(ValueError, match="0 rounds apart"):
+        _history_setup(
+            replace(base, history_capture_env_steps=(2, 4)), schedule, prepared
+        )
+    with pytest.raises(ValueError, match="at least 8"):
+        _history_setup(
+            replace(base, history_capture_env_steps=None, past_capture_interval=8),
+            schedule,
+            prepared,
+        )
+    _, recurring = _history_setup(
+        replace(base, history_capture_env_steps=None, past_capture_interval=16),
+        schedule,
+        prepared,
+    )
+    assert recurring["capture_interval_rounds"] == 8
+    assert recurring["history_capture_capacity"] == 4
+    _, rounded = _history_setup(
+        replace(base, history_capture_env_steps=None, past_capture_interval=15),
+        schedule,
+        prepared,
+    )
+    assert rounded["capture_interval_rounds"] == 8
+    disabled, none = _history_setup(replace(base, keep_past=0), schedule, prepared)
+    assert disabled.arrays.history_threshold_count is not None
+    assert int(disabled.arrays.history_threshold_count) == 0
+    assert none["history_capture_capacity"] == 0
+    with pytest.raises(ValueError, match="not both"):
+        replace(base, past_capture_interval=16)
+
+
+def test_child_history_growth_preserves_named_member_statistics() -> None:
+    from marl_battlegrounds.training.runner import _resize_member_statistics
+
+    host: dict[str, Any] = {
+        "member_completed": [[1, 0, 0], [0, 1, 0], [0, 0, 1], [2, 3, 4]],
+        "member_score_sums": [[5, 4], [3, 3], [2, 6], [9, 8]],
+        "last_member_completed": [[0, 0, 0], [0, 0, 0], [0, 0, 1], [1, 1, 1]],
+        "last_member_score_sums": [[0, 0], [0, 0], [2, 6], [3, 2]],
+        "sampled_exposure": {"by_opponent": [10, 20, 30, 40]},
+    }
+    _resize_member_statistics(host, old_capacity=1, new_capacity=3, new_rows=7)
+    assert host["member_completed"] == [
+        [1, 0, 0],
+        [0, 1, 0],
+        [0, 0, 1],
+        [0, 0, 0],
+        [0, 0, 0],
+        [2, 3, 4],
+        [0, 0, 0],
+    ]
+    assert host["member_score_sums"][5:] == [[9, 8], [0, 0]]
+    assert host["last_member_completed"][5:] == [[1, 1, 1], [0, 0, 0]]
+    assert host["last_member_score_sums"][5:] == [[3, 2], [0, 0]]
+    assert host["sampled_exposure"]["by_opponent"] == [10, 20, 30, 0, 0, 40, 0]
+
+
+@pytest.mark.parametrize("recording", [False, True])
+def test_named_population_callback_append_and_exact_resume(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, recording: bool
+) -> None:
+    from tests.training_continuation_helpers import capture_runs, fixed_source
+    from tests.training_learner_helpers import equal
+
+    from marl_battlegrounds.baselines.ppo import PPOConfig
+    from marl_battlegrounds.training import checkpoints, runner
+
+    fixed_source(monkeypatch, "ff_ippo")
+    starts, ends = capture_runs(monkeypatch)
+    config = TrainConfig(
+        method="ff_ippo",
+        num_envs=4,
+        total_env_steps=16,
+        keep_past=0,
+        opponents={"self": 0.6, "past": 0.2, "random_friend": 0.2},
+        ppo=PPOConfig(rollout_length=2, epochs=1),
+        checkpoint_interval_updates=1,
+        recording=recording,
+        metrics="none",
+        verbose=False,
+    )
+    seen: list[int] = []
+
+    def choose(statistics: dict[str, Any], steps: int) -> dict[str, Any]:
+        seen.append(steps)
+        assert {row["name"] for row in statistics["members"]} >= {
+            "self",
+            "random_friend",
+        }
+        return {"opponents": ["random_friend", "self", "self"]}
+
+    parent = runner.train(
+        config,
+        output_dir=tmp_path / "parent",
+        opponents={"random_friend": "random"},
+        matchmaking=choose,
+    )
+    assert seen == [0, 8]
+    details = checkpoints.read_checkpoint_details(parent.final_checkpoint)
+    assert details["metadata"]["opponent_selection"] == [
+        "random_friend",
+        "self",
+        "self",
+    ]
+    assert details["collection"]["opponent_members"][0]["reference"] == "random"
+    child = runner.extend_training(
+        parent.final_checkpoint,
+        additional_env_steps=8,
+        output_dir=tmp_path / "child",
+        changes={"opponents": ["new_friend", "random_friend"]},
+        opponents={"new_friend": "tdm-alpha"},
+    )
+    child_collection, child_start = starts[child.run_dir]
+    assert child_collection.opponent_names == ("random_friend", "new_friend")
+    equal(child_start.carry.state, ends[parent.run_dir].carry.state)
+    before = ends[child.run_dir]
+    resumed = runner.train(resume_from=child.final_checkpoint)
+    equal(ends[resumed.run_dir], before)
+    saved = checkpoints.read_checkpoint_details(resumed.final_checkpoint)
+    assert [row["reference"] for row in saved["collection"]["opponent_members"]] == [
+        "random",
+        "tdm-alpha",
+    ]
+
+
+@pytest.mark.parametrize("method", ["ff_ippo", "qmix", "pqn_vdn"])
+def test_partner_population_append_preserves_games_and_resumes(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    method: Literal["ff_ippo", "qmix", "pqn_vdn"],
+) -> None:
+    from tests.training_continuation_helpers import capture_runs, fixed_source
+    from tests.training_learner_helpers import equal
+
+    from marl_battlegrounds.baselines.ppo import PPOConfig
+    from marl_battlegrounds.baselines.pqn import PQNConfig
+    from marl_battlegrounds.baselines.qmix import QMIXConfig
+    from marl_battlegrounds.training import checkpoints, runner
+
+    fixed_source(monkeypatch, method)
+    starts, ends = capture_runs(monkeypatch)
+    parent = runner.train(
+        TrainConfig(
+            method=method,
+            num_envs=4,
+            total_env_steps=24,
+            keep_past=0,
+            learner_slots=(0, 2),
+            partners={"friend": 1.0},
+            validation_partners={"unfamiliar_friend": "tdm-beta"},
+            validation_partner_labels={"unfamiliar_friend": "held_out"},
+            ppo=PPOConfig(rollout_length=2, epochs=1)
+            if method == "ff_ippo"
+            else PPOConfig(),
+            qmix=QMIXConfig(
+                rollout_length=2,
+                buffer_size=4,
+                min_buffer_size=2,
+                sample_sequence_length=2,
+                sample_batch_size=2,
+                epochs=1,
+            )
+            if method == "qmix"
+            else None,
+            pqn=PQNConfig(
+                rollout_length=2,
+                memory_window=1,
+                epochs=1,
+                num_minibatches=1,
+                lr_linear_decay=False,
+            )
+            if method == "pqn_vdn"
+            else None,
+            checkpoint_interval_updates=1,
+            recording=method == "ff_ippo",
+            metrics="none",
+            verbose=False,
+        ),
+        partners={"friend": "random"},
+        output_dir=tmp_path / "parent",
+    )
+    saved = checkpoints.read_checkpoint_details(parent.final_checkpoint)
+    assert saved["collection"]["learner_slots"] == [0, 2]
+    assert saved["collection"]["partner_members"][0]["reference"] == "random"
+    assert [
+        member["label"]
+        for member in saved["metadata"]["validation_deployment"]["partners"]
+    ] == ["familiar", "held_out"]
+    assert saved["metadata"]["used_partner_members"][0]["name"] == "friend"
+    child = runner.extend_training(
+        parent.final_checkpoint,
+        additional_env_steps=8,
+        output_dir=tmp_path / "child",
+        changes={"partners": ["new_friend", "friend"]},
+        partners={"new_friend": "tdm-alpha"},
+    )
+    collection, boundary = starts[child.run_dir]
+    assert collection.partner_names == ("friend", "new_friend")
+    equal(boundary.carry.state, ends[parent.run_dir].carry.state)
+    equal(
+        boundary.carry.partner_values[0].members[0],
+        ends[parent.run_dir].carry.partner_values[0].members[0],
+    )
+    for old, new in zip(
+        ends[parent.run_dir].carry.partner_selection,
+        boundary.carry.partner_selection,
+        strict=True,
+    ):
+        equal(old.choices, new.choices)
+        equal(old.game_starts, new.game_starts)
+    if method == "qmix":
+        equal(boundary.replay, ends[parent.run_dir].replay)
+    elif method == "pqn_vdn":
+        equal(boundary.recent, ends[parent.run_dir].recent)
+    details = checkpoints.read_checkpoint_details(child.final_checkpoint)
+    assert details["metadata"]["partner_selection"] == ["new_friend", "friend"]
+    assert [
+        row["name"] for row in details["metadata"]["validation_deployment"]["partners"]
+    ] == ["friend", "new_friend", "unfamiliar_friend"]
+    expected = ends[child.run_dir]
+    resumed = runner.train(resume_from=child.final_checkpoint)
+    assert resumed.completed_env_steps == 32
+    equal(ends[child.run_dir], expected)
+
+
+@pytest.mark.parametrize("choice", [{}, {"partners": {"friend": 1.0}}])
+def test_partner_only_matchmaking_keeps_legacy_pinned_opponents(
+    monkeypatch: pytest.MonkeyPatch, choice: dict[str, Any]
+) -> None:
+    from types import SimpleNamespace
+    from typing import NamedTuple, cast
+
+    from marl_battlegrounds.training import collection, runner
+
+    class State(NamedTuple):
+        carry: object
+
+    execution = object.__new__(runner._Run)
+    execution.collection = cast(
+        Any, SimpleNamespace(pinned_opponent_share=0.1, partner_records=())
+    )
+    original_carry = object()
+    changed_carry = object()
+    execution.state = State(original_carry)
+    execution.host = {"env_steps": 8}
+
+    def choose(_stats: dict[str, Any], _steps: int) -> dict[str, Any]:
+        return choice
+
+    def statistics(_self: runner._Run) -> list[dict[str, Any]]:
+        return []
+
+    execution.matchmaking = choose
+    monkeypatch.setattr(runner._Run, "_member_statistics", statistics)
+    selections: list[object] = []
+
+    def partners(
+        owner: object, carry: object, *, selection: object
+    ) -> tuple[object, object]:
+        assert owner is execution.collection and carry is original_carry
+        selections.append(selection)
+        return owner, changed_carry
+
+    monkeypatch.setattr(collection, "update_partner_selection", partners)
+    # Leave the real opponent helper installed: it rejects this legacy pin.
+    execution._choose_next_games()
+    assert selections == [choice.get("partners")]
+    assert execution.state.carry is changed_carry
+    assert execution.collection.pinned_opponent_share == 0.1
+
+
+def test_matchmaking_cannot_mutate_frozen_member_records(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from types import SimpleNamespace
+    from typing import NamedTuple, cast
+
+    from marl_battlegrounds.training import collection, runner
+
+    class State(NamedTuple):
+        carry: object
+
+    partner = {"name": "friend", "evidence": {"actor_id": "frozen_partner"}}
+    opponent = {"name": "rival", "evidence": {"actor_id": "frozen_opponent"}}
+    execution = object.__new__(runner._Run)
+    execution.collection = cast(Any, SimpleNamespace(partner_records=(partner,)))
+    execution.state = State(object())
+    execution.host = {"env_steps": 8}
+
+    def choose(stats: dict[str, Any], _steps: int) -> dict[str, object]:
+        stats["partners"][0].pop("name")
+        stats["partners"][0]["evidence"]["actor_id"] = "changed_partner"
+        stats["members"][0]["evidence"]["actor_id"] = "changed_opponent"
+        return {}
+
+    def statistics(_self: runner._Run) -> list[dict[str, Any]]:
+        return [{**opponent}]
+
+    def partners(
+        owner: object, carry: object, *, selection: object
+    ) -> tuple[object, object]:
+        return owner, carry
+
+    execution.matchmaking = choose
+    monkeypatch.setattr(runner._Run, "_member_statistics", statistics)
+    monkeypatch.setattr(collection, "update_partner_selection", partners)
+    execution._choose_next_games()
+    assert partner == {"name": "friend", "evidence": {"actor_id": "frozen_partner"}}
+    assert opponent == {"name": "rival", "evidence": {"actor_id": "frozen_opponent"}}

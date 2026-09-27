@@ -1,4 +1,4 @@
-"""Add optional team score feedback without changing simulator rewards.
+"""Add optional training feedback without changing simulator rewards.
 
 Validate settings once on the host with validate_shaping. Potential feedback
 preserves the discounted task objective; score-delta feedback adds a separate
@@ -7,18 +7,205 @@ when AutoReset returns a replacement game. Scores are Team Deathmatch points,
 so both follow the task's scoring: with a positive Red Zone depth a Red Zone
 death moves a team's score, and this feedback, by 2 instead of 1. There is no
 separate Red Zone reward. These pure adjustments belong to learner feedback,
-never actor inputs or official benchmark scores.
+never actor inputs or official benchmark scores. Custom reward_adjustments
+uses selected Core facts and the existing training-round clock. validate_reward
+checks its scalar output before collection; learners own runtime finite checks.
+resolve_reward loads a declared callback once and records available code evidence.
 """
 
+from collections.abc import Callable
+from functools import partial
 from numbers import Real
 from typing import cast
 
+import jax
 import jax.numpy as jnp
 import numpy as np
 from jax import Array
 from jax.core import Tracer
 
-from marl_battlegrounds.environment import EpisodeInfo, episode_advanced
+from marl_battlegrounds.core.types import EnvState
+from marl_battlegrounds.environment import EpisodeInfo, TrainingFacts, episode_advanced
+
+type RewardFunction = Callable[[EnvState, TrainingFacts, EnvState, Array], Array]
+
+
+def resolve_reward(
+    reference: str | None,
+) -> tuple[RewardFunction | None, dict[str, object] | None]:
+    """Load one declared reward and record the available code evidence.
+
+    Parameters
+    ----------
+    reference : str or None
+        Installed ``module:function`` with the reward_adjustments signature.
+        None disables the callback and returns (None, None) without imports.
+        The imported module is trusted researcher code; imports can have their
+        own side effects. This function never calls the reward.
+
+    Returns
+    -------
+    tuple[callable or None, dict or None]
+        The callable and its JSON-ready declaration. The record includes the
+        reference, existing bytecode/default evidence, the defining module's
+        source hash when readable, and the completed-rounds progress clock.
+        Save this record with collection settings and compare it before resume.
+        Validate shapes separately with validate_reward after preparing inputs.
+
+    Raises
+    ------
+    ValueError, ImportError, AttributeError
+        The shared installed-callable loader rejects the reference, import or
+        attribute. Its original error is retained.
+
+    Notes
+    -----
+    Host setup only. Source hashing reads one file; no callback, numerical
+    transition or output write occurs. Reuse the returned callable during the
+    run. A source hash covers constants written in that module, but does not
+    prove imported configuration, mutable globals, closures or external state.
+    Keep those values fixed and record their meaning with the experiment.
+    Missing evidence stays unknown, never a verified reward identity. This is
+    the same evidence limit as a recorded System, not a callback serializer.
+    """
+    if reference is None:
+        return None, None
+    import inspect
+    from hashlib import sha256
+    from pathlib import Path
+
+    from marl_battlegrounds._method_loading import installed_callable
+    from marl_battlegrounds.evaluation.recording_identity import (
+        _callable_evidence,  # pyright: ignore[reportPrivateUsage]
+    )
+
+    reward = cast(RewardFunction, installed_callable(reference))
+    try:
+        source = inspect.getsourcefile(reward)
+        source_digest = (
+            None if source is None else sha256(Path(source).read_bytes()).hexdigest()
+        )
+    except OSError, TypeError:
+        source_digest = None
+    return reward, {
+        "reference": reference,
+        "callable": _callable_evidence(reward),
+        "source_digest": source_digest,
+        "source_scope": "defining_module" if source_digest is not None else "unknown",
+        "configuration_scope": "source_and_defaults_only",
+        "external_state": "unknown",
+        "progress_clock": "completed_training_rounds_before_step",
+    }
+
+
+def reward_adjustments(
+    reward: RewardFunction,
+    before: EnvState,
+    facts: TrainingFacts,
+    after: EnvState,
+    progress: Array,
+) -> Array:
+    """Apply one custom training reward to one producing transition.
+
+    Parameters
+    ----------
+    reward : callable
+        Pure JAX function reward(before, facts, after, progress). Return one
+        float32 (10,) adjustment in global slot order. The function owns its
+        feedback rule, including how dead or inactive agents are treated.
+    before, after : EnvState
+        Exact public Environment.training_state views before and after the same
+        action. Pass the producing successor, never an AutoReset replacement.
+        With AutoReset, enable include_training_state and use final.training_state
+        for completed lanes. Neither state may enter an actor or its memory.
+    facts : TrainingFacts
+        Scalar producing facts from make(training_facts=True). A false
+        has_transition marks padding and forces the returned adjustment to zero.
+    progress : Array
+        Int32 scalar completed training rounds before this batched step,
+        including parent lineage. One round advances each environment once.
+        Multiplying by the fixed saved batch size gives real transitions.
+        Resets, padding and optimizer updates do not advance this clock.
+
+    Returns
+    -------
+    Array
+        Float32 (10,) extra learner feedback. Native task rewards and scores
+        remain separate. Nonfinite real-step values remain visible so the
+        learner's existing failure check can reject them. Inputs are unchanged.
+
+    Raises
+    ------
+    TypeError
+        reward is not callable, facts/progress have wrong types, or the return
+        does not have float32 dtype.
+    ValueError
+        facts or progress are batched, or the return does not have shape (10,).
+
+    Notes
+    -----
+    Pure numerical code supports jit and scan. Use vmap with progress shared
+    across lanes for native batches. Validate once with validate_reward before
+    collection. Callback errors propagate; numerical bounds and finiteness are
+    the caller's runtime checks. Masking padding does not promise to skip the
+    function inside vmap. Disabled collectors must skip this helper entirely.
+    Arbitrary custom feedback need not preserve the native training objective.
+    """
+    if not callable(reward):
+        raise TypeError("reward must be a pure JAX callable")
+    if not isinstance(cast(object, facts), TrainingFacts):
+        raise TypeError("facts must come from make(training_facts=True)")
+    for name, value, dtype in (
+        ("facts.has_transition", facts.has_transition, jnp.bool_),
+        ("progress", progress, jnp.int32),
+    ):
+        if np.shape(value) != ():
+            raise ValueError(f"{name} must be a scalar")
+        if getattr(value, "dtype", None) != dtype:
+            raise TypeError(f"{name} must have {jnp.dtype(dtype)} dtype")
+    adjustment = reward(before, facts, after, progress)
+    if np.shape(adjustment) != (10,):
+        raise ValueError("reward must return shape (10,)")
+    if getattr(adjustment, "dtype", None) != jnp.float32:
+        raise TypeError("reward must return float32 dtype")
+    return jnp.where(facts.has_transition, adjustment, jnp.float32(0))
+
+
+def validate_reward(
+    reward: RewardFunction,
+    before: EnvState,
+    facts: TrainingFacts,
+    after: EnvState,
+    progress: Array,
+) -> None:
+    """Trace a custom reward's scalar contract before collection starts.
+
+    Parameters
+    ----------
+    reward, before, facts, after, progress
+        The callback and scalar inputs documented by reward_adjustments. Use
+        one prepared game, its producing facts and an int32 round counter.
+        Actual input values are not inspected; tracing checks shapes and dtypes.
+
+    Returns
+    -------
+    None
+        The callback traces with an exact float32 (10,) result. This checks
+        JAX compatibility, not numerical finiteness or scientific validity.
+
+    Raises
+    ------
+    TypeError, ValueError
+        A static input/output contract is wrong. JAX tracing errors and callback
+        exceptions propagate unchanged, before a game or writer is advanced.
+
+    Notes
+    -----
+    Host setup only. jax.eval_shape traces Python once but executes no numerical
+    transition. The callback must have no I/O or side effects. No callable is
+    saved, no clock is allocated and no file or device result is written.
+    """
+    jax.eval_shape(partial(reward_adjustments, reward), before, facts, after, progress)
 
 
 def validate_shaping(

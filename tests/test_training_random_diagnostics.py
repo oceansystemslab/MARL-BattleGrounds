@@ -63,9 +63,32 @@ def _files(root: Path) -> dict[str, bytes]:
     }
 
 
-def _no_content(**kwargs: object) -> None:
-    # Learner setup is stubbed below, so the prepared content is never used.
+def _no_content(**kwargs: object) -> SimpleNamespace:
     del kwargs
+    return SimpleNamespace(source_configs=SimpleNamespace(max_steps=(300,)))
+
+
+def _isolate_initialization_identity(monkeypatch: pytest.MonkeyPatch) -> None:
+    from marl_battlegrounds.training import collection
+
+    # These two tests stop at actor identity. Real workflow tests below own
+    # content, frozen member binding and deployed-team validation preparation.
+    def retain(value: object, references: object) -> object:
+        del references
+        return value
+
+    def undeployed(*args: object) -> tuple[dict[str, object], None, dict[str, str]]:
+        del args
+        return {}, None, {}
+
+    def no_teams(*args: object, **kwargs: object) -> None:
+        del args, kwargs
+
+    monkeypatch.setattr(_content, "prepare_training_content", _no_content)
+    for name in ("_bind_opponent_references", "_bind_partner_references"):
+        monkeypatch.setattr(collection, name, retain)
+    monkeypatch.setattr(runner, "_validation_setup", undeployed)
+    monkeypatch.setattr(validation, "prepare_validation_teams", no_teams)
 
 
 def test_initialization_reuse_binds_the_selected_method_before_output(
@@ -78,19 +101,24 @@ def test_initialization_reuse_binds_the_selected_method_before_output(
         carry=SimpleNamespace(history=SimpleNamespace(current_variables=variables))
     )
 
-    def initialize(**kwargs: object) -> tuple[None, SimpleNamespace]:
-        return None, state
+    def initialize(**kwargs: object) -> tuple[SimpleNamespace, SimpleNamespace]:
+        return SimpleNamespace(learner_actor=None, actor=None), state
 
     monkeypatch.setattr(learner, "init_learner", initialize)
-    monkeypatch.setattr(_content, "prepare_training_content", _no_content)
+    _isolate_initialization_identity(monkeypatch)
     digests: list[str] = []
 
     def read_initialization(
-        path: object, *, actor_digest: str, seed_pairs: int, red_zone_depth: float
+        path: object,
+        *,
+        actor_digest: str,
+        seed_pairs: int,
+        red_zone_depth: float,
+        deployment: object,
     ) -> None:
         assert path == str(tmp_path / "initialization.json") and seed_pairs == 1
         # The shared result must have been recorded at the run's own depth.
-        assert red_zone_depth == 5.0
+        assert red_zone_depth == 5.0 and deployment is None
         digests.append(actor_digest)
         raise ValueError("Stop at the initialization identity check")
 
@@ -98,6 +126,7 @@ def test_initialization_reuse_binds_the_selected_method_before_output(
     for method in ("mappo", "ippo", "ff_mappo", "ff_ippo"):
         config = config_from_dict(
             {
+                "keep_past": 0,
                 "method": method,
                 "num_envs": 4,
                 "total_env_steps": 8,
@@ -128,17 +157,23 @@ def test_pqn_initialization_reuse_binds_parameters_and_statistics(
     digests: list[str] = []
 
     def read_initialization(
-        path: object, *, actor_digest: str, seed_pairs: int, red_zone_depth: float
+        path: object,
+        *,
+        actor_digest: str,
+        seed_pairs: int,
+        red_zone_depth: float,
+        deployment: object,
     ) -> None:
         del path, seed_pairs
-        assert red_zone_depth == 5.0
+        assert red_zone_depth == 5.0 and deployment is None
         digests.append(actor_digest)
         raise ValueError("Stop at the initialization identity check")
 
     monkeypatch.setattr(validation, "read_random_initialization", read_initialization)
-    monkeypatch.setattr(_content, "prepare_training_content", _no_content)
+    _isolate_initialization_identity(monkeypatch)
     config = config_from_dict(
         {
+            "keep_past": 0,
             "method": "pqn_vdn",
             "num_envs": 4,
             "total_env_steps": 64,
@@ -163,9 +198,9 @@ def test_pqn_initialization_reuse_binds_parameters_and_statistics(
 
         def initialize(
             *, chosen: SimpleNamespace = state, **kwargs: object
-        ) -> tuple[None, SimpleNamespace]:
+        ) -> tuple[SimpleNamespace, SimpleNamespace]:
             del kwargs
-            return None, chosen
+            return SimpleNamespace(learner_actor=None, actor=None), chosen
 
         monkeypatch.setattr(pqn_learner, "init_pqn_learner", initialize)
         with pytest.raises(ValueError, match="initialization identity check"):
@@ -198,6 +233,7 @@ def random_runs(tmp_path_factory: pytest.TempPathFactory) -> Any:  # noqa: ANN40
 
     directory = tmp_path_factory.mktemp("random-diagnostics")
     base = TrainConfig(
+        keep_past=0,
         seed=1701,
         num_envs=4,
         total_env_steps=8,
@@ -258,9 +294,7 @@ def random_runs(tmp_path_factory: pytest.TempPathFactory) -> Any:  # noqa: ANN40
         with pytest.raises(RuntimeError, match="partial Random"):
             runner.train(config, output_dir=directory / "first")
         first_root = directory / "first"
-        details_path = next(
-            (first_root / "validation").glob("*/opponent-0/*/run_details.json")
-        )
+        (details_path,) = (first_root / "validation").rglob("run_details.json")
         partial = next(iter(json.loads(details_path.read_text())["passes"].values()))
         assert 0 < len(partial["completed_episode_ids"]) < 10
         partial_games = {
@@ -435,6 +469,7 @@ def test_random_capture_publishes_combat_from_existing_host_results(
     run = object.__new__(runner._Run)
     run.root = tmp_path
     run.config = TrainConfig(random_diagnostic_seed_pairs=4)
+    run.validation_options = {}
     run.host = {
         "env_steps": 4096,
         "random_results": [_progress_record(0, 1, 4)],
@@ -448,14 +483,32 @@ def test_random_capture_publishes_combat_from_existing_host_results(
     run.status = {}
     states: list[dict[str, Any]] = []
     calls: list[Path] = []
+    description_reads: list[Path] = []
+    checkpoint_id = "a" * 64
+    actor = tmp_path / "mappo_actor_step_000000004096"
+    actor.mkdir()
+
+    def describe(path: str | Path) -> dict[str, Any]:
+        assert Path(path) == actor
+        description_reads.append(Path(path))
+        return {
+            "kind": "actor",
+            "schemas": checkpoints.checkpoint_schemas("mappo"),
+            "metadata": {"checkpoint_id": checkpoint_id, "env_steps": 4096},
+        }
 
     def publish(phase: str, **facts: object) -> None:
         run.status.update(phase=phase, **facts)
         states.append(deepcopy(run.status))
 
-    def evaluate(actor: Path, **_: object) -> dict[str, Any]:
+    def evaluate(actor: Path, *, output_dir: Path, **_: object) -> dict[str, Any]:
         calls.append(actor)
-        return _progress_record(4096, 2, 2)
+        assert output_dir == (
+            tmp_path
+            / "validation"
+            / f"random_mappo_actor_step_000000004096_{checkpoint_id}"
+        )
+        return {**_progress_record(4096, 2, 2), "checkpoint_id": checkpoint_id}
 
     def event(*_args: object, **_kwargs: object) -> None:
         pass
@@ -463,16 +516,19 @@ def test_random_capture_publishes_combat_from_existing_host_results(
     monkeypatch.setattr(run, "set_status", publish)
     monkeypatch.setattr(run, "event", event)
     monkeypatch.setattr(validation, "validate_random", evaluate)
+    monkeypatch.setattr(checkpoints, "read_checkpoint_description", describe)
     monkeypatch.setattr(jax, "default_backend", lambda: "cpu")
-    actor = tmp_path / "actor"
     run.validate_random(actor)
     saved = json.loads((tmp_path / "random_diagnostics.json").read_text())
     assert calls == [actor]
+    assert description_reads == [actor, actor]
+    assert saved[-1]["checkpoint_id"] == checkpoint_id != actor.name
     assert states[-1]["random_validation"] == runner._random_progress(saved)
     assert states[-1]["random_validation"]["kill_margin_change"] == 3
     assert run.host["validation_games"] == 80
     run.validate_random(actor)
     assert calls == [actor]
+    assert description_reads == [actor, actor]
     assert len(states) == 2
 
 
@@ -539,8 +595,11 @@ def test_native_random_captures_preserve_complete_learning_state(
         "cells",
     ):
         assert reused[name] == original[name]
-    assert not (
-        data["reused"].run_dir / "validation" / f"random-{reused['checkpoint_id']}"
+    assert not checkpoints.validation_directory(
+        data["reused"].run_dir,
+        "random",
+        reused["checkpoint_id"],
+        actor=Path(reused["actor_path"]),
     ).exists()
 
 

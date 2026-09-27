@@ -23,7 +23,7 @@ Requires the training extra.
 """
 
 import warnings
-from collections.abc import Callable
+from collections.abc import Callable, Mapping, Sequence
 from functools import lru_cache
 from typing import Any, NamedTuple, cast
 
@@ -54,6 +54,7 @@ from marl_battlegrounds.baselines.inputs import (
     spawn_frame_flag,
     team_obstacle_partners,
 )
+from marl_battlegrounds.baselines.ppo import _actor_groups
 from marl_battlegrounds.baselines.qmix import (
     DEFAULT_QMIX_CONFIG,
     QMIX_HIDDEN_SIZE,
@@ -100,6 +101,7 @@ from marl_battlegrounds.training.collection import (
     _padding,
     _validate_training_continuation,
     init_training_collection,
+    learner_memory,
 )
 from marl_battlegrounds.training.curriculum import TrainingSchedule
 from marl_battlegrounds.training.learner import (
@@ -116,7 +118,12 @@ from marl_battlegrounds.training.learner import (
     _finite,
     _summary,
 )
-from marl_battlegrounds.training.opponents import SnapshotEvent, refresh_opponents
+from marl_battlegrounds.training.opponents import (
+    SnapshotEvent,
+    opponent_counter_row,
+    refresh_opponents,
+)
+from marl_battlegrounds.training.shaping import RewardFunction
 
 type Tree = Any
 
@@ -140,9 +147,13 @@ class QMIXReplayRow(NamedTuple):
         Int32 (5,) categorical indices of the submitted Team A actions, world
         frame.
     task_reward : Array
-        Float32 team task reward: the mean native reward over configured slots.
+        Float32 native team reward plus the mean custom adjustment over owned
+        active slots. The native team reward enters once, not once per actor.
     shaping_reward : Array
         Float32 team shaping reward (0 when shaping is off).
+    learner_active : Array or None, default=None
+        Bool (5,) slots owned by this learner. None owns all active slots.
+        Stored only when partners are enabled; adds 5 bytes per game row.
     active, alive : Array
         Bool (5,) configured and living Team A slots before the action.
     episode_start, ended, valid : Array
@@ -184,9 +195,11 @@ class QMIXReplayRow(NamedTuple):
     learner_update: Array
     opponent_update: Array
     opponent_snapshot: Array
+    learner_active: Array | None = None
 
 
-type ReplayState = TrajectoryBufferState[QMIXReplayRow]
+# Flashbax's typing omits None, which JAX accepts as an empty optional leaf.
+type ReplayState = TrajectoryBufferState[QMIXReplayRow]  # pyright: ignore[reportInvalidTypeArguments]
 """Flashbax trajectory storage of QMIXReplayRow leaves shaped (B, C, ...)."""
 
 
@@ -212,7 +225,14 @@ def _replay_rows(rows: TrainingTransition) -> QMIXReplayRow:
         rows.observations.source_availability[..., :TEAM_SLOTS, :TEAM_SLOTS],
         rows.action_mask,
         encode_actions(native),
-        team_task_reward(rows.task_rewards, rows.active),
+        team_task_reward(
+            rows.task_rewards
+            if rows.custom_rewards is None
+            else rows.task_rewards + rows.custom_rewards,
+            rows.active
+            if rows.learner_active is None
+            else rows.active & rows.learner_active,
+        ),
         rows.shaping_reward,
         rows.active,
         rows.alive,
@@ -228,6 +248,7 @@ def _replay_rows(rows: TrainingTransition) -> QMIXReplayRow:
         rows.learner_update,
         rows.opponent_update,
         rows.opponent_snapshot,
+        rows.learner_active,
     )
 
 
@@ -306,7 +327,7 @@ def _init_replay(
         """Allocate one zero leaf with the capacity axis after the game axis."""
         return jnp.zeros((value.shape[0], capacity, *value.shape[1:]), value.dtype)
 
-    return TrajectoryBufferState[QMIXReplayRow](
+    return TrajectoryBufferState[QMIXReplayRow](  # pyright: ignore[reportInvalidTypeArguments]
         experience=jax.tree.map(zeros, spec),
         current_index=jnp.asarray(0, jnp.int32),
         is_full=jnp.asarray(False),
@@ -374,7 +395,9 @@ def _expand_sample(sample: QMIXReplayRow, qmix: QMIXConfig) -> QMIXBatch:
     observer rows with zero Team B rows and a zero 10x10 permission matrix, then
     passed through ``build_team_actor_input`` for Team A, the same builder as
     live action selection. In the "left" frame, flagged rows' views, masks and
-    stored world actions are reflected. Rewards are task plus shaping.
+    stored world actions are reflected. Actor groups come from raw self classes
+    or physical slots before encoding; no extra group field is stored. Rewards
+    are task plus shaping.
     Returns float32 (M,S,5,5165) features among the QMIXBatch leaves; about
     264 MB for M=128, S=20. Pure JAX.
     """
@@ -397,6 +420,11 @@ def _expand_sample(sample: QMIXReplayRow, qmix: QMIXConfig) -> QMIXBatch:
     )
     observations = Observations(jax.tree.map(ten_rows, flat.observation), permissions)
     actors = jax.vmap(build_team_actor_input, in_axes=(0, None))(observations, 0)
+    groups = (
+        None
+        if qmix.parameter_sharing == "all"
+        else _actor_groups(actors, qmix.parameter_sharing)
+    )
     mask, actions = flat.action_mask, flat.actions
     if qmix.spawn_frame != "world":
         flag = spawn_frame_flag(actors, qmix.spawn_frame)
@@ -424,6 +452,8 @@ def _expand_sample(sample: QMIXReplayRow, qmix: QMIXConfig) -> QMIXBatch:
         sample.valid,
         sample.active,
         sample.training_state,
+        actor_group=None if groups is None else rows(groups),
+        learner_active=sample.learner_active,
     )
 
 
@@ -435,7 +465,6 @@ LEARNER_ERROR_SEQUENCE = 7
 """Failure reason: a replay sample broke episode or decision-step order."""
 _MAX_COUNT = int(np.iinfo(np.int32).max)
 _STAGES = 17
-_OPPONENT_ROWS = 21
 
 
 class QMIXLearnerState(NamedTuple):
@@ -452,7 +481,8 @@ class QMIXLearnerState(NamedTuple):
     opt_state : PyTree
         Chained Adam state over ``(online Q, online mixer)``.
     replay : ReplayState
-        Compact per-game replay, never flushed.
+        Compact per-game replay. An explicit changed-reward child starts empty;
+        ordinary collection and unchanged descendants retain its rows.
     sampling_root : Array
         Scalar typed Threefry key, ``fold_in(root, QMIX_SAMPLING_ROOT_TAG)``.
         Optimizer step n draws its sample with ``fold_in(sampling_root, n)``,
@@ -501,8 +531,8 @@ class QMIXSampledCounts(NamedTuple):
     exposure_by_source : Array
         Int32 (bank,) TD pairs by the left row's source-bank row.
     exposure_by_opponent : Array
-        Int32 (21,) TD pairs by opponent: row 0 current self-play, row k the
-        historical (or pinned, for slot 0) opponent in slot k-1.
+        Int32 (C+2,) TD pairs by stable opponent: row 0 self, row 1 pin,
+        then capture_id+2. C is the configured capture-count bound.
 
     Notes
     -----
@@ -530,6 +560,9 @@ class QMIXUpdateResult(NamedTuple):
         Bool. True only when the block ran optimizer steps and published.
     failed, failure_reason : Array
         Mirror the returned state's sticky failure.
+    reward, reward_identity : callable and dict or None, defaults=None
+        Optional pure training reward and its saved identity. Forwarded to
+        init_training_collection; None skips callback work and extra storage.
     metrics : QMIXMetrics
         Leaves with leading (epochs,); zeros unless performed.
     snapshot : SnapshotEvent
@@ -616,7 +649,7 @@ def _state_shapes(state: QMIXLearnerState, qmix: QMIXConfig) -> int:
     """
     games = state.carry.state.episode_id.shape[0]
     _array(
-        state.carry.memory.team_a,
+        learner_memory(state.carry),
         (games, TEAM_SLOTS, QMIX_HIDDEN_SIZE),
         jnp.float32,
         "Actor memory",
@@ -636,6 +669,13 @@ def _state_shapes(state: QMIXLearnerState, qmix: QMIXConfig) -> int:
         raise ValueError("QMIX sampling_root must be one typed Threefry key")
     _array(state.replay.current_index, (), jnp.int32, "replay current_index")
     _array(state.replay.is_full, (), jnp.bool_, "replay is_full")
+    if state.replay.experience.learner_active is not None:
+        _array(
+            state.replay.experience.learner_active,
+            (games, qmix.buffer_size, TEAM_SLOTS),
+            jnp.bool_,
+            "stored learner_active",
+        )
     for leaf in jax.tree.leaves(state.replay.experience):
         if leaf.shape[:2] != (games, qmix.buffer_size):
             raise ValueError("QMIX replay must hold buffer_size rows per game")
@@ -646,14 +686,26 @@ def init_qmix_learner(
     *,
     schedule: TrainingSchedule,
     seed: int = 42,
+    initial_actor: Tree | None = None,
     prepared: PreparedTrainingContent | None = None,
     shaping: bool = False,
     shaping_coefficient: float = 0.01,
     shaping_mode: str = "potential",
+    reward: RewardFunction | None = None,
+    reward_identity: dict[str, object] | None = None,
     metrics: str = "priority",
     recording: bool = False,
     pinned_opponent_share: float = 0.0,
     pinned_opponent: System | Policy | str | None = None,
+    keep_past: int = 20,
+    history_capture_capacity: int = 20,
+    minimum_capture_rounds: int = 1,
+    capture_interval_rounds: int = 0,
+    opponent_population: Mapping[str, System | Policy | str] | None = None,
+    opponent_selection: Mapping[str, float] | Sequence[str] | None = None,
+    learner_slots: tuple[int, ...] | None = None,
+    partner_population: Mapping[str, System | Policy | str] | None = None,
+    partner_selection: Mapping[str, float] | Sequence[str] | None = None,
     qmix: QMIXConfig = DEFAULT_QMIX_CONFIG,
 ) -> tuple[TrainingCollection, QMIXLearnerState]:
     """Initialize one untrained QMIX learner and its verified collection setup.
@@ -665,6 +717,12 @@ def init_qmix_learner(
     seed : int, default=42
         Python run seed, excluding bool. Collection keeps its own streams; the
         model key and sampling root come from version-1 QMIX tags.
+    initial_actor : numerical actor tree or None, default=None
+        Compatible actor weights copied into a fresh learner before history is
+        initialized. PPO takes actor parameters; QMIX takes online Q parameters
+        (also used for its targets); PQN takes parameters and running statistics.
+        Critic, mixer, optimizer, memory and counters start fresh. Initial
+        exploration and collection keep this method's normal rules.
     prepared : PreparedTrainingContent or None, default=None
         Existing verified content, or None to verify installed content now.
     shaping : bool, default=False
@@ -682,6 +740,24 @@ def init_qmix_learner(
         Passed unchanged to init_training_collection, which documents them.
     qmix : QMIXConfig, default=DEFAULT_QMIX_CONFIG
         Static QMIX settings shared by the actor, replay and every update.
+
+    keep_past, history_capture_capacity : int, defaults=20, 20
+        Rolling copy count and maximum stable capture count. See
+        init_training_collection for storage and counter meanings.
+    minimum_capture_rounds, capture_interval_rounds : int, defaults=1, 0
+        Minimum actual capture gap and optional recurring gap. The public runner
+        checks the maximum game horizon and passes it as the minimum.
+
+    opponent_population, opponent_selection : mapping, sequence or None
+        Named frozen Systems and future-game shares or exact repeating order.
+        Forwarded to init_training_collection; None keeps the existing recipe.
+        Open member resources around setup and training, as public train does.
+
+    learner_slots : tuple[int, ...] or None, default=None
+        Physical Team A slots trained by this learner. None owns all slots.
+    partner_population, partner_selection : mapping, sequence or None
+        Frozen named partners and their future-game shares or repeating order.
+        Forwarded to init_training_collection with learner_slots.
 
     Returns
     -------
@@ -717,6 +793,11 @@ def init_qmix_learner(
     initialized = initialize_qmix(
         jax.random.fold_in(root, QMIX_MODEL_INITIALIZATION_TAG), qmix
     )
+    if initial_actor is not None:
+        from marl_battlegrounds.training.checkpoints import initial_actor_variables
+
+        weights = initial_actor_variables(initial_actor, initialized.online_q)
+        initialized = initialized._replace(online_q=weights, target_q=weights)
     variables = QMIXActorVariables(
         initialized.online_q,
         epsilon_at(jnp.int32(0), games, qmix.eps_min, qmix.eps_decay),
@@ -726,6 +807,7 @@ def init_qmix_learner(
         epsilon=float(variables.epsilon),
         input_scale=qmix.input_scale,
         spawn_frame=qmix.spawn_frame,
+        parameter_sharing=qmix.parameter_sharing,
     )
     collection, carry = init_training_collection(
         actor,
@@ -735,6 +817,8 @@ def init_qmix_learner(
         prepared=prepared,
         shaping=shaping,
         shaping_mode=shaping_mode,
+        reward=reward,
+        reward_identity=reward_identity,
         discount=qmix.gamma,
         coefficient=shaping_coefficient,
         collect_training_state=True,
@@ -742,6 +826,16 @@ def init_qmix_learner(
         recording=recording,
         pinned_opponent_share=pinned_opponent_share,
         pinned_opponent=pinned_opponent,
+        keep_past=keep_past,
+        history_capture_capacity=history_capture_capacity,
+        minimum_capture_rounds=minimum_capture_rounds,
+        capture_interval_rounds=capture_interval_rounds,
+        opponent_population=opponent_population,
+        opponent_selection=opponent_selection,
+        learner_slots=learner_slots,
+        partner_population=partner_population,
+        partner_selection=partner_selection,
+        vectorize_opponent_lanes=qmix.parameter_sharing == "all",
         actor_variables_at_step=QMIXExploration(qmix.eps_min, qmix.eps_decay, games),
     )
     state = QMIXLearnerState(
@@ -806,6 +900,20 @@ def _rollout_shapes(
     for name in ("active", "alive"):
         _array(getattr(rows, name), (length, games, TEAM_SLOTS), jnp.bool_, name)
     _array(rows.task_rewards, (length, games, TEAM_SLOTS), jnp.float32, "task_rewards")
+    if rows.learner_active is not None:
+        _array(
+            rows.learner_active,
+            (length, games, TEAM_SLOTS),
+            jnp.bool_,
+            "learner_active",
+        )
+    if rows.custom_rewards is not None:
+        _array(
+            rows.custom_rewards,
+            (length, games, TEAM_SLOTS),
+            jnp.float32,
+            "custom_rewards",
+        )
     _array(rows.shaping_reward, (length, games), jnp.float32, "shaping_reward")
     _array(rows.learner_update, (length, games), jnp.int32, "learner_update")
     _array(rollout.final_ended, (games,), jnp.bool_, "final_ended")
@@ -819,6 +927,7 @@ def _boundary_valid(
     collected: TrainingCarry,
     rollout: TrainingRollout,
     qmix: QMIXConfig,
+    continuation: LearnerContinuation | None = None,
 ) -> Array:
     """Check counters, replay cursor and the exact real prefix in one bool.
 
@@ -826,6 +935,8 @@ def _boundary_valid(
     the minimum; the write index and full flag follow the round count; the
     collected carry kept the same actor version; and the rows are an exact
     valid prefix of this learner version with matching memory and endings.
+    A reward reset measures replay occupancy from its saved round offset and
+    keeps the previous publication until the first new learning block.
     """
     rows = rollout.transitions
     prefix = jnp.arange(rows.valid.shape[0])[:, None] < rollout.real_steps
@@ -833,16 +944,21 @@ def _boundary_valid(
     rounds = prior.progress.rounds
     learning = state.learning_blocks
     refreshed = prior.history.last_refresh_rounds
+    reset = None if continuation is None else continuation.reward_reset
+    elapsed = rounds - (0 if reset is None else reset.rounds)
+    learned_before = 0 if reset is None else reset.learning_blocks
+    refreshed_before = 0 if reset is None else reset.last_refresh_rounds
     return (
         (learning >= 0)
         & (state.completed_blocks >= learning)
         & (state.completed_blocks < _MAX_COUNT)
         & (state.completed_updates == learning * qmix.epochs)
         & (prior.history.current_update == learning)
-        & (refreshed == jnp.where(learning > 0, rounds, 0))
-        & ((learning > 0) == (rounds >= qmix.min_buffer_size))
-        & (state.replay.current_index == rounds % qmix.buffer_size)
-        & (state.replay.is_full == (rounds >= qmix.buffer_size))
+        & (refreshed == jnp.where(learning > learned_before, rounds, refreshed_before))
+        & ((learning > learned_before) == (elapsed >= qmix.min_buffer_size))
+        & (elapsed >= 0)
+        & (state.replay.current_index == elapsed % qmix.buffer_size)
+        & (state.replay.is_full == (elapsed >= qmix.buffer_size))
         & (collected.history.current_update == learning)
         & (collected.history.last_refresh_rounds == refreshed)
         & (rollout.real_steps >= 0)
@@ -850,7 +966,7 @@ def _boundary_valid(
         & (collected.progress.rounds - rounds == rollout.real_steps)
         & jnp.all(rows.valid == prefix)
         & jnp.all(jnp.where(rows.valid, rows.learner_update == learning, True))
-        & jnp.all(rollout.initial_memory == prior.memory.team_a)
+        & jnp.all(rollout.initial_memory == learner_memory(prior))
         & jnp.all(rollout.final_ended == collected.state.done.done)
     )
 
@@ -891,10 +1007,17 @@ def _sequence_valid(sample: QMIXReplayRow) -> Array:
 
 
 def _step_counts(
-    sample: QMIXReplayRow, metrics: QMIXMetrics, bank: int
+    sample: QMIXReplayRow,
+    metrics: QMIXMetrics,
+    bank: int,
+    opponent_rows: int,
+    capture_capacity: int | Array = 20,
 ) -> QMIXSampledCounts:
     """Count one step's TD pairs by stage, source row and opponent row."""
-    pair = (sample.valid[:, :-1] & sample.valid[:, 1:]).reshape(-1).astype(jnp.int32)
+    pair = sample.valid[:, :-1] & sample.valid[:, 1:]
+    if sample.learner_active is not None:
+        pair &= jnp.any((sample.active & sample.learner_active)[:, :-1], axis=-1)
+    pair = pair.reshape(-1).astype(jnp.int32)
 
     def count(index: Array, size: int) -> Array:
         """Add each pair to the bin of its left row."""
@@ -906,7 +1029,10 @@ def _step_counts(
         metrics.used_agent_utilities,
         count(sample.episode_stage, _STAGES),
         count(sample.source_index, bank),
-        count(sample.opponent_snapshot + 1, _OPPONENT_ROWS),
+        count(
+            opponent_counter_row(sample.opponent_snapshot, capture_capacity),
+            opponent_rows,
+        ),
     )
 
 
@@ -915,7 +1041,7 @@ def _epoch_sum(value: Array) -> Array:
     return jnp.sum(value, axis=0)
 
 
-def _absent_counts(bank: int) -> QMIXSampledCounts:
+def _absent_counts(bank: int, opponent_rows: int) -> QMIXSampledCounts:
     """Return zero sampled counts with the fixed shapes."""
     zero = jnp.int32(0)
     return QMIXSampledCounts(
@@ -924,7 +1050,7 @@ def _absent_counts(bank: int) -> QMIXSampledCounts:
         zero,
         jnp.zeros(_STAGES, jnp.int32),
         jnp.zeros(bank, jnp.int32),
-        jnp.zeros(_OPPONENT_ROWS, jnp.int32),
+        jnp.zeros(opponent_rows, jnp.int32),
     )
 
 
@@ -945,11 +1071,14 @@ def _absent_snapshot() -> SnapshotEvent:
         jnp.int32(-1),
         jnp.int32(-1),
         jnp.zeros(20, jnp.bool_),
+        jnp.int32(-1),
     )
 
 
-def _absent_summary() -> UpdateSummary:
-    """Return a zero experience summary for empty or rejected blocks."""
+def _absent_summary(
+    opponent_rows: int = 22, *, custom_reward: bool = False
+) -> UpdateSummary:
+    """Return zeros, keeping the enabled custom-reward summary leaf only."""
     return UpdateSummary(
         jnp.float32(0),
         jnp.float32(0),
@@ -960,6 +1089,9 @@ def _absent_summary() -> UpdateSummary:
         jnp.zeros((_STAGES, 2), jnp.int32),
         jnp.zeros(_STAGES, jnp.int32),
         jnp.zeros(_STAGES, jnp.int32),
+        jnp.zeros((opponent_rows, 3), jnp.int32),
+        jnp.zeros((opponent_rows, 2), jnp.int32),
+        jnp.float32(0) if custom_reward else None,
     )
 
 
@@ -974,8 +1106,11 @@ def _absent_result(
         state.failure_reason,
         _absent_metrics(qmix.epochs),
         _absent_snapshot(),
-        _absent_summary(),
-        _absent_counts(bank),
+        _absent_summary(
+            state.carry.progress.opponent_steps.shape[0],
+            custom_reward=state.carry.env.training_facts,
+        ),
+        _absent_counts(bank, state.carry.progress.opponent_steps.shape[0]),
     )
 
 
@@ -1070,7 +1205,7 @@ def update_qmix_learner(
         _failed(state.carry) | _failed(collected),
         LEARNER_ERROR_COLLECTION,
         jnp.where(
-            _boundary_valid(state, collected, rollout, qmix),
+            _boundary_valid(state, collected, rollout, qmix, continuation),
             LEARNER_ERROR_NONE,
             LEARNER_ERROR_BOUNDARY,
         ),
@@ -1100,7 +1235,11 @@ def update_qmix_learner(
 
         def proceed(_: None) -> _Outcome:
             """Choose warmup or learning; the rows were already inserted."""
-            summary = _summary(rollout)
+            summary = _summary(
+                rollout,
+                collected.progress.opponent_steps.shape[0],
+                collected.history.capture_capacity,
+            )
 
             def warmup(_: None) -> _Outcome:
                 """Accept the rows without any optimizer or version change."""
@@ -1123,7 +1262,9 @@ def update_qmix_learner(
                             _absent_metrics(qmix.epochs),
                             _absent_snapshot(),
                             summary,
-                            _absent_counts(bank),
+                            _absent_counts(
+                                bank, state.carry.progress.opponent_steps.shape[0]
+                            ),
                         ),
                     ),
                     True,
@@ -1149,7 +1290,16 @@ def update_qmix_learner(
                         candidate,
                         bad_update | ~metrics.finite,
                         bad_order | ~_sequence_valid(sample),
-                    ), (metrics, _step_counts(sample, metrics, bank))
+                    ), (
+                        metrics,
+                        _step_counts(
+                            sample,
+                            metrics,
+                            bank,
+                            state.carry.progress.opponent_steps.shape[0],
+                            state.carry.history.capture_capacity,
+                        ),
+                    )
 
                 (train, bad_update, bad_order), (metrics, counts) = jax.lax.scan(
                     epoch,
@@ -1319,6 +1469,10 @@ def validate_qmix_learner(
     collection.schedule.continuation['learner']; inherited slots keep the
     verified parent rates. With hard updates, targets must equal the
     online networks at count 0 and when a block's last step was a copy step.
+    Grouped actor targets are checked for groups whose local optimizer count
+    proves they were present at every step, or have never updated. Other groups
+    may retain an older target because absent groups do not move. The mixer
+    keeps its exact global-clock check.
     Because a block takes epochs steps, the second case needs a copy step to
     land at the end of a block; with the defaults (4 epochs, period 200) it
     never does, so after the first block wrong targets pass this check. The
@@ -1356,14 +1510,19 @@ def validate_qmix_learner(
     learning = int(state.learning_blocks)
     updates = int(state.completed_updates)
     history = state.carry.history
+    reset = None if continuation is None else continuation.reward_reset
+    elapsed = rounds - (0 if reset is None else reset.rounds)
+    learned_before = 0 if reset is None else reset.learning_blocks
+    refreshed_before = 0 if reset is None else reset.last_refresh_rounds
     if (
         updates != learning * qmix.epochs
         or int(history.current_update) != learning
-        or int(history.last_refresh_rounds) != (rounds if learning else 0)
+        or int(history.last_refresh_rounds)
+        != (rounds if learning > learned_before else refreshed_before)
         or not _block_counts_possible(
-            rounds,
-            blocks,
-            learning,
+            elapsed,
+            blocks - (0 if reset is None else reset.blocks),
+            learning - learned_before,
             rollout_length=qmix.rollout_length,
             minimum=qmix.min_buffer_size,
         )
@@ -1374,9 +1533,9 @@ def validate_qmix_learner(
         jax.random.key_data(state.sampling_root), jax.random.key_data(expected_key)
     ):
         raise ValueError("QMIX sampling key does not match the run root")
-    if int(state.replay.current_index) != rounds % qmix.buffer_size or bool(
+    if int(state.replay.current_index) != elapsed % qmix.buffer_size or bool(
         state.replay.is_full
-    ) != (rounds >= qmix.buffer_size):
+    ) != (elapsed >= qmix.buffer_size):
         raise ValueError("QMIX replay cursor disagrees with collected rounds")
 
     def empty_replay(values: TrainingCarry) -> ReplayState:
@@ -1400,8 +1559,16 @@ def validate_qmix_learner(
     ):
         _array(actual, expected.shape, expected.dtype, "QMIX network/optimizer leaf")
     for leaf in cast(list[Array], jax.tree.leaves(state.opt_state)):
-        if jnp.issubdtype(leaf.dtype, jnp.integer) and int(leaf) != updates:
-            raise ValueError("QMIX optimizer count differs from completed updates")
+        if jnp.issubdtype(leaf.dtype, jnp.integer):
+            counts = np.asarray(leaf)
+            valid_count = (
+                np.all((counts >= 0) & (counts <= updates))
+                and int(np.sum(counts, dtype=np.int64)) >= updates
+                if qmix.parameter_sharing != "all" and counts.shape == (5,)
+                else np.all(counts == updates)
+            )
+            if not valid_count:
+                raise ValueError("QMIX optimizer count differs from completed updates")
     if not bool(_saved_boundary_valid(state)):
         raise ValueError("QMIX learner contains nonfinite values")
 
@@ -1414,15 +1581,36 @@ def validate_qmix_learner(
 
     if not epsilon_matches(float(history.current_variables.epsilon), rounds):
         raise ValueError("Current exploration rate disagrees with the clock")
+    inherited = (
+        {}
+        if continuation is None
+        else dict(
+            zip(
+                continuation.frozen_capture_ids,
+                continuation.frozen_epsilon,
+                strict=True,
+            )
+        )
+    )
     captured = np.asarray(history.captured_rounds)
+    ids = np.asarray(history.captured_ids)
     rates = np.asarray(history.historical_variables.epsilon)
-    for slot in range(int(history.count)):
-        if continuation is not None and slot < len(continuation.frozen_epsilon):
-            matches = float(rates[slot]) == continuation.frozen_epsilon[slot]
-        else:
-            matches = epsilon_matches(float(rates[slot]), int(captured[slot]))
+    for slot in np.flatnonzero(ids >= 0):
+        expected = inherited.get(int(ids[slot]))
+        matches = (
+            float(rates[slot]) == expected
+            if expected is not None
+            else epsilon_matches(float(rates[slot]), int(captured[slot]))
+        )
         if not matches:
             raise ValueError("A frozen opponent's exploration rate disagrees")
+    if history.pinned_variables is not None and int(history.pinned_update) >= 0:
+        rate = float(history.pinned_variables.epsilon)
+        if continuation is not None and continuation.pinned_epsilon is not None:
+            if rate != continuation.pinned_epsilon:
+                raise ValueError("The permanent pin's exploration rate changed")
+        elif not np.isfinite(rate) or not 0 <= rate <= 1:
+            raise ValueError("The permanent pin's exploration rate is invalid")
     copied = updates == 0 or (
         qmix.hard_update and (updates - 1) % qmix.update_period == 0
     )
@@ -1431,11 +1619,23 @@ def validate_qmix_learner(
             (numerical.target_q, numerical.online_q),
             (numerical.target_mixer, numerical.online_mixer),
         )
-        for target, online in pairs:
+        for index, (target, online) in enumerate(pairs):
+            copied_groups = None
+            if qmix.parameter_sharing != "all" and index == 0:
+                count = next(
+                    leaf
+                    for leaf in jax.tree.leaves(state.opt_state[0])
+                    if jnp.issubdtype(leaf.dtype, jnp.integer)
+                )
+                local_counts = np.asarray(count)
+                copied_groups = (local_counts == updates) | (local_counts == 0)
             for a, b in zip(
                 jax.tree.leaves(target), jax.tree.leaves(online), strict=True
             ):
-                if not np.array_equal(np.asarray(a), np.asarray(b)):
+                left, right = np.asarray(a), np.asarray(b)
+                if copied_groups is not None:
+                    left, right = left[copied_groups], right[copied_groups]
+                if not np.array_equal(left, right):
                     raise ValueError(
                         "QMIX targets differ from online at a copy boundary"
                     )

@@ -86,7 +86,7 @@ publication; a local pass cannot guarantee a remote service's result.
 
 ## Evidence economics and CI runtime
 
-Keep twelve nonempty Python shards and eight nonempty browser profiles. Their
+Keep nineteen nonempty Python shards and one nonempty browser profile. Their
 sole assignment authorities are [pytest_shard.py](../../scripts/dev/pytest_shard.py)
 and [ci-shards.json](../../web/visual_debugger/e2e/ci-shards.json). Do not copy
 membership into another scheduler.
@@ -139,13 +139,13 @@ if a future collection changes an expected source owner. The resulting local
 12-way proof selects all 3,403 tests exactly once: pytest time ranges from 3:38
 to 4:34 and whole-command wall time from 3:50 to 4:50. Every publication
 candidate must still be checked against hosted timestamps. Rebalance intact
-work units within the current twelve-Python/eight-browser, twenty-job ceiling
+work units within the then-current twelve-Python/eight-browser, twenty-job ceiling
 while allowing valid work to finish. Do not cancel and rerun unchanged work.
 Never omit tests or weaken assertions for timing.
 Since 22 September 2026 the scheduler uses measured per-file costs instead of
 those hand-picked moves; see [Rebalancing the test shards](#rebalancing-the-test-shards).
 
-The twelve Python shards and eight browser profiles are continuing ownership
+The nineteen Python shards and one browser profile are continuing ownership
 obligations, not a one-time optimization. Any change that adds, removes,
 renames, moves, or parameterizes tests must re-prove that the relevant inventory
 is an exact, disjoint cover and review measured shard/profile elapsed times.
@@ -172,6 +172,26 @@ supersession of stale branch and pull-request work.
 
 ## Rebalancing the test shards
 
+The current layout uses **19 Python shards and one browser shard**, keeping
+20 test jobs in hosted CI. The browser shard runs all spec files with one
+Playwright worker. Merging the former eight profiles removes repeated file
+setup and dependency installation; it does not skip tests. The existing Python
+scheduler places the largest work units first into the lightest shard. Shared
+fixtures and parameter families stay together. No new scheduling layer is used.
+
+The weights were refreshed on 27 September 2026 before further repair tests.
+Recorded times cover 7,051 current cases; 1,097 unrun, failed or new cases retain
+estimates from the prior table. The existing scheduler predicts 1,408–1,409
+seconds (about 23.5 minutes) per Python shard. The single browser shard last ran
+all 93 cases in 1,554 seconds (25.9 minutes). These local, contended measurements
+are scheduling estimates, not promises about hosted CI or passing evidence.
+The table's `measured_with` field identifies the sources and calculation.
+
+Use `scripts/dev/check_before_commit.sh --timings artifacts/gate_timings` to
+save the complete next gate's per-test reports without running a second timing
+campaign. This forwards the existing timing option to both child gates. The
+staged candidate must still remain unchanged, and every check must pass.
+
 The Python scheduler weighs each test file by its measured cost in seconds. The
 costs live in one table, [pytest_shard_costs.json](../../scripts/dev/pytest_shard_costs.json),
 which [pytest_shard.py](../../scripts/dev/pytest_shard.py) loads. A file that is
@@ -180,16 +200,36 @@ lists its slow functions under `split_families` and the rest of the file under
 `split_residuals`. A file missing from the table, such as a new one, costs one
 unit per collected test until the next refresh. Entries for files or functions
 that no longer exist are ignored, so renaming or deleting tests never stops a
-shard. `reserved_seconds` keeps 50 seconds free on shard 12 because hosted CI
+shard. `reserved_seconds` keeps 50 seconds free on shard 19 because hosted CI
 runs Pyright there before its tests. The numbers come from the tool below; do
 not edit them by hand.
 
-Refresh the table when shard times drift apart or after adding or moving heavy
-tests. Use timings from a gate where every shard passed; the tool refuses
-missing or failed reports, duplicate cases, invalid durations and any difference
-from the exact current test collection, including parameter cases. It checks
-the new table with the scheduler before replacing the old one. JUnit files
-prove which tests ran; they do not prove that the gate's static checks passed:
+Refresh the table when shard times drift apart or after adding heavy tests.
+Do this before the next large run. Timing estimates and test qualification answer
+different questions: how to share the work, and whether the code passed.
+
+The routine `shard_costs.py update` command below accepts complete passing reports
+and checks exact current coverage. It refuses missing or failed reports, duplicate
+cases and invalid durations. It is useful after a complete run, but waiting for
+one must not block a needed rebalance. For a repair run, use successful case times
+already recorded, retain explicit prior-cost estimates for missing cases, and
+feed those estimates through the existing table builder and scheduler. Preserve
+the original reports, calculation, source hashes and estimate counts. Never edit
+XML to hide a failure or present estimates as measured passing work.
+
+Keep a short source record beside the raw reports. Record each report's path and
+hash, tested commit or candidate tree, repairs, machine, worker count and limits.
+Check that every current test belongs to exactly one shard and that shared
+fixtures stay together. The generated `measured_with` field explains whether the
+table contains estimates. If present, `measured_commit` records HEAD at refresh;
+it is not proof that clean HEAD passed.
+
+After a failed check, repair it and run the failed tests, tests not yet run, and
+tests affected by the change. Reuse prior passes only after reviewing the changed
+source and dependencies. Record exact case coverage, result origins and that
+review. A timing-only change does not invalidate unrelated functional passes.
+Do not repeat a full gate solely to collect timings or replace valid passes.
+Run affected static checks too; JUnit reports do not prove those passed.
 
 ```bash
 scripts/dev/check.sh --timings /tmp/shard-timings            # full Python gate, saves per-test times
@@ -454,7 +494,7 @@ JAX_PLATFORMS=cpu uv run --no-sync pytest tests/test_environment.py
 uv run --no-sync ruff format --check src tests scripts examples
 uv run --no-sync ruff check src tests scripts examples
 uv run --no-sync pyright
-scripts/dev/check.sh --shard 1/12
+scripts/dev/check.sh --shard 1/19
 ```
 
 For browser source changes, use the existing commands:
@@ -493,9 +533,9 @@ settings. Both retain per-task status and elapsed time. A missing prerequisite
 or failed shard blocks qualification.
 
 On a machine with limited RAM, set `MARL_PYTHON_GATE_JOBS=6` when running
-`check.sh` or `check_before_commit.sh`. The supported range is 1–12, with 12
+`check.sh` or `check_before_commit.sh`. The supported range is 1–19, with 19
 as the default. This limits concurrent Python workers, not test membership:
-all twelve shards and all static checks still run. Use the same worker count
+all nineteen shards and all static checks still run. Use the same worker count
 when comparing shard timings. Heavy swap use is a reason to lower concurrency,
 not to omit tests or call an unfinished gate a pass.
 
@@ -540,8 +580,8 @@ ignored outputs and tracked baselines within the repository file-size limit.
 
 ## Automation
 
-[CI](../../.github/workflows/ci.yml) runs twelve Python shards with the static
-checks distributed across the matrix, plus eight browser profiles containing
+[CI](../../.github/workflows/ci.yml) runs nineteen Python shards with the static
+checks distributed across the matrix, plus one browser profile containing
 the frontend unit/static inventory and real Chromium tests. It uses locked
 Python `dev`/`viz` and frontend dependencies. Hosted jobs do not qualify CUDA;
 that is the separate [local GPU gate](gpu_sanity.md).

@@ -681,7 +681,9 @@ def prepare_run(
             if not original.is_absolute():
                 continue
         output = panel_root / (
-            member.name.lower() if panel.schema_version == 1 else f"opponent-{index}"
+            member.name.lower()
+            if panel.schema_version == 1
+            else f"opponent_{index:02d}"
         )
         shutil.copytree(original, output, symlinks=True)
         _files(output)
@@ -988,30 +990,43 @@ def _checkpoint(package: Path, explicit: str | None) -> Path:
     marker. All choices must be complete checkpoints in this package's run.
     There is no fallback from a corrupt chosen checkpoint to an older one.
     """
-    from marl_battlegrounds.training.checkpoints import read_checkpoint_details
+    from marl_battlegrounds.training.checkpoints import (
+        artifact_directory,
+        read_checkpoint_details,
+    )
 
     run = package / "run"
     marker = run / "checkpoint_recovery.json"
     recovering = _read(marker)["checkpoint_id"] if marker.exists() else None
     if explicit is not None:
         selected = Path(explicit).absolute()
-        if recovering is not None and selected.name != recovering:
-            raise ValueError("Interrupted recovery requires its original checkpoint")
     elif recovering is not None:
-        selected = run / "checkpoints" / recovering
+        selected = artifact_directory(run, "checkpoints", recovering)
     else:
         pointer = _read(run / "latest_checkpoint.json")
         identifier = pointer.get("checkpoint_id")
+        relative = pointer.get("relative_path")
         if (
             pointer.get("schema_version") != 1
-            or pointer.get("relative_path") != f"checkpoints/{identifier}"
+            or not isinstance(identifier, str)
+            or not isinstance(relative, str)
+            or Path(relative).parent != Path("checkpoints")
+            or not (
+                Path(relative).name == identifier
+                or Path(relative).name.endswith(f"_{identifier}")
+            )
         ):
             raise ValueError("Latest checkpoint pointer is invalid")
-        selected = run / "checkpoints" / str(identifier)
+        selected = run / relative
     if selected.parent != run / "checkpoints":
         raise ValueError("Resume checkpoint must belong to this package's run")
     details = read_checkpoint_details(selected)
-    if details["checkpoint_id"] != selected.name or details["kind"] != "learner":
+    if recovering is not None and details["checkpoint_id"] != recovering:
+        raise ValueError("Interrupted recovery requires its original checkpoint")
+    if (
+        details["kind"] != "learner"
+        or artifact_directory(run, "checkpoints", details["checkpoint_id"]) != selected
+    ):
         raise ValueError("Resume checkpoint identity differs from its directory")
     return selected
 

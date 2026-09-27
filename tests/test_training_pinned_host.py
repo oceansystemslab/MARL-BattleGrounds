@@ -6,9 +6,10 @@ through collect_training_rollout on fresh collections, and again when both
 collections record through a writer. Setup opens no host memory for any lane.
 The host holder equals M8's own full-batch host call round by round, for a
 generic System and for a Policy adapter that uses its keys: it computes a
-Policy on the pinned games' rows only, makes no call in a round with no pinned
-game, returns zero actions for games it does not play, and starts a lane's
-memory afresh when a pinned lane begins a new game.
+Policy on active slots in pinned games only, makes no call in a round with no
+pinned game, returns zero actions for games it does not play, leaves inactive
+slots' actions and memory at zero, and starts a lane's memory afresh when a
+pinned lane begins a new game.
 A host method's error keeps its own type, KeyboardInterrupt included, and
 afterwards the collection refuses every call; a carry from an earlier round is
 refused even after success, so host memory never meets an older game state. A
@@ -80,10 +81,6 @@ def weights() -> Tree:
     return initialize_ppo(jax.random.key(61)).actor_params
 
 
-def _fill_slot_zero(bank: Array, leaf: Array) -> Array:
-    return bank.at[0].set(leaf)
-
-
 def _collection(
     prepared: PreparedTrainingContent,
     weights: Tree,
@@ -107,11 +104,7 @@ def _collection(
         pinned_opponent=pinned,
     )
     history = carry.history._replace(
-        count=jnp.int32(1),
-        historical_variables=jax.tree.map(
-            _fill_slot_zero, carry.history.historical_variables, weights
-        ),
-        lane_snapshot=jnp.asarray((-1, 0, -1, 0), jnp.int32),
+        lane_snapshot=jnp.asarray((-1, -2, -1, -2), jnp.int32),
     )
     return collection, carry._replace(history=history)
 
@@ -189,7 +182,7 @@ def test_the_host_route_equals_its_jax_twin_and_opens_nothing_at_setup(
         ):
             np.testing.assert_array_equal(np.asarray(left), np.asarray(right))
         rows = host_rollout.transitions
-        pinned = (np.asarray(rows.opponent_snapshot) == 0) & np.asarray(rows.valid)
+        pinned = (np.asarray(rows.opponent_snapshot) == -2) & np.asarray(rows.valid)
         pinned_rows += int(pinned.sum())
         assert (np.asarray(rows.opponent_update)[pinned] == -2).all()
     assert pinned_rows > 0
@@ -240,6 +233,7 @@ def test_the_host_holder_equals_m8_round_by_round(form: str) -> None:
     )
     observations, state = env.reset(jax.random.key(70))
     inputs = system_inputs(observations, state, team=1)
+    active = np.asarray(inputs.active_mask)
     keys = jax.random.split(jax.random.key(71), 4)
     init_keys = jax.random.split(jax.random.key(72), 4)
     holder = HostOpponent(method, 4)
@@ -256,7 +250,10 @@ def test_the_host_holder_equals_m8_round_by_round(form: str) -> None:
         )
         calls = counter.calls
         if form == "policy":
-            assert len(HOST_CALLS) == 5 * int(lanes.sum())
+            assert len(HOST_CALLS) == np.count_nonzero(active & lanes[:, None])
+            for head in actions:
+                np.testing.assert_array_equal(np.asarray(head)[~active], 0)
+            np.testing.assert_array_equal(np.asarray(holder.memory)[~active], 0.0)
         assert holder.next_round == index + 1
         if not lanes.any():
             assert calls == before

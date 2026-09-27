@@ -1,9 +1,9 @@
 """Keep current self-play and frozen actor versions for one training run.
 
-Initialize a capacity-20 bank on the host, draw assignments only at game resets,
+Initialize a bounded rolling bank on the host, draw assignments at game starts,
 and publish updated actor variables after learning with refresh_opponents.
 make_opponent_system applies those choices through the actor's existing System,
-and can play a named pinned System on the lanes assigned to slot 0 through M8's
+and can play a named pinned System on the lanes assigned to -2 through M8's
 own one-team helpers. A pinned host method runs outside compiled code through
 HostOpponent, and HOST_ACTIONS_SYSTEM hands its actions to the compiled step.
 Recurrent memory belongs to SystemState.team_b, never to this bank. These helpers
@@ -11,6 +11,7 @@ do not train, load checkpoints, call a critic, or change simulator rules.
 """
 
 import math
+from collections.abc import Mapping, Sequence
 from functools import partial
 from typing import Any, NamedTuple, cast
 
@@ -27,6 +28,7 @@ from marl_battlegrounds.evaluation.policy_execution import (
     System,
     SystemInput,
     SystemOutput,
+    _CompositionVariables,
     _default_reset,
     _execution,
     _host_apply,
@@ -45,47 +47,56 @@ _CAPACITY = 20
 
 
 class OpponentHistory(NamedTuple):
-    """Carry one run's actor variables and reset-time opponent choices.
+    """Keep actor copies and game assignments as a numerical JAX tree.
 
     Attributes
     ----------
-    current_variables : PyTree
-        Actor-only array tree, including every changing inference value. Shared
-        by current opponents and the learner. No critic or optimizer belongs here.
-    historical_variables : PyTree
-        Same leaves with a leading capacity axis of 20. Occupied slots never
-        change. Unused slots are zero. No rollout-time axis or lane copy is stored.
+    current_variables, historical_variables : PyTree
+        Current actor-only inference leaves and a bank with leading axis C.
+        C is keep_past + 1, or zero when keep_past is zero. Copies include
+        exploration values. No critic, optimizer or game memory belongs here.
     count : Array
-        Int32 scalar number of occupied slots, from 0 through 20.
+        Int32 scalar resident slot count, including any retired copy. At most
+        C - 1 copies are eligible for new games. Slots may be reused only after
+        retirement and after all games using them end.
     lane_snapshot : Array
-        Int32 (B,) choices. -1 means current; other values index occupied slots.
-        An assignment stays fixed through death, respawn and learner updates.
-    current_update : Array
-        Int32 scalar current learner version; initialization is version zero.
-    captured_rounds, captured_updates : Array
-        Int32 (20,) actual capture boundaries. Unused entries are -1.
+        Int32 (B,) physical choices: -1 current, -2 permanent pin, or bank slot.
+        A game keeps its choice until its next reset.
+    current_update, last_refresh_rounds : Array
+        Int32 scalar most recent accepted learner version and round, initially
+        zero. One round means one transition in every environment lane.
+    captured_rounds, captured_updates, captured_ids : Array
+        Int32 (C,) actual capture boundaries and stable capture IDs. Unused
+        slots contain -1. IDs never repeat even when physical slots are reused.
     threshold_to_snapshot : Array
-        Int32 (20,) slot satisfying each requested history threshold, or -1 if
-        unmet. Thresholds are the 5% steps, or round 1 followed by 5% through
-        95% when the schedule requests early capture of a pinned first-update
-        actor. Several thresholds can point to one slot after one update. When
-        a named System is pinned, slot 0 still holds the first-update actor, but
-        lanes assigned to slot 0 play the named System instead and the snapshot
-        is never played.
-    last_refresh_rounds : Array
-        Int32 scalar last accepted real-round count, initially zero. One round
-        means one decision across the fixed environment batch.
+        Int32 (20,) stable capture IDs for explicit thresholds, or -1 if unmet.
+        Several crossed thresholds may share one ID. IDs survive slot eviction.
+    eligible : Array
+        Bool (C,) copies available for new games, always the newest keep_past.
+        A retired resident copy remains readable by a continuing game.
+    next_capture_id, last_capture_rounds : Array
+        Int32 scalars: next unused stable ID and last capture round (-1 if none).
+    minimum_capture_rounds, capture_interval_rounds : Array
+        Int32 scalars. Captures must be at least minimum_capture_rounds apart.
+        A positive interval requests the next capture that many rounds after the
+        last actual capture (or run start); zero disables recurring requests.
+    pinned_variables, pinned_update : PyTree or None, Array
+        A separate permanent first-update actor tree, or None when disabled.
+        pinned_update is int32 -1 before capture or when disabled. The pin uses
+        no rolling slot and remains available when keep_past is zero.
+    external_pin : Array
+        Bool scalar: a separate named System owns the permanent-pin route.
+        Its variables and memory stay with collection, outside this actor bank.
+    capture_capacity : Array
+        Int32 scalar total stable capture bound. Counter rows reserve this many IDs.
     error : Array
-        Sticky Boolean scalar. A bad notification or assignment preserves prior
-        values and sets this flag. Collection must stop while it is true.
+        Sticky bool scalar. Invalid operations preserve state and set this flag.
 
     Notes
     -----
-    This immutable numerical PyTree supports jit/scan. Initialization reserves
-    20 times the actor tree's bytes for history, plus one current tree. Current
-    leaves may share immutable storage with learner variables. Mixed application
-    can need temporary selected weights; those are never retained in this record.
-    The bank is evolving run state, not an immutable content declaration.
+    Weights and metadata have fixed shapes during a run. Only current weights,
+    the C bank copies and an explicitly requested pin consume actor storage.
+    The caller saves capture records and exports before a slot can be reused.
     """
 
     current_variables: Tree
@@ -98,16 +109,26 @@ class OpponentHistory(NamedTuple):
     threshold_to_snapshot: Array
     last_refresh_rounds: Array
     error: Array
+    eligible: Array
+    captured_ids: Array
+    next_capture_id: Array
+    last_capture_rounds: Array
+    minimum_capture_rounds: Array
+    capture_interval_rounds: Array
+    pinned_variables: Tree
+    pinned_update: Array
+    external_pin: Array
+    capture_capacity: Array
 
 
 class SnapshotEvent(NamedTuple):
-    """Describe the one physical snapshot made by a completed learner update.
+    """Report one exported-copy boundary without copying actor weights.
 
-    created is a Boolean scalar. slot, rounds and update_index are int32 scalars;
-    all three are -1 when no snapshot was made. threshold_mask is Boolean (20,)
-    and marks every requested threshold satisfied by this capture. Report actual
-    environment transitions by multiplying rounds by the fixed batch size on the
-    host. A final snapshot can have no later training exposure.
+    created is bool scalar. slot, rounds, update_index and capture_id are int32
+    scalars, all -1 for an absent event. threshold_mask is bool (20,) and marks
+    explicit thresholds satisfied by this capture. A recurring capture may
+    have an empty mask. Multiply rounds by num_envs for actual transitions.
+    Read the weights from slot before processing another learner update.
     """
 
     created: Array
@@ -115,6 +136,201 @@ class SnapshotEvent(NamedTuple):
     rounds: Array
     update_index: Array
     threshold_mask: Array
+    capture_id: Array
+
+
+def opponent_selection_names(selection: object) -> tuple[str, ...]:
+    """Validate training shares or a repeating order and return distinct names.
+
+    None keeps the existing self/history recipe. A mapping gives finite,
+    nonnegative relative shares with a positive total. A nonempty sequence
+    gives an exact repeating game-start order; repeated names are allowed.
+    Names must be nonempty strings. This does not load or resolve any member.
+    """
+    if selection is None:
+        return ()
+    if isinstance(selection, Mapping):
+        if not selection:
+            raise ValueError("Opponent shares must not be empty")
+        values = list(cast(Mapping[Any, Any], selection).values())
+        if any(
+            isinstance(v, bool) or not isinstance(cast(object, v), (int, float))
+            for v in values
+        ):
+            raise TypeError("Opponent shares must be real numbers")
+        if any(not math.isfinite(v) or v < 0 for v in values):
+            raise ValueError("Opponent shares must be finite and nonnegative")
+        if not math.isfinite(sum(values)) or sum(values) <= 0:
+            raise ValueError("Opponent shares must have a finite positive total")
+        names = tuple(cast(Mapping[Any, Any], selection))
+    elif isinstance(selection, Sequence) and not isinstance(selection, (str, bytes)):
+        names = tuple(cast(Sequence[Any], selection))
+        if not names:
+            raise ValueError("Opponent order must not be empty")
+    else:
+        raise TypeError("Opponent selection must be a share mapping or a name sequence")
+    if any(not isinstance(name, str) or not name.strip() for name in names):
+        raise ValueError("Opponent names must be nonempty strings")
+    return tuple(dict.fromkeys(names))
+
+
+class OpponentSelection(NamedTuple):
+    """Keep numerical matchmaking settings and the next dense game-start index.
+
+    shares follows self, past, then declared named members. order contains those
+    same category indices and repeats from order_start. ordered chooses between
+    them. game_starts counts real initial/reset games in ascending lane order;
+    the environment's existing int32 episode allocator bounds it. choices keeps
+    each lane's external member index. past_ids binds per-slot past_weights to
+    the captured IDs they describe; a newly reused slot gets uniform weight.
+    """
+
+    shares: Array
+    order: Array
+    ordered: Array
+    game_starts: Array
+    order_start: Array
+    choices: Array
+    past_ids: Array
+    past_weights: Array
+
+
+def configure_opponent_selection(
+    names: tuple[str, ...],
+    history: OpponentHistory,
+    selection: object,
+    *,
+    previous: OpponentSelection | None = None,
+    past: Mapping[int, float] | None = None,
+) -> OpponentSelection:
+    """Validate host settings and preserve every live game's member and memory.
+
+    names is the fixed external-member declaration order, excluding self/past.
+    selection is a share mapping or repeating name sequence. None means 80%
+    self and 20% past. A changed sequence starts from its first entry at the
+    next game start. Same-shaped share changes keep compiled programs reusable.
+    A different sequence length changes shape and may need compilation.
+    past optionally gives relative weights by currently eligible capture ID;
+    omitted IDs receive zero. None keeps the last weights; newly captured copies
+    default to one. All-zero eligible weights fall back to self. No game starts.
+    """
+    selected = opponent_selection_names(selection)
+    if len(set(names)) != len(names) or any(n in ("self", "past") for n in names):
+        raise ValueError("Opponent member names must be unique and exclude self/past")
+    categories = ("self", "past", *names)
+    if any(name not in categories for name in selected):
+        raise ValueError("Opponent selection names must refer to declared members")
+    if selection is None:
+        selection = {"self": 0.8, "past": 0.2}
+    ordered = not isinstance(selection, Mapping)
+    if ordered:
+        order = np.asarray(
+            [categories.index(n) for n in cast(Sequence[str], selection)], np.int32
+        )
+        shares = np.zeros(len(categories), np.float32)
+    else:
+        mapping = cast(Mapping[str, float], selection)
+        values = np.asarray([mapping.get(n, 0.0) for n in categories], np.float64)
+        shares = (values / values.sum()).astype(np.float32)
+        order = np.zeros(1, np.int32)
+    starts = jnp.int32(0) if previous is None else previous.game_starts
+    origin = starts
+    if (
+        previous is not None
+        and bool(previous.ordered) == ordered
+        and np.array_equal(previous.order, order)
+    ):
+        origin = previous.order_start
+    ids = np.asarray(history.captured_ids)
+    weights = np.ones(ids.shape, np.float32)
+    if previous is not None:
+        old = dict(
+            zip(
+                np.asarray(previous.past_ids).tolist(),
+                np.asarray(previous.past_weights).tolist(),
+                strict=True,
+            )
+        )
+        weights = np.asarray(
+            [old.get(int(i), 1.0) if i >= 0 else 1.0 for i in ids], np.float32
+        )
+    if past is not None:
+        eligible = set(ids[np.asarray(history.eligible)].tolist())
+        if any(type(i) is not int or i not in eligible for i in past):
+            raise ValueError("Past weights must name currently eligible capture IDs")
+        if any(
+            isinstance(v, bool)
+            or not isinstance(cast(object, v), (int, float))
+            or not math.isfinite(v)
+            or v < 0
+            for v in past.values()
+        ):
+            raise ValueError("Past weights must be finite nonnegative numbers")
+        weights = np.asarray([past.get(int(i), 0.0) for i in ids], np.float32)
+        if not np.all(np.isfinite(weights)):
+            raise ValueError("Past weights must fit float32")
+    return OpponentSelection(
+        jnp.asarray(shares),
+        jnp.asarray(order),
+        jnp.bool_(ordered),
+        starts,
+        origin,
+        jnp.zeros(history.lane_snapshot.shape, jnp.int32)
+        if previous is None
+        else previous.choices,
+        jnp.asarray(ids),
+        jnp.asarray(weights),
+    )
+
+
+def select_opponents(
+    history: OpponentHistory,
+    settings: OpponentSelection,
+    reset_mask: Array,
+    keys: Array,
+) -> tuple[OpponentHistory, OpponentSelection]:
+    """Assign only real game starts, reusing the pool's full-batch member memory.
+
+    reset_mask is bool (B,), keys are B Threefry keys. Return history with
+    physical self/past/external choices and settings with external member indices
+    and the advanced dense count. Continuing lanes are unchanged. Missing past
+    copies or zero eligible past weight falls back to self; padding calls none.
+    """
+    offsets = jnp.cumsum(reset_mask.astype(jnp.int32)) - 1
+    indices = settings.game_starts - settings.order_start + offsets
+    order = settings.order[jnp.mod(indices, settings.order.shape[0])]
+    split = jax.vmap(partial(jax.random.split, num=2))(keys)
+
+    def draw(_: None) -> Array:
+        """Draw categories only for weighted selection."""
+        return jax.vmap(
+            partial(jax.random.categorical, logits=jnp.log(settings.shares))
+        )(split[:, 0]).astype(jnp.int32)
+
+    def in_order(_: None) -> Array:
+        """Read the repeating sequence without a category draw."""
+        return order
+
+    category = cast(Array, jax.lax.cond(settings.ordered, in_order, draw, None))
+    slots = jnp.full(reset_mask.shape, -1, jnp.int32)
+    if history.captured_ids.shape[0]:
+        weights = jnp.where(
+            history.captured_ids == settings.past_ids, settings.past_weights, 1.0
+        )
+        weights = jnp.where(history.eligible, weights, 0.0)
+        available = jnp.sum(weights) > 0
+        safe = jnp.where(available, weights, jnp.ones_like(weights))
+        past_slots = jax.vmap(partial(jax.random.categorical, logits=jnp.log(safe)))(
+            split[:, 1]
+        ).astype(jnp.int32)
+        slots = jnp.where((category == 1) & available, past_slots, slots)
+    slots = jnp.where(category >= 2, -2, slots)
+    return history._replace(
+        lane_snapshot=jnp.where(reset_mask, slots, history.lane_snapshot)
+    ), settings._replace(
+        game_starts=settings.game_starts + jnp.sum(reset_mask, dtype=jnp.int32),
+        choices=jnp.where(reset_mask & (category >= 2), category - 2, settings.choices),
+    )
 
 
 def _array_tree(tree: Tree, *, name: str) -> None:
@@ -151,7 +367,7 @@ def _pinned_share(value: object) -> None:
     Parameters
     ----------
     value : object
-        The share to check. Zero means the 80/20 recipe is unchanged.
+        The share to check. Zero reserves no probability for a permanent pin.
 
     Raises
     ------
@@ -178,18 +394,38 @@ def _field(value: Array, shape: tuple[int, ...], dtype: DTypeLike, name: str) ->
 
 
 def _history_shapes(history: OpponentHistory) -> int:
-    """Check history structure and return B without reading device values."""
+    """Check fixed field shapes and return B without reading device values."""
     if not isinstance(cast(object, history), OpponentHistory):
         raise TypeError("Opponent variables must be an OpponentHistory")
     if history.lane_snapshot.ndim != 1 or not history.lane_snapshot.shape[0]:
         raise ValueError("lane_snapshot must have a nonempty lane axis")
     size = history.lane_snapshot.shape[0]
+    if history.captured_ids.ndim != 1:
+        raise ValueError("captured_ids must have a one-dimensional slot axis")
+    capacity = history.captured_ids.shape[0]
+    if capacity == 1:
+        raise ValueError("A rolling bank needs keep_past + 1 slots, or zero slots")
     _field(history.lane_snapshot, (size,), jnp.int32, "lane_snapshot")
-    for name in ("count", "current_update", "last_refresh_rounds"):
+    for name in (
+        "count",
+        "current_update",
+        "last_refresh_rounds",
+        "next_capture_id",
+        "last_capture_rounds",
+        "minimum_capture_rounds",
+        "capture_interval_rounds",
+        "pinned_update",
+        "capture_capacity",
+    ):
         _field(getattr(history, name), (), jnp.int32, name)
     _field(history.error, (), jnp.bool_, "error")
-    for name in ("captured_rounds", "captured_updates", "threshold_to_snapshot"):
-        _field(getattr(history, name), (_CAPACITY,), jnp.int32, name)
+    _field(history.external_pin, (), jnp.bool_, "external_pin")
+    _field(history.eligible, (capacity,), jnp.bool_, "eligible")
+    for name in ("captured_rounds", "captured_updates", "captured_ids"):
+        _field(getattr(history, name), (capacity,), jnp.int32, name)
+    _field(
+        history.threshold_to_snapshot, (_CAPACITY,), jnp.int32, "threshold_to_snapshot"
+    )
     _array_tree(history.current_variables, name="Actor variables")
     _array_tree(history.historical_variables, name="Historical variables")
     if jax.tree.structure(history.current_variables) != jax.tree.structure(
@@ -201,26 +437,47 @@ def _history_shapes(history: OpponentHistory) -> int:
         jax.tree.leaves(history.historical_variables),
         strict=True,
     ):
-        if bank.shape != (_CAPACITY, *current.shape) or bank.dtype != current.dtype:
-            raise ValueError("Historical leaves need capacity 20 and the actor schema")
+        if bank.shape != (capacity, *current.shape) or bank.dtype != current.dtype:
+            raise ValueError(
+                "Historical leaves need the bank capacity and actor schema"
+            )
+    if history.pinned_variables is not None:
+        _matching_variables(
+            history.pinned_variables, _schema(history.current_variables)
+        )
     return size
 
 
 def _history_invalid(history: OpponentHistory) -> Array:
-    """Return sticky failure or invalid count, version, round or occupied-slot IDs.
+    """Reject malformed slot ownership and counters after static shape checks.
 
-    This small numerical guard supports jit. Static structure must already have
-    passed _history_shapes. Collection may check it before memory initialization
-    or actor application; it never clips or repairs a bad snapshot ID.
+    Retired copies remain valid for live games. This compiled guard never clips
+    or repairs an invalid assignment. A permanent pin requires a captured tree.
     """
+    capacity = history.captured_ids.shape[0]
+    occupied = history.captured_ids >= 0
+    slots = history.lane_snapshot
+    pin_ready = history.external_pin | (
+        (history.pinned_variables is not None) & (history.pinned_update >= 0)
+    )
+    invalid_slot = (slots < -2) | ((slots == -2) & ~pin_ready) | (slots >= capacity)
+    if capacity:
+        invalid_slot |= (slots >= 0) & ~occupied[jnp.clip(slots, 0, capacity - 1)]
     return (
         history.error
-        | (history.count < 0)
-        | (history.count > _CAPACITY)
+        | (history.count != jnp.sum(occupied))
+        | (jnp.sum(history.eligible) > max(capacity - 1, 0))
+        | jnp.any(history.eligible & ~occupied)
+        | jnp.any(history.captured_ids < -1)
+        | jnp.any(history.captured_ids >= history.next_capture_id)
+        | (history.next_capture_id < 0)
+        | (history.next_capture_id > history.capture_capacity)
+        | (history.capture_capacity < 0)
         | (history.current_update < 0)
         | (history.last_refresh_rounds < 0)
-        | jnp.any(history.lane_snapshot < -1)
-        | jnp.any(history.lane_snapshot >= history.count)
+        | (history.minimum_capture_rounds < 1)
+        | (history.capture_interval_rounds < 0)
+        | jnp.any(invalid_slot)
     )
 
 
@@ -232,64 +489,114 @@ def _keys(keys: Array, size: int) -> None:
         raise ValueError("Opponent keys must contain one key per lane")
 
 
-def init_opponent_history(actor_variables: Tree, *, num_envs: int) -> OpponentHistory:
-    """Reserve an empty frozen-actor bank and assign every lane to current play.
+def init_opponent_history(
+    actor_variables: Tree,
+    *,
+    num_envs: int,
+    keep_past: int = 20,
+    minimum_capture_rounds: int = 1,
+    capture_interval_rounds: int = 0,
+    pin_first_update: bool = False,
+    external_pin: bool = False,
+    capture_capacity: int = 2147483646,
+) -> OpponentHistory:
+    """Reserve a rolling actor bank on the host without drawing assignments.
 
     Parameters
     ----------
     actor_variables : PyTree
-        Actor-only numerical arrays, including all changing inference state.
-        Critic, optimizer and recurrent memory must stay outside this tree.
-        Leaves retain their shapes/dtypes for the entire run. Empty () is valid.
+        Numerical actor-only inference arrays with fixed shapes and dtypes.
+        Empty () is valid. Critic, optimizer and memory must stay outside.
     num_envs : int
-        Positive Python batch size, excluding bool, within the int32 limit.
+        Positive fixed lane count B, excluding bool and fitting int32.
+    keep_past : int, default=20
+        Number of newest copies offered to new games. Reserve one extra slot
+        for a retired copy still playing. Zero allocates no bank and makes past
+        selection fall back to current weights. Must be nonnegative and fit int32.
+    minimum_capture_rounds : int, default=1
+        Minimum distance between actual captures. Collection must supply the
+        maximum game horizon, not the learner rollout length. Positive int32.
+    capture_interval_rounds : int, default=0
+        Recurring capture interval in rounds, alongside explicit thresholds.
+        Zero disables recurring requests. Positive values must be at least the
+        minimum distance. The public runner converts total transitions to rounds
+        and validates actual learner publication boundaries before this call.
+    pin_first_update : bool, default=False
+        Reserve a separate permanent actor copy at the first accepted update.
+        It does not count against keep_past or the rolling capture interval.
+    external_pin : bool, default=False
+        A separate named System owns assignment -2 from the first game. Cannot
+        be combined with pin_first_update; collection owns its values and memory.
+
+    capture_capacity : int, default=2147483646
+        Maximum total captures. Collection supplies its fixed counter capacity.
 
     Returns
     -------
     OpponentHistory
-        Zero-filled capacity-20 bank, no snapshots, B current assignments (-1),
-        version/round zero and error=False. Current JAX arrays are retained by
-        reference; NumPy arrays become device arrays. No random draw is made.
+        Empty bank, B current assignments, zero counters and error=False.
+        No file access, random draws or System memory initialization occurs.
 
     Raises
     ------
     TypeError, ValueError
-        Batch size or array tree is invalid, or setup is called with traced arrays.
-
-    Notes
-    -----
-    Host setup allocates the full bank once. It reads no files and does not
-    initialize System memory. Actor-only ownership is a caller precondition;
-    arbitrary array names cannot prove that an external tree excludes a critic.
+        Invalid integer controls, array leaves or traced setup inputs.
     """
-    if type(num_envs) is not int:
-        raise TypeError("num_envs must be a Python integer")
-    if not 1 <= num_envs <= np.iinfo(np.int32).max:
-        raise ValueError("num_envs must be positive and fit int32")
+    for name, value, lower in (
+        ("num_envs", num_envs, 1),
+        ("keep_past", keep_past, 0),
+        ("capture_capacity", capture_capacity, 0),
+        ("minimum_capture_rounds", minimum_capture_rounds, 1),
+        ("capture_interval_rounds", capture_interval_rounds, 0),
+    ):
+        if type(value) is not int:
+            raise TypeError(f"{name} must be a Python integer")
+        if not lower <= value < np.iinfo(np.int32).max:
+            raise ValueError(
+                f"{name} must be {'positive' if lower else 'nonnegative'} and fit int32"
+            )
+    if type(pin_first_update) is not bool or type(external_pin) is not bool:
+        raise TypeError("pin_first_update and external_pin must be Python bools")
+    if pin_first_update and external_pin:
+        raise ValueError("A permanent pin must use one actor or one named System")
+    if capture_interval_rounds and capture_interval_rounds < minimum_capture_rounds:
+        raise ValueError("Capture interval must be at least the maximum game horizon")
     _array_tree(actor_variables, name="Actor variables")
     if any(isinstance(leaf, Tracer) for leaf in jax.tree.leaves(actor_variables)):
         raise TypeError("Initialize opponent history on the host before compiled use")
+    capacity = keep_past + 1 if keep_past else 0
 
     def asarray(leaf: Array) -> Array:
-        """Keep existing device arrays or copy host arrays to numerical storage."""
+        """Keep device leaves or copy host leaves into numerical arrays."""
         return jnp.asarray(leaf)
 
-    def empty_bank(leaf: Array) -> Array:
-        """Reserve twenty zero slots with this inference leaf's shape and dtype."""
-        return jnp.zeros((_CAPACITY, *leaf.shape), leaf.dtype)
-
     current = jax.tree.map(asarray, actor_variables)
+
+    def empty_bank(leaf: Array) -> Array:
+        """Reserve the rolling slots for one inference leaf."""
+        return jnp.zeros((capacity, *leaf.shape), leaf.dtype)
+
     return OpponentHistory(
         current,
         jax.tree.map(empty_bank, current),
         jnp.int32(0),
         jnp.full((num_envs,), -1, jnp.int32),
         jnp.int32(0),
-        jnp.full((_CAPACITY,), -1, jnp.int32),
-        jnp.full((_CAPACITY,), -1, jnp.int32),
+        jnp.full((capacity,), -1, jnp.int32),
+        jnp.full((capacity,), -1, jnp.int32),
         jnp.full((_CAPACITY,), -1, jnp.int32),
         jnp.int32(0),
         jnp.bool_(False),
+        jnp.zeros((capacity,), jnp.bool_),
+        jnp.full((capacity,), -1, jnp.int32),
+        jnp.int32(0),
+        jnp.int32(-1),
+        jnp.int32(minimum_capture_rounds),
+        jnp.int32(capture_interval_rounds),
+        current if pin_first_update else None,
+        jnp.int32(-1),
+        jnp.bool_(external_pin),
+        jnp.int32(capture_capacity),
     )
 
 
@@ -299,100 +606,231 @@ def assign_opponents(
     keys: Array,
     *,
     pinned_share: float = 0.0,
+    past_share: float | Array = 0.2,
+    past_weights: Array | None = None,
 ) -> OpponentHistory:
-    """Draw current or frozen opponents only for lanes starting another game.
+    """Choose current, permanent pin or eligible past copies for new games.
 
     Parameters
     ----------
     history : OpponentHistory
-        Latest numerical bank. Existing valid assignments remain until reset.
+        Latest bank. Continuing lanes keep their physical slot unchanged.
     reset_mask : Array
-        Boolean (B,) lanes starting games before their next real decision.
+        Bool (B,) lanes starting a game, including initial games.
     keys : Array
-        Independent opponent-stream Threefry keys, typed (B,) or uint32 (B,2).
-        Each selected lane splits its key for the 20% historical choice and a
-        uniform occupied-slot draw. Other sampling/action streams are untouched.
+        Independent Threefry keys, typed (B,) or legacy uint32 (B,2).
     pinned_share : float, default=0.0
-        Static Python probability, within [0, 0.8], that a reset lane meets
-        history slot 0: the pinned first-update actor, or the named pinned System
-        when the collection has one (slot 0 then only marks the assignment). Zero
-        keeps the 80%
-        current and 20% uniform-history recipe with exactly today's random
-        draws. A positive share requires a schedule whose first history
-        threshold is round 1, so slot 0 holds the actor after the first completed
-        update. Each reset then picks slot 0 with this probability, one of slots
-        1 through count-1 uniformly with total probability 0.2 while at least two
-        slots exist, and current weights otherwise. While only slot 0 exists,
-        that 0.2 goes to current weights. bool and traced values are rejected.
+        Static Python probability in [0, 0.8] for the permanent first-update
+        actor at assignment -2. Before that capture its share goes to current.
+    past_share : float or Array, default=0.2
+        Scalar probability in [0, 1 - pinned_share]. Empty past selection falls
+        back to current. Numeric values remain dynamic under jit.
+    past_weights : Array or None, default=None
+        Optional floating (C,) nonnegative finite weights indexed by physical
+        slot. Only eligible slots participate. None selects them uniformly.
+        All eligible weights zero sends the past share to current. The caller
+        updates slot weights from captured_ids when slots are reused.
 
     Returns
     -------
     OpponentHistory
-        New assignments for selected lanes only. Empty history selects current
-        without drawing. Otherwise each reset has 80% current probability and
-        20% historical probability, or the pinned split above; finite counts
-        and transition shares differ.
-        Invalid numerical history preserves every old value and sets error=True.
-
-    Raises
-    ------
-    TypeError, ValueError
-        History, reset-mask or key shapes/dtypes are incompatible, or
-        pinned_share is not a Python number within [0, 0.8].
-
-    Notes
-    -----
-    Pure JAX work supports jit/scan. No memory is reset here. The collector must
-    stop on error before applying a System, including its memory initializer.
-    The sticky flag cannot be repaired by a later assignment or refresh. The
-    pinned branch is chosen in Python, so a zero share traces today's program.
+        Reset-lane assignments, with no memory reset or weight changes. Bad
+        numeric state or probabilities preserve assignments and set error=True.
+        Bad static shapes, dtypes or key types raise TypeError or ValueError.
     """
     size = _history_shapes(history)
+    capacity = history.captured_ids.shape[0]
     _field(reset_mask, (size,), jnp.bool_, "reset_mask")
     _keys(keys, size)
     _pinned_share(pinned_share)
-    invalid = _history_invalid(history)
+    share = jnp.asarray(past_share, jnp.float32)
+    _field(share, (), jnp.float32, "past_share")
+    invalid = (
+        _history_invalid(history)
+        | ~jnp.isfinite(share)
+        | (share < 0)
+        | (share + pinned_share > 1)
+    )
+    weights = history.eligible.astype(jnp.float32)
+    if past_weights is not None:
+        if past_weights.shape != (capacity,) or not jnp.issubdtype(
+            past_weights.dtype, jnp.floating
+        ):
+            raise ValueError(
+                "past_weights must be floating values with one entry per physical slot"
+            )
+        invalid |= jnp.any(~jnp.isfinite(past_weights) | (past_weights < 0))
+        weights = jnp.where(history.eligible, past_weights, 0)
+    available = jnp.sum(weights) > 0
+    pin_ready = history.external_pin | (
+        (history.pinned_variables is not None) & (history.pinned_update >= 0)
+    )
 
     def draw(_: None) -> Array:
-        """Draw one choice per lane from two independent parts of its own key."""
+        """Draw independently per reset lane without changing other RNG streams."""
 
         def one(key: Array) -> Array:
-            """Choose current or one occupied slot using only this lane's key."""
+            """Split this game's key between member choice and past-copy choice."""
             choose_key, slot_key = jax.random.split(key)
-            historical = jax.random.bernoulli(choose_key, 0.2)
-            slot = jax.random.randint(slot_key, (), 0, history.count, dtype=jnp.int32)
-            return jnp.where(historical, slot, jnp.int32(-1))
-
-        def one_pinned(key: Array) -> Array:
-            """Choose the pinned slot, another occupied slot or current weights."""
-            choose_key, slot_key = jax.random.split(key)
-            chance = jax.random.uniform(choose_key)
-            pinned = chance < pinned_share
-            historical = ~pinned & (chance < pinned_share + 0.2) & (history.count > 1)
-            slot = jax.random.randint(
-                slot_key, (), 1, jnp.maximum(history.count, 2), dtype=jnp.int32
-            )
+            if pinned_share:
+                chance = jax.random.uniform(choose_key)
+                pinned = (chance < pinned_share) & pin_ready
+                historical = (chance >= pinned_share) & (chance < pinned_share + share)
+            else:
+                pinned = jnp.bool_(False)
+                historical = jax.random.bernoulli(choose_key, share)
+            slot = jnp.int32(-1)
+            if capacity:
+                if past_weights is None:
+                    eligible = jnp.nonzero(
+                        history.eligible, size=capacity, fill_value=0
+                    )[0]
+                    index = jax.random.randint(
+                        slot_key, (), 0, jnp.maximum(jnp.sum(history.eligible), 1)
+                    )
+                    slot = eligible[index]
+                else:
+                    slot = jax.random.categorical(slot_key, jnp.log(weights)).astype(
+                        jnp.int32
+                    )
             return jnp.where(
-                pinned, jnp.int32(0), jnp.where(historical, slot, jnp.int32(-1))
+                pinned,
+                jnp.int32(-2),
+                jnp.where(historical & available, slot, jnp.int32(-1)),
             )
 
-        chooser = one if pinned_share == 0 else one_pinned
-        return jnp.where(reset_mask, jax.vmap(chooser)(keys), history.lane_snapshot)
+        return jnp.where(reset_mask, jax.vmap(one)(keys), history.lane_snapshot)
 
     def unchanged(_: None) -> Array:
-        """Keep every assignment when no draw is needed or history is invalid."""
+        """Preserve game assignments when input values are invalid."""
         return history.lane_snapshot
 
     assignments = cast(
-        Array,
-        jax.lax.cond(
-            ~invalid & (history.count > 0) & jnp.any(reset_mask),
-            draw,
-            unchanged,
-            operand=None,
-        ),
+        Array, jax.lax.cond(~invalid & jnp.any(reset_mask), draw, unchanged, None)
     )
     return history._replace(lane_snapshot=assignments, error=invalid)
+
+
+def opponent_counter_row(snapshot: Array, capture_capacity: int | Array = 20) -> Array:
+    """Map stable opponent identities to counter rows without changing identity.
+
+    snapshot is an int32 array: -1 current, -2 permanent pin, or a nonnegative
+    capture ID. Values -3-index name declared external members. Return int32
+    rows: 0 current, 1 pin, ID+2 history, then the named members after the
+    capture_capacity reserved rows.
+    The caller owns the counter capacity and validates all supplied identities.
+    """
+    return jnp.where(
+        snapshot < -2,
+        capture_capacity + 2 + (-snapshot - 3),
+        jnp.where(snapshot == -1, 0, jnp.where(snapshot == -2, 1, snapshot + 2)),
+    )
+
+
+def opponent_identity(history: OpponentHistory) -> tuple[Array, Array]:
+    """Return each lane's stable snapshot ID and actual actor update index.
+
+    Physical slots are replaced by captured_ids. -1 names current weights and
+    -2 the permanent pin. A named external pin has update -2; a first-update
+    pin keeps its captured update. Both outputs are int32 (B,). Empty banks
+    work without indexing an empty leaf. This does not read host values.
+    """
+    slot = history.lane_snapshot
+    snapshot = slot
+    update = jnp.full_like(slot, history.current_update)
+    if history.captured_ids.shape[0]:
+        index = jnp.maximum(slot, 0)
+        snapshot = jnp.where(slot >= 0, history.captured_ids[index], slot)
+        update = jnp.where(slot >= 0, history.captured_updates[index], update)
+    return snapshot, jnp.where(
+        slot == -2, jnp.where(history.external_pin, -2, history.pinned_update), update
+    )
+
+
+def _capture_request(
+    history: OpponentHistory, rounds: Array, schedule: ScheduleArrays
+) -> tuple[Array, Array]:
+    """Return explicit due thresholds and whether either capture route is due."""
+    due = (history.threshold_to_snapshot == -1) & (
+        rounds >= schedule.history_threshold_rounds
+    )
+    if schedule.history_threshold_count is not None:
+        due &= jnp.arange(_CAPACITY) < schedule.history_threshold_count
+    interval = history.capture_interval_rounds
+    recurring = (interval > 0) & (
+        rounds - jnp.maximum(history.last_capture_rounds, 0) >= interval
+    )
+    return due, (jnp.any(due) | recurring) & (history.captured_ids.shape[0] > 0)
+
+
+def _free_history_slots(history: OpponentHistory, live_slots: Array | None) -> Array:
+    """Find retired or unused slots with no opponent or extra partner references.
+
+    live_slots is optional bool (C,) usage from every other team or owner. The
+    built-in opponent assignments are always included, even when it is supplied.
+    """
+    capacity = history.captured_ids.shape[0]
+    used = (
+        jnp.bincount(
+            jnp.maximum(history.lane_snapshot, 0),
+            weights=(history.lane_snapshot >= 0).astype(jnp.int32),
+            length=capacity,
+        )
+        > 0
+    )
+    if live_slots is not None:
+        _field(live_slots, (capacity,), jnp.bool_, "live_slots")
+        used |= live_slots
+    return ~history.eligible & ~used
+
+
+def _capture_ready(
+    history: OpponentHistory,
+    rounds: Array,
+    schedule: ScheduleArrays,
+    live_slots: Array | None,
+) -> tuple[Array, Array]:
+    """Keep requests pending until spacing and both-team slot safety allow capture."""
+    due, requested = _capture_request(history, rounds, schedule)
+    spaced = (history.last_capture_rounds < 0) | (
+        rounds - history.last_capture_rounds >= history.minimum_capture_rounds
+    )
+    return due, requested & spaced & jnp.any(_free_history_slots(history, live_slots))
+
+
+def publication_valid(
+    history: OpponentHistory,
+    *,
+    completed_rounds: Array,
+    update_index: Array,
+    schedule: ScheduleArrays,
+    live_slots: Array | None = None,
+) -> Array:
+    """Check the shared publisher rule before committing a learner update.
+
+    history and schedule have already passed host setup. completed_rounds and
+    update_index are int32 scalars: a strictly later real round within the
+    schedule and exactly the next learner version. live_slots is optional bool
+    (C,) usage by partners or other owners; opponent references are included.
+    Returns a bool scalar under jit. Capture timing and occupied retired slots
+    may delay a copy, but never reject a valid learner update. An exhausted
+    stable-ID counter rejects a ready capture. Shape errors raise TypeError
+    or ValueError. No state changes.
+    """
+    _history_shapes(history)
+    _field(completed_rounds, (), jnp.int32, "completed_rounds")
+    _field(update_index, (), jnp.int32, "update_index")
+    _field(schedule.total_rounds, (), jnp.int32, "total_rounds")
+    _field(schedule.history_threshold_rounds, (_CAPACITY,), jnp.int32, "thresholds")
+    _, capture = _capture_ready(history, completed_rounds, schedule, live_slots)
+    return (
+        ~_history_invalid(history)
+        & (history.current_update < np.iinfo(np.int32).max)
+        & (update_index == history.current_update + 1)
+        & (completed_rounds > history.last_refresh_rounds)
+        & (completed_rounds <= schedule.total_rounds)
+        & (~capture | (history.next_capture_id < history.capture_capacity))
+    )
 
 
 def refresh_opponents(
@@ -402,112 +840,136 @@ def refresh_opponents(
     completed_rounds: Array,
     update_index: Array,
     schedule: ScheduleArrays,
+    live_slots: Array | None = None,
 ) -> tuple[OpponentHistory, SnapshotEvent]:
-    """Publish one completed learner update and capture a due frozen actor once.
+    """Publish one actor update and freeze a due copy without changing live games.
 
     Parameters
     ----------
     history : OpponentHistory
-        Latest bank and assignments; this function never resets game memory.
+        Latest rolling bank. Its slot assignments and game memory stay fixed.
     actor_variables : PyTree
-        Already-updated actor-only arrays with exactly the original tree, leaf
-        shapes and dtypes. Includes all changing inference state. No learning is
-        performed here; critic and optimizer state remain with the learner.
-    completed_rounds : Array
-        Int32 scalar real rounds after this update. Must be strictly greater
-        than last_refresh_rounds and no greater than schedule.total_rounds.
-    update_index : Array
-        Int32 scalar exactly one greater than current_update, without overflow.
+        Updated actor-only inference arrays with the same leaf schema.
+    completed_rounds, update_index : Array
+        Int32 scalar actual publication round and consecutive learner version.
     schedule : ScheduleArrays
-        Validated numerical schedule with int32 total_rounds and
-        history_threshold_rounds shaped (20,) as built by make_training_schedule:
-        the upward-rounded 5% steps, or round 1 then 5% through 95% when early
-        history capture is requested. A child may set history_threshold_count
-        to an active prefix of at most 20 entries; unused entries never trigger
-        captures. Structure stays fixed under jit.
+        Validated total and explicit capture thresholds. Crossed thresholds
+        share one capture. Recurring requests use the interval stored in history.
+    live_slots : Array or None, default=None
+        Bool (C,) extra references, including partners. Opponent assignments
+        are always protected. The caller must include every other live owner.
 
     Returns
     -------
     tuple[OpponentHistory, SnapshotEvent]
-        Refreshed current variables and at most one new slot. Every newly met
-        threshold points to that slot. Existing slots and assignments stay fixed.
-        Invalid numerical notifications preserve old weights and timing, set the
-        sticky error flag and return an absent event (all scalar IDs/counts -1).
-
-    Raises
-    ------
-    TypeError, ValueError
-        A field's static shape/dtype or the actor-variable schema is incompatible.
+        New current weights and at most one rolling capture. It retires the
+        oldest eligible copy when needed. All still-referenced weights remain
+        unchanged. Every event needs exporting before the next publication.
+        Invalid publication preserves all prior values and sets error=True.
+        See publication_valid for the single shared acceptance rule.
 
     Notes
     -----
-    Pure JAX work supports jit/scan. Call once after each completed learner update,
-    before the next collection block, including a final partial block. Several
-    crossed thresholds share one physical snapshot; there is no eviction. The
-    final captured actor may receive no later game. All inference leaves freeze
-    together; current games use the new values with their continuing memory.
+    Call after each accepted learner update, including a final partial block.
+    Pure JAX supports jit/scan. Setup checks explicit capture spacing. At run
+    time, a due request waits for the minimum actual gap and a free safe slot.
+    Current weights still publish, and the next eligible update captures its
+    actor. Recurring cadence starts again at that actual capture round.
     """
-    _history_shapes(history)
     _matching_variables(actor_variables, _schema(history.current_variables))
-    _field(completed_rounds, (), jnp.int32, "completed_rounds")
-    _field(update_index, (), jnp.int32, "update_index")
-    _field(schedule.total_rounds, (), jnp.int32, "total_rounds")
-    _field(schedule.history_threshold_rounds, (_CAPACITY,), jnp.int32, "thresholds")
-    due = (history.threshold_to_snapshot == -1) & (
-        completed_rounds >= schedule.history_threshold_rounds
+    valid = publication_valid(
+        history,
+        completed_rounds=completed_rounds,
+        update_index=update_index,
+        schedule=schedule,
+        live_slots=live_slots,
     )
-    threshold_count = getattr(schedule, "history_threshold_count", None)
-    if threshold_count is not None:
-        due &= jnp.arange(_CAPACITY) < threshold_count
-    capture = jnp.any(due)
-    valid = (
-        ~_history_invalid(history)
-        & (history.current_update < np.iinfo(np.int32).max)
-        & (update_index == history.current_update + 1)
-        & (completed_rounds > history.last_refresh_rounds)
-        & (completed_rounds <= schedule.total_rounds)
-        & (~capture | (history.count < _CAPACITY))
-    )
+    due, capture = _capture_ready(history, completed_rounds, schedule, live_slots)
     absent = SnapshotEvent(
         jnp.bool_(False),
         jnp.int32(-1),
         jnp.int32(-1),
         jnp.int32(-1),
         jnp.zeros((_CAPACITY,), jnp.bool_),
+        jnp.int32(-1),
     )
 
     def publish(_: None) -> tuple[OpponentHistory, SnapshotEvent]:
-        """Replace current variables, then append one slot if any threshold is due."""
+        """Publish current and the separate first-update pin before a rolling copy."""
+        pinned = history.pinned_variables
+        if pinned is not None:
+
+            def first_pin(new: Array, old: Array) -> Array:
+                """Freeze this inference leaf only at the first publication."""
+                return jnp.where(history.pinned_update < 0, new, old)
+
+            pinned = jax.tree.map(first_pin, actor_variables, pinned)
         refreshed = history._replace(
             current_variables=actor_variables,
             current_update=update_index,
             last_refresh_rounds=completed_rounds,
+            pinned_variables=pinned,
+            pinned_update=jnp.where(
+                (pinned is not None) & (history.pinned_update < 0),
+                update_index,
+                history.pinned_update,
+            ),
         )
+        capacity = history.captured_ids.shape[0]
+        if not capacity:
+            return refreshed, absent
 
         def append(_: None) -> tuple[OpponentHistory, SnapshotEvent]:
-            """Freeze every inference leaf in the next unused slot."""
-            slot = history.count
+            """Use a free slot and retire the oldest copy when the window is full."""
+            slot = jnp.argmax(_free_history_slots(history, live_slots)).astype(
+                jnp.int32
+            )
+            oldest = jnp.argmin(
+                jnp.where(
+                    history.eligible, history.captured_ids, np.iinfo(np.int32).max
+                )
+            )
+            eligible = (
+                history.eligible.at[oldest]
+                .set(
+                    history.eligible[oldest]
+                    & (jnp.sum(history.eligible) < capacity - 1)
+                )
+                .at[slot]
+                .set(True)
+            )
 
             def capture_leaf(bank: Array, current: Array) -> Array:
-                """Write one actor leaf to the unused slot, retaining older slots."""
+                """Replace one unused or safely retired inference leaf."""
                 return bank.at[slot].set(current)
 
+            copied = jax.tree.map(
+                capture_leaf, history.historical_variables, actor_variables
+            )
             return refreshed._replace(
-                historical_variables=jax.tree.map(
-                    capture_leaf,
-                    history.historical_variables,
-                    actor_variables,
-                ),
-                count=slot + 1,
+                historical_variables=copied,
+                count=history.count
+                + (history.captured_ids[slot] < 0).astype(jnp.int32),
+                eligible=eligible,
+                captured_ids=history.captured_ids.at[slot].set(history.next_capture_id),
                 captured_rounds=history.captured_rounds.at[slot].set(completed_rounds),
                 captured_updates=history.captured_updates.at[slot].set(update_index),
                 threshold_to_snapshot=jnp.where(
-                    due, slot, history.threshold_to_snapshot
+                    due, history.next_capture_id, history.threshold_to_snapshot
                 ),
-            ), SnapshotEvent(jnp.bool_(True), slot, completed_rounds, update_index, due)
+                next_capture_id=history.next_capture_id + 1,
+                last_capture_rounds=completed_rounds,
+            ), SnapshotEvent(
+                jnp.bool_(True),
+                slot,
+                completed_rounds,
+                update_index,
+                due,
+                history.next_capture_id,
+            )
 
         def current_only(_: None) -> tuple[OpponentHistory, SnapshotEvent]:
-            """Publish new current weights without creating an early snapshot."""
+            """Publish current weights while no copy is ready."""
             return refreshed, absent
 
         return cast(
@@ -516,7 +978,7 @@ def refresh_opponents(
         )
 
     def reject(_: None) -> tuple[OpponentHistory, SnapshotEvent]:
-        """Keep prior numerical evidence and make the failure sticky."""
+        """Keep prior state and make a bad publication sticky."""
         return history._replace(error=jnp.bool_(True)), absent
 
     return cast(
@@ -536,9 +998,10 @@ def _memory(memory: Tree, size: int) -> Tree:
 def _chosen_variables(history: OpponentHistory, slot: Array) -> Tree:
     """Select one lane's current or occupied frozen tree without a persistent copy.
 
-    slot must be -1 or an occupied slot. The collector checks that precondition
-    before entering application. A mixed vmap may materialize temporary selected
-    leaves; no selected variables are stored in the returned memory or history.
+    slot must be -1, a ready permanent pin (-2), or an occupied slot. Collection
+    checks that precondition before application. A mixed vmap may materialize
+    temporary selected leaves. No selected variables are stored in returned memory
+    or history.
     """
 
     def current(_: None) -> Tree:
@@ -554,7 +1017,19 @@ def _chosen_variables(history: OpponentHistory, slot: Array) -> Tree:
 
         return jax.tree.map(select, history.historical_variables)
 
-    return cast(Tree, jax.lax.cond(slot == -1, current, historical, None))
+    def unpinned(_: None) -> Tree:
+        """Read current or rolling weights without indexing an empty bank."""
+        if not history.captured_ids.shape[0]:
+            return history.current_variables
+        return cast(Tree, jax.lax.cond(slot == -1, current, historical, None))
+
+    def pinned(_: None) -> Tree:
+        """Read the separate permanent actor copy."""
+        return history.pinned_variables
+
+    if history.pinned_variables is not None:
+        return cast(Tree, jax.lax.cond(slot == -2, pinned, unpinned, None))
+    return unpinned(None)
 
 
 def _add_batch(leaf: Array) -> Array:
@@ -638,7 +1113,9 @@ def _scatter_rows(full: Tree, part: Tree, index: Array) -> Tree:
     return jax.tree.map(put, full, part)
 
 
-def make_opponent_system(actor: System, *, pinned: System | None = None) -> System:
+def make_opponent_system(
+    actor: System, *, pinned: System | None = None, vectorize_lanes: bool = True
+) -> System:
     """Wrap a native JAX actor for current or frozen per-game opponent variables.
 
     Parameters
@@ -652,10 +1129,16 @@ def make_opponent_system(actor: System, *, pinned: System | None = None) -> Syst
     pinned : System or None, default None
         Keyword-only. None returns exactly today's wrapper. A frozen JAX-execution
         System, or a Policy adapted with shared_policy, plays the lanes whose
-        assignment is slot 0 instead of the network. Its memory may have any
+        assignment is -2 instead of the network. Its memory may have any
         layout M8 allows, with or without its own reset_memory hook. A host
         method is not passed here: the collection passes HOST_ACTIONS_SYSTEM
         and runs the host method through HostOpponent.
+
+    vectorize_lanes : bool, default=True
+        Map mixed history lanes with vmap. Built-in grouped models use False
+        because their grouped dot primitive lacks this extra batching rule;
+        lax.map then preserves their results. All-current batches still call the
+        actor once. The shared-model path keeps its original compiled program.
 
     Returns
     -------
@@ -666,7 +1149,7 @@ def make_opponent_system(actor: System, *, pinned: System | None = None) -> Syst
         template), and the memory is (network memory, pinned memory).
         All-current batches call the base actor once on the full batch. Mixed
         batches map independent length-one calls in lane order; with a pinned
-        System, slot-0 lanes count as current for the network, whose output
+        System, permanent-pin lanes count as current for the network, whose output
         there is discarded. Initialization selects each lane's assigned
         variables too. Learning outputs are empty and policy IDs are unreported
         (-1); training records own exact version identities.
@@ -694,7 +1177,7 @@ def make_opponent_system(actor: System, *, pinned: System | None = None) -> Syst
     as valid (other lanes are padding to it), its memory is initialized by M8's
     outer reset through this wrapper's init for pinned lanes of new games, and
     its step runs through M8's _jax_apply with the same keys the network gets.
-    A whole-batch lax.cond skips it on steps where no lane uses it. A Policy
+    A whole-batch lax.cond skips either actor when no valid lane uses it. A Policy
     adapter, which acts per actor, then runs on the pinned games only, gathered
     into the smallest fitting quarter, half or full batch (rounded up);
     a generic System, which may look across the batch, runs on the full batch
@@ -759,7 +1242,14 @@ def make_opponent_system(actor: System, *, pinned: System | None = None) -> Syst
                 )
                 return jax.tree.map(_remove_batch, fresh)
 
-            return jax.vmap(one)(history.lane_snapshot, inputs, keys)
+            if vectorize_lanes:
+                return jax.vmap(one)(history.lane_snapshot, inputs, keys)
+
+            def row(values: tuple[Array, SystemInput, Array]) -> Tree:
+                """Keep grouped primitives outside an extra vmap axis."""
+                return one(*values)
+
+            return cast(Tree, jax.lax.map(row, (history.lane_snapshot, inputs, keys)))
 
         return cast(
             Tree,
@@ -806,7 +1296,17 @@ def make_opponent_system(actor: System, *, pinned: System | None = None) -> Syst
                 )
                 return jax.tree.map(_remove_batch, result)
 
-            return jax.vmap(one)(history.lane_snapshot, memory, inputs, keys)
+            if vectorize_lanes:
+                return jax.vmap(one)(history.lane_snapshot, memory, inputs, keys)
+
+            def row(values: tuple[Array, Tree, SystemInput, Array]) -> SystemOutput:
+                """Keep grouped primitives outside an extra vmap axis."""
+                return one(*values)
+
+            return cast(
+                SystemOutput,
+                jax.lax.map(row, (history.lane_snapshot, memory, inputs, keys)),
+            )
 
         return cast(
             SystemOutput,
@@ -831,7 +1331,7 @@ def make_opponent_system(actor: System, *, pinned: System | None = None) -> Syst
 
     def network_view(history: OpponentHistory) -> OpponentHistory:
         """Give pinned lanes current weights; their network output is discarded."""
-        snapshot = jnp.where(history.lane_snapshot == 0, -1, history.lane_snapshot)
+        snapshot = jnp.where(history.lane_snapshot == -2, -1, history.lane_snapshot)
         return history._replace(lane_snapshot=snapshot)
 
     def unpack(variables: Tree) -> tuple[OpponentHistory, Tree, Tree]:
@@ -852,7 +1352,7 @@ def make_opponent_system(actor: System, *, pinned: System | None = None) -> Syst
         history, pinned_variables, template = unpack(variables)
         check(history, inputs, keys)
         network = initialize(network_view(history), inputs, keys)
-        use = inputs.valid & (history.lane_snapshot == 0)
+        use = inputs.valid & (history.lane_snapshot == -2)
         fresh = _initial_memory(
             pinned_execution,
             pinned_variables,
@@ -873,15 +1373,30 @@ def make_opponent_system(actor: System, *, pinned: System | None = None) -> Syst
                 "A pinned opponent's memory must be (network memory, pinned memory)"
             )
         network_memory, pinned_memory = cast(tuple[Tree, Tree], memory)
-        network = apply(network_view(history), network_memory, inputs, keys)
+        use = inputs.valid & (history.lane_snapshot == -2)
+        native_inputs = inputs._replace(valid=inputs.valid & ~use)
+
+        def native(_: None) -> SystemOutput:
+            """Apply the learning actor only when a native opponent needs it."""
+            return apply(network_view(history), network_memory, native_inputs, keys)
+
+        def no_native(_: None) -> SystemOutput:
+            """Keep unused native memory and skip the actor for all-external games."""
+            zero = jnp.zeros((size, 5), jnp.int32)
+            return SystemOutput(ActorAction(zero, zero, zero), network_memory)
+
+        network = cast(
+            SystemOutput,
+            jax.lax.cond(jnp.any(native_inputs.valid), native, no_native, None),
+        )
         next_network = network.next_memory
         if pinned_reset is not None:
             # A wrapper reset hook turns off M8's padding protection, so keep
             # invalid lanes of the network half here.
             next_network = select_policy_carry(
-                inputs.valid, next_network, network_memory
+                native_inputs.valid, next_network, network_memory
             )
-        use = inputs.valid & (history.lane_snapshot == 0)
+        use = inputs.valid & (history.lane_snapshot == -2)
 
         def run(_: None) -> tuple[ActorAction, Tree]:
             """Apply the pinned System to its lanes with M8's one-team rules."""
@@ -1084,8 +1599,16 @@ class HostOpponent:
     the resume rule.
     """
 
-    def __init__(self, system: System, num_envs: int) -> None:
-        """Split the frozen method once; memory is built by start()."""
+    def __init__(
+        self, system: System, num_envs: int, *, external_selection: bool = False
+    ) -> None:
+        """Split a frozen method; external_selection marks a training-owned pool.
+
+        Only that outer pool's choices are supplied by the saved training
+        selector. Nested researcher parameters keep their ordinary meanings.
+        Memory is built by start(); no numerical action occurs here.
+        """
+        self.external_selection = external_selection
         self.execution: _SystemExecution
         self.execution, self.variables, self.template = prepare_evaluation_system(
             system
@@ -1100,6 +1623,61 @@ class HostOpponent:
         self.next_round: int | None = None
         self.failure: BaseException | None = None
         self.failed_round: int | None = None
+
+    def _frozen_tree(self) -> tuple[Tree, Tree]:
+        """Omit only the training selector's outer pool choice from frozen values."""
+        variables = self.variables
+        if self.external_selection:
+            if not isinstance(variables, _CompositionVariables):
+                raise ValueError("External selection requires an ordinary pool")
+            variables = variables._replace(choices=None)
+        return variables, self.template
+
+    def checkpoint_values(self) -> tuple[Array, ...]:
+        """Return accessible frozen array leaves for the existing checkpoint tree.
+
+        Numerical parameters and initial-memory templates are saved in their
+        existing PyTree order. Opaque clients and other host objects stay bound
+        to this holder; no serializer is invented for them. This does not save
+        current game memory or make an unfinished host game resumable. Array
+        values retain their device placement; no numerical policy call occurs.
+        """
+        return tuple(
+            jnp.asarray(value)
+            for value in jax.tree.leaves(self._frozen_tree())
+            if isinstance(value, (Array, np.ndarray))
+        )
+
+    def restore_values(self, saved: tuple[Array, ...]) -> None:
+        """Restore checked frozen arrays without replacing opaque live bindings.
+
+        saved is checkpoint_values() restored by the normal learner array loader.
+        Its count, shapes and dtypes must match the rebound method. NumPy leaves
+        stay on the host and JAX leaves stay on their restored device. Current
+        memory and round guards are unchanged. Call only during checkpoint
+        preflight, before any resumed action or output write.
+        """
+        leaves, structure = cast(
+            tuple[list[Any], Any], jax.tree.flatten(self._frozen_tree())
+        )
+        indices = [
+            index
+            for index, value in enumerate(leaves)
+            if isinstance(value, (Array, np.ndarray))
+        ]
+        if len(indices) != len(saved):
+            raise ValueError("Restored host method's frozen array count differs")
+        for index, value in zip(indices, saved, strict=True):
+            old = leaves[index]
+            if old.shape != value.shape or old.dtype != value.dtype:
+                raise ValueError("Restored host method's frozen array schema differs")
+            leaves[index] = np.asarray(value) if isinstance(old, np.ndarray) else value
+        restored, self.template = jax.tree.unflatten(structure, leaves)
+        self.variables = (
+            restored._replace(choices=self.variables.choices)
+            if self.external_selection
+            else restored
+        )
 
     def start(self, inputs: SystemInput, init_keys: Array) -> None:
         """Build placeholder memory with every lane invalid, so nothing opens.

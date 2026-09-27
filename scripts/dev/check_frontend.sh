@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
 
 # Run browser-client style, type, unit and browser checks.
-# Usage: scripts/dev/check_frontend.sh --help. With no options, run eight browser
-# profiles plus static/unit checks with at most eight workers. The profile file
-# owns browser membership. --static-only includes unit tests; --style-only does
+# Usage: scripts/dev/check_frontend.sh --help. With no options, run one browser
+# profile alongside static/unit checks. Playwright uses one worker. The profile
+# file owns browser membership. --static-only includes unit tests; --style-only does
 # not. --e2e-only and --e2e-shard forward extra Playwright arguments.
 # --timings DIR runs the same full gate and also saves each browser profile's
 # per-test times as DIR/browser-profile-N.json for scripts/dev/shard_costs.py.
@@ -47,7 +47,7 @@ require_canonical_frontend_environment() {
 
 # Print frontend check options to stderr. No arguments or file changes.
 usage() {
-  echo "usage: scripts/dev/check_frontend.sh [--static-only | --style-only | --unit-only | --timings DIR | --e2e-only [playwright arguments...] | --e2e-shard N/8 [playwright arguments...] | --help]" >&2
+  echo "usage: scripts/dev/check_frontend.sh [--static-only | --style-only | --unit-only | --timings DIR | --e2e-only [playwright arguments...] | --e2e-shard 1/1 [playwright arguments...] | --help]" >&2
 }
 
 if [[ "${1:-}" == "--help" || "${1:-}" == "-h" ]]; then
@@ -104,7 +104,7 @@ run_e2e_shard_timed() {
     --reporter=line,json "$@"
 }
 
-# Run eight browser profiles plus static/unit checks in an eight-worker pool.
+# Run one browser profile alongside static/unit checks in a two-worker pool.
 # Optional $1 is an existing directory; when given, each profile also writes its
 # per-test times to $1/browser-profile-N.json. Set CI=1, reject noncanonical
 # overrides and isolate browser output directories. Remove outputs on success;
@@ -113,31 +113,28 @@ run_e2e_shard_timed() {
 run_complete_frontend_gate() {
   local timings_dir="${1:-}"
   local output_root=""
-  local shard_number=""
   local status=0
 
   require_canonical_frontend_environment
   export CI=1
   output_root="$(mktemp -d "${TMPDIR:-/tmp}/marl-browser-validation.XXXXXX")"
-  marl_validation_init 8 frontend-validation
-  for shard_number in {1..8}; do
-    if [[ -n "${timings_dir}" ]]; then
-      marl_validation_start \
-        "Browser profile ${shard_number}/8" \
-        run_e2e_shard_timed \
-        "${shard_number}/8" \
-        "${timings_dir}/browser-profile-${shard_number}.json" \
-        --max-failures=1 \
-        --output "${output_root}/profile-${shard_number}"
-    else
-      marl_validation_start \
-        "Browser profile ${shard_number}/8" \
-        run_e2e_shard \
-        "${shard_number}/8" \
-        --max-failures=1 \
-        --output "${output_root}/profile-${shard_number}"
-    fi
-  done
+  marl_validation_init 2 frontend-validation
+  if [[ -n "${timings_dir}" ]]; then
+    marl_validation_start \
+      "Browser profile 1/1" \
+      run_e2e_shard_timed \
+      "1/1" \
+      "${timings_dir}/browser-profile-1.json" \
+      --max-failures=1 \
+      --output "${output_root}/profile-1"
+  else
+    marl_validation_start \
+      "Browser profile 1/1" \
+      run_e2e_shard \
+      "1/1" \
+      --max-failures=1 \
+      --output "${output_root}/profile-1"
+  fi
   marl_validation_start "Frontend static and unit gates" run_static
   if ! marl_validation_finish; then
     status=1
@@ -204,7 +201,7 @@ case "${1:-}" in
   --e2e-shard)
     shift
     if (( $# < 1 )); then
-      echo "error: --e2e-shard requires N/8." >&2
+      echo "error: --e2e-shard requires 1/1." >&2
       exit 2
     fi
     shard="$1"

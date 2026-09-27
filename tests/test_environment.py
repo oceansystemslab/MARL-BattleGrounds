@@ -1,7 +1,10 @@
 """Check the public environment against Core trajectories.
 
 The tests cover configuration ownership, metric selection, batched execution
-and episode bookkeeping. make refuses any supplied Red Zone depth, even the
+and episode bookkeeping. Optional training facts must match Core exactly,
+leave actor inputs and native rewards unchanged, and retain producing terminal
+facts through AutoReset while using neutral values for padding. make refuses
+any supplied Red Zone depth, even the
 default 5.0 or 0.0, when an exact env_config owns the rules, and refuses one
 with neither map_id nor env_config.
 """
@@ -16,7 +19,7 @@ import pytest
 from jax import Array
 from tests.evaluation_fixtures import evaluation_env_config
 
-from marl_battlegrounds import Environment, EnvironmentState, make
+from marl_battlegrounds import AutoReset, Environment, EnvironmentState, make
 from marl_battlegrounds.core import env as core
 from marl_battlegrounds.core.types import (
     TASK_MODE_TDM,
@@ -654,3 +657,70 @@ def test_partial_reset_restores_source_choices_only_in_reset_lanes() -> None:
         next_observations.source_availability, state.source_availability
     )
     assert info.replay is None and info.priority is None and info.full is None
+
+
+@pytest.mark.parametrize("batch", (None, 3))
+def test_optional_training_facts_match_core_without_changing_public_step(
+    batch: int | None,
+) -> None:
+    plain = make("tdm", num_envs=batch, metrics="none")
+    enabled = make("tdm", num_envs=batch, metrics="none", training_facts=True)
+    assert not plain.training_facts and enabled.training_facts
+    _, state = plain.reset(jax.random.key(160), _config(max_steps=1))
+    actions = _idle(batch)
+    key = jax.random.key(161)
+    if batch is not None:
+        key = jax.random.split(key, batch)
+    expected = (core.step if batch is None else jax.vmap(core.step))(
+        state.config, state.core_state, state.action_mask, actions, key
+    )[5].transition_facts
+    original = plain.step(key, state, actions)
+    actual = enabled.step(key, state, actions)
+    assert original[4].training_facts is None
+    facts = actual[4].training_facts
+    assert facts is not None
+    authority = {
+        "has_transition": expected.has_transition,
+        **expected.combat_transition_facts._asdict(),
+        **expected.death_facts._asdict(),
+    }
+    for name, value in facts._asdict().items():
+        np.testing.assert_array_equal(value, authority[name])
+    assert sum(np.asarray(value).nbytes for value in facts) == 341 * (batch or 1)
+    _assert_tree_exact(original[:4], actual[:4])
+    _assert_tree_exact(original[4], actual[4]._replace(training_facts=None))
+    for side in (0, 1):
+        _assert_tree_exact(
+            plain.policy_inputs(original[0], original[1], side),
+            enabled.policy_inputs(actual[0], actual[1], side),
+        )
+    padded = enabled.step(key, actual[1], actions)[4].training_facts
+    assert padded is not None and not np.any(padded.has_transition)
+    for name, value in padded._asdict().items():
+        expected_value = -1 if name.endswith("global_slot_by_source") else 0
+        np.testing.assert_array_equal(value, np.full_like(value, expected_value))
+
+
+def test_training_facts_keep_terminal_deaths_through_autoreset() -> None:
+    env = make("tdm", metrics="none", training_facts=True)
+    start = _scenario_start(env, scores=(19, 0), max_steps=3)
+    action = _idle()._replace(select_target=jnp.zeros(10, jnp.int32).at[0].set(6))
+    key = jax.random.key(162)
+    manual = env.step(key, start, action)
+    assert bool(manual[4].completed)
+    facts = manual[4].training_facts
+    assert facts is not None and bool(facts.is_newly_dead_by_recipient[5])
+    wrapped = AutoReset(env, include_training_state=True)
+    automatic = wrapped.step(key, start, action)
+    _assert_tree_exact(automatic[4].training_facts, facts)
+    assert automatic[4].final is not None
+    _assert_tree_exact(automatic[4].final.training_state, manual[1].core_state)
+    assert not bool(automatic[1].done.done)
+    assert int(automatic[1].core_state.step_count) == 0
+    _assert_tree_exact(automatic[2:4], manual[2:4])
+
+
+@pytest.mark.parametrize("value", (None, 1, "true"))
+def test_training_facts_requires_an_explicit_boolean(value: object) -> None:
+    with pytest.raises(TypeError, match="training_facts must be a boolean"):
+        make("tdm", training_facts=cast(bool, value))

@@ -11,6 +11,14 @@ the PQN-VDN example its tiny pqn settings, with the curriculum and shaping
 switches reaching the config and --evaluate playing "tdm-alpha" in one
 evaluation and one two-entrant tournament; the PQN-VDN example refuses those
 switches with --config or --resume-from before any training call.
+Cross-play keeps fixed focal/partner/opponent cells, declared familiarity,
+actual snapshot labels and both spawn ends in recoverable saved game rows.
+The local host example uses no provider. The own-learner example performs real
+actor/critic updates, preserves actor information rights and legal choices,
+loads exact own actor snapshots, then validates, selects and evaluates them.
+The declared-stage curriculum entry point trains its exact tiny budget, loads
+the actor, reports actual stage exposure and saves held-out paired evaluation.
+These are workflow proofs, not evidence of learned competence.
 """
 
 import sys
@@ -27,10 +35,10 @@ import pytest
 from examples import episode_tracking as curriculum
 from examples import evaluation as evaluation_example
 from examples import mappo_training as training_example
+from examples import own_learner, research_methods
 from examples import pqn_training as pqn_example
 from examples import qmix_training as qmix_example
 from examples import recorded_rollout as recorded
-from examples import research_methods
 
 import marl_battlegrounds as marl_bgs
 from marl_battlegrounds.tasks import list_tdm_maps
@@ -269,7 +277,14 @@ def test_training_example_passes_method_to_the_shared_public_workflow(
     ) -> training.TrainResult:
         calls.append((config, kwargs))
         return training.TrainResult(
-            tmp_path, tmp_path / "final-actor", actor, 32, 2, "complete", ()
+            tmp_path,
+            tmp_path / "final-actor",
+            actor,
+            32,
+            2,
+            "complete",
+            (),
+            tmp_path / "checkpoints" / "final",
         )
 
     def load(path: Path) -> object:
@@ -332,7 +347,16 @@ def test_qmix_example_runs_the_shared_public_workflow(
         config: training.TrainConfig | None, **kwargs: object
     ) -> training.TrainResult:
         calls.append((config, kwargs))
-        return training.TrainResult(tmp_path, actor, None, 192, 3, "complete", ())
+        return training.TrainResult(
+            tmp_path,
+            actor,
+            None,
+            192,
+            3,
+            "complete",
+            (),
+            tmp_path / "checkpoints" / "final",
+        )
 
     def load(path: Path) -> object:
         loaded.append(path)
@@ -371,7 +395,16 @@ def test_pqn_example_runs_the_shared_public_workflow(
         config: training.TrainConfig | None, **kwargs: object
     ) -> training.TrainResult:
         calls.append((config, kwargs))
-        return training.TrainResult(tmp_path, actor, None, 176, 20, "complete", ())
+        return training.TrainResult(
+            tmp_path,
+            actor,
+            None,
+            176,
+            20,
+            "complete",
+            (),
+            tmp_path / "checkpoints" / "final",
+        )
 
     def load(path: Path) -> object:
         loaded.append(path)
@@ -433,3 +466,349 @@ def test_pqn_example_runs_the_shared_public_workflow(
             pqn_example.main()
         assert error.value.code == 2
     assert len(calls) == 1
+
+
+def test_cross_play_saves_fixed_cells_and_resumes_with_live_members(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    import csv
+    import json
+    from importlib import import_module
+
+    from examples import cross_play_and_zsc as example
+
+    evaluator = import_module("marl_battlegrounds.evaluation.evaluate")
+    provenance = evaluator.capture_recording_provenance(num_envs=2)
+
+    def fixed_provenance(**kwargs: object) -> dict[str, object]:
+        del kwargs
+        return provenance
+
+    # Concurrent repository edits must not change this test's saved revision.
+    monkeypatch.setattr(evaluator, "capture_recording_provenance", fixed_provenance)
+    calls: list[np.ndarray] = []
+    source_values = np.array([0.25], dtype=np.float32)
+
+    def host(variables: Tree, memory: Tree, inputs: Tree, keys: Tree) -> Tree:
+        np.testing.assert_array_equal(variables, [0.25])
+        source_values[0] = 0.75
+        calls.append(np.array(inputs.controlled_mask, copy=True))
+        return example.host_idle(variables, memory, inputs, keys)
+
+    host_member = marl_bgs.System(
+        "Local Idle Host",
+        host,
+        variables=source_values,
+        execution="host",
+        checkpoint="local-idle-code-v1",
+    )
+    options: dict[str, Tree] = {
+        "focals": {"first": "random", "second": "tdm-alpha"},
+        "partners": {"jax": "random", "host": host_member},
+        "opponents": {"first": "random", "second": "tdm-beta"},
+        "familiarity": {"first": {"jax": "familiar", "host": "held_out"}},
+        "max_steps": 1,
+    }
+    rows = example.run(tmp_path, **options)
+    assert len(rows) == 16
+    assert capsys.readouterr().out.count("Mean Point Margin:") == 8
+    assert source_values[0] == 0.75
+    source_values[0] = 0.25
+    assert all("-" not in Path(row["run_path"]).parts[0] for row in rows)
+    assert calls and all(np.all(value[:, :4] == 0) for value in calls)
+    assert all(np.all(value[:, 4]) for value in calls)
+    declaration = json.loads((tmp_path / "cross_play_settings.json").read_text())
+    for focal in ("first", "second"):
+        for partner in ("jax", "host"):
+            for opponent in ("first", "second"):
+                cell = [
+                    row
+                    for row in rows
+                    if (row["focal"], row["partner"], row["opponent"])
+                    == (focal, partner, opponent)
+                ]
+                assert {row["spawn_end"] for row in cell} == {"team_a", "team_b"}
+                assert len({row["seed_id"] for row in cell}) == 1
+                expected = (
+                    ("familiar" if partner == "jax" else "held_out")
+                    if focal == "first"
+                    else "unknown"
+                )
+                assert {row["familiarity"] for row in cell} == {expected}
+                saved = marl_bgs.load_results(tmp_path / cell[0]["run_path"])
+                entry = next(iter(saved.metadata["passes"].values()))
+                assert len(saved.table("episodes")["episode_id"]) == 2
+                for row in cell:
+                    assert row["team_a_system_id"] == entry["system_ids"]["team_a"]
+                    assert row["team_b_system_id"] == entry["system_ids"]["team_b"]
+                    assert row["partner_checkpoint"] == (
+                        "local-idle-code-v1" if partner == "host" else None
+                    )
+                    assert row["focal_checkpoint"] is None
+                    assert (
+                        row["partner_id"]
+                        == declaration["members"]["partners"][partner]["id"]
+                    )
+                    assert len(row["focal_id"]) == len(row["partner_id"]) == 64
+    before = {path: path.read_bytes() for path in tmp_path.rglob("*") if path.is_file()}
+    count = len(calls)
+    assert example.run(tmp_path, **options) == rows
+    assert len(calls) == count
+    assert all(path.read_bytes() == content for path, content in before.items())
+    with (tmp_path / "games.csv").open(newline="") as stream:
+        assert len(list(csv.DictReader(stream))) == 16
+    options["familiarity"] = {"first": {"host": "familiar"}}
+    with pytest.raises(ValueError, match="declaration changed"):
+        example.run(tmp_path, **options)
+    assert all(path.read_bytes() == content for path, content in before.items())
+
+
+def test_cross_play_cli_forwards_explicit_references_and_budget(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from examples import cross_play_and_zsc as example
+
+    observed: dict[str, Tree] = {}
+
+    def run(output_dir: Path, **kwargs: Tree) -> list[dict[str, Tree]]:
+        observed.update(output_dir=output_dir, **kwargs)
+        return []
+
+    monkeypatch.setattr(example, "run", run)
+    assert (
+        example.main(
+            [
+                "--output-dir",
+                str(tmp_path),
+                "--focal",
+                "saved/actor",
+                "--partner",
+                "tdm-alpha",
+                "--opponent",
+                "tdm-beta",
+                "--max-steps",
+                "300",
+                "--seed-pairs",
+                "8",
+                "--maps",
+                "47",
+                "48",
+                "--num-envs",
+                "32",
+            ]
+        )
+        == 0
+    )
+    assert observed["focals"] == {"saved/actor": "saved/actor"}
+    assert observed["partners"] == {"tdm-alpha": "tdm-alpha"}
+    assert observed["opponents"] == {"tdm-beta": "tdm-beta"}
+    assert observed["max_steps"] == 300 and observed["seed_pairs"] == 8
+    assert observed["maps"] == [47, 48] and observed["num_envs"] == 32
+
+
+@pytest.fixture(scope="module")
+def own_ctde_run(tmp_path_factory: pytest.TempPathFactory) -> dict[str, Any]:
+    return own_learner.train(
+        tmp_path_factory.mktemp("own_ctde") / "run",
+        updates=2,
+        rollout_length=2,
+        num_envs=2,
+        max_steps=3,
+        custom_reward=True,
+        fade_rounds=4,
+    )
+
+
+def test_own_ctde_updates_actor_and_critic_and_reloads_exact_inference(
+    own_ctde_run: dict[str, Any], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    assert own_ctde_run["env_steps"] == 8
+    for initial, final in zip(
+        own_ctde_run["initial"], own_ctde_run["parameters"], strict=True
+    ):
+        assert any(
+            not np.array_equal(left, right)
+            for left, right in zip(
+                jax.tree.leaves(initial), jax.tree.leaves(final), strict=True
+            )
+        )
+        assert all(np.all(np.isfinite(value)) for value in jax.tree.leaves(final))
+    assert all(
+        row["same_call_log_probability_error"] < 2e-6 for row in own_ctde_run["metrics"]
+    )
+    path = own_ctde_run["snapshots"][-1]
+    monkeypatch.setenv("MARL_OWN_ACTOR", str(path))
+    saved = own_learner.load_selected()
+    current = own_learner.actor(own_ctde_run["parameters"][0])
+    env = marl_bgs.make("tdm", map_id=0, num_envs=2, max_steps=2, metrics="none")
+    observations, state = env.reset(jax.random.key(801))
+    opponent = marl_bgs.shared_policy(marl_bgs.policy("random"))
+    outputs = []
+    for method in (current, saved):
+        memory = marl_bgs.init_systems(
+            method, opponent, observations, state, jax.random.key(802)
+        )
+        outputs.append(
+            marl_bgs.apply_systems(
+                method, opponent, memory, observations, state, jax.random.key(803)
+            )
+        )
+    _equal(outputs[0], outputs[1])
+    inputs = env.policy_inputs(observations, state)
+    result = own_learner.act(
+        current.variables, (), inputs, jax.random.split(jax.random.key(804), 2)
+    )
+    paired = 2 * result.actions.select_target + result.actions.use_ultimate
+    assert np.all(
+        jnp.take_along_axis(
+            inputs.action_mask.move_mask, result.actions.move[..., None], -1
+        )
+    )
+    assert np.all(
+        jnp.take_along_axis(
+            inputs.action_mask.select_target_use_ultimate_joint_mask.reshape(
+                (2, 5, 22)
+            ),
+            paired[..., None],
+            -1,
+        )
+    )
+
+    def clear_other_recipients(value: jax.Array) -> jax.Array:
+        return value.at[:, 1:].set(jnp.zeros_like(value[:, 1:]))
+
+    changed = inputs._replace(
+        actors=jax.tree.map(clear_other_recipients, inputs.actors)
+    )
+    other = own_learner.act(
+        current.variables, (), changed, jax.random.split(jax.random.key(804), 2)
+    )
+    for first, second in zip(
+        jax.tree.leaves(result.actions), jax.tree.leaves(other.actions), strict=True
+    ):
+        np.testing.assert_array_equal(first[:, 0], second[:, 0])
+    np.testing.assert_array_equal(
+        result.learning_outputs[:, 0], other.learning_outputs[:, 0]
+    )
+    before = (path / "actor_weights.npz").read_bytes()
+    with pytest.raises(FileExistsError):
+        own_learner.save_actor(path, current.variables, env_steps=8)
+    assert (path / "actor_weights.npz").read_bytes() == before
+
+
+def test_own_ctde_bootstraps_cutoffs_but_not_native_horizon_draws() -> None:
+    env = marl_bgs.make("tdm", map_id=0, num_envs=2, max_steps=2, metrics="none")
+    _, state = env.reset(jax.random.key(811))
+    outcomes: list[jax.Array] = []
+    for index in range(2):
+        actions = env.sample_actions(jax.random.key(812 + index), state)
+        _, state, _, done, _ = env.step(jax.random.key(814 + index), state, actions)
+        outcomes.append(
+            own_learner.td_targets(jnp.ones(2), jnp.full(2, 10.0), done.done)
+        )
+    np.testing.assert_allclose(outcomes[0], 10.9)
+    np.testing.assert_array_equal(outcomes[1], 1)
+
+
+def test_own_ctde_finishes_public_validation_selection_and_evaluation(
+    own_ctde_run: dict[str, Any], tmp_path: Path
+) -> None:
+    selected = own_learner.validate_and_evaluate(
+        own_ctde_run["snapshots"], tmp_path / "validation", num_envs=2
+    )
+    assert selected["selection_rule"] == "point_margin"
+    assert Path(selected["selected_actor"]) in own_ctde_run["snapshots"]
+    result = marl_bgs.load_results(selected["evaluation_run"])
+    assert result.status == "complete"
+    assert set(result.table("episodes")["map_id"]) == {47}
+    assert len(result.table("episodes")["episode_id"]) == 2
+
+
+def test_own_ctde_cli_keeps_training_batch_separate_from_validation(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    observed: dict[str, int] = {}
+
+    def train(output_dir: Path, **options: object) -> dict[str, Any]:
+        observed["training"] = cast(int, options["num_envs"])
+        return {"snapshots": [output_dir / "actor"], "env_steps": 8192}
+
+    def evaluate(
+        snapshots: list[Path], output_dir: Path, *, num_envs: int
+    ) -> dict[str, str]:
+        del snapshots, output_dir
+        observed["validation"] = num_envs
+        return {"selected_actor": "actor"}
+
+    monkeypatch.setattr(own_learner, "train", train)
+    monkeypatch.setattr(own_learner, "validate_and_evaluate", evaluate)
+    monkeypatch.setattr(
+        sys, "argv", ["own_learner", "--output-dir", str(tmp_path), "--num-envs", "128"]
+    )
+    own_learner.main()
+    assert observed == {"training": 128, "validation": 32}
+
+
+def test_declared_curriculum_example_trains_loads_and_evaluates(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    import json
+
+    from examples import curriculum as example
+
+    from marl_battlegrounds.training import checkpoints
+
+    run_dir = tmp_path / "curriculum"
+    monkeypatch.setattr(sys, "argv", ["curriculum.py", "--output-dir", str(run_dir)])
+    example.main()
+    printed = capsys.readouterr().out
+    details = json.loads((run_dir / "run_details.json").read_text())
+    assert details["config"]["total_env_steps"] == 32
+    assert details["config"]["num_envs"] == 4
+    assert details["config"]["keep_past"] == 0
+    stages = details["config"]["curriculum"]
+    assert stages[0]["rosters"] == {"system": ["mage", "mage"], "opponent": ["warrior"]}
+    assert stages[1]["rosters"] == {
+        "system": ["mage", "mage", "priest"],
+        "opponent": ["warrior", "hunter"],
+    }
+    assert details["schedule"]["stage_maps"] == [[0], [1, 2, 3]]
+    assert details["schedule"]["score_thresholds"] == [5, 20]
+    assert details["schedule"]["assigned_round_counts"] == [4, 4]
+    exposure = json.loads((run_dir / "exposure.json").read_text())
+    steps, starts = (
+        exposure["steps_by_episode_stage"],
+        exposure["starts_by_episode_stage"],
+    )
+    assert sum(steps) == exposure["env_steps"] == 32
+    assert sum(starts) >= 4
+    assert f"Actual Transitions By Stage: {steps}" in printed
+    assert f"Actual Game Starts By Stage: {starts}" in printed
+    actor = Path(
+        next(line[7:] for line in printed.splitlines() if line.startswith("Actor: "))
+    )
+    saved = checkpoints.read_checkpoint_description(actor)
+    assert saved["metadata"]["env_steps"] == 32
+    assert actor.parent == run_dir / "actors"
+    evaluation_dir = Path(
+        next(
+            line[12:]
+            for line in printed.splitlines()
+            if line.startswith("Evaluation: ")
+        )
+    )
+    assert evaluation_dir.parent == run_dir / "curriculum_evaluation"
+    evaluated = marl_bgs.load_results(evaluation_dir)
+    assert evaluated.status == "complete"
+    episodes = evaluated.table("episodes")
+    assert len(episodes["episode_id"]) == 4
+    assert set(episodes["map_id"]) == {42}
+    saved_pass = next(iter(evaluated.metadata["passes"].values()))
+    assert sorted(
+        episode["spawn_locations"] for episode in saved_pass["episodes"].values()
+    ) == [0, 0, 1, 1]

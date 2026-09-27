@@ -21,9 +21,21 @@ disabled. Existing directories are preserved. A separate three-pair comparison
 measures default compiler settings on the same immutable inputs and reports any
 numerical differences; it is not the production/reference acceptance check.
 
-The tool writes source identity, cost JSON, real update/status files and captured
-stdout files. It does not save checkpoints, run validation, plot learning curves
-or establish useful learning. The saved mini-run measures those separate costs.
+The default tool writes source identity, cost JSON, real update/status files and
+captured stdout files. That lower-level route does not save checkpoints, run
+validation, plot learning curves or establish useful learning.
+
+Use ``timeout 600s python -m scripts.dev.benchmark_mappo_training
+--full-training-config CONFIG.json --gpu-uuid GPU-... --output NEW_DIRECTORY``
+for one full public train() call with the exact JSON settings. This mode requires
+MAPPO with 512 environments (four with --cpu-smoke) and at most 3,932,160 real
+transitions. It includes declared checkpoints, validation, captures and reports.
+There are at most three approved matched GPU cases; a timeout authorizes no retry.
+First-block time combines compilation and execution; later blocks and inclusive
+output timers come from the normal saved records. Untimed work stays a named
+residual, never an assumed host bottleneck. Compilation alone and transfer cost
+are not measured here. Existing evidence is preserved; each case needs a new
+output. No case establishes learning quality or sample efficiency.
 GPU memory polling is a sampled lower bound, not a guaranteed peak.
 The learner uses the baseline's default spawn frame, "left" since 22 September
 2026. Measurements saved before that date used "world"; a rerun measures
@@ -44,6 +56,7 @@ from __future__ import annotations
 import argparse
 import importlib.metadata
 import json
+import math
 import os
 import resource
 import statistics
@@ -78,6 +91,7 @@ from marl_battlegrounds.training._run_io import (
     TrainingSpeedEstimate,
     append_jsonl,
     atomic_json,
+    read_jsonl,
 )
 from marl_battlegrounds.training.checkpoints import checkpoint_dependencies
 from marl_battlegrounds.training.collection import (
@@ -95,6 +109,12 @@ from marl_battlegrounds.training.learner import (
     update_learner,
 )
 from marl_battlegrounds.training.opponents import refresh_opponents
+from marl_battlegrounds.training.runner import (
+    TrainConfig,
+    config_to_dict,
+    read_config,
+    train,
+)
 from scripts.dev.benchmark_training_collection import (
     _array,
     _bytes,
@@ -867,10 +887,274 @@ def _gpu_identity(uuid: str | None, *, cpu_smoke: bool) -> tuple[str, str | None
     return backend, identity
 
 
+def _full_training_config(path: Path, *, cpu_smoke: bool) -> TrainConfig:
+    """Read one unchanged MAPPO config inside the declared P9 measurement bounds.
+
+    GPU cases use 512 environments; CPU tool checks use four. Both retain the
+    exact JSON budget and settings, at most 3,932,160 real transitions. This
+    reader does not adjust capture spacing, outputs or learner settings. Public
+    train performs its ordinary setup validation before creating run files.
+    The caller enforces the 600-second wall limit; a timeout permits no retry.
+    """
+    config = read_config(path)
+    expected = 4 if cpu_smoke else 512
+    if config.method != "mappo" or config.num_envs != expected:
+        raise ValueError(
+            f"Full training measurement requires MAPPO with {expected} environments"
+        )
+    if config.total_env_steps > 3_932_160:
+        raise ValueError(
+            "Full training measurement allows at most 3,932,160 transitions"
+        )
+    return config
+
+
+def _full_training_cost(
+    run_dir: Path,
+    config: TrainConfig,
+    *,
+    seconds: float,
+    complete: bool,
+) -> dict[str, Tree]:
+    """Read real block counts and nonoverlapping inclusive phase timers from files.
+
+    seconds is the complete public train call, including setup and final outputs.
+    Update rows already synchronize their result. First-block time includes
+    compilation and execution; later rows are reported separately without a
+    compile-only claim. Saved output-event timers include that operation's host,
+    device, transfer and file work. Residual time includes logging, status,
+    bookkeeping and any unmeasured work; it is not a Python-overhead estimate.
+    Invalid counts, negative/nonfinite times or missing completed work raise.
+    """
+    if not math.isfinite(seconds) or seconds <= 0:
+        raise ValueError("Full training wall time must be finite and positive")
+    rows = read_jsonl(run_dir / "training_updates.jsonl")
+    blocks: list[dict[str, Tree]] = []
+    previous = 0
+    for row in rows:
+        steps = row.get("env_steps")
+        duration = row.get("collection_update_seconds")
+        if (
+            type(steps) is not int
+            or steps <= previous
+            or steps > config.total_env_steps
+            or (steps - previous) % config.num_envs
+            or isinstance(duration, bool)
+            or not isinstance(duration, (int, float))
+            or not math.isfinite(duration)
+            or duration <= 0
+        ):
+            raise ValueError(
+                "Saved training blocks need increasing real counts "
+                "and positive finite times"
+            )
+        blocks.append(
+            {
+                "env_steps": steps,
+                "real_transitions": steps - previous,
+                "seconds": float(duration),
+            }
+        )
+        previous = steps
+    if complete and previous != config.total_env_steps:
+        raise ValueError(
+            "Completed training count differs from the declared experience budget"
+        )
+    events = read_jsonl(run_dir / "run_events.jsonl")
+    event_names = {
+        "checkpoint": ("checkpoint_saved",),
+        "actor_export": ("actor_exported",),
+        "past_capture_export": ("past_copy_exported",),
+        "validation": ("validation_complete", "random_validation_complete"),
+        "report": ("reports_written",),
+    }
+    phases: dict[str, float] = {}
+    counts: dict[str, int] = {}
+    for name, names in event_names.items():
+        matching = [row for row in events if row.get("event") in names]
+        durations = [row.get("seconds") for row in matching]
+        if any(
+            isinstance(value, bool)
+            or not isinstance(value, (int, float))
+            or not math.isfinite(value)
+            or value < 0
+            for value in durations
+        ):
+            raise ValueError(f"Saved {name} events need finite nonnegative seconds")
+        phases[name] = sum(float(cast(int | float, value)) for value in durations)
+        counts[name] = len(matching)
+    details_path = run_dir / "run_details.json"
+    details: object = (
+        json.loads(details_path.read_text()) if details_path.exists() else {}
+    )
+    if not isinstance(details, dict):
+        raise ValueError("Saved run details must be an object")
+    setup = cast(dict[str, Tree], details).get("initial_setup_seconds", 0.0)
+    if (
+        isinstance(setup, bool)
+        or not isinstance(setup, (int, float))
+        or not math.isfinite(setup)
+        or setup < 0
+    ):
+        raise ValueError("Saved setup time must be finite and nonnegative")
+    training = sum(row["seconds"] for row in blocks)
+    accounted = setup + training + sum(phases.values())
+    if accounted > seconds + max(0.01, seconds * 1e-6):
+        raise ValueError("Saved phase times overlap or exceed the full train wall time")
+    warm = blocks[1:]
+    warm_seconds = sum(row["seconds"] for row in warm)
+    warm_steps = sum(row["real_transitions"] for row in warm)
+    disk: dict[str, int] = {}
+    for path in run_dir.rglob("*"):
+        if path.is_file():
+            group = path.relative_to(run_dir).parts[0]
+            disk[group] = disk.get(group, 0) + path.stat().st_size
+    return {
+        "complete": complete,
+        "scope": (
+            "One unchanged public train() call, including setup, "
+            "all declared outputs and cleanup"
+        ),
+        "declared_env_steps": config.total_env_steps,
+        "real_transitions": previous,
+        "total_seconds": seconds,
+        "end_to_end_transitions_per_second": previous / seconds,
+        "initial_setup_seconds": setup,
+        "first_block_compile_and_execute": blocks[0] if blocks else None,
+        "later_blocks": {
+            "count": len(warm),
+            "seconds": warm_seconds,
+            "real_transitions": warm_steps,
+            "transitions_per_second": warm_steps / warm_seconds
+            if warm_seconds
+            else None,
+            "samples": warm,
+        },
+        "collection_update_seconds": training,
+        "inclusive_output_seconds": phases,
+        "output_event_counts": counts,
+        "residual_seconds": max(0.0, seconds - accounted),
+        "residual_scope": (
+            "Logging, status, bookkeeping, untimed cleanup "
+            "and any other unmeasured work"
+        ),
+        "disk_bytes_by_entry": disk,
+        "disk_bytes": sum(disk.values()),
+        "unmeasured": [
+            "Compilation alone",
+            "Separate host/device transfer cost",
+            "Learned behavior or sample efficiency",
+        ],
+    }
+
+
+def _full_training(
+    output: Path,
+    config: TrainConfig,
+    *,
+    gpu_uuid: str | None,
+    tool_started: float,
+) -> None:
+    """Measure one complete ordinary train call and retain its raw normal outputs.
+
+    output is the new benchmark directory already holding source identity. The
+    training child must not exist. No settings change or retry occurs. The caller
+    enforces the declared 600-second timeout; forced termination can leave only
+    partial source/workload/training files. Normal failures get a partial cost
+    record and propagate. The extra tool clock ends after the sampler stops and
+    excludes writing this cost report. GPU sampling is a lower bound, not a
+    guaranteed peak.
+    """
+    run_dir = output / "training"
+    if run_dir.exists():
+        raise ValueError("Existing full-training evidence must be preserved")
+    atomic_json(
+        output / "workload.json",
+        {
+            "mode": "Full public training",
+            "config": config_to_dict(config),
+            "maximum_real_transitions": 3_932_160,
+            "caller_wall_limit_seconds": 600,
+            "case_limit": (
+                "At most three cases in the approved investigation; no automatic retry"
+            ),
+            "timing": (
+                "First block includes compilation and execution; "
+                "later blocks remain separate"
+            ),
+            "timeout": (
+                "Enforce with the caller's timeout 600s; "
+                "termination keeps existing files"
+            ),
+        },
+    )
+    complete = False
+    error: str | None = None
+    sampler = _MemorySampler(gpu_uuid)
+    seconds = 0.0
+    try:
+        with sampler:
+            started = time.perf_counter()
+            try:
+                result = train(config, output_dir=run_dir)
+                if result.completed_env_steps != config.total_env_steps:
+                    raise ValueError(
+                        "Public train result differs from its declared transition count"
+                    )
+                complete = True
+            finally:
+                seconds = time.perf_counter() - started
+    except BaseException as failure:
+        error = f"{type(failure).__name__}: {failure}"
+        raise
+    finally:
+        tool_seconds = time.perf_counter() - tool_started
+        cost: dict[str, Tree]
+        try:
+            cost = _full_training_cost(
+                run_dir, config, seconds=seconds, complete=complete
+            )
+        except (ValueError, OSError) as measurement_error:
+            if complete:
+                raise
+            # Keep the original training failure if its partial records are invalid.
+            cost = {
+                "complete": False,
+                "total_seconds": seconds,
+                "measurement_error": str(measurement_error),
+            }
+        cost.update(
+            error=error,
+            tool_seconds_through_sampling=tool_seconds,
+            tool_setup_and_sampler_cleanup_seconds=max(0.0, tool_seconds - seconds),
+            process_peak_ram_bytes=resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
+            * 1024,
+            gpu_process_memory=sampler.report(),
+            device_memory_stats=cast(Tree, jax.devices()[0].memory_stats()),
+            memory_scope=(
+                "Whole process; GPU polling covers public train, "
+                "including setup and outputs"
+            ),
+        )
+        atomic_json(output / "full_training_cost.json", cost)
+    print(
+        json.dumps(
+            {
+                "output": str(output),
+                "real_transitions": config.total_env_steps,
+                "seconds": seconds,
+            }
+        )
+    )
+
+
 def main() -> None:
     """Parse the fixed workload, run independent checks, and save cost evidence.
 
-    Accept --output (new directory), --seed (default 19041900), --cpu-smoke and
+    --full-training-config reads an unchanged bounded public MAPPO run instead
+    of the lower-level comparison. Its JSON owns the seed; --seed applies only
+    to the default route. Accept --output (new directory), --seed (default
+    19041900), --cpu-smoke and
     --gpu-uuid. --diagnose-update stops after one block and writes stage comparisons.
     Invalid device selection or existing output raises a CLI error.
     Numerical disagreement aborts without a success cost report. No backend,
@@ -883,7 +1167,20 @@ def main() -> None:
     parser.add_argument("--gpu-uuid")
     parser.add_argument("--cpu-smoke", action="store_true")
     parser.add_argument("--diagnose-update", action="store_true")
+    parser.add_argument("--full-training-config", type=Path)
     options = parser.parse_args()
+    full_config = None
+    if options.full_training_config is not None:
+        if options.diagnose_update:
+            parser.error(
+                "--full-training-config cannot be combined with --diagnose-update"
+            )
+        try:
+            full_config = _full_training_config(
+                options.full_training_config, cpu_smoke=options.cpu_smoke
+            )
+        except (ValueError, TypeError) as error:
+            parser.error(str(error))
     if options.output.exists():
         parser.error("Existing evidence directories must be preserved")
     jax.config.update("jax_enable_compilation_cache", False)
@@ -939,6 +1236,14 @@ def main() -> None:
             "execution": execution_identity(),
         },
     )
+    if full_config is not None:
+        _full_training(
+            options.output,
+            full_config,
+            gpu_uuid=options.gpu_uuid,
+            tool_started=tool_started,
+        )
+        return
     batch, length = (4, 2) if options.cpu_smoke else (32, 128)
     ppo = PPOConfig(rollout_length=length, epochs=1 if options.cpu_smoke else 4)
     prepared, prepare_seconds = _timed(_prepare_content)

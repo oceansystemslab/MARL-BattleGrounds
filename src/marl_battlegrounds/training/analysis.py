@@ -430,29 +430,77 @@ def _independent_validation_summary(
     }
 
 
-def _selection_key(row: Mapping[str, Any]) -> tuple[float, float, int, str]:
-    """Apply the saved task's exact native-score rule, retaining legacy ties."""
-    difference = 0.0
-    if row.get("selection_schema_version", 1) == 2:
-        value = row.get("mean_kill_difference")
-        if (
+def _mean_point_margin(row: Mapping[str, Any]) -> float:
+    """Average Team A minus Team B points over complete map/opponent cells.
+
+    Each cell must contain finite mean_team_a_score and mean_team_b_score.
+    Validation gives every cell equal weight. Missing points are an error;
+    wins and kills cannot stand in for them. Historical summaries stay unchanged.
+    """
+    cells = row.get("cells")
+    if not isinstance(cells, (list, tuple)) or not cells:
+        raise ValueError("Point-margin selection needs saved points in every cell")
+    cells = cast(Sequence[object], cells)
+    margins: list[float] = []
+    for cell in cells:
+        if not isinstance(cell, Mapping):
+            raise ValueError("Point-margin selection needs saved points in every cell")
+        cell = cast(Mapping[str, Any], cell)
+        points = [cell.get(f"mean_team_{team}_score") for team in ("a", "b")]
+        if any(
             isinstance(value, bool)
             or not isinstance(value, (int, float))
             or not math.isfinite(value)
+            for value in points
         ):
             raise ValueError(
-                "New checkpoint selection needs a finite mean kill difference"
+                "Point-margin selection needs finite saved points in every cell"
             )
-        difference = float(value)
+        points = cast(list[float], points)
+        margin = float(points[0]) - float(points[1])
+        if not math.isfinite(margin):
+            raise ValueError("Point-margin selection needs a finite point difference")
+        margins.append(margin / len(cells))
+    return math.fsum(margins)
+
+
+def _selection_key(
+    row: Mapping[str, Any], *, rule: str = "saved"
+) -> tuple[float, float, int, str]:
+    """Order by point margin, or reproduce the saved historical score rule.
+
+    point_margin uses only mean points, then earlier steps and checkpoint ID.
+    saved keeps schema 1 score ties and schema 2 score/kill ties unchanged.
+    """
+    if rule not in ("point_margin", "saved"):
+        raise ValueError("Selection rule must be point_margin or saved")
+    difference = 0.0
+    if rule == "point_margin":
+        primary = _mean_point_margin(row)
+    else:
+        primary = float(row["score"])
+        if row.get("selection_schema_version", 1) == 2:
+            value = row.get("mean_kill_difference")
+            if (
+                isinstance(value, bool)
+                or not isinstance(value, (int, float))
+                or not math.isfinite(value)
+            ):
+                raise ValueError(
+                    "Saved checkpoint selection needs a finite mean kill difference"
+                )
+            difference = float(value)
     return (
-        -float(row["score"]),
+        -primary,
         -difference,
         int(row["env_steps"]),
         str(row["checkpoint_id"]),
     )
 
 
-def _candidates(results: Sequence[Mapping[str, Any]]) -> dict[str, Record]:
+def _candidates(
+    results: Sequence[Mapping[str, Any]], *, rule: str = "saved"
+) -> dict[str, Record]:
     """Validate complete unique noninitial checkpoint summaries for selection.
 
     A row with no experience is dropped. A row marked ``method == "qmix"``
@@ -460,10 +508,13 @@ def _candidates(results: Sequence[Mapping[str, Any]]) -> dict[str, Record]:
     (missing, negative or Boolean values raise ValueError) and is dropped at
     zero, so QMIX warmup and PQN-VDN initial-collection actors that never
     learned are never selected. Compatible PPO, QMIX and PQN-VDN rows (same
-    frozen panel and scoring protocol) may be selected together. Rows must also
-    share one scoring rule: the same recorded red_zone_depth, or none (results
-    saved before the Red Zone rule); mixing them raises ValueError, because
-    their points and kill differences are not comparable.
+    frozen panel, maps, ordered rosters and scoring protocol) may be selected
+    together. Missing roster fields retain the historical canonical 5v5 meaning.
+    Rows must also share one scoring rule: the same recorded red_zone_depth,
+    or none (results saved before the Red Zone rule). Mixing them raises
+    ValueError because their points and kill differences are not comparable.
+    rule chooses the ranking fields: point_margin for new choices, saved for
+    historical rules.
     """
     selected: dict[str, Record] = {}
     for result in results:
@@ -492,54 +543,83 @@ def _candidates(results: Sequence[Mapping[str, Any]]) -> dict[str, Record]:
         raise ValueError("Selection cannot mix scoring protocols")
     if len({row.get("red_zone_depth") for row in selected.values()}) != 1:
         raise ValueError("Selection cannot mix Red Zone scoring rules")
+    from marl_battlegrounds.tasks import canonical_tournament_rosters
+
+    default_a, default_b = canonical_tournament_rosters()
+    conditions = {
+        (
+            tuple(row.get("maps", ())),
+            tuple(row.get("system_roster", default_a)),
+            tuple(row.get("opponent_roster", default_b)),
+            tuple(row.get("learner_slots", ())),
+            tuple(
+                (partner["name"], partner["label"], partner["registration_id"])
+                for partner in row.get("partners", ())
+            ),
+        )
+        for row in selected.values()
+    }
+    if len(conditions) != 1:
+        raise ValueError(
+            "Selection cannot mix maps or team rosters or deployed partners"
+        )
     for row in selected.values():
-        _selection_key(row)
+        _selection_key(row, rule=rule)
     return selected
 
 
 def confirmation_candidates(
-    routine_results: Sequence[Mapping[str, Any]], *, final_checkpoint_id: str
+    routine_results: Sequence[Mapping[str, Any]],
+    *,
+    final_checkpoint_id: str,
+    rule: str = "point_margin",
 ) -> tuple[str, ...]:
     """Return the best two routine checkpoint IDs, then final when distinct.
 
-    routine_results must be complete unique fixed-panel summaries containing
-    checkpoint_id, env_steps, score and complete. Initialization is ignored. Ties
-    use new-panel kill difference when declared, then earlier experience and
-    identity. Historical panels skip kill difference. QMIX and PQN-VDN rows
-    need a nonnegative integer optimizer_steps and are skipped at zero (QMIX
-    warmup actors and PQN-VDN initial-collection actors, which never
-    learned). The final checkpoint must be present. Incomplete/mismatched
-    evidence raises ValueError. No file changes.
+    routine_results must contain complete, unique fixed-panel summaries with
+    checkpoint_id, env_steps and score. The default point_margin rule ranks only
+    mean Team A minus Team B points from the saved cells. Every cell needs finite
+    mean_team_a_score and mean_team_b_score. Equal margins use earlier steps,
+    then checkpoint ID; wins and kills do not break ties. rule='saved' reproduces
+    a historical panel's original score and tie rules.
+
+    Initialization is ignored. QMIX and PQN-VDN rows need a nonnegative integer
+    optimizer_steps and are skipped at zero. The final checkpoint must be
+    present. Incomplete, mismatched or missing evidence raises ValueError.
+    No files change.
     """
-    candidates = _candidates(routine_results)
+    candidates = _candidates(routine_results, rule=rule)
     if final_checkpoint_id not in candidates:
         raise ValueError("The final checkpoint lacks complete routine validation")
     ordered = sorted(
         candidates,
-        key=lambda key: _selection_key(candidates[key]),
+        key=lambda key: _selection_key(candidates[key], rule=rule),
     )[:2]
     if final_checkpoint_id not in ordered:
         ordered.append(final_checkpoint_id)
     return tuple(ordered)
 
 
-def select_checkpoint(confirmation_results: Sequence[Mapping[str, Any]]) -> Record:
-    """Choose a fresh-confirmation winner using its saved panel's scoring rule.
+def select_checkpoint(
+    confirmation_results: Sequence[Mapping[str, Any]], *, rule: str = "point_margin"
+) -> Record:
+    """Choose a fresh-confirmation winner by mean point margin.
 
     Each input uses the same summary contract as confirmation_candidates and must
-    have purpose='confirmation'. New panels break score ties by kill difference,
-    then earlier experience and identity; historical panels skip kill difference.
+    have purpose='confirmation'. The default point_margin rule uses only mean
+    Team A minus Team B points; ties use earlier steps, then checkpoint ID.
+    rule='saved' reproduces a historical panel's original score and tie rules.
     Return a new copy of the winning summary. The caller checks that every
     scheduled candidate was confirmed. Empty, incomplete, mixed-panel or
     wrong-purpose records raise ValueError. No I/O occurs.
     """
     if any(row.get("purpose") != "confirmation" for row in confirmation_results):
         raise ValueError("Selection requires fresh confirmation results")
-    candidates = _candidates(confirmation_results)
+    candidates = _candidates(confirmation_results, rule=rule)
     return dict(
         min(
             candidates.values(),
-            key=_selection_key,
+            key=lambda row: _selection_key(row, rule=rule),
         )
     )
 
@@ -2522,7 +2602,11 @@ def _screen_ancestry(directory: Path, details: Record) -> dict[str, Record]:
     if (
         not isinstance(identifier, str)
         or not isinstance(relative, str)
-        or relative != f"checkpoints/{identifier}"
+        or Path(relative).parent != Path("checkpoints")
+        or not (
+            Path(relative).name == identifier
+            or Path(relative).name.endswith(f"_{identifier}")
+        )
         or Path(identifier).name != identifier
     ):
         raise ValueError("Screen run has no valid active checkpoint pointer")
@@ -2536,13 +2620,19 @@ def _screen_ancestry(directory: Path, details: Record) -> dict[str, Record]:
 
 
 def _screen_evidence(
-    result: Mapping[str, Any], *, run_id: str | None, seed: int | None
+    result: Mapping[str, Any],
+    *,
+    run_id: str | None,
+    seed: int | None,
+    deployment: Mapping[str, Any] | None = None,
 ) -> tuple[Record, list[Record]]:
     """Verify one saved Random task and return its summary and original M8 rows.
 
     result is a runner random_diagnostics entry, including original task and
     artifact identities. run_id and seed bind a fresh capture to its own run;
     both are None only for the explicitly shared original initialization.
+    deployment is the owning run's fixed partner and roster declaration, or None
+    for the historical bare actor. It is checked against the saved task.
     The result's own red_zone_depth (None when it was saved before the Red Zone
     rule) selects the task layout and whether rows carry recorded kills.
     Existing validation owns task and score verification;
@@ -2561,6 +2651,7 @@ def _screen_evidence(
         run_id=run_id,
         seed=seed,
         red_zone_depth=result.get("red_zone_depth"),
+        deployment=deployment,
     )
 
 
@@ -2585,7 +2676,9 @@ def _screen_statistics(
         summary = summarize_validation(
             rows,
             maps=result["maps"],
-            opponents=("Random",),
+            opponents=tuple(member["name"] for member in result["members"])
+            if "partners" in result
+            else ("Random",),
             seed_pairs=result["seed_pairs"],
             actual_kills=(team_a, team_b) == _KILL_COLUMNS,
         )
@@ -2617,8 +2710,8 @@ def _screen_statistics(
                 if first is not None and second is not None:
                     margins.append(float(first) - float(second))
             mapped[seed] = (
-                math.fsum(_score(row["system_game_score"]) for row in pair) / 2,
-                math.fsum(margins) / 2 if len(margins) == 2 else None,
+                math.fsum(_score(row["system_game_score"]) for row in pair) / len(pair),
+                math.fsum(margins) / len(pair) if len(margins) == len(pair) else None,
             )
         blocks[map_id] = mapped
     margin_blocks = [
@@ -3212,6 +3305,7 @@ def analyze_screen(
                         result,
                         run_id=None if reused else details["run_id"],
                         seed=None if reused else config["seed"],
+                        deployment=details.get("validation_deployment"),
                     )
                     statistics = _screen_statistics(rows, result, summary=verified)
                     tasks[task_id] = {

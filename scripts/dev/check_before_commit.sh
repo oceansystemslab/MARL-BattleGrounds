@@ -1,12 +1,14 @@
 #!/usr/bin/env bash
 
 # Check an already frozen, nonempty staged candidate before a Codex commit.
-# Usage: scripts/dev/check_before_commit.sh (no arguments). Requires Git, the
+# Usage: scripts/dev/check_before_commit.sh [--timings DIR]. Requires Git, the
 # prepared uv environment, Node/npm and installed browser dependencies. Reject
 # tracked unstaged changes and nonignored untracked files. Run the complete Python
 # and frontend gates, then recheck HEAD, the index tree and worktree cleanliness.
 # The script reports success only for that unchanged candidate. It never stages
-# or commits. git write-tree may write Git tree objects while fingerprinting.
+# or commits. --timings DIR saves per-test reports through the existing child
+# gates, without changing their test inventory. Use an ignored or external path.
+# git write-tree may write Git tree objects while fingerprinting.
 # A caller's GIT_INDEX_FILE selects this gate's candidate only. Child validation
 # uses its own Git indexes so tests can safely create separate repositories.
 set -euo pipefail
@@ -61,9 +63,15 @@ require_frozen_staged_candidate() {
   git -C "${REPO_ROOT}" diff --cached --check
 }
 
+timing_args=()
 if (( $# != 0 )); then
-  echo "usage: scripts/dev/check_before_commit.sh" >&2
-  exit 2
+  if (( $# != 2 )) || [[ "$1" != --timings || -z "$2" ]]; then
+    echo "usage: scripts/dev/check_before_commit.sh [--timings DIR]" >&2
+    exit 2
+  fi
+  mkdir -p -- "$2"
+  timings_dir="$(cd -- "$2" && pwd -P)"
+  timing_args=(--timings "${timings_dir}")
 fi
 
 require_frozen_staged_candidate
@@ -75,9 +83,9 @@ fi
 status=0
 marl_validation_init 2 before-commit
 marl_validation_start "Complete Python validation" \
-  env -u GIT_INDEX_FILE "${SCRIPT_DIR}/check.sh"
+  env -u GIT_INDEX_FILE "${SCRIPT_DIR}/check.sh" "${timing_args[@]}"
 marl_validation_start "Complete frontend validation" \
-  env -u GIT_INDEX_FILE "${SCRIPT_DIR}/check_frontend.sh"
+  env -u GIT_INDEX_FILE "${SCRIPT_DIR}/check_frontend.sh" "${timing_args[@]}"
 if ! marl_validation_finish; then
   status=1
 fi

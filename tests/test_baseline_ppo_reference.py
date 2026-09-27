@@ -190,7 +190,7 @@ def _select_games(batch: ppo.PPOMinibatch, indices: Array) -> ppo.PPOMinibatch:
         return jnp.take(value, index, axis=0)
 
     sequence = tuple(jax.vmap(sequence_rows)(leaf, indices) for leaf in batch[:12])
-    memory = tuple(jax.vmap(memory_rows)(leaf, indices) for leaf in batch[12:])
+    memory = tuple(jax.vmap(memory_rows)(leaf, indices) for leaf in batch[12:14])
     return ppo.PPOMinibatch(*sequence, *memory)
 
 

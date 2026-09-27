@@ -12,6 +12,7 @@ from scripts.dev.visual_debugger.control import create_session
 from scripts.dev.visual_debugger.match_summary import (
     MatchAgentV1,
     MatchDeathV1,
+    MatchTeamV1,
     build_match_summary_v1,
 )
 from scripts.dev.visual_debugger.model import DebuggerScenarioProvenance
@@ -195,7 +196,7 @@ def test_scenario_pressure_display_name_uses_recorded_controller(
         summary = build_match_summary_v1(historical, trajectory.frames[0])
         assert (
             summary.teams[1].display_name
-            == f"tdm-scenario-{scenario_id}-controller-{variant}"
+            == f"TDM Scenario {scenario_id} {variant.upper()} Controller"
         )
         assert summary.teams[1].policy_ids == (policy_id,)
 
@@ -233,7 +234,17 @@ def test_scenario_pressure_display_name_uses_recorded_controller(
     assert session.evaluation_context.identity.scenario.identifier == (
         "authored-team-deathmatch-scenario"
     )
-    produced = session.evaluation_context
+    produced = session.evaluation_context.model_copy(
+        update={
+            "aggregation_keys": (
+                *session.evaluation_context.aggregation_keys,
+                AggregationKeyV1(
+                    name="marl_bgs.system_name.team_b",
+                    value=f'"tdm_{variant}"',
+                ),
+            )
+        }
+    )
     actual = build_match_summary_v1(produced, session.current_evaluation_frame)
     assert actual.teams[1].display_name == summary.teams[1].display_name
     assert actual.teams[1].policy_ids == tuple(
@@ -246,7 +257,7 @@ def test_scenario_pressure_display_name_uses_recorded_controller(
         if row.assignment_status == "assigned"
     )
 
-    current = session.evaluation_context
+    current = produced
     callable_name = f"tdm-{variant}"
     current = current.model_copy(
         update={
@@ -269,7 +280,7 @@ def test_scenario_pressure_display_name_uses_recorded_controller(
         build_match_summary_v1(current, session.current_evaluation_frame)
         .teams[1]
         .display_name
-        == callable_name
+        == f"Tdm {variant}"
     )
     descriptor = ContentAddressedIdentityV1(
         identifier=policy_id, version=1, canonical_digest="f" * 64
@@ -288,3 +299,87 @@ def test_scenario_pressure_display_name_uses_recorded_controller(
     observed = build_match_summary_v1(current, session.current_evaluation_frame)
     assert observed.teams[1].display_name == summary.teams[1].display_name
     assert observed.teams[1].policy_ids == (callable_name,)
+
+
+@pytest.mark.parametrize(
+    ("bank_x", "expected"),
+    [
+        ((2.0, 18.0), ("left", "right")),
+        ((18.0, 2.0), ("right", "left")),
+        ((10.0, 10.0), (None, None)),
+        ((2.0, 3.0), (None, None)),
+        (None, (None, None)),
+    ],
+)
+def test_match_display_sides_use_recorded_pads_without_red_zone(
+    bank_x: tuple[float, float] | None, expected: tuple[str | None, str | None]
+) -> None:
+    trajectory = captured_evaluation_trajectory(transition_count=0)
+    config = trajectory.context.resolved_env_config.model_copy(
+        update={
+            "map_width": 20.0,
+            "team_spawn_pad_positions": None
+            if bank_x is None
+            else tuple(
+                tuple((x, float(slot + 1)) for slot in range(5)) for x in bank_x
+            ),
+        }
+    )
+    context = trajectory.context.model_copy(update={"resolved_env_config": config})
+    summary = build_match_summary_v1(context, trajectory.frames[0])
+    assert tuple(team.display_side for team in summary.teams) == expected
+    assert tuple(team.team_id for team in summary.teams) == (1, 2)
+    assert summary.scores == trajectory.frames[0].snapshot.team_deathmatch_scores
+    assert config.task_mode == 0  # Side does not depend on a Red Zone game.
+
+
+def test_old_team_summary_has_no_claimed_spawn_side() -> None:
+    team = MatchTeamV1(
+        team_id=1, display_name="Old actor", policy_ids=(), checkpoint_digests=()
+    )
+    assert team.display_side is None
+
+
+@pytest.mark.parametrize(
+    "name", ["MAPPO Run 3 Step 120000", "researcher_policy", "Équipe One"]
+)
+def test_match_summary_prefers_recorded_name_and_keeps_exact_identity(
+    name: str,
+) -> None:
+    import json
+
+    trajectory = captured_evaluation_trajectory(transition_count=0)
+    context = trajectory.context.model_copy(
+        update={
+            "policy_assignments": tuple(
+                row.model_copy(update={"policy_id": "a" * 64, "policy_kind": "system"})
+                if isinstance(row, AssignedPolicySlotV1) and row.global_slot < 5
+                else row
+                for row in trajectory.context.policy_assignments
+            ),
+            "aggregation_keys": tuple(
+                sorted(
+                    (
+                        *trajectory.context.aggregation_keys,
+                        AggregationKeyV1(
+                            name="marl_bgs.system_name.team_a",
+                            value=json.dumps(name, ensure_ascii=True),
+                        ),
+                    ),
+                    key=lambda row: row.name,
+                )
+            ),
+        }
+    )
+    summary = build_match_summary_v1(context, trajectory.frames[0])
+    assert summary.teams[0].display_name == (
+        "Researcher policy" if name == "researcher_policy" else name
+    )
+    assert summary.teams[0].policy_ids == ("a" * 64,)
+    old = context.model_copy(
+        update={"aggregation_keys": trajectory.context.aggregation_keys}
+    )
+    assert (
+        build_match_summary_v1(old, trajectory.frames[0]).teams[0].display_name
+        == "Recorded System"
+    )

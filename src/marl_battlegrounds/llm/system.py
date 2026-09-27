@@ -466,7 +466,14 @@ def _apply(
         else:
             actors, masks = inputs.actors, inputs.action_mask
             flag = np.zeros(inputs.active_mask.shape, dtype=np.bool_)
-    active = np.asarray(inputs.valid)[:, None] & np.asarray(inputs.active_mask)
+    controlled = (
+        inputs.active_mask if inputs.controlled_mask is None else inputs.controlled_mask
+    )
+    active = (
+        np.asarray(inputs.valid)[:, None]
+        & np.asarray(inputs.active_mask)
+        & np.asarray(controlled)
+    )
     living = np.asarray(actors.observation.self_features)[..., AGENT_FEATURE_ALIVE] > 0
     selected = np.argwhere(active & living)
     evidence = {

@@ -22,6 +22,7 @@ The compiled update's temporary bytes grow by less than 0.75 per replay byte
 (measured between 500 and 1,000 rows; about 0.46 now, about 0.99 if one
 branch level kept a replay copy): the rows are inserted once and the replay is
 chosen once. These checks prove software contracts, not learning or GPU cost.
+Warm starts load saved actors, match greedy inference and keep fresh learner state.
 """
 
 # pyright: reportPrivateUsage=false, reportUnknownLambdaType=false
@@ -29,6 +30,7 @@ import itertools
 from collections.abc import Callable
 from dataclasses import dataclass, replace
 from functools import lru_cache, partial
+from pathlib import Path
 from typing import Any, cast
 
 import jax
@@ -268,7 +270,15 @@ def test_sampling_keys_and_target_copies_follow_the_count(run: _Run) -> None:
         )
         snapshots.append(train)
         losses.append(float(metrics.loss))
-        counts.append(learner._step_counts(sample, metrics, bank))
+        counts.append(
+            learner._step_counts(
+                sample,
+                metrics,
+                bank,
+                prior.carry.progress.opponent_steps.shape[0],
+                prior.carry.history.capture_capacity,
+            )
+        )
     # Losses depend on the exact samples and their order; integers are exact.
     np.testing.assert_allclose(result.metrics.loss, losses, rtol=1e-4)
     total = jax.tree.map(lambda *values: sum(values), *counts)
@@ -556,3 +566,173 @@ def test_the_update_keeps_no_replay_copy_per_branch(
     # level kept a replay copy, and about 1.99 in the old nested layout.
     growth = (sizes[1][1] - sizes[0][1]) / (sizes[1][0] - sizes[0][0])
     assert growth < 0.75
+
+
+def test_warm_start_copies_online_and_target_but_keeps_fresh_mixer(
+    prepared: PreparedTrainingContent,
+    tmp_path: Path,
+) -> None:
+    schedule = make_training_schedule(total_env_steps=28, num_envs=2)
+    _, fresh = learner.init_qmix_learner(
+        schedule=schedule, qmix=_CONFIG, seed=23, prepared=prepared, metrics="none"
+    )
+    imported = jax.tree.map(
+        partial(jnp.add, jnp.float32(0.125)),
+        fresh.carry.history.current_variables.params,
+    )
+    from marl_battlegrounds.evaluation.policy_execution import (
+        apply_systems,
+        init_systems,
+    )
+    from marl_battlegrounds.training import checkpoints
+
+    artifact = checkpoints.export_system(
+        imported,
+        tmp_path / "actor",
+        method="qmix",
+        input_scale=_CONFIG.input_scale,
+        spawn_frame=_CONFIG.spawn_frame,
+        metadata={
+            "run_id": "Warm Start Test",
+            "seed": 23,
+            "env_steps": 0,
+            "checkpoint_id": "a" * 64,
+            "optimizer_steps": 0,
+        },
+    )
+    loaded, _ = checkpoints.load_initial_actor(
+        artifact,
+        method="qmix",
+        input_scale=_CONFIG.input_scale,
+        spawn_frame=_CONFIG.spawn_frame,
+    )
+    collection, warm = learner.init_qmix_learner(
+        schedule=schedule,
+        qmix=_CONFIG,
+        seed=23,
+        prepared=prepared,
+        metrics="none",
+        initial_actor=loaded.variables.params,
+    )
+    _equal(warm.carry.history.current_variables.params, imported)
+    _equal(warm.target_q_params, imported)
+    _equal(warm.mixer_params, fresh.mixer_params)
+    _equal(warm.target_mixer_params, fresh.mixer_params)
+    _equal(warm.opt_state, fresh.opt_state)
+    _equal(warm.replay, fresh.replay)
+    assert float(warm.carry.history.current_variables.epsilon) == 1.0
+    assert int(warm.completed_updates) == int(warm.carry.history.count) == 0
+    variables = warm.carry.history.current_variables
+    # Compare greedy inference separately from the learner's fresh exploration.
+    variables = variables._replace(epsilon=jnp.float32(0))
+    observations, state = warm.carry.observations, warm.carry.state
+    memory = init_systems(loaded, loaded, observations, state, jax.random.key(71))
+    expected = apply_systems(
+        loaded, loaded, memory, observations, state, jax.random.key(72)
+    )
+    actual = apply_systems(
+        collection.actor,
+        loaded,
+        memory,
+        observations,
+        state,
+        jax.random.key(72),
+        variables_a=variables,
+    )
+    _equal(actual, expected)
+
+
+def test_named_opponent_keeps_identity_through_qmix_replay_and_learning(
+    prepared: PreparedTrainingContent,
+) -> None:
+    from tests.test_training_collection import (
+        _actor,  # pyright: ignore[reportPrivateUsage]
+    )
+
+    collection, state = learner.init_qmix_learner(
+        schedule=make_training_schedule(total_env_steps=16, num_envs=2),
+        prepared=prepared,
+        metrics="none",
+        qmix=_CONFIG,
+        keep_past=0,
+        history_capture_capacity=0,
+        opponent_population={"fixed": _actor()},
+        opponent_selection={"fixed": 1.0},
+    )
+    results: list[learner.QMIXUpdateResult] = []
+    for _ in range(2):
+        carry, rollout = _scan(collection, 4)(state.carry)
+        np.testing.assert_array_equal(rollout.transitions.opponent_snapshot, -3)
+        state, result = _update(_CONFIG)(state, carry, rollout)
+        assert bool(result.accepted) and not bool(result.failed)
+        results.append(result)
+    result = results[-1]
+    assert bool(result.performed)
+    counts = np.asarray(result.sampled.exposure_by_opponent)
+    assert counts.shape[-1] == 3
+    assert int(counts[..., :2].sum()) == 0
+    assert int(counts[..., 2].sum()) > 0
+    learner.validate_qmix_learner(collection, state, qmix=_CONFIG)
+
+
+def test_reward_reset_refills_replay_before_new_targets(run: _Run) -> None:
+    from marl_battlegrounds.training._continuation_schedules import (
+        LearnerContinuation,
+        RewardReset,
+    )
+
+    parent = run.states[2]
+    rounds, blocks, learning, updates = _counts(parent)
+    context = LearnerContinuation(
+        "qmix",
+        rounds,
+        blocks,
+        learning,
+        loss_settings=(("gamma", 0.0),),
+        reward_reset=RewardReset(rounds, blocks, learning, rounds),
+    )
+    state = parent._replace(
+        replay=learner._init_replay(run.collection, parent.carry, _CONFIG)
+    )
+    _equal(state.opt_state, parent.opt_state)
+    _equal(state.carry, parent.carry)
+    _equal(state.target_q_params, parent.target_q_params)
+    update = cast(
+        Update,
+        jax.jit(
+            partial(learner.update_qmix_learner, qmix=_CONFIG, continuation=context)
+        ),
+    )
+    for index in range(2):
+        carry, rollout = _scan(run.collection, 4)(state.carry)
+        rows = rollout.transitions
+        rollout = rollout._replace(
+            transitions=rows._replace(
+                task_rewards=jnp.where(
+                    rows.valid[..., None], jnp.float32(40), jnp.float32(0)
+                )
+                * jnp.ones_like(rows.task_rewards),
+            )
+        )
+        previous = state
+        state, result = update(state, carry, rollout)
+        assert bool(result.accepted) and not bool(result.failed)
+        assert bool(result.performed) == (index == 1)
+        if index == 0:
+            assert int(state.completed_updates) == updates
+            assert int(state.carry.history.last_refresh_rounds) == rounds
+            _equal(state.opt_state, previous.opt_state)
+            _equal(state.target_q_params, previous.target_q_params)
+            _equal(
+                state.carry.history.current_variables.params,
+                previous.carry.history.current_variables.params,
+            )
+        else:
+            assert int(state.completed_updates) == updates + _CONFIG.epochs
+            np.testing.assert_allclose(result.metrics.mean_target, 40, rtol=1e-6)
+    assert int(state.replay.current_index) == 6
+    assert not bool(state.replay.is_full)
+    valid = np.asarray(state.replay.experience.valid)
+    np.testing.assert_array_equal(
+        np.asarray(state.replay.experience.task_reward)[valid], 40
+    )

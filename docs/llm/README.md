@@ -472,3 +472,22 @@ result immediately, but the worker cannot forcibly interrupt arbitrary Python.
 The single pending slot stays occupied until that work returns and cleanup ends.
 HTTP calls still use the client's deadlines. Cleanup and recording failures are
 reported in the host log; the browser keeps paths and server details private.
+
+
+## Give Selected Slots To An LLM
+
+The same `team` helper can combine an LLM with other valid methods. For example,
+`marl_bgs.team(llm_system, "random", slots=[[4], [0, 1, 2, 3]])` gives the fifth
+actor to the LLM. Run the complete example with `--llm-slots 4`:
+
+```bash
+python examples/llm.py --model MODEL --server-url URL --llm-slots 4 --games 2
+```
+
+Only owned, valid, living actors make model requests. All permitted input rows
+remain intact; slot ownership grants no new information rights. Actor history
+keeps its original slot. The System's existing scope closes runner-owned clients;
+a supplied client remains caller-owned. A pool of LLM and other Systems uses the
+same path and chooses once per game. See [System composition](../evaluation/workflows.md#compose-teams-and-opponent-pools)
+for key, memory, class-selector and paired-evaluation rules. Fake-server checks
+prove routing and cleanup, not the model's playing strength.

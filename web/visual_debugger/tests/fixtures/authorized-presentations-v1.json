@@ -2596,7 +2596,8 @@
               "checkpoint_digests": [
                 "2222222222222222222222222222222222222222222222222222222222222222"
               ],
-              "display_name": "policy-0 / policy-1 / policy-2",
+              "display_name": "Policy 0 / Policy 1 / Policy 2",
+              "display_side": "left",
               "policy_ids": [
                 "policy-0",
                 "policy-1",
@@ -2608,7 +2609,8 @@
               "checkpoint_digests": [
                 "2222222222222222222222222222222222222222222222222222222222222222"
               ],
-              "display_name": "policy-5 / policy-6",
+              "display_name": "Policy 5 / Policy 6",
+              "display_side": "right",
               "policy_ids": [
                 "policy-5",
                 "policy-6"
@@ -4780,7 +4782,8 @@
               "checkpoint_digests": [
                 "2222222222222222222222222222222222222222222222222222222222222222"
               ],
-              "display_name": "policy-0 / policy-1 / policy-2",
+              "display_name": "Policy 0 / Policy 1 / Policy 2",
+              "display_side": "left",
               "policy_ids": [
                 "policy-0",
                 "policy-1",
@@ -4792,7 +4795,8 @@
               "checkpoint_digests": [
                 "2222222222222222222222222222222222222222222222222222222222222222"
               ],
-              "display_name": "policy-5 / policy-6",
+              "display_name": "Policy 5 / Policy 6",
+              "display_side": "right",
               "policy_ids": [
                 "policy-5",
                 "policy-6"
@@ -7124,6 +7128,7 @@
             {
               "checkpoint_digests": [],
               "display_name": "Manual",
+              "display_side": "left",
               "policy_ids": [
                 "debugger-action-source:manual:slot:0",
                 "debugger-action-source:manual:slot:1",
@@ -7136,6 +7141,7 @@
             {
               "checkpoint_digests": [],
               "display_name": "Manual",
+              "display_side": "right",
               "policy_ids": [
                 "debugger-action-source:manual:slot:5",
                 "debugger-action-source:manual:slot:6",
@@ -10053,6 +10059,7 @@
             {
               "checkpoint_digests": [],
               "display_name": "Manual",
+              "display_side": "left",
               "policy_ids": [
                 "debugger-action-source:manual:slot:0",
                 "debugger-action-source:manual:slot:1",
@@ -10065,6 +10072,7 @@
             {
               "checkpoint_digests": [],
               "display_name": "Manual",
+              "display_side": "right",
               "policy_ids": [
                 "debugger-action-source:manual:slot:5",
                 "debugger-action-source:manual:slot:6",
@@ -12947,6 +12955,7 @@
             {
               "checkpoint_digests": [],
               "display_name": "Manual",
+              "display_side": "left",
               "policy_ids": [
                 "debugger-action-source:manual:slot:0",
                 "debugger-action-source:manual:slot:1",
@@ -12959,6 +12968,7 @@
             {
               "checkpoint_digests": [],
               "display_name": "Manual",
+              "display_side": "right",
               "policy_ids": [
                 "debugger-action-source:manual:slot:5",
                 "debugger-action-source:manual:slot:6",
@@ -15082,7 +15092,8 @@
               "checkpoint_digests": [
                 "2222222222222222222222222222222222222222222222222222222222222222"
               ],
-              "display_name": "policy-0 / policy-1 / policy-2",
+              "display_name": "Policy 0 / Policy 1 / Policy 2",
+              "display_side": "left",
               "policy_ids": [
                 "policy-0",
                 "policy-1",
@@ -15094,7 +15105,8 @@
               "checkpoint_digests": [
                 "2222222222222222222222222222222222222222222222222222222222222222"
               ],
-              "display_name": "policy-5 / policy-6",
+              "display_name": "Policy 5 / Policy 6",
+              "display_side": "right",
               "policy_ids": [
                 "policy-5",
                 "policy-6"
@@ -17747,7 +17759,8 @@
               "checkpoint_digests": [
                 "2222222222222222222222222222222222222222222222222222222222222222"
               ],
-              "display_name": "policy-0 / policy-1 / policy-2",
+              "display_name": "Policy 0 / Policy 1 / Policy 2",
+              "display_side": "left",
               "policy_ids": [
                 "policy-0",
                 "policy-1",
@@ -17759,7 +17772,8 @@
               "checkpoint_digests": [
                 "2222222222222222222222222222222222222222222222222222222222222222"
               ],
-              "display_name": "policy-5 / policy-6",
+              "display_name": "Policy 5 / Policy 6",
+              "display_side": "right",
               "policy_ids": [
                 "policy-5",
                 "policy-6"
@@ -19702,7 +19716,8 @@
               "checkpoint_digests": [
                 "2222222222222222222222222222222222222222222222222222222222222222"
               ],
-              "display_name": "policy-0 / policy-1 / policy-2",
+              "display_name": "Policy 0 / Policy 1 / Policy 2",
+              "display_side": "left",
               "policy_ids": [
                 "policy-0",
                 "policy-1",
@@ -19714,7 +19729,8 @@
               "checkpoint_digests": [
                 "2222222222222222222222222222222222222222222222222222222222222222"
               ],
-              "display_name": "policy-5 / policy-6",
+              "display_name": "Policy 5 / Policy 6",
+              "display_side": "right",
               "policy_ids": [
                 "policy-5",
                 "policy-6"
@@ -25979,6 +25995,7 @@
           {
             "checkpoint_digests": [],
             "display_name": "Manual",
+            "display_side": "left",
             "policy_ids": [
               "debugger-action-source:manual:slot:0",
               "debugger-action-source:manual:slot:1",
@@ -25991,6 +26008,7 @@
           {
             "checkpoint_digests": [],
             "display_name": "Manual",
+            "display_side": "right",
             "policy_ids": [
               "debugger-action-source:manual:slot:5",
               "debugger-action-source:manual:slot:6",
@@ -30594,7 +30612,8 @@
             "checkpoint_digests": [
               "2222222222222222222222222222222222222222222222222222222222222222"
             ],
-            "display_name": "policy-0 / policy-1 / policy-2",
+            "display_name": "Policy 0 / Policy 1 / Policy 2",
+            "display_side": "left",
             "policy_ids": [
               "policy-0",
               "policy-1",
@@ -30606,7 +30625,8 @@
             "checkpoint_digests": [
               "2222222222222222222222222222222222222222222222222222222222222222"
             ],
-            "display_name": "policy-5 / policy-6",
+            "display_name": "Policy 5 / Policy 6",
+            "display_side": "right",
             "policy_ids": [
               "policy-5",
               "policy-6"
@@ -34185,6 +34205,7 @@
           {
             "checkpoint_digests": [],
             "display_name": "Manual",
+            "display_side": "left",
             "policy_ids": [
               "debugger-action-source:manual:slot:0",
               "debugger-action-source:manual:slot:1",
@@ -34195,6 +34216,7 @@
           {
             "checkpoint_digests": [],
             "display_name": "Manual",
+            "display_side": "right",
             "policy_ids": [
               "debugger-action-source:manual:slot:5",
               "debugger-action-source:manual:slot:6"
@@ -35312,6 +35334,7 @@
           {
             "checkpoint_digests": [],
             "display_name": "Manual",
+            "display_side": null,
             "policy_ids": [
               "debugger-action-source:manual:slot:0",
               "debugger-action-source:manual:slot:1",
@@ -35322,6 +35345,7 @@
           {
             "checkpoint_digests": [],
             "display_name": "Manual",
+            "display_side": null,
             "policy_ids": [
               "debugger-action-source:manual:slot:5",
               "debugger-action-source:manual:slot:6"
@@ -36429,6 +36453,7 @@
           {
             "checkpoint_digests": [],
             "display_name": "Manual",
+            "display_side": "left",
             "policy_ids": [
               "debugger-action-source:manual:slot:0",
               "debugger-action-source:manual:slot:1",
@@ -36439,6 +36464,7 @@
           {
             "checkpoint_digests": [],
             "display_name": "Manual",
+            "display_side": "right",
             "policy_ids": [
               "debugger-action-source:manual:slot:5",
               "debugger-action-source:manual:slot:6"
@@ -37556,6 +37582,7 @@
           {
             "checkpoint_digests": [],
             "display_name": "Manual",
+            "display_side": "left",
             "policy_ids": [
               "debugger-action-source:manual:slot:0",
               "debugger-action-source:manual:slot:1",
@@ -37566,6 +37593,7 @@
           {
             "checkpoint_digests": [],
             "display_name": "Manual",
+            "display_side": "right",
             "policy_ids": [
               "debugger-action-source:manual:slot:5",
               "debugger-action-source:manual:slot:6"
@@ -38683,6 +38711,7 @@
           {
             "checkpoint_digests": [],
             "display_name": "Manual",
+            "display_side": "left",
             "policy_ids": [
               "debugger-action-source:manual:slot:0",
               "debugger-action-source:manual:slot:1",
@@ -38693,6 +38722,7 @@
           {
             "checkpoint_digests": [],
             "display_name": "Manual",
+            "display_side": "right",
             "policy_ids": [
               "debugger-action-source:manual:slot:5",
               "debugger-action-source:manual:slot:6"
@@ -39810,6 +39840,7 @@
           {
             "checkpoint_digests": [],
             "display_name": "Manual",
+            "display_side": "left",
             "policy_ids": [
               "debugger-action-source:manual:slot:0",
               "debugger-action-source:manual:slot:1",
@@ -39820,6 +39851,7 @@
           {
             "checkpoint_digests": [],
             "display_name": "Manual",
+            "display_side": "right",
             "policy_ids": [
               "debugger-action-source:manual:slot:5",
               "debugger-action-source:manual:slot:6"
@@ -40937,6 +40969,7 @@
           {
             "checkpoint_digests": [],
             "display_name": "Manual",
+            "display_side": "left",
             "policy_ids": [
               "debugger-action-source:manual:slot:0",
               "debugger-action-source:manual:slot:1",
@@ -40947,6 +40980,7 @@
           {
             "checkpoint_digests": [],
             "display_name": "Manual",
+            "display_side": "right",
             "policy_ids": [
               "debugger-action-source:manual:slot:5",
               "debugger-action-source:manual:slot:6"
@@ -42064,6 +42098,7 @@
           {
             "checkpoint_digests": [],
             "display_name": "Manual",
+            "display_side": "right",
             "policy_ids": [
               "debugger-action-source:manual:slot:0",
               "debugger-action-source:manual:slot:1",
@@ -42074,6 +42109,7 @@
           {
             "checkpoint_digests": [],
             "display_name": "Manual",
+            "display_side": "left",
             "policy_ids": [
               "debugger-action-source:manual:slot:5",
               "debugger-action-source:manual:slot:6"
@@ -43191,6 +43227,7 @@
           {
             "checkpoint_digests": [],
             "display_name": "Manual",
+            "display_side": "left",
             "policy_ids": [
               "debugger-action-source:manual:slot:0",
               "debugger-action-source:manual:slot:1",
@@ -43201,6 +43238,7 @@
           {
             "checkpoint_digests": [],
             "display_name": "Manual",
+            "display_side": "right",
             "policy_ids": [
               "debugger-action-source:manual:slot:5",
               "debugger-action-source:manual:slot:6"
@@ -44343,6 +44381,7 @@
           {
             "checkpoint_digests": [],
             "display_name": "Manual",
+            "display_side": "left",
             "policy_ids": [
               "debugger-action-source:manual:slot:0",
               "debugger-action-source:manual:slot:1",
@@ -44353,6 +44392,7 @@
           {
             "checkpoint_digests": [],
             "display_name": "Manual",
+            "display_side": "right",
             "policy_ids": [
               "debugger-action-source:manual:slot:5",
               "debugger-action-source:manual:slot:6"
@@ -45470,6 +45510,7 @@
           {
             "checkpoint_digests": [],
             "display_name": "Manual",
+            "display_side": "left",
             "policy_ids": [
               "debugger-action-source:manual:slot:0",
               "debugger-action-source:manual:slot:1",
@@ -45480,6 +45521,7 @@
           {
             "checkpoint_digests": [],
             "display_name": "Manual",
+            "display_side": "right",
             "policy_ids": [
               "debugger-action-source:manual:slot:5",
               "debugger-action-source:manual:slot:6"
@@ -46597,6 +46639,7 @@
           {
             "checkpoint_digests": [],
             "display_name": "Manual",
+            "display_side": "left",
             "policy_ids": [
               "debugger-action-source:manual:slot:0",
               "debugger-action-source:manual:slot:1",
@@ -46607,6 +46650,7 @@
           {
             "checkpoint_digests": [],
             "display_name": "Manual",
+            "display_side": "right",
             "policy_ids": [
               "debugger-action-source:manual:slot:5",
               "debugger-action-source:manual:slot:6"
@@ -47480,7 +47524,8 @@
             "checkpoint_digests": [
               "2222222222222222222222222222222222222222222222222222222222222222"
             ],
-            "display_name": "policy-0 / policy-1 / policy-2",
+            "display_name": "Policy 0 / Policy 1 / Policy 2",
+            "display_side": "left",
             "policy_ids": [
               "policy-0",
               "policy-1",
@@ -47492,7 +47537,8 @@
             "checkpoint_digests": [
               "2222222222222222222222222222222222222222222222222222222222222222"
             ],
-            "display_name": "policy-5 / policy-6",
+            "display_name": "Policy 5 / Policy 6",
+            "display_side": "right",
             "policy_ids": [
               "policy-5",
               "policy-6"
@@ -49594,7 +49640,8 @@
             "checkpoint_digests": [
               "2222222222222222222222222222222222222222222222222222222222222222"
             ],
-            "display_name": "policy-0 / policy-1 / policy-2",
+            "display_name": "Policy 0 / Policy 1 / Policy 2",
+            "display_side": "left",
             "policy_ids": [
               "policy-0",
               "policy-1",
@@ -49606,7 +49653,8 @@
             "checkpoint_digests": [
               "2222222222222222222222222222222222222222222222222222222222222222"
             ],
-            "display_name": "policy-5 / policy-6",
+            "display_name": "Policy 5 / Policy 6",
+            "display_side": "right",
             "policy_ids": [
               "policy-5",
               "policy-6"
@@ -50663,7 +50711,8 @@
             "checkpoint_digests": [
               "2222222222222222222222222222222222222222222222222222222222222222"
             ],
-            "display_name": "policy-0 / policy-1 / policy-2",
+            "display_name": "Policy 0 / Policy 1 / Policy 2",
+            "display_side": "left",
             "policy_ids": [
               "policy-0",
               "policy-1",
@@ -50675,7 +50724,8 @@
             "checkpoint_digests": [
               "2222222222222222222222222222222222222222222222222222222222222222"
             ],
-            "display_name": "policy-5 / policy-6",
+            "display_name": "Policy 5 / Policy 6",
+            "display_side": "right",
             "policy_ids": [
               "policy-5",
               "policy-6"
@@ -53226,6 +53276,7 @@
           {
             "checkpoint_digests": [],
             "display_name": "Manual",
+            "display_side": "left",
             "policy_ids": [
               "debugger-action-source:manual:slot:0",
               "debugger-action-source:manual:slot:1",
@@ -53238,6 +53289,7 @@
           {
             "checkpoint_digests": [],
             "display_name": "Manual",
+            "display_side": "right",
             "policy_ids": [
               "debugger-action-source:manual:slot:5",
               "debugger-action-source:manual:slot:6",
@@ -60910,7 +60962,8 @@
             "checkpoint_digests": [
               "2222222222222222222222222222222222222222222222222222222222222222"
             ],
-            "display_name": "policy-0 / policy-1 / policy-2",
+            "display_name": "Policy 0 / Policy 1 / Policy 2",
+            "display_side": "left",
             "policy_ids": [
               "policy-0",
               "policy-1",
@@ -60922,7 +60975,8 @@
             "checkpoint_digests": [
               "2222222222222222222222222222222222222222222222222222222222222222"
             ],
-            "display_name": "policy-5 / policy-6",
+            "display_name": "Policy 5 / Policy 6",
+            "display_side": "right",
             "policy_ids": [
               "policy-5",
               "policy-6"
@@ -65823,7 +65877,8 @@
             "checkpoint_digests": [
               "2222222222222222222222222222222222222222222222222222222222222222"
             ],
-            "display_name": "policy-0 / policy-1 / policy-2",
+            "display_name": "Policy 0 / Policy 1 / Policy 2",
+            "display_side": "left",
             "policy_ids": [
               "policy-0",
               "policy-1",
@@ -65835,7 +65890,8 @@
             "checkpoint_digests": [
               "2222222222222222222222222222222222222222222222222222222222222222"
             ],
-            "display_name": "policy-5 / policy-6",
+            "display_name": "Policy 5 / Policy 6",
+            "display_side": "right",
             "policy_ids": [
               "policy-5",
               "policy-6"
@@ -67708,7 +67764,8 @@
             "checkpoint_digests": [
               "2222222222222222222222222222222222222222222222222222222222222222"
             ],
-            "display_name": "policy-0 / policy-1 / policy-2",
+            "display_name": "Policy 0 / Policy 1 / Policy 2",
+            "display_side": "left",
             "policy_ids": [
               "policy-0",
               "policy-1",
@@ -67720,7 +67777,8 @@
             "checkpoint_digests": [
               "2222222222222222222222222222222222222222222222222222222222222222"
             ],
-            "display_name": "policy-5 / policy-6",
+            "display_name": "Policy 5 / Policy 6",
+            "display_side": "right",
             "policy_ids": [
               "policy-5",
               "policy-6"
@@ -68797,7 +68855,8 @@
             "checkpoint_digests": [
               "2222222222222222222222222222222222222222222222222222222222222222"
             ],
-            "display_name": "policy-0 / policy-1 / policy-2",
+            "display_name": "Policy 0 / Policy 1 / Policy 2",
+            "display_side": "left",
             "policy_ids": [
               "policy-0",
               "policy-1",
@@ -68809,7 +68868,8 @@
             "checkpoint_digests": [
               "2222222222222222222222222222222222222222222222222222222222222222"
             ],
-            "display_name": "policy-5 / policy-6",
+            "display_name": "Policy 5 / Policy 6",
+            "display_side": "right",
             "policy_ids": [
               "policy-5",
               "policy-6"
@@ -69648,7 +69708,8 @@
             "checkpoint_digests": [
               "2222222222222222222222222222222222222222222222222222222222222222"
             ],
-            "display_name": "policy-0 / policy-1 / policy-2",
+            "display_name": "Policy 0 / Policy 1 / Policy 2",
+            "display_side": "left",
             "policy_ids": [
               "policy-0",
               "policy-1",
@@ -69660,7 +69721,8 @@
             "checkpoint_digests": [
               "2222222222222222222222222222222222222222222222222222222222222222"
             ],
-            "display_name": "policy-5 / policy-6",
+            "display_name": "Policy 5 / Policy 6",
+            "display_side": "right",
             "policy_ids": [
               "policy-5",
               "policy-6"

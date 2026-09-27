@@ -9,11 +9,16 @@ or GPU speed; the composed collector owns proof that disabled work is omitted.
 Score-delta cases keep terminal kill feedback, net simultaneous deaths, ignore
 padding and use reset-local scores without changing native rewards. Feedback
 follows points, so a Red Zone death (two points) moves it by twice the
-coefficient, for or against the team.
+coefficient, for or against the team. Custom callbacks check scalar shape/dtype,
+round-based fades, per-agent values, padding and visible nonfinite failures.
+Callback resolution skips disabled work, records available code/source evidence,
+and leaves opaque configuration unknown without executing the reward.
 """
 
 from collections.abc import Callable
+from functools import partial
 from itertools import pairwise
+from pathlib import Path
 from typing import cast
 
 import jax
@@ -25,11 +30,12 @@ from tests.evaluation_fixtures import evaluation_env_config
 
 from marl_battlegrounds.autoreset import AutoReset
 from marl_battlegrounds.core import env as core
-from marl_battlegrounds.core.types import TASK_MODE_TDM, Action, EnvConfig
+from marl_battlegrounds.core.types import TASK_MODE_TDM, Action, EnvConfig, EnvState
 from marl_battlegrounds.environment import (
     Environment,
     EnvironmentState,
     EpisodeInfo,
+    TrainingFacts,
     make,
 )
 from marl_battlegrounds.episode_tracking import StepResult
@@ -40,8 +46,11 @@ from marl_battlegrounds.evaluation.policy_execution import (
     shared_policy,
 )
 from marl_battlegrounds.training.shaping import (
+    RewardFunction,
+    reward_adjustments,
     team_potential_shaping,
     team_score_delta_shaping,
+    validate_reward,
     validate_shaping,
 )
 
@@ -527,3 +536,199 @@ def test_public_actor_calls_and_task_trajectory_ignore_shaping(
             outputs.append((actions, updated, result))
         _equal(outputs[0], outputs[1])
         _equal(outputs[0], outputs[2])
+
+
+@pytest.fixture(scope="module")
+def reward_inputs(
+    game: tuple[Environment, EnvironmentState],
+) -> tuple[EnvState, TrainingFacts, EnvState]:
+    env = make("tdm", num_envs=5, metrics="none", training_facts=True)
+    before = game[1]
+    after = env.step(jax.random.key(170), before, _attack())
+    assert after[4].training_facts is not None
+    return before.core_state, after[4].training_facts, after[1].core_state
+
+
+def _custom_reward(
+    before: EnvState, facts: TrainingFacts, after: EnvState, progress: Array
+) -> Array:
+    steps = (after.step_count - before.step_count).astype(jnp.float32)
+    fade = jnp.maximum(jnp.float32(0), 1 - progress.astype(jnp.float32) / 10)
+    return fade * (
+        jnp.arange(10, dtype=jnp.float32) * steps
+        - facts.is_newly_dead_by_recipient.astype(jnp.float32)
+    )
+
+
+def test_custom_reward_is_per_agent_uses_rounds_and_keeps_terminal_feedback(
+    reward_inputs: tuple[EnvState, TrainingFacts, EnvState],
+) -> None:
+    before, facts, after = reward_inputs
+    one = (
+        _row(reward_inputs[0], 0),
+        _row(reward_inputs[1], 0),
+        _row(reward_inputs[2], 0),
+    )
+    validate_reward(_custom_reward, *one, jnp.int32(0))
+    apply = cast(
+        RewardFunction,
+        jax.jit(
+            jax.vmap(
+                partial(reward_adjustments, _custom_reward), in_axes=(0, 0, 0, None)
+            )
+        ),
+    )
+    full = apply(before, facts, after, jnp.int32(0))
+    faded = apply(before, facts, after, jnp.int32(5))
+    expected = np.broadcast_to(np.arange(10, dtype=np.float32), (5, 10)).copy()
+    expected -= np.asarray(facts.is_newly_dead_by_recipient, np.float32)
+    np.testing.assert_array_equal(full, expected)
+    np.testing.assert_array_equal(faded, expected * 0.5)
+    np.testing.assert_array_equal(apply(before, facts, after, jnp.int32(10)), 0)
+    assert bool(facts.is_newly_dead_by_recipient[0, 5])
+    assert float(full[0, 5]) == 4
+    assert full.dtype == jnp.float32
+    padded = facts._replace(has_transition=jnp.zeros(5, jnp.bool_))
+    np.testing.assert_array_equal(apply(before, padded, after, jnp.int32(0)), 0)
+
+
+@pytest.mark.parametrize("kind", ("shape", "dtype", "nonfinite", "zero"))
+def test_custom_reward_rejects_bad_contracts_and_preserves_real_nonfinite_values(
+    reward_inputs: tuple[EnvState, TrainingFacts, EnvState], kind: str
+) -> None:
+    one = (
+        _row(reward_inputs[0], 0),
+        _row(reward_inputs[1], 0),
+        _row(reward_inputs[2], 0),
+    )
+
+    def callback(
+        before: EnvState, facts: TrainingFacts, after: EnvState, progress: Array
+    ) -> Array:
+        del before, facts, after, progress
+        if kind == "shape":
+            return jnp.zeros(5, jnp.float32)
+        if kind == "dtype":
+            return jnp.zeros(10, jnp.int32)
+        return jnp.full(10, jnp.nan if kind == "nonfinite" else 0, jnp.float32)
+
+    if kind in ("shape", "dtype"):
+        with pytest.raises(ValueError if kind == "shape" else TypeError):
+            validate_reward(callback, *one, jnp.int32(0))
+        return
+    validate_reward(callback, *one, jnp.int32(0))
+    apply = cast(RewardFunction, jax.jit(partial(reward_adjustments, callback)))
+    actual = apply(*one, jnp.int32(0))
+    if kind == "nonfinite":
+        assert np.all(np.isnan(actual))
+    else:
+        np.testing.assert_array_equal(actual, 0)
+
+
+@pytest.mark.parametrize("progress", (jnp.float32(0), jnp.zeros(2, jnp.int32)))
+def test_custom_reward_requires_the_existing_scalar_int32_clock(
+    reward_inputs: tuple[EnvState, TrainingFacts, EnvState], progress: Array
+) -> None:
+    one = (
+        _row(reward_inputs[0], 0),
+        _row(reward_inputs[1], 0),
+        _row(reward_inputs[2], 0),
+    )
+    with pytest.raises((TypeError, ValueError), match="progress"):
+        validate_reward(_custom_reward, *one, progress)
+
+
+def test_reward_resolution_disabled_skips_import_and_evidence(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from marl_battlegrounds import _method_loading
+    from marl_battlegrounds.training.shaping import resolve_reward
+
+    def forbidden(reference: str) -> None:
+        pytest.fail("Disabled reward must not load a callback")
+
+    monkeypatch.setattr(_method_loading, "installed_callable", forbidden)
+    assert resolve_reward(None) == (None, None)
+
+
+def test_reward_resolution_records_code_source_and_clock_without_calling(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import hashlib
+    import importlib
+    import json
+    import sys
+
+    from marl_battlegrounds.training.shaping import resolve_reward
+
+    name = "marl_test_reward_source"
+    source = tmp_path / f"{name}.py"
+    source.write_text(
+        "GAIN = 0.5\n"
+        "def feedback(before, facts, after, progress):\n"
+        "    raise AssertionError('Reward must not run at import')\n"
+    )
+    monkeypatch.syspath_prepend(str(tmp_path))
+    monkeypatch.delitem(sys.modules, name, raising=False)
+    module = importlib.import_module(name)
+    sys.modules.pop(name)
+    monkeypatch.setitem(sys.modules, name, module)
+    try:
+        reward, evidence = resolve_reward(f"{name}:feedback")
+        assert reward is module.feedback
+        assert evidence is not None
+        assert (
+            evidence["source_digest"] == hashlib.sha256(source.read_bytes()).hexdigest()
+        )
+        assert evidence["progress_clock"] == "completed_training_rounds_before_step"
+        assert evidence["configuration_scope"] == "source_and_defaults_only"
+        assert evidence["external_state"] == "unknown"
+        hook = cast(dict[str, object], evidence["callable"])
+        assert hook["code_digest"] is not None
+        assert hook["closure_content"] == "none"
+        assert json.loads(json.dumps(evidence, allow_nan=False)) == evidence
+        assert resolve_reward(f"{name}:feedback")[1] == evidence
+        source.write_text(source.read_text().replace("GAIN = 0.5", "GAIN = 0.25"))
+        changed = resolve_reward(f"{name}:feedback")[1]
+        assert (
+            changed is not None
+            and changed["source_digest"] != evidence["source_digest"]
+        )
+        assert changed["callable"] == evidence["callable"]
+        with pytest.raises(ValueError, match="not callable"):
+            resolve_reward(f"{name}:GAIN")
+    finally:
+        sys.modules.pop(name, None)
+
+
+def test_reward_resolution_leaves_opaque_configuration_unknown(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from marl_battlegrounds import _method_loading
+    from marl_battlegrounds.training.shaping import resolve_reward
+
+    opaque = partial(_custom_reward, progress=jnp.int32(5))
+
+    def installed(reference: str) -> RewardFunction:
+        return cast(RewardFunction, opaque)
+
+    monkeypatch.setattr(_method_loading, "installed_callable", installed)
+    reward, evidence = resolve_reward("researcher:feedback")
+    assert reward is opaque
+    assert evidence is not None
+    assert evidence["source_digest"] is None
+    assert evidence["source_scope"] == "unknown"
+    hook = cast(dict[str, object], evidence["callable"])
+    assert hook["code_digest"] is None
+    assert hook["closure_content"] == "unknown"
+    assert evidence["external_state"] == "unknown"
+
+
+@pytest.mark.parametrize("reference", ("missing_colon", "module:nested.function", ""))
+def test_reward_resolution_uses_existing_installed_reference_rules(
+    reference: str,
+) -> None:
+    from marl_battlegrounds.training.shaping import resolve_reward
+
+    with pytest.raises(ValueError, match=r"module-level|module:function"):
+        resolve_reward(reference)

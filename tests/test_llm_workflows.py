@@ -142,6 +142,8 @@ def test_example_command_runs_and_closes_its_supplied_client(
                 format_name,
                 "--history-turns",
                 "2",
+                "--llm-slots",
+                "4",
                 "--games",
                 "2",
                 "--num-envs",
@@ -153,7 +155,7 @@ def test_example_command_runs_and_closes_its_supplied_client(
             ],
         )
         main()
-    assert len(model.generations()) == 20
+    assert len(model.generations()) == 4
     assert len(closed) == 1
     with pytest.raises(RuntimeError, match="closed"):
         closed[0].request("chat/completions", {})

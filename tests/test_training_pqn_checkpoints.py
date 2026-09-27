@@ -789,7 +789,8 @@ def test_a_failed_publication_keeps_the_pointer_and_a_new_attempt_saves(
             raise OSError("injected pointer failure")
         publish(path, value)
 
-    retry = {**_metadata(), "parent_checkpoint": original.name}
+    original_id = checkpoints.read_checkpoint_description(original)["checkpoint_id"]
+    retry = {**_metadata(), "parent_checkpoint": original_id}
     with monkeypatch.context() as patch:
         patch.setattr(checkpoints, "_atomic_json", fail_pointer)
         with pytest.raises(OSError, match="pointer failure"):
@@ -820,24 +821,26 @@ def test_a_failed_publication_keeps_the_pointer_and_a_new_attempt_saves(
         pqn=_CONFIG,
     )
     latest = json.loads((tmp_path / "latest_checkpoint.json").read_bytes())
-    assert latest["checkpoint_id"] == resumed.name != original.name
+    resumed_id = checkpoints.read_checkpoint_description(resumed)["checkpoint_id"]
+    assert latest["checkpoint_id"] == resumed_id != original_id
 
 
 def test_a_corrupt_ancestor_is_refused(tmp_path: Path) -> None:
     collection = _learner()[0]
     parent = _save(tmp_path, _uninterrupted().states[3])
+    parent_id = checkpoints.read_checkpoint_description(parent)["checkpoint_id"]
     child = save_checkpoint(
         tmp_path,
         collection,
         _uninterrupted().states[4],
-        metadata={**_metadata(), "parent_checkpoint": parent.name},
+        metadata={**_metadata(), "parent_checkpoint": parent_id},
         method="pqn_vdn",
         pqn=_CONFIG,
     )
     details = checkpoints.read_checkpoint_description(child)
     chain = io_helpers.checkpoint_ancestry(tmp_path, details)
-    assert list(chain) == [child.name, parent.name]
-    assert chain[parent.name]["counters"] == {
+    assert list(chain) == [details["checkpoint_id"], parent_id]
+    assert chain[parent_id]["counters"] == {
         "updates": 2,
         "env_steps": 40,
         "completed_blocks": 3,
@@ -851,7 +854,7 @@ def test_a_corrupt_ancestor_is_refused(tmp_path: Path) -> None:
     shutil.copytree(parent, copy)
     # A re-signed parent no longer matches its directory's identity.
     _resign(parent, lambda saved: saved["counters"].update({"learning_blocks": 0}))
-    with pytest.raises(ValueError, match="identities differ"):
+    with pytest.raises(ValueError, match="name and full identity differ"):
         io_helpers.checkpoint_ancestry(tmp_path, details)
     # An edited parent no longer matches its own signed identity.
     shutil.rmtree(parent)
@@ -882,12 +885,11 @@ def test_a_host_pin_refuses_to_resume_a_pqn_learner_mid_game(tmp_path: Path) -> 
     config = cast(dict[str, object], metadata["config"])
     config.update(pinned_opponent_share=0.5, pinned_opponent="Host")
     history = state.carry.history
-    # A real pinned lane needs a published snapshot. The refusal runs before
-    # the learner check, so two lanes are placed on slot 0 by hand.
+    # Force two unfinished games onto the separate external pin.
     mid_game = state._replace(
         carry=state.carry._replace(
             history=history._replace(
-                lane_snapshot=jnp.asarray((-1, 0, -1, 0), jnp.int32)
+                lane_snapshot=jnp.asarray((-1, -2, -1, -2), jnp.int32)
             )
         )
     )
@@ -914,10 +916,17 @@ def test_a_host_pin_refuses_to_resume_a_pqn_learner_mid_game(tmp_path: Path) -> 
             pqn=_CONFIG,
         )
     assert _files(tmp_path) == before
+    idle_state = state._replace(
+        carry=state.carry._replace(
+            history=history._replace(
+                lane_snapshot=jnp.full_like(history.lane_snapshot, -1)
+            )
+        )
+    )
     idle = save_checkpoint(
         tmp_path / "idle",
         collection,
-        state,
+        idle_state,
         metadata=metadata,
         method="pqn_vdn",
         pqn=_CONFIG,
@@ -1061,15 +1070,8 @@ def test_a_mappo_learner_pins_a_pqn_export(tmp_path: Path) -> None:
     assert record is not None and record["reference"] == str(export)
     carry = state.carry
 
-    def fill(bank: jax.Array, leaf: jax.Array) -> jax.Array:
-        return bank.at[0].set(leaf)
-
     history = carry.history._replace(
-        count=jnp.int32(1),
-        historical_variables=jax.tree.map(
-            fill, carry.history.historical_variables, carry.history.current_variables
-        ),
-        lane_snapshot=jnp.asarray((-1, 0, -1, 0), jnp.int32),
+        lane_snapshot=jnp.asarray((-1, -2, -1, -2), jnp.int32),
     )
     scan = cast(
         Callable[[TrainingCarry], tuple[TrainingCarry, TrainingRollout]],
@@ -1077,7 +1079,7 @@ def test_a_mappo_learner_pins_a_pqn_export(tmp_path: Path) -> None:
     )
     carry, rollout = scan(carry._replace(history=history))
     rows = rollout.transitions
-    pinned = np.asarray(rows.opponent_snapshot) == 0
+    pinned = np.asarray(rows.opponent_snapshot) == -2
     assert pinned.any() and (np.asarray(rows.opponent_update)[pinned] == -2).all()
     widths = {leaf.shape[-1] for leaf in jax.tree.leaves(carry.memory.team_b)}
     assert 512 in widths

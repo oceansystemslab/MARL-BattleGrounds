@@ -4,7 +4,9 @@ Run ``python examples/systems.py`` from an installed checkout. Set
 JAX_PLATFORMS=cpu for CPU correctness or JAX_PLATFORMS=cuda for the 32-game GPU
 example. The default creates no files. Add ``--output-dir PATH`` to save a short
 raw System run with optional policy-choice traces and a separate none-mode
-Policy evaluation. No training algorithm or network service is used. Learning
+Policy evaluation. Add ``--composition`` for a mixed team, an opponent pool,
+fixed-member evaluation and a short custom tournament. No training algorithm or
+network service is used. Learning
 values come from the same call that chooses each action and are never recorded.
 """
 
@@ -136,6 +138,57 @@ def record_examples(output_dir: Path) -> None:
     print("None-mode evaluation outcomes:", result.paths["episodes"])
 
 
+def composition_examples(output_dir: Path | None = None) -> None:
+    """Use ordinary team/pool Systems in a raw game, evaluation and tournament.
+
+    output_dir optionally saves three separate result folders. Two fixed-member
+    evaluations show how to obtain paired per-member results; the mixture itself
+    makes independent per-game choices. This short CPU example checks integration,
+    not learned behavior or performance. A host member needs no new runner.
+    """
+    host = marl_bgs.System("Local Host", host_act, execution="host")
+    deployed = marl_bgs.team(host, "random", slots=[[4], [0, 1, 2, 3]])
+    opponents = marl_bgs.pool({"random": 0.5, "tdm-alpha": 0.5})
+    env = marl_bgs.make("tdm", map_id=0, num_envs=32, max_steps=1, metrics="none")
+    observations, state = env.reset(jax.random.key(13))
+    memory = marl_bgs.init_systems(
+        deployed, opponents, observations, state, jax.random.key(14)
+    )
+    actions, memory, _ = marl_bgs.apply_systems(
+        deployed, opponents, memory, observations, state, jax.random.key(15)
+    )
+    env.step(jax.random.key(16), state, actions)
+    options: dict[str, Tree] = dict(
+        maps=[0], num_episodes=2, num_envs=2, max_steps=1, metrics="none"
+    )
+    mixture = marl_bgs.evaluate(
+        deployed,
+        opponents,
+        **options,
+        output_dir=output_dir / "mixture" if output_dir else None,
+    )
+    print("Mixture games:", mixture.table("episodes")["episode_id"])
+    for name in ("random", "tdm-alpha"):
+        folder = "fixed_" + name.replace("-", "_")
+        paired = marl_bgs.evaluate(
+            deployed,
+            name,
+            **options,
+            output_dir=output_dir / folder if output_dir else None,
+        )
+        print("Fixed opponent:", name, paired.table("episodes")["outcome"])
+    tournament = marl_bgs.run_tournament(
+        [deployed, opponents],
+        maps=[0],
+        episodes_per_pair=2,
+        num_envs=2,
+        max_steps=1,
+        metrics="none",
+        output_dir=output_dir / "tournament" if output_dir else None,
+    )
+    print("Tournament completed:", tournament.table("matches"))
+
+
 def main() -> None:
     """Run the three raw workflows, optionally saving separate recording examples.
 
@@ -147,6 +200,11 @@ def main() -> None:
     """
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--output-dir", type=Path, help="save both recording examples")
+    parser.add_argument(
+        "--composition",
+        action="store_true",
+        help="also run team/pool evaluation and a short custom tournament",
+    )
     args = parser.parse_args()
     env = marl_bgs.make(
         "tdm",
@@ -221,6 +279,8 @@ def main() -> None:
     print("Independent and host/JAX decisions completed for 32 games.")
     if args.output_dir is not None:
         record_examples(args.output_dir)
+    if args.composition:
+        composition_examples(args.output_dir)
 
 
 if __name__ == "__main__":

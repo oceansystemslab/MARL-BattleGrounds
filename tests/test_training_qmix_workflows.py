@@ -77,6 +77,7 @@ def _config(**changes: Any) -> Any:  # noqa: ANN401
     from marl_battlegrounds import training
 
     settings: dict[str, Any] = {
+        "keep_past": 0,
         "method": "qmix",
         "seed": 19048101,
         "num_envs": 4,
@@ -189,7 +190,9 @@ def test_plain_run_validates_selects_exports_loads_and_evaluates(
     loaded = training.load_system(result.selected_actor)
     assert float(loaded.variables.epsilon) == 0.0
     ancestor = checkpoints.read_checkpoint_description(
-        root / "checkpoints" / selected["metadata"]["checkpoint_id"]
+        checkpoints.artifact_directory(
+            root, "checkpoints", selected["metadata"]["checkpoint_id"]
+        )
     )
     assert tree_digest(loaded.variables.params) == ancestor["actor_digest"]
     evaluation = marl_bgs.evaluate(

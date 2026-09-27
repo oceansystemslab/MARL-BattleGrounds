@@ -8,9 +8,10 @@ Private continuation helpers give added work a fresh bounded stage proof while
 retaining original distributions, old proofs and cumulative experience.
 """
 
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, replace
 from fractions import Fraction
+from itertools import pairwise
 from types import MappingProxyType
 from typing import Any, NamedTuple, cast
 
@@ -33,12 +34,17 @@ from marl_battlegrounds.evaluation.recording_types import (
     TRACKING_ERROR_ACCOUNTING,
     TRACKING_ERROR_OVERFLOW,
 )
+from marl_battlegrounds.tasks import (
+    AgentClassName,
+    _roster_ids,  # pyright: ignore[reportPrivateUsage]
+)
 from marl_battlegrounds.training.distributions import validate_training_distribution
 
 _STAGES = 17
 _MAPS = 42
 _MAX_COUNT = int(np.iinfo(np.int32).max)
 _SCORE_THRESHOLDS = (*range(1, 11), 12, 15, 20)
+type Curriculum = bool | Sequence[Mapping[str, object]]
 
 
 class ScheduleArrays(NamedTuple):
@@ -48,14 +54,15 @@ class ScheduleArrays(NamedTuple):
     ----------
     stage_count : Array
         Int32 scalar active accounting stages: 1 without curriculum, 17 for
-        fresh team/map curriculum, 13 for fresh score curriculum, or the number
-        of remaining original distributions in a child segment (at most 17).
+        fresh team/map curriculum, 13 for fresh score curriculum, or 1..17
+        custom stages. A child holds only its remaining accounting stages.
     round_budgets, round_ends : Array
         Int32 (17,) local stage round budgets and absolute cumulative ends.
         Active budgets are positive. Unused budgets are zero and ends repeat
         total_rounds. The first child budget starts at round_offset.
     team_sizes : Array
-        Int32 (17,) equal team sizes in 1..5; unused rows contain 5.
+        Int32 (17,) equal sampled team sizes in 1..5; unused rows contain 5.
+        A nonzero roster_class_ids row supplies its own sizes instead.
     eligible_maps : Array
         Bool (17,42) masks in map order within each source block. Unused rows enable
         all maps. Each active pool contains at least one map.
@@ -70,14 +77,21 @@ class ScheduleArrays(NamedTuple):
         contain 20. Continuing games keep their previous threshold.
     round_offset, distribution_offset, distribution_count : Array or None
         Child segments use int32 scalars: cumulative rounds before this segment,
-        the first original distribution it requests, and the original number of
-        distributions. Stage budgets/proofs use local slots; distribution tables
-        and episode exposure keep their original slots. Ends and total_rounds
-        stay cumulative. Fresh schedules use None, preserving their array layout.
+        the first distribution it requests, and the total number of preserved
+        distributions across the lineage. Stage budgets/proofs use local slots;
+        distribution tables and episode exposure keep their original slots.
+        Ends and total_rounds stay cumulative. Fresh schedules use None,
+        preserving their array layout.
     history_threshold_count : Array or None
         Optional int32 scalar length of the active prefix of the 20 history
         thresholds. Inactive rows are zero and never trigger a capture. None
         keeps the original all-20 contract and its checkpoint array layout.
+
+    roster_class_ids : Array or None
+        Custom schedules use int32 (17,10), in Team A then Team B slot order.
+        Each explicit roster is compact, may repeat classes and may have unequal
+        team sizes. An all-zero row uses team_sizes and the usual random roster.
+        Boolean schedules keep None and their original numerical layout.
 
     Notes
     -----
@@ -98,6 +112,7 @@ class ScheduleArrays(NamedTuple):
     distribution_offset: Array | None = None
     distribution_count: Array | None = None
     history_threshold_count: Array | None = None
+    roster_class_ids: Array | None = None
 
 
 @dataclass(frozen=True)
@@ -111,8 +126,9 @@ class TrainingSchedule:
         its parent experience. continuation records the added budget separately.
     num_envs : int
         Positive even number of fixed environment lanes.
-    curriculum : bool
-        Whether to use the 17-stage starting recipe instead of one full stage.
+    curriculum : bool or sequence of mappings
+        False keeps one full stage and True keeps the built-in 17-stage recipe.
+        Custom stages are copied into immutable mappings, preserving their order.
     arrays : ScheduleArrays
         Dynamic numerical controls; pass these into compiled collection.
     rounding_report : Mapping[str, object]
@@ -133,6 +149,11 @@ class TrainingSchedule:
         offset, parent stage proof and new budget. Nested records are also frozen.
         Use _continuation_details for a JSON-ready copy. None means a fresh run.
 
+    history_capture_rounds : tuple[int, ...] or None
+        Optional explicit fresh-run capture targets. Empty disables explicit
+        captures; None keeps the original defaults. Use the checked helper
+        _with_history_capture_rounds rather than replacing numerical leaves.
+
     Notes
     -----
     Construct with make_training_schedule. This frozen host descriptor writes
@@ -142,17 +163,24 @@ class TrainingSchedule:
 
     total_env_steps: int
     num_envs: int
-    curriculum: bool
+    curriculum: Curriculum
     arrays: ScheduleArrays
     rounding_report: Mapping[str, object]
     score_threshold_curriculum: bool = False
     early_history_capture: bool = False
     continuation: Mapping[str, object] | None = None
+    history_capture_rounds: tuple[int, ...] | None = None
 
     @property
     def score_thresholds(self) -> tuple[int, ...]:
         """Return the ordered source-bank thresholds required by this schedule."""
-        return _SCORE_THRESHOLDS if self.score_threshold_curriculum else (20,)
+        count = int(
+            self.arrays.stage_count
+            if self.arrays.distribution_count is None
+            else self.arrays.distribution_count
+        )
+        values = np.asarray(self.arrays.score_thresholds)[:count]
+        return tuple(dict.fromkeys(int(v) for v in values))
 
 
 class TrainingProgress(NamedTuple):
@@ -183,9 +211,14 @@ class TrainingProgress(NamedTuple):
         Int32 (42,B) real transitions by producing source map. Collection owns
         these increments; the curriculum helper leaves them unchanged.
     opponent_starts, opponent_steps : Array
-        Int32 (21,B) first decisions and real transitions by opponent source:
-        current policy at row 0, then historical slots 0..19 at rows 1..20.
+        Int32 (C+2,B) first decisions and real transitions by stable identity.
+        C bounds total captures, not resident slots: row 0 current, row 1
+        permanent pin, and row capture_id+2 for historical copies.
         Collection owns these increments; the curriculum helper preserves them.
+    partner_used : Array or None
+        Bool (M,) for declared fixed partners that supplied at least one active,
+        living owned action on either team. None when partner training is off.
+        A declared but unused member does not become training exposure.
 
     Notes
     -----
@@ -205,13 +238,14 @@ class TrainingProgress(NamedTuple):
     map_steps: Array
     opponent_starts: Array
     opponent_steps: Array
+    partner_used: Array | None = None
 
 
 def make_training_schedule(
     *,
     total_env_steps: int,
     num_envs: int,
-    curriculum: bool = False,
+    curriculum: Curriculum = False,
     score_threshold_curriculum: bool = False,
     early_history_capture: bool = False,
 ) -> TrainingSchedule:
@@ -225,10 +259,16 @@ def make_training_schedule(
     num_envs : int
         Positive even Python integer; bool is rejected. Fixed lanes keep their
         default or exchanged spawn arrangement throughout training.
-    curriculum : bool, default=False
+    curriculum : bool or sequence of mappings, default=False
         False requests one 5v5 stage over all 42 maps. True requests sizes 1..5
         on map 0 at 4% each, then 5v5 on pools 0..1 through 0..11 at 20/11%
-        each, then 5v5 on all maps for the remaining 60%.
+        each, then 5v5 on all maps for the remaining 60%. A custom list has
+        1..17 stages. Each stage gives a positive share, nonempty distinct maps
+        from 0..41, and either team_size (1..5) or rosters with system/opponent
+        class-name lists. Explicit rosters permit repeated classes and unequal
+        sizes. Shares must sum to one. Optional score_threshold defaults to 20
+        and means the winning score, not a test for promotion. Custom stages
+        cannot be combined with score_threshold_curriculum.
     score_threshold_curriculum : bool, default=False
         Request K1 for 10% of transitions, K2..10 for 1/30 each, K12 and K15
         for 5% each, and K20 for 50%. All stages use canonical 5v5 and all 42
@@ -267,8 +307,8 @@ def make_training_schedule(
             raise TypeError(f"{name} must be a Python integer, not bool")
         if value <= 0:
             raise ValueError(f"{name} must be positive")
+    custom = None if type(curriculum) is bool else _custom_stages(curriculum)
     for name, value in (
-        ("curriculum", curriculum),
         ("score_threshold_curriculum", score_threshold_curriculum),
         ("early_history_capture", early_history_capture),
     ):
@@ -284,7 +324,9 @@ def make_training_schedule(
     if rounds > _MAX_COUNT:
         raise ValueError("per-lane total rounds must fit int32")
     shares = (
-        (Fraction(1, 10),)
+        tuple(Fraction(str(stage["share"])) for stage in custom)
+        if custom is not None
+        else (Fraction(1, 10),)
         + (Fraction(1, 30),) * 9
         + (Fraction(1, 20),) * 2
         + (Fraction(1, 2),)
@@ -308,7 +350,23 @@ def make_training_schedule(
     thresholds = np.full(_STAGES, 20, np.int32)
     if score_threshold_curriculum:
         thresholds[: len(_SCORE_THRESHOLDS)] = _SCORE_THRESHOLDS
-    if curriculum:
+    roster_ids = None
+    if custom is not None:
+        roster_ids = np.zeros((_STAGES, 10), np.int32)
+        for index, stage in enumerate(custom):
+            pools[index] = np.isin(
+                np.arange(_MAPS), cast(tuple[int, ...], stage["maps"])
+            )
+            thresholds[index] = cast(int, stage.get("score_threshold", 20))
+            if "team_size" in stage:
+                sizes[index] = cast(int, stage["team_size"])
+            else:
+                rosters = cast(Mapping[str, Sequence[AgentClassName]], stage["rosters"])
+                roster_ids[index] = (
+                    *_roster_ids(rosters["system"], name="system roster"),
+                    *_roster_ids(rosters["opponent"], name="opponent roster"),
+                )
+    elif curriculum:
         sizes[:5] = np.arange(1, 6, dtype=np.int32)
         pools[:16] = False
         pools[:5, 0] = True
@@ -316,7 +374,9 @@ def make_training_schedule(
             pools[index, : index - 3] = True
     for index in range(len(counts)):
         validate_training_distribution(
-            eligible_maps=pools[index], team_size=sizes[index]
+            eligible_maps=pools[index],
+            team_size=sizes[index],
+            roster_class_ids=None if roster_ids is None else roster_ids[index],
         )
     history_thresholds = [(rounds * i + 19) // 20 for i in range(1, 21)]
     if early_history_capture:
@@ -330,6 +390,7 @@ def make_training_schedule(
         jnp.asarray(rounds, jnp.int32),
         jnp.asarray(history_thresholds, jnp.int32),
         jnp.asarray(thresholds),
+        roster_class_ids=None if roster_ids is None else jnp.asarray(roster_ids),
     )
     report: Mapping[str, object] = MappingProxyType(
         {
@@ -342,6 +403,21 @@ def make_training_schedule(
             "rounding_rule": "Largest remainders; earlier stages win exact ties",
         }
     )
+    if custom is not None:
+        assert roster_ids is not None
+        report = MappingProxyType(
+            {
+                **report,
+                "stage_maps": tuple(
+                    cast(tuple[int, ...], stage["maps"]) for stage in custom
+                ),
+                "team_sizes": tuple(int(v) for v in sizes[: len(custom)]),
+                "roster_class_ids": tuple(
+                    tuple(int(v) for v in row) for row in roster_ids[: len(custom)]
+                ),
+                "score_thresholds": tuple(int(v) for v in thresholds[: len(custom)]),
+            }
+        )
     if score_threshold_curriculum:
         report = MappingProxyType(
             {
@@ -359,12 +435,78 @@ def make_training_schedule(
     return TrainingSchedule(
         total_env_steps,
         num_envs,
-        curriculum,
+        curriculum if custom is None else custom,
         arrays,
         report,
         score_threshold_curriculum,
         early_history_capture,
     )
+
+
+def _custom_stages(value: object) -> tuple[Mapping[str, object], ...]:
+    """Validate a stage list and copy its JSON values into immutable mappings.
+
+    Stages use positive finite shares summing exactly to one as decimal
+    fractions. Maps are training IDs 0..41. Roster names use the task owner's
+    validator; thresholds receive their depth-specific upper check when the
+    source bank is prepared. This helper reads no assets and changes no inputs.
+    """
+    if isinstance(value, (str, bytes)) or not isinstance(value, Sequence):
+        raise TypeError("curriculum must be bool or a sequence of stage mappings")
+    stages = cast(Sequence[object], value)
+    if not 1 <= len(stages) <= _STAGES:
+        raise ValueError("A custom curriculum needs 1..17 stages")
+    total = Fraction(0)
+    for index, raw in enumerate(stages):
+        if not isinstance(raw, Mapping):
+            raise TypeError(f"Curriculum stage {index} must be a mapping")
+        stage = cast(Mapping[str, Any], raw)
+        keys = set(stage)
+        if (
+            not {"share", "maps"} <= keys
+            or keys - {"share", "maps", "team_size", "rosters", "score_threshold"}
+            or ("team_size" in keys) == ("rosters" in keys)
+        ):
+            raise ValueError(
+                f"Curriculum stage {index} needs share, maps and exactly one of "
+                "team_size or rosters"
+            )
+        share = stage["share"]
+        if type(share) not in (int, float) or not 0 < share <= 1:
+            raise ValueError("Stage shares must be positive finite numbers")
+        total += Fraction(str(share))
+        raw_maps = stage["maps"]
+        if not isinstance(raw_maps, (list, tuple)):
+            raise ValueError("Stage maps must be a list of training IDs from 0..41")
+        maps = cast(Sequence[object], raw_maps)
+        if (
+            not maps
+            or any(type(item) is not int or not 0 <= item < _MAPS for item in maps)
+            or len(set(maps)) != len(maps)
+        ):
+            raise ValueError("Stage maps must be distinct training IDs from 0..41")
+        if "team_size" in stage:
+            size = stage["team_size"]
+            if type(size) is not int or not 1 <= size <= 5:
+                raise ValueError("Stage team_size must be a Python integer in 1..5")
+        else:
+            rosters = cast(Mapping[str, object], stage["rosters"])
+            if not isinstance(cast(object, rosters), Mapping) or set(rosters) != {
+                "system",
+                "opponent",
+            }:
+                raise ValueError("Stage rosters must name system and opponent")
+            for team in ("system", "opponent"):
+                _roster_ids(cast(Sequence[AgentClassName], rosters[team]), name=team)
+        threshold = stage.get("score_threshold", 20)
+        if type(threshold) is not int or not 1 <= threshold <= 2**24 - 4:
+            raise ValueError(
+                "Stage score_threshold is outside the supported score range"
+            )
+    if total != 1:
+        raise ValueError("Curriculum stage shares must sum to one")
+    frozen = _freeze_continuation({"stages": stages})
+    return cast(tuple[Mapping[str, object], ...], frozen["stages"])
 
 
 def _freeze_continuation(value: Mapping[str, object]) -> Mapping[str, object]:
@@ -419,6 +561,89 @@ def _continuation_details(schedule: TrainingSchedule) -> dict[str, Any] | None:
     return cast(dict[str, Any] | None, plain(schedule.continuation))
 
 
+def _distribution_schedule(
+    root: TrainingSchedule, changes: Sequence[Mapping[str, object]]
+) -> TrainingSchedule:
+    """Append declared child distributions without reusing historical stage IDs.
+
+    Each change names its segment, cumulative starting round, added whole-batch
+    budget and custom curriculum. At most 17 distributions fit across the whole
+    lineage. The latest change supplies the active accounting boundaries; old
+    map, roster and threshold rows remain available to unfinished games and
+    stored experience. This is host setup with no game reset or file writes.
+    """
+    current = root
+    count = int(root.arrays.stage_count)
+    previous_index = 0
+    previous_round = -1
+    for change in changes:
+        if not isinstance(cast(object, change), Mapping) or set(change) != {
+            "segment_index",
+            "round_offset",
+            "additional_env_steps",
+            "curriculum",
+        }:
+            raise ValueError("Changed curriculum declaration fields differ")
+        index, start, added = (
+            change["segment_index"],
+            change["round_offset"],
+            change["additional_env_steps"],
+        )
+        if (
+            type(index) is not int
+            or index <= previous_index
+            or type(start) is not int
+            or start < 0
+            or start < previous_round
+            or type(added) is not int
+            or added <= 0
+            or added % root.num_envs
+            or start + added // root.num_envs > _MAX_COUNT
+        ):
+            raise ValueError(
+                "Changed curriculum needs ordered valid segment boundaries"
+            )
+        stages = _custom_stages(change["curriculum"])
+        new = make_training_schedule(
+            total_env_steps=added, num_envs=root.num_envs, curriculum=stages
+        )
+        added_count = int(new.arrays.stage_count)
+        if count + added_count > _STAGES:
+            raise ValueError(
+                "Changed curriculum exceeds 17 distribution IDs across this lineage; "
+                "start a fresh run to use another stage table"
+            )
+
+        def append(
+            old: Array, values: Array, first: int = count, length: int = added_count
+        ) -> Array:
+            """Keep existing rows and place new controls in unused fixed slots."""
+            return old.at[first : first + length].set(values[:length])
+
+        previous_rosters = current.arrays.roster_class_ids
+        if previous_rosters is None:
+            previous_rosters = jnp.zeros((_STAGES, 10), jnp.int32)
+        assert new.arrays.roster_class_ids is not None
+        arrays = new.arrays._replace(
+            team_sizes=append(current.arrays.team_sizes, new.arrays.team_sizes),
+            eligible_maps=append(
+                current.arrays.eligible_maps, new.arrays.eligible_maps
+            ),
+            score_thresholds=append(
+                current.arrays.score_thresholds, new.arrays.score_thresholds
+            ),
+            roster_class_ids=append(previous_rosters, new.arrays.roster_class_ids),
+            round_ends=new.arrays.round_ends + jnp.int32(start),
+            total_rounds=new.arrays.total_rounds + jnp.int32(start),
+            distribution_offset=jnp.int32(count),
+            distribution_count=jnp.int32(count + added_count),
+        )
+        current = replace(root, arrays=arrays)
+        count += added_count
+        previous_index, previous_round = index, start
+    return current
+
+
 def _segment_arrays(
     root: TrainingSchedule,
     *,
@@ -426,6 +651,7 @@ def _segment_arrays(
     stop: int,
     thresholds: tuple[int, ...],
     threshold_count: int | None,
+    curriculum_changes: Sequence[Mapping[str, object]] = (),
 ) -> tuple[ScheduleArrays, Mapping[str, object]]:
     """Build one bounded suffix while keeping original distribution tables.
 
@@ -433,14 +659,27 @@ def _segment_arrays(
     thresholds is the complete 20-row absolute history table; threshold_count
     is its active prefix or None for all rows. The final distribution keeps
     extra work in its own slot. Return dynamic arrays and an immutable report;
-    no original array is changed and no random key is consumed.
+    no original array is changed and no random key is consumed. Optional child
+    curricula append source distributions, retaining their original IDs.
     """
+    root = _distribution_schedule(root, curriculum_changes)
     original_count = int(root.arrays.stage_count)
+    distribution_base = (
+        0
+        if root.arrays.distribution_offset is None
+        else int(root.arrays.distribution_offset)
+    )
+    distribution_count = (
+        original_count
+        if root.arrays.distribution_count is None
+        else int(root.arrays.distribution_count)
+    )
     original_ends = tuple(
         int(value) for value in np.asarray(root.arrays.round_ends)[:original_count]
     )
-    first = min(sum(end <= start for end in original_ends), original_count - 1)
-    ends = tuple(end for end in original_ends[first:-1] if start < end < stop)
+    local_first = min(sum(end <= start for end in original_ends), original_count - 1)
+    first = distribution_base + local_first
+    ends = tuple(end for end in original_ends[local_first:-1] if start < end < stop)
     ends = (*ends, stop)
     budgets = tuple(
         end - previous for previous, end in zip((start, *ends[:-1]), ends, strict=True)
@@ -455,7 +694,7 @@ def _segment_arrays(
         history_threshold_rounds=jnp.asarray(thresholds, jnp.int32),
         round_offset=jnp.int32(start),
         distribution_offset=jnp.int32(first),
-        distribution_count=jnp.int32(original_count),
+        distribution_count=jnp.int32(distribution_count),
         history_threshold_count=None
         if threshold_count is None
         else jnp.int32(threshold_count),
@@ -483,6 +722,7 @@ def _make_continuation_schedule(  # pyright: ignore[reportUnusedFunction]
     completed_rounds: int,
     additional_env_steps: int,
     history_threshold_rounds: tuple[int, ...] | None = None,
+    curriculum: Sequence[Mapping[str, object]] | None = None,
 ) -> TrainingSchedule:
     """Declare added whole-batch work after a parent's actual saved boundary.
 
@@ -501,6 +741,11 @@ def _make_continuation_schedule(  # pyright: ignore[reportUnusedFunction]
         sorted and positive, with at most 20 entries. Unused rows are zero.
         None preserves the parent's exact thresholds and active count. The
         checked collection boundary also proves that old snapshots remain bound.
+    curriculum : sequence of mappings or None, default=None
+        Optional replacement stage list for this child's additional budget.
+        It uses make_training_schedule's stage fields and appends distribution
+        IDs without changing old games. Old and new distributions together must
+        fit 17 rows. None continues the parent's existing stage boundaries.
 
     Returns
     -------
@@ -550,6 +795,11 @@ def _make_continuation_schedule(  # pyright: ignore[reportUnusedFunction]
             "curriculum": parent_schedule.curriculum,
             "score_threshold_curriculum": parent_schedule.score_threshold_curriculum,
             "early_history_capture": parent_schedule.early_history_capture,
+            **(
+                {}
+                if parent_schedule.history_capture_rounds is None
+                else {"history_capture_rounds": parent_schedule.history_capture_rounds}
+            ),
         }
         if previous is None
         else previous["root_schedule"]
@@ -586,13 +836,26 @@ def _make_continuation_schedule(  # pyright: ignore[reportUnusedFunction]
         )
     if history_threshold_rounds is not None:
         thresholds = (*thresholds, *((0,) * (20 - len(thresholds))))
+    changes: list[Mapping[str, object]] = (
+        [] if previous is None else list(previous.get("curriculum_changes", ()))
+    )
+    segment_index = 1 if previous is None else previous["segment_index"] + 1
+    if curriculum is not None:
+        changes.append(
+            {
+                "segment_index": segment_index,
+                "round_offset": completed_rounds,
+                "additional_env_steps": additional_env_steps,
+                "curriculum": _custom_stages(curriculum),
+            }
+        )
     declaration = {
-        "schema_version": 1,
+        "schema_version": 2 if changes else 1,
         "root_schedule": root,
         "root_rounding_report": dict(parent_schedule.rounding_report)
         if previous is None
         else previous["root_rounding_report"],
-        "segment_index": 1 if previous is None else previous["segment_index"] + 1,
+        "segment_index": segment_index,
         "round_offset": completed_rounds,
         "additional_env_steps": additional_env_steps,
         "history_threshold_rounds": thresholds,
@@ -612,6 +875,8 @@ def _make_continuation_schedule(  # pyright: ignore[reportUnusedFunction]
         },
         "parent_stage_proof": None,
     }
+    if changes:
+        declaration["curriculum_changes"] = changes
     return _build_continuation_schedule(declaration, require_parent_proof=False)
 
 
@@ -640,9 +905,10 @@ def _build_continuation_schedule(
         "parent_stage_proof",
     }
     if (
-        set(frozen) - {"learner"} != expected
+        set(frozen) - {"learner", "curriculum_changes"} != expected
         or type(frozen["schema_version"]) is not int
-        or frozen["schema_version"] != 1
+        or frozen["schema_version"] not in (1, 2)
+        or (frozen["schema_version"] == 2) != ("curriculum_changes" in frozen)
     ):
         raise ValueError("Unsupported continuation schedule declaration")
     root_record = frozen["root_schedule"]
@@ -656,9 +922,13 @@ def _build_continuation_schedule(
         "score_threshold_curriculum",
         "early_history_capture",
     }
-    if set(root_record) != root_keys:
+    if set(root_record) - {"history_capture_rounds"} != root_keys:
         raise ValueError("Continuation root schedule fields differ")
-    root = make_training_schedule(**cast(Any, dict(root_record)))
+    root_arguments = dict(root_record)
+    capture_rounds = root_arguments.pop("history_capture_rounds", None)
+    root = make_training_schedule(**cast(Any, root_arguments))
+    if capture_rounds is not None:
+        root = _with_history_capture_rounds(root, capture_rounds)
     if frozen["root_rounding_report"] != _freeze_continuation(root.rounding_report):
         raise ValueError(
             "Continuation original boundaries differ from the root schedule"
@@ -681,6 +951,20 @@ def _build_continuation_schedule(
     stop = start + added // root.num_envs
     if stop > _MAX_COUNT:
         raise ValueError("Cumulative continuation rounds must fit int32")
+    changes = frozen.get("curriculum_changes", ())
+    if not isinstance(changes, tuple) or (
+        frozen["schema_version"] == 2 and not changes
+    ):
+        raise ValueError("Changed curricula must be a nonempty ordered sequence")
+    changes = cast(tuple[Mapping[str, Any], ...], changes)
+    _distribution_schedule(root, changes)
+    for change in changes:
+        if change["segment_index"] > index or change["round_offset"] > start:
+            raise ValueError("A curriculum change is beyond this continuation boundary")
+        if change["segment_index"] == index and (
+            change["round_offset"] != start or change["additional_env_steps"] != added
+        ):
+            raise ValueError("Current curriculum change must match its child budget")
     thresholds = cast(tuple[int, ...], frozen["history_threshold_rounds"])
     count = frozen["history_threshold_count"]
     active = 20 if count is None else count
@@ -753,6 +1037,7 @@ def _build_continuation_schedule(
         stop=parent_stop,
         thresholds=cast(tuple[int, ...], thresholds),
         threshold_count=cast(int | None, count),
+        curriculum_changes=tuple(c for c in changes if c["segment_index"] < index),
     )
     if (
         int(parent_arrays.stage_count) != parent["stage_count"]
@@ -773,6 +1058,7 @@ def _build_continuation_schedule(
         stop=stop,
         thresholds=cast(tuple[int, ...], thresholds),
         threshold_count=cast(int | None, count),
+        curriculum_changes=changes,
     )
     return replace(
         root,
@@ -829,8 +1115,12 @@ def _check_parent_stage_proof(
                 "Continuation parent proof rows have invalid types or shapes"
             )
     history_mapping = np.asarray(checked_proof["history_threshold_to_snapshot"])
-    if np.any(history_mapping < -1) or np.any(history_mapping >= 20):
-        raise ValueError("Continuation parent history mapping is outside its slots")
+    if np.any(history_mapping < -1) or np.any(
+        history_mapping >= np.iinfo(np.int32).max
+    ):
+        raise ValueError(
+            "Continuation parent history mapping has invalid stable capture IDs"
+        )
     count = cast(int, parent["stage_count"])
     ends = np.asarray(parent["round_ends"])
     budgets = np.asarray(parent["round_budgets"])
@@ -872,6 +1162,51 @@ def _restore_continuation_schedule(
     return _build_continuation_schedule(declaration, require_parent_proof=True)
 
 
+def _with_history_capture_rounds(
+    schedule: TrainingSchedule, rounds: tuple[int, ...]
+) -> TrainingSchedule:
+    """Declare a fresh schedule's explicit captures, including an empty table.
+
+    rounds contains at most 20 strictly increasing positive full-round targets
+    within this schedule. The runner converts transition targets and validates
+    game-length spacing. None on the descriptor means the unchanged 20-point
+    default. Children already declare their pending absolute table through the
+    continuation owner and cannot be changed by this helper. No game runs.
+    """
+    if schedule.continuation is not None:
+        raise ValueError("Change child captures through its continuation declaration")
+    if (
+        not isinstance(cast(object, rounds), tuple)
+        or len(rounds) > 20
+        or any(
+            type(value) is not int or not 0 < value <= int(schedule.arrays.total_rounds)
+            for value in rounds
+        )
+        or any(a >= b for a, b in pairwise(rounds))
+    ):
+        raise ValueError(
+            "Capture rounds must be at most 20 increasing in-budget integers"
+        )
+    padding = (0,) * (20 - len(rounds))
+    return replace(
+        schedule,
+        history_capture_rounds=rounds,
+        rounding_report=MappingProxyType(
+            {
+                **schedule.rounding_report,
+                "history_thresholds": "Explicit capture targets"
+                if rounds
+                else "No explicit capture targets",
+                "history_capture_rounds": rounds,
+            }
+        ),
+        arrays=schedule.arrays._replace(
+            history_threshold_rounds=jnp.asarray((*rounds, *padding), jnp.int32),
+            history_threshold_count=jnp.int32(len(rounds)),
+        ),
+    )
+
+
 def _check_training_schedule(schedule: TrainingSchedule) -> None:
     """Reject a schedule whose arrays or report differ from its declaration.
 
@@ -892,6 +1227,8 @@ def _check_training_schedule(schedule: TrainingSchedule) -> None:
         if schedule.continuation is None
         else _restore_continuation_schedule(schedule.continuation)
     )
+    if schedule.continuation is None and schedule.history_capture_rounds is not None:
+        checked = _with_history_capture_rounds(checked, schedule.history_capture_rounds)
     if (
         (
             schedule.total_env_steps,
@@ -924,12 +1261,17 @@ def _check_training_schedule(schedule: TrainingSchedule) -> None:
 
 
 def _init_training_progress(  # pyright: ignore[reportUnusedFunction]
-    *, num_envs: int
+    *,
+    num_envs: int,
+    history_capture_capacity: int = 20,
+    opponent_members: int = 0,
+    partner_members: int = 0,
 ) -> TrainingProgress:
     """Create zeroed dynamic counters for fresh stage-zero games in B lanes.
 
     num_envs is a positive even Python integer already checked by setup. Return
-    TrainingProgress with fixed stage/map/history capacity; no content is read,
+    history_capture_capacity is the nonnegative maximum total capture count.
+    Return TrainingProgress with fixed stage/map/identity capacity; no content is read,
     no game is reset and no input is changed. Call once on the host, then carry
     the returned arrays through collection. Wrong batch values raise ValueError.
     """
@@ -937,6 +1279,13 @@ def _init_training_progress(  # pyright: ignore[reportUnusedFunction]
         raise ValueError("num_envs must be a positive even Python integer")
     if num_envs <= 0 or num_envs % 2:
         raise ValueError("num_envs must be a positive even Python integer")
+    if type(history_capture_capacity) is not int or history_capture_capacity < 0:
+        raise ValueError("history_capture_capacity must be a nonnegative integer")
+    if type(opponent_members) is not int or opponent_members < 0:
+        raise ValueError("opponent_members must be a nonnegative integer")
+    if type(partner_members) is not int or partner_members < 0:
+        raise ValueError("partner_members must be a nonnegative integer")
+    opponent_rows = history_capture_capacity + 2 + opponent_members
     return TrainingProgress(
         rounds=jnp.zeros((), jnp.int32),
         episode_stage=jnp.zeros(num_envs, jnp.int32),
@@ -946,8 +1295,11 @@ def _init_training_progress(  # pyright: ignore[reportUnusedFunction]
         completed_stage_counts=jnp.zeros((_STAGES, num_envs, 3), jnp.int32),
         stage_complete=jnp.zeros(_STAGES, jnp.bool_),
         map_steps=jnp.zeros((_MAPS, num_envs), jnp.int32),
-        opponent_starts=jnp.zeros((21, num_envs), jnp.int32),
-        opponent_steps=jnp.zeros((21, num_envs), jnp.int32),
+        opponent_starts=jnp.zeros((opponent_rows, num_envs), jnp.int32),
+        opponent_steps=jnp.zeros((opponent_rows, num_envs), jnp.int32),
+        partner_used=None
+        if not partner_members
+        else jnp.zeros(partner_members, jnp.bool_),
     )
 
 

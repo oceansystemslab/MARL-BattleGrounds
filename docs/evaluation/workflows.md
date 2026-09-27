@@ -142,6 +142,50 @@ unrounded ratings; examples must not fit them again. Headline standard deviation
 means game-to-game spread, not confidence. Missing values remain unavailable;
 none mode does not gain a headline merely because selected full rows exist.
 
+### Read Head-To-Head Results
+
+`EvaluationResult`, tournament results and `load_results(...)` share these calls:
+
+```python
+import marl_battlegrounds as marl_bgs
+
+result = marl_bgs.load_results("artifacts/my_saved_run")
+overall = result.head_to_head()
+by_map = result.head_to_head(by="map")
+by_spawn = result.head_to_head(by="spawn")
+matrix = result.opponent_matrix(metric="mean_point_margin")
+print(matrix["system_ids"], matrix["values"])
+```
+
+Each row names the focal System and opponent by exact saved identity, then gives
+games, wins, draws, losses, rates, mean points for and against, and mean point
+margin. Display names may repeat; they never merge different identities. Both
+directions appear. Recorded self-play with one identity appears once, from
+Team A's view. Canonical tournaments use their declared entrant IDs; other
+results use their recorded System registration IDs.
+
+These are descriptive averages: every completed game has equal weight. An
+unfinished run includes only its completed games. Unequal or missing matchup
+cells do not receive invented games. Matrix rows are focal Systems and columns
+are opponents in `system_ids` order. Unplayed cells are `NaN`, including an
+unplayed diagonal. The `games` matrix shows the actual comparison sizes.
+
+In the spawn view, `team_a` means the map's original Team A spawn bank and
+`team_b` means its original Team B bank. This describes the focal System's
+physical starting end, even when that System played as Team B. Custom maps
+without a map ID remain separated by their saved configuration ID. Historical
+records missing System identities or spawn choices reject the affected view
+with a clear message; missing point values remain unavailable.
+
+These calls work with `metrics="none"` because outcomes and native points are
+required results. They do not rebuild combat metrics or fit ratings. Overall
+completed tournament matchups may reuse their saved expected-score interval.
+It keeps its original scope, status and sampling assumptions; read the saved
+`matchup_results` table for those facts. Other intervals remain unavailable.
+Point-margin intervals are not estimated.
+Existing tournament rankings and joint Elo stay unchanged. The package CLI
+prints the same head-to-head games, W/D/L and point values.
+
 ## Use Your Own Method
 
 The [Systems example](../../examples/systems.py) runs a complete compiled
@@ -2259,3 +2303,115 @@ and keeps a selected-field refit and later test games separate. Failed or
 incomplete fields select no substitute members. This does not admit a release.
 See [Select A Population](population_selection.md) for the complete declaration,
 Python example, `select-population` command and failure behavior.
+
+
+## Compose Teams And Opponent Pools
+
+`team` and `pool` return ordinary `System` objects. Use them with the same
+`init_systems` / `apply_systems` raw loop, `evaluate` and `run_tournament` calls.
+Members may be live Systems, scalar Policies, built-in names, saved actors or
+trusted factory references. No learner or new runner is required.
+
+```python
+import marl_battlegrounds as marl_bgs
+
+researcher = marl_bgs.team("random", "tdm-alpha", slots=[[0, 1], [2, 3, 4]])
+opponents = marl_bgs.pool({"random": 0.25, "tdm-beta": 0.75})
+result = marl_bgs.evaluate(researcher, opponents, maps=[0], num_episodes=2)
+print(result.table("episodes"))
+```
+
+One team member defaults to all slots; five members default to slots 0 through
+4. Other counts need `slots`. Selectors also accept class names, such as
+`slots=["priest", ["mage", "warrior", "hunter", "rogue"]]`. A class name selects
+every matching actor in that game's roster. Each controlled active slot needs
+exactly one owner. Nested teams check only their incoming owned slots. A
+five-Policy System restricted to slots 3 and 4 keeps policies 3 and 4, their
+weights, memory and keys. It does not move policies 0 and 1 into those slots.
+
+`SystemInput.controlled_mask` is an optional Boolean `(B, 5)` field. `None` means
+all physically active slots. The constructor still accepts its original five
+arguments; tuple unpacking must account for the new sixth field. Library inputs
+supply an explicit mask. Composition preserves every permitted actor row,
+action mask and physical `active_mask`. Control selects whose action is kept;
+it does not grant access to another actor's private inputs or memory. Custom
+Systems must honor `valid` and actor information limits. Full-batch methods and
+custom memory reset hooks remain supported; composition never guesses a memory
+axis or packs opaque memory into selected lanes.
+
+A pool normalizes finite nonnegative shares with a positive total. It chooses
+one member when each game starts and retains that member until reset. Its
+`variables.members` stores separate member trees; `variables.weights` stores
+shares. Pass a replaced variables tree to `apply_systems` to update weights
+without rebuilding the System. New shares affect future choices only. Keep
+shapes and dtypes stable to reuse compiled work. Memory stores `choice` and
+separate `members`; learning outputs form a tuple in member order. Unassigned
+JAX learner outputs are zero arrays of the declared shape; use the choice and
+valid masks when consuming them. Unassigned host members return no learner
+values and make no action/provider calls.
+
+Singleton wrappers preserve the member's initialization and action keys.
+Additional generic members fold a fixed `MEMB` tag and their member index;
+pool selection uses a separate `POOL` tag. Scalar Policies retain physical-slot
+keys, including exact evaluator keys. Member weights and selectors are dynamic
+values. Changing the member layout may compile a new program. Host members
+receive their full NumPy input batch; JAX members keep batched device execution.
+Each member's existing resource scope owns its cleanup, including on failure.
+
+Saved component identities name the methods that actually supply retained
+actions. An unreported inner choice stays unknown; knowing the selected System
+does not identify a hidden internal policy. A mixture's two spawn-end games can
+choose different pool members. For paired results for each member, evaluate
+that fixed member separately:
+
+```python
+for opponent in ("random", "tdm-beta"):
+    result = marl_bgs.evaluate(researcher, opponent, maps=[0], num_episodes=2)
+    print(opponent, result.table("episodes"))
+```
+
+Run `JAX_PLATFORMS=cpu python examples/systems.py --composition` for the raw
+loop, evaluation, fixed-member comparisons and a custom tournament. Add
+`--output-dir PATH` to save the examples. These short checks demonstrate wiring;
+they do not establish learning quality or GPU speed.
+
+
+## Read Saved File Names
+
+New recording folders use readable snake_case names with the phase, available
+team names, UTC time and a short random suffix. If a generated name is already
+in use, the suffix grows. Creating a run never replaces another run. Use
+`resume_from` explicitly to continue an existing run. Read `run_id` from
+`run_details.json`; the directory name is a display name, not an identity check.
+Older folders continue to load under their original paths.
+
+Generated replay names start with the map, episode, seeds and readable Team A/B
+names. Their full content digest remains at the end so different replays cannot
+silently share a shortened identity. Only the display labels are shortened to
+fit the filesystem's filename limit. Replay publication keeps its existing
+exclusive-write and byte-identical-reuse checks. Explicit caller paths are not
+renamed. UI labels retain ordinary readable names; snake_case is for saved paths.
+
+
+### Measured Composition Cost
+
+A bounded development check on the internal RTX 5090 compared a recurrent MAPPO
+actor with `team(actor)` in the same public apply/step/reset loop. It used 32
+environments, 16 steps, an 8-step game cap, a Random opponent, metrics off and a
+10% allocator limit with preallocation disabled. Each call made 512 real
+transitions. Five alternating synchronized warm calls had medians of 110.7 ms
+for the actor and 111.2 ms for the team wrapper (about 4,625 and 4,604 transitions
+per second). Actions, physical state, memory and learning values matched exactly.
+Same-shaped weight changes caused no extra outer compilation.
+
+The compiler reported 9.0 MB of temporary storage for the direct route and
+11.3 MB for composition. Composition added 138 input bytes and 128 retained
+output bytes. Whole-probe peaks were 272.7 MB of allocator memory and 2.64 GB of
+host RSS, including both compiled programs. Compile times were 11.9 and 8.4
+seconds in this one check; they do not establish a general compile-speed result.
+
+A separate fixed-input actor-only scan showed larger relative wrapper overhead
+because its unchanged inputs allowed more work to be reused. The real-rollout
+numbers above do not describe larger mixtures, host providers, full training,
+sample efficiency or learned skill. The evidence supports keeping the existing
+shared execution route for this workload. It does not prove an optimal limit.

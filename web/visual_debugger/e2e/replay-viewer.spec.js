@@ -374,7 +374,7 @@ async function captureReplayTransportBaseline(page, viewport) {
     "false",
   );
   await expect(page.locator("#replay-frame-position")).toHaveText("Tick 0 / 5");
-  await expect(page.locator("#replay-playback-rate")).toHaveValue("1");
+  await expect(page.locator("#replay-playback-rate")).toHaveValue("0.5");
   await expect(page.locator("#replay-playback-rate option")).toHaveText([
     "0.25×",
     "0.50×",
@@ -386,7 +386,7 @@ async function captureReplayTransportBaseline(page, viewport) {
     "2.00×",
   ]);
   await expect(page.locator("#replay-transport-status")).toHaveText(
-    "Frame 0 / 5 · Tick 0 / 5 · 1.00× · SETTLED",
+    "Frame 0 / 5 · Tick 0 / 5 · 0.50× · SETTLED",
   );
   const layout = await transport.evaluate((element) => ({
     horizontalOverflow: element.scrollWidth - element.clientWidth,
@@ -1687,7 +1687,12 @@ test("one replay transport trajectory keeps static seeks, playback, rates, and r
   await expectReplayChoreographySettled(page);
   const frameOne = await currentReplayFrame(page);
   await expect(page.locator("#replay-transport-status")).toHaveText(
-    `Frame 1 / 5 · Tick 1 / 5 · Incoming Transition ${frameOne.incoming_transition_id} · 1.00× · SETTLED`,
+    `Frame 1 / 5 · Tick 1 / 5 · Incoming Transition ${frameOne.incoming_transition_id} · 0.50× · SETTLED`,
+  );
+
+  await page.locator("#replay-playback-rate").selectOption("1");
+  await expect(page.locator("#replay-transport-status")).toContainText(
+    "1.00× · SETTLED",
   );
 
   const postsBeforePreview = replayPosts.length;
@@ -3365,7 +3370,7 @@ test("all eight scenario identities and dense authoritative deaths render in bot
       for (const view of /** @type {const} */ (["researcher", "pov"])) {
         await installReplayView(page, view);
         await expect(page.locator("#match-team-b")).toContainText(
-          `tdm-scenario-${scenarioId}-controller-${variant}`,
+          `TDM Scenario ${scenarioId} ${variant.toUpperCase()} Controller`,
         );
         const identities = await page
           .locator(".roster-identity")
@@ -3639,9 +3644,9 @@ test("TDM scores and offline metric exports follow the cursor across POV changes
     await openReplay(page, viewer.url);
     await expect(page.locator("#match-task")).toContainText("Task mode: TDM");
     await expect(page.locator("#match-team-a")).toContainText(
-      "policy-0 / policy-1 / policy-2",
+      "Policy 0 / Policy 1 / Policy 2",
     );
-    await expect(page.locator("#match-team-b")).toContainText("policy-5 / policy-6");
+    await expect(page.locator("#match-team-b")).toContainText("Policy 5 / Policy 6");
     await expect(page.locator(".match-scoreboard__score")).toHaveText([
       "Score: 0/1",
       "Score: 0/1",

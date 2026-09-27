@@ -5,7 +5,8 @@ No ratings are fitted, no games are played and no official bundle is installed.
 A reuse run of a snapshot saved before the Red Zone rule (pins 14, 2, 3) reads
 its full reports with the schema-14 header and its metadata says
 metric_schema_version 14, on the saved and the in-memory route alike; a current
-snapshot uses schema 15 for both.
+snapshot uses schema 15 for both. Head-to-head views join reused game origins
+to their recorded entrants and agree between saved and in-memory readers.
 """
 
 # pyright: reportPrivateUsage=false
@@ -17,6 +18,7 @@ import sys
 from pathlib import Path
 from typing import Any
 
+import numpy as np
 import pytest
 
 from canonical_record_fixtures import build_record_bundle
@@ -433,3 +435,25 @@ assert 'marl_battlegrounds.evaluation.evaluate' not in sys.modules
         capture_output=True,
         text=True,
     )
+
+
+def test_head_to_head_joins_reused_origins_and_keeps_saved_memory_parity(
+    tmp_path: Path,
+) -> None:
+    from marl_battlegrounds.evaluation.results import SavedResults
+
+    path, manifest, records = _saved(tmp_path, mode="none")
+    saved = load_results(path)
+    view = CanonicalView(manifest, run_dir=None, memory={"_record_access": records})
+    memory = SavedResults(view.metadata, view)
+    for by in ("overall", "map", "spawn"):
+        left, right = saved.head_to_head(by), memory.head_to_head(by)
+        for name in left:
+            np.testing.assert_equal(left[name], right[name])
+        assert set(left["system_id"]) == {"fixture-00", "fixture-01", "fixture-02"}
+    overall = saved.head_to_head()
+    assert overall["games"].tolist() == [2] * 6
+    assert saved.head_to_head("spawn")["games"].tolist() == [1] * 12
+    matrix = saved.opponent_matrix("games")["values"]
+    np.testing.assert_equal(matrix, [[np.nan, 2, 2], [2, np.nan, 2], [2, 2, np.nan]])
+    assert not (path / "match_results.csv").exists()

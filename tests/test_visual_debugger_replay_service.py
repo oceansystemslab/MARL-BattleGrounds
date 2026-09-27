@@ -2950,10 +2950,12 @@ def test_agent_presentations_exclude_privileged_fields_and_canonical_values(
     ]
     teams = cast(list[dict[str, object]], match_summary["teams"])
     assert [team["team_id"] for team in teams] == [1, 2]
+    assert [team["display_side"] for team in teams] == ["left", "right"]
     for team in teams:
         assert set(team) == {
             "team_id",
             "display_name",
+            "display_side",
             "policy_ids",
             "checkpoint_digests",
         }

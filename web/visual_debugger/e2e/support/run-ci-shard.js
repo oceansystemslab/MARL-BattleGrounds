@@ -69,8 +69,8 @@ export function validatedEnvironment(value, label) {
 }
 
 /**
- * Read and check e2e/ci-shards.json: eight profiles that together name every
- * spec file. A profile without test_titles runs its files whole. A profile with
+ * Read and check e2e/ci-shards.json: one profile naming every spec file. A
+ * profile without test_titles runs its files whole. A profile with
  * test_titles runs, across all of its files, only tests whose full title ends
  * with one entry after a space or at its start, so it must list the titles of
  * every test it should run; adding or renaming a test in such a file needs a
@@ -92,7 +92,7 @@ export function validatedCiManifest() {
     value.schema_version !== 3 ||
     !("shards" in value) ||
     !Array.isArray(value.shards) ||
-    value.shards.length !== 8
+    value.shards.length !== 1
   ) {
     throw new Error("e2e/ci-shards.json has an invalid root contract");
   }
@@ -165,15 +165,10 @@ export function playwrightEnvironmentForShard(shard, inherited) {
 
 /** @param {string} value */
 function parseShard(value) {
-  const match = /^(\d+)\/8$/u.exec(value);
-  if (match === null) {
-    throw new Error("browser shard must use N/8");
+  if (value !== "1/1") {
+    throw new Error("browser shard must use 1/1");
   }
-  const index = Number.parseInt(match[1], 10);
-  if (index < 1 || index > 8) {
-    throw new Error("browser shard requires 1 <= N <= 8");
-  }
-  return index - 1;
+  return 0;
 }
 
 if (fileURLToPath(import.meta.url) === path.resolve(process.argv[1] ?? "")) {

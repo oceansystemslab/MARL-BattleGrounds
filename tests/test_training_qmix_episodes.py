@@ -10,8 +10,10 @@ the row's active slots, and each batch reward is task plus shaping. Samples
 include small rosters and more than one curriculum stage. The learner's
 per-block exposure counts by stage, source row and opponent row equal a
 separate NumPy count of the left row of every used TD pair in samples redrawn
-with the learner's keys. The shortened episodes come from an explicit test
-bank, so the verified-content check of validate_qmix_learner is not run here.
+with the learner's keys. Opponent rows keep self, the permanent pin and stable
+capture IDs separate, with capacity taken from the configured history bound.
+The shortened episodes come from an explicit test bank, so the verified-content
+check of validate_qmix_learner is not run here.
 Software contracts only; no learning or speed is claimed.
 """
 
@@ -101,14 +103,26 @@ def _samples(block: Block) -> list[learner.QMIXReplayRow]:
 
 
 def _check_exposure(block: Block, bank: int) -> tuple[np.ndarray[Any, Any], ...]:
-    counts = [np.zeros(17, np.int64), np.zeros(bank, np.int64), np.zeros(21, np.int64)]
+    capture_capacity = int(block[0].carry.history.capture_capacity)
+    counts = [
+        np.zeros(17, np.int64),
+        np.zeros(bank, np.int64),
+        np.zeros(capture_capacity + 2, np.int64),
+    ]
     for sample in _samples(block):
         valid = np.asarray(sample.valid)
         pair = valid[:, :-1] & valid[:, 1:]
+        snapshot = np.asarray(sample.opponent_snapshot)
+        # This run has no named opponents: -1 is self, -2 is the permanent
+        # pin, and nonnegative IDs name captures, not reusable bank slots.
+        assert np.all((snapshot[valid] >= -2) & (snapshot[valid] < capture_capacity))
+        opponent_row = np.where(
+            snapshot == -1, 0, np.where(snapshot == -2, 1, snapshot + 2)
+        )
         labels = (
             np.asarray(sample.episode_stage),
             np.asarray(sample.source_index),
-            np.asarray(sample.opponent_snapshot) + 1,
+            opponent_row,
         )
         for bins, label in zip(counts, labels, strict=True):
             np.add.at(bins, label[:, :-1][pair], 1)

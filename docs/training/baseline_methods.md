@@ -934,3 +934,51 @@ quarter route. These collection measurements do not establish a net whole-study
 speedup; final calibration must price the actual source. Raw results, source
 identities, the explicit paired engineering state transfer and limits are in
 `qualification/adaptive-capacity-report.md` under the study artifact root.
+
+## Start A New Learner From Saved Actor Weights
+
+Set `TrainConfig(initial_actor="run/actors/saved_actor", ...)` to start a fresh
+run from compatible built-in actor weights. Keep the method, input scale and
+spawn frame equal to the export. The path may also name a full learner
+checkpoint, but this operation imports only its actor. To keep the full learner,
+use `extend_training(result.final_checkpoint, ...)` instead.
+
+All four PPO methods get fresh critics, optimizer state and normalization.
+QMIX copies the actor into both online and target Q networks and creates fresh,
+equal mixers. PQN copies actor parameters and BatchNorm statistics. All methods
+start fresh memory, counters and experience stores and keep their normal initial
+exploration rules. The new run keeps the source identity and known protected
+controller exposure. Unknown exposure remains unknown.
+
+The weights are loaded before output is opened. Incompatible methods, actor
+schemas, input scales, frames, shapes or values fail there. Ordinary resume
+restores the saved learner; it never loads `initial_actor` again. These limits
+apply to copying built-in weights, not to valid external Systems as opponents
+or in researcher-owned learning loops.
+
+
+## Learner Slots And Actor Sharing
+
+All six learners support fixed `learner_slots` beside frozen partners. Physical
+roster membership stays unchanged. Only the learner's active slots enter its
+losses, targets and statistics. Dead actors contribute no policy loss; they
+remain part of their method's physical state and value semantics. An actor group
+with no learner samples keeps its parameters, optimizer moments and actor
+statistics unchanged.
+
+PPO retains individual reward adjustments. QMIX and PQN use one team objective:
+the native team reward plus the mean custom adjustment over learner-owned active
+slots, plus enabled team shaping. Frozen partners supply actions, not trainable
+utilities. This supports mixed teams without claiming independent per-agent
+objectives for a team-reward method.
+
+Set `parameter_sharing="all"`, `"class"` or `"none"` in the method's normal config.
+The default shares actor weights across the team. Class mode shares by class;
+none keeps separate physical-slot actors. Every actor retains its own recurrent
+memory. Checkpoints and actor exports record the mode; loading and actor-only
+warm starts check it. Critics and mixers retain their existing method ownership.
+
+The [training guide](README.md#train-with-frozen-partners) and
+[partner example](../../examples/partner_training.py) cover the complete workflow.
+Mask, update and recovery checks establish software behavior, not learned skill
+or sample-efficiency improvements.

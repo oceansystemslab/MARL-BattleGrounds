@@ -14,6 +14,7 @@ import io
 import json
 import math
 import os
+import re
 from collections import ChainMap
 from collections.abc import Callable, Iterable, Mapping, Sequence
 from contextlib import ExitStack
@@ -429,6 +430,53 @@ def _replay_summaries(packets: ReplayPackets) -> dict[int, tuple[int, int, int, 
     return result
 
 
+def _new_run_directory(
+    root: Path, phase: str, policies: dict[str, object] | None
+) -> tuple[str, Path]:
+    """Reserve a readable new run name without replacing an existing directory.
+
+    root is the caller's output parent. phase and optional Team A/B names affect
+    only the bounded display prefix. The full random token remains in run_id;
+    the displayed token starts at 12 characters and grows on a name collision.
+    Exclusive mkdir is the final authority. Existing runs and their IDs remain
+    unchanged. Exhausting the full token raises FileExistsError.
+    """
+
+    def label(value: object, limit: int = 24) -> str:
+        """Keep a short ASCII snake_case label separate from saved identity."""
+        return (re.sub(r"[^a-z0-9]+", "_", str(value).lower()).strip("_") or "unknown")[
+            :limit
+        ].rstrip("_")
+
+    names: list[str] = []
+    for team_name in ("team_a", "team_b"):
+        member = (policies or {}).get(team_name)
+        if member is None:
+            continue
+        name = (
+            cast(dict[str, object], member).get(
+                "name", cast(dict[str, object], member).get("policy_id", team_name)
+            )
+            if isinstance(member, dict)
+            else getattr(member, "name", member)
+        )
+        names.append(label(name))
+    prefix = label(phase) + ("_" + "_vs_".join(names) if names else "")
+    timestamp = datetime.now(UTC)
+    token = uuid4().hex
+    run_id = timestamp.strftime("%Y%m%dT%H%M%S") + "-" + token
+    for length in (12, 16, 24, 32):
+        candidate = root / f"{prefix}_{timestamp:%Y%m%d_%H%M%S}_{token[:length]}"
+        try:
+            candidate.mkdir()
+        except FileExistsError:
+            continue
+        return run_id, candidate
+    raise FileExistsError(
+        "Generated run directory already exists; no files were replaced"
+    )
+
+
 class RunWriter:
     """Own one durable run directory for episode tables and selected replays.
 
@@ -436,6 +484,9 @@ class RunWriter:
     ----------
     output_dir : str or pathlib.Path, optional
         Parent directory for a new uniquely named run. Supply this or resume_from.
+        Generated names use the phase, available team names, UTC time and a short
+        random suffix in snake_case. Collisions lengthen the suffix; no run is
+        overwritten. Read the exact run identity from run_details.json.
     resume_from : str or pathlib.Path, optional
         Existing run directory to recover. Its metric/input schema must match.
         Saved start/source relationships are checked before table recovery.
@@ -566,11 +617,7 @@ class RunWriter:
                     "output_dir names an existing run; use resume_from instead"
                 )
             root.mkdir(parents=True, exist_ok=True)
-            run_id = (
-                datetime.now(UTC).strftime("%Y%m%dT%H%M%S") + "-" + uuid4().hex[:12]
-            )
-            self.run_dir = root / run_id
-            self.run_dir.mkdir()
+            run_id, self.run_dir = _new_run_directory(root, phase, policies)
             self._details: dict[str, Any] = {
                 "schema_version": RUN_SCHEMA_VERSION,
                 "run_id": run_id,

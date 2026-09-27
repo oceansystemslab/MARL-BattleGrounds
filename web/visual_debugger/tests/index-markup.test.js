@@ -304,6 +304,7 @@ test("replay transport exposes the exact CP8 controls, rates, and truthful help"
     /id="replay-last-button"[^>]*aria-label="End replay tick"[^>]*>End<\/button>/u,
   );
   const rateOptions = elementBody(markup, "replay-playback-rate", "select");
+  assert.match(rateOptions, /<option value="0\.5" selected>0\.50×<\/option>/u);
   assert.deepEqual(
     [
       ...rateOptions.matchAll(

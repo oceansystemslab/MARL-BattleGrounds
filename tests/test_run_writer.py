@@ -7,9 +7,12 @@ sampling facts, LLM summaries and links from model decisions to durable games.
 import csv
 import json
 import os
+import re
 import stat
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Literal, NamedTuple, cast
+from uuid import UUID
 
 import jax
 import jax.numpy as jnp
@@ -837,3 +840,51 @@ def test_host_call_evidence_and_game_attempt_publish_at_one_boundary(
         resumed.flush()
         evidence = cast(dict[str, Any], resumed.host_evidence["llm"])
         assert evidence["attempts"]["restart"] == {"calls": 9}
+
+
+def test_generated_run_names_are_readable_and_extend_colliding_suffixes(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class FixedTime(datetime):
+        @classmethod
+        def now(cls, tz: object = None) -> datetime:
+            return datetime(2026, 9, 27, 12, 30, 0, tzinfo=UTC)
+
+    tokens = iter((UUID("a" * 12 + "b" * 20), UUID("a" * 12 + "c" * 20)))
+    monkeypatch.setattr(run_writer, "datetime", FixedTime)
+    monkeypatch.setattr(run_writer, "uuid4", lambda: next(tokens))
+    policies: dict[str, object] = {"team_a": "Research Model", "team_b": "tdm-alpha"}
+    with RunWriter(tmp_path, policies=policies) as first:
+        original = first.paths["run_details"].read_bytes()
+        with RunWriter(tmp_path, policies=policies) as second:
+            assert (
+                first.run_dir.name
+                == "evaluation_research_model_vs_tdm_alpha_20260927_123000_" + "a" * 12
+            )
+            assert second.run_dir.name.endswith("a" * 12 + "c" * 4)
+            assert first.run_id != second.run_id
+            assert first.run_dir.name != first.run_id
+            assert re.fullmatch(r"[a-z0-9_]+", second.run_dir.name)
+            assert first.paths["run_details"].read_bytes() == original
+    with RunWriter(resume_from=first.run_dir, policies=policies) as resumed:
+        assert resumed.run_id == first.run_id
+
+
+def test_exhausted_generated_run_name_never_overwrites_existing_paths(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class FixedTime(datetime):
+        @classmethod
+        def now(cls, tz: object = None) -> datetime:
+            return datetime(2026, 9, 27, 12, 30, 0, tzinfo=UTC)
+
+    monkeypatch.setattr(run_writer, "datetime", FixedTime)
+    monkeypatch.setattr(run_writer, "uuid4", lambda: UUID("a" * 32))
+    for length in (12, 16, 24, 32):
+        path = tmp_path / ("evaluation_20260927_123000_" + "a" * length)
+        path.write_text("Existing owner")
+    with pytest.raises(FileExistsError, match="no files were replaced"):
+        RunWriter(tmp_path)
+    assert all(path.read_text() == "Existing owner" for path in tmp_path.iterdir())

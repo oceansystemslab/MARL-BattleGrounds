@@ -1,8 +1,8 @@
 """Check frozen training opponents, update boundaries and native System execution.
 
 CPU proofs cover independent opponent streams, the 80/20 reset distribution,
-the optional pinned first-update share (zero traces today's exact program;
-positive shares match a scalar-key oracle and declared frequencies), immutable
+the separate permanent pin, rolling-copy retirement and stable capture IDs,
+actual capture spacing, dynamic copy weights, zero-capacity play, immutable
 complete actor variables, shared result normalization, selected memory resets,
 stochastic initialization limits and untrained MAPPO on public inputs. These
 tests do not train a learner or establish GPU cost or learned competence.
@@ -47,6 +47,7 @@ from marl_battlegrounds.training.opponents import (
     assign_opponents,
     init_opponent_history,
     make_opponent_system,
+    publication_valid,
     refresh_opponents,
 )
 
@@ -152,13 +153,20 @@ def public_setup() -> tuple[Environment, Observations, EnvironmentState]:
     return env, observations, state
 
 
-def _bank(*, batch: int = 4, count: int = 3) -> OpponentHistory:
-    history = init_opponent_history(_variables(), num_envs=batch)
+def _bank(*, batch: int = 4, count: int = 3, pin: bool = False) -> OpponentHistory:
+    history = init_opponent_history(_variables(), num_envs=batch, pin_first_update=pin)
     return history._replace(
         count=jnp.int32(count),
+        eligible=jnp.arange(21) < count,
+        captured_ids=jnp.where(jnp.arange(21) < count, jnp.arange(21), -1).astype(
+            jnp.int32
+        ),
+        next_capture_id=jnp.int32(max(count, 0)),
+        pinned_variables=_variables(99, 7) if pin else None,
+        pinned_update=jnp.int32(1 if pin else -1),
         historical_variables={
-            "weight": jnp.arange(20, dtype=jnp.int32),
-            "inference": jnp.arange(20, dtype=jnp.int32) + 5,
+            "weight": jnp.arange(21, dtype=jnp.int32),
+            "inference": jnp.arange(21, dtype=jnp.int32) + 5,
         },
     )
 
@@ -167,7 +175,7 @@ def test_empty_bank_has_no_draw_and_reserves_only_capacity_axis() -> None:
     variables = {"weights": jnp.arange(6, dtype=jnp.float32).reshape(2, 3)}
     history = init_opponent_history(variables, num_envs=4)
     assert history.current_variables["weights"] is variables["weights"]
-    assert history.historical_variables["weights"].shape == (20, 2, 3)
+    assert history.historical_variables["weights"].shape == (21, 2, 3)
     assert not np.any(history.historical_variables["weights"])
     np.testing.assert_array_equal(history.lane_snapshot, -np.ones(4))
     np.testing.assert_array_equal(history.threshold_to_snapshot, -np.ones(20))
@@ -237,7 +245,7 @@ def test_pinned_share_reaches_the_traced_program_only_when_positive() -> None:
 def test_pinned_draws_match_independent_scalar_key_oracle(
     count: int, legacy: bool
 ) -> None:
-    history = _bank(count=count)
+    history = _bank(count=count, pin=True)
     root = jax.random.PRNGKey(5) if legacy else jax.random.key(5)
     keys = training_keys(root, jnp.arange(4, dtype=jnp.int32), stream="opponent")
     mask = jnp.asarray((True, True, False, True))
@@ -249,9 +257,9 @@ def test_pinned_draws_match_independent_scalar_key_oracle(
         if not bool(selected):
             expected.append(-1)
         elif chance < np.float32(0.1):
-            expected.append(0)
-        elif chance < np.float32(0.1 + 0.2) and count > 1:
-            expected.append(int(jax.random.randint(slot_key, (), 1, count)))
+            expected.append(-2)
+        elif chance < np.float32(0.1 + 0.2):
+            expected.append(int(jax.random.randint(slot_key, (), 0, count)))
         else:
             expected.append(-1)
     np.testing.assert_array_equal(result.lane_snapshot, expected)
@@ -261,22 +269,22 @@ def test_pinned_draws_match_independent_scalar_key_oracle(
 def test_seeded_pinned_frequencies_match_declared_shares() -> None:
     draw = _jit(partial(assign_opponents, pinned_share=0.1))
     result = draw(
-        _bank(batch=20_000, count=4),
+        _bank(batch=20_000, count=4, pin=True),
         jnp.ones(20_000, jnp.bool_),
         jax.random.split(jax.random.key(93), 20_000),
     )
-    shares = np.bincount(np.asarray(result.lane_snapshot) + 1, minlength=5) / 20_000
-    assert 0.68 < shares[0] < 0.72
-    assert 0.085 < shares[1] < 0.115
-    assert np.all((shares[2:] > 0.055) & (shares[2:] < 0.08))
+    shares = np.bincount(np.asarray(result.lane_snapshot) + 2, minlength=6) / 20_000
+    assert 0.085 < shares[0] < 0.115
+    assert 0.68 < shares[1] < 0.72
+    assert np.all((shares[2:] > 0.04) & (shares[2:] < 0.06))
     single = draw(
-        _bank(batch=20_000, count=1),
+        _bank(batch=20_000, count=1, pin=True),
         jnp.ones(20_000, jnp.bool_),
         jax.random.split(jax.random.key(94), 20_000),
     )
     values = np.asarray(single.lane_snapshot)
-    assert set(np.unique(values).tolist()) <= {-1, 0}
-    assert 0.88 < np.mean(values == -1) < 0.92
+    assert set(np.unique(values).tolist()) <= {-2, -1, 0}
+    assert 0.68 < np.mean(values == -1) < 0.72
 
 
 def test_empty_bank_draws_nothing_even_with_a_pinned_share() -> None:
@@ -392,7 +400,7 @@ def test_each_five_percent_update_can_fill_twenty_unique_slots() -> None:
     np.testing.assert_array_equal(events.slot, np.arange(20))
     np.testing.assert_array_equal(history.threshold_to_snapshot, np.arange(20))
     np.testing.assert_array_equal(
-        history.historical_variables["weight"], np.arange(1, 21)
+        history.historical_variables["weight"][:20], np.arange(1, 21)
     )
 
 
@@ -555,8 +563,7 @@ def test_weight_history_count_and_assignments_change_without_retracing(
     keys = jax.random.split(jax.random.key(99), 4)
     compiled(history, memory, keys)
     compiled(
-        history._replace(
-            count=jnp.int32(3),
+        _bank(count=3)._replace(
             current_variables=_variables(7),
             lane_snapshot=jnp.asarray((1, -1, 2, 0), jnp.int32),
             historical_variables=jax.tree.map(_plus_one, history.historical_variables),
@@ -848,3 +855,402 @@ def test_untrained_mappo_matches_public_permitted_inputs_and_keeps_rows_private(
         assert np.all(
             np.asarray(inputs.action_mask.move_mask[lane])[np.arange(5), selected]
         )
+
+
+def test_rotation_protects_both_teams_and_keeps_stable_capture_ids() -> None:
+    schedule = make_training_schedule(total_env_steps=400, num_envs=4, curriculum=False)
+    arrays = schedule.arrays._replace(
+        history_threshold_rounds=jnp.pad(
+            jnp.arange(10, 61, 10, dtype=jnp.int32), (0, 14)
+        ),
+        history_threshold_count=jnp.int32(6),
+    )
+    history = init_opponent_history(
+        _variables(), num_envs=4, keep_past=2, minimum_capture_rounds=10
+    )
+    refresh = _jit(refresh_opponents)
+    for index, rounds in enumerate((10, 20, 30), 1):
+        if index == 2:
+            history = history._replace(
+                lane_snapshot=jnp.asarray((0, -1, -1, -1), jnp.int32)
+            )
+        history, event = refresh(
+            history,
+            _variables(rounds, rounds + 1),
+            completed_rounds=jnp.int32(rounds),
+            update_index=jnp.int32(index),
+            schedule=arrays,
+        )
+        assert bool(event.created) and int(event.capture_id) == index - 1
+    np.testing.assert_array_equal(history.eligible, (False, True, True))
+    assert int(history.historical_variables["weight"][0]) == 10
+    assert int(history.lane_snapshot[0]) == 0
+    previous = history
+    history, event = refresh(
+        history,
+        _variables(40),
+        completed_rounds=jnp.int32(40),
+        update_index=jnp.int32(4),
+        schedule=arrays,
+    )
+    assert not bool(event.created) and not bool(history.error)
+    assert int(history.current_variables["weight"]) == 40
+    _tree_equal(history.historical_variables, previous.historical_variables)
+    history = history._replace(lane_snapshot=jnp.full(4, -1, jnp.int32))
+    partners = jnp.asarray((True, False, False))
+    assert bool(
+        publication_valid(
+            history,
+            completed_rounds=jnp.int32(50),
+            update_index=jnp.int32(5),
+            schedule=arrays,
+            live_slots=partners,
+        )
+    )
+    history, event = refresh(
+        history,
+        _variables(50),
+        completed_rounds=jnp.int32(50),
+        update_index=jnp.int32(5),
+        schedule=arrays,
+        live_slots=partners,
+    )
+    assert not bool(event.created) and not bool(history.error)
+    history, event = refresh(
+        history,
+        _variables(60, 61),
+        completed_rounds=jnp.int32(60),
+        update_index=jnp.int32(6),
+        schedule=arrays,
+        live_slots=jnp.zeros(3, jnp.bool_),
+    )
+    assert bool(event.created) and int(event.capture_id) == 3 and int(event.slot) == 0
+    assert int(event.rounds) == 60 and int(event.update_index) == 6
+    assert int(history.historical_variables["inference"][0]) == 61
+    np.testing.assert_array_equal(history.eligible, (True, False, True))
+    np.testing.assert_array_equal(history.captured_ids, (3, 1, 2))
+    np.testing.assert_array_equal(history.threshold_to_snapshot[:6], (0, 1, 2, 3, 3, 3))
+    assert history.historical_variables["weight"].shape == (3,)
+    assert int(history.count) == 3
+
+
+def test_recurring_capture_uses_actual_time_and_keeps_newest_window() -> None:
+    schedule = make_training_schedule(total_env_steps=400, num_envs=4, curriculum=False)
+    arrays = schedule.arrays._replace(history_threshold_count=jnp.int32(0))
+    history = init_opponent_history(
+        _variables(),
+        num_envs=4,
+        keep_past=2,
+        minimum_capture_rounds=10,
+        capture_interval_rounds=10,
+    )
+    refresh = _jit(refresh_opponents)
+    captures: list[tuple[int, int]] = []
+    for index, rounds in enumerate(range(8, 97, 8), 1):
+        history, event = refresh(
+            history,
+            _variables(rounds, rounds + 1),
+            completed_rounds=jnp.int32(rounds),
+            update_index=jnp.int32(index),
+            schedule=arrays,
+        )
+        assert not bool(history.error)
+        if bool(event.created):
+            captures.append((int(event.capture_id), int(event.rounds)))
+        assert np.count_nonzero(history.eligible) <= 2
+    assert captures == [(0, 16), (1, 32), (2, 48), (3, 64), (4, 80), (5, 96)]
+    assert set(np.asarray(history.captured_ids)[np.asarray(history.eligible)]) == {4, 5}
+    assert set(np.asarray(history.captured_rounds)[np.asarray(history.eligible)]) == {
+        80,
+        96,
+    }
+    assert history.historical_variables["weight"].shape == (3,)
+    assert int(history.next_capture_id) == 6
+
+
+def test_explicit_capture_waits_for_minimum_gap_without_rejecting_updates() -> None:
+    schedule = make_training_schedule(total_env_steps=80, num_envs=4, curriculum=False)
+    arrays = schedule.arrays._replace(
+        history_threshold_rounds=jnp.pad(jnp.asarray((1, 2), jnp.int32), (0, 18)),
+        history_threshold_count=jnp.int32(2),
+    )
+    history = init_opponent_history(
+        _variables(), num_envs=4, keep_past=1, minimum_capture_rounds=10
+    )
+    events: list[bool] = []
+    for index, rounds in enumerate((1, 2, 11), 1):
+        history, event = _jit(refresh_opponents)(
+            history,
+            _variables(rounds),
+            completed_rounds=jnp.int32(rounds),
+            update_index=jnp.int32(index),
+            schedule=arrays,
+        )
+        events.append(bool(event.created))
+        assert not bool(history.error)
+        assert int(history.current_variables["weight"]) == rounds
+    assert events == [True, False, True]
+    np.testing.assert_array_equal(history.threshold_to_snapshot[:2], (0, 1))
+    np.testing.assert_array_equal(history.captured_rounds, (1, 11))
+
+
+def test_zero_history_preserves_separate_first_update_pin_and_executes_it(
+    public_setup: tuple[Environment, Observations, EnvironmentState],
+) -> None:
+    env, observations, state = public_setup
+    schedule = make_training_schedule(total_env_steps=80, num_envs=4, curriculum=False)
+    history = init_opponent_history(
+        _variables(), num_envs=4, keep_past=0, pin_first_update=True
+    )
+    refresh = _jit(refresh_opponents)
+    for index in (1, 2):
+        history, event = refresh(
+            history,
+            _variables(index * 3, index),
+            completed_rounds=jnp.int32(index),
+            update_index=jnp.int32(index),
+            schedule=schedule.arrays,
+        )
+        assert not bool(event.created) and not bool(history.error)
+    assert history.historical_variables["weight"].shape == (0,)
+    _tree_equal(history.pinned_variables, _variables(3, 1))
+    assert int(history.pinned_update) == 1 and int(history.next_capture_id) == 0
+    keys = jax.random.split(jax.random.key(77), 4)
+    chosen = _jit(partial(assign_opponents, pinned_share=0.8))(
+        history, jnp.ones(4, jnp.bool_), keys
+    )
+    assert not bool(chosen.error)
+    assert set(np.asarray(chosen.lane_snapshot)) <= {-2, -1}
+    history = history._replace(lane_snapshot=jnp.asarray((-2, -1, -2, -1), jnp.int32))
+    wrapped = make_opponent_system(_actor())
+    assert wrapped.init is not None
+    inputs = env.policy_inputs(observations, state, team=1)
+    memory = _jit(wrapped.init)(history, inputs, keys)
+    actual = _jit(wrapped.apply)(history, memory, inputs, keys)
+    for lane in range(4):
+        variables = (
+            history.pinned_variables if lane % 2 == 0 else history.current_variables
+        )
+        expected = _apply(
+            variables, _row(memory, lane), _row(inputs, lane), keys[lane : lane + 1]
+        )
+        _tree_equal(_row(actual.actions, lane), expected.actions)
+    empty = init_opponent_history(_variables(), num_envs=4, keep_past=0)
+    empty, event = refresh(
+        empty,
+        _variables(9),
+        completed_rounds=jnp.int32(1),
+        update_index=jnp.int32(1),
+        schedule=schedule.arrays,
+    )
+    selected = assign_opponents(empty, jnp.ones(4, jnp.bool_), keys, past_share=1.0)
+    assert not bool(event.created) and not bool(selected.error)
+    np.testing.assert_array_equal(selected.lane_snapshot, -np.ones(4))
+
+
+def test_dynamic_copy_weights_change_choices_without_retracing() -> None:
+    history = _bank(count=3)
+    keys = jax.random.split(jax.random.key(87), 4)
+    traces: list[int] = []
+
+    def draw(value: OpponentHistory, weights: Array) -> OpponentHistory:
+        traces.append(1)
+        return assign_opponents(
+            value,
+            jnp.ones(4, jnp.bool_),
+            keys,
+            past_share=jnp.float32(1),
+            past_weights=weights,
+        )
+
+    compiled = _jit(draw)
+    weights = jnp.zeros(21, jnp.float32)
+    first = compiled(history, weights.at[1].set(1))
+    second = compiled(history, weights.at[2].set(1))
+    retired = compiled(
+        history._replace(eligible=history.eligible.at[1].set(False)),
+        weights.at[1].set(1),
+    )
+    assert len(traces) == 1
+    np.testing.assert_array_equal(first.lane_snapshot, np.ones(4))
+    np.testing.assert_array_equal(second.lane_snapshot, np.full(4, 2))
+    np.testing.assert_array_equal(retired.lane_snapshot, -np.ones(4))
+    invalid = compiled(history, weights.at[1].set(float("nan")))
+    assert bool(invalid.error)
+    _tree_equal(invalid._replace(error=history.error), history)
+
+
+def test_external_pin_and_reused_slots_have_distinct_stable_counter_rows() -> None:
+    from marl_battlegrounds.training.opponents import (
+        opponent_counter_row,
+        opponent_identity,
+    )
+
+    history = init_opponent_history(
+        _variables(), num_envs=4, keep_past=1, external_pin=True
+    )
+    schedule = make_training_schedule(total_env_steps=80, num_envs=4).arrays
+    for index in range(1, 6):
+        history, event = refresh_opponents(
+            history,
+            _variables(index),
+            completed_rounds=jnp.int32(index),
+            update_index=jnp.int32(index),
+            schedule=schedule,
+        )
+        assert bool(event.created) and not bool(history.error)
+    assert history.historical_variables["weight"].shape == (2,)
+    slot = int(np.flatnonzero(np.asarray(history.captured_ids) == 4)[0])
+    history = history._replace(
+        lane_snapshot=jnp.asarray([-1, -2, slot, slot], jnp.int32)
+    )
+    identities, versions = _jit(opponent_identity)(history)
+    np.testing.assert_array_equal(identities, [-1, -2, 4, 4])
+    np.testing.assert_array_equal(versions, [5, -2, 5, 5])
+    np.testing.assert_array_equal(opponent_counter_row(identities), [0, 1, 6, 6])
+    empty = init_opponent_history(
+        _variables(), num_envs=4, keep_past=0, external_pin=True
+    )
+    chosen = assign_opponents(
+        empty,
+        jnp.ones(4, jnp.bool_),
+        jax.random.split(jax.random.key(5), 4),
+        pinned_share=0.8,
+        past_share=0.0,
+    )
+    assert not bool(chosen.error)
+    assert -2 in np.asarray(chosen.lane_snapshot)
+
+
+def test_named_order_counts_only_actual_starts_and_updates_future_choices() -> None:
+    from marl_battlegrounds.training.opponents import (
+        configure_opponent_selection,
+        opponent_selection_names,
+        select_opponents,
+    )
+
+    assert opponent_selection_names({"self": 2, "script": 1}) == ("self", "script")
+    assert opponent_selection_names(["script", "self", "script"]) == ("script", "self")
+    invalid_values: tuple[object, ...] = (
+        {},
+        [],
+        {"self": -1},
+        {"self": 0},
+        {"self": float("nan")},
+    )
+    for invalid in invalid_values:
+        with pytest.raises(ValueError):
+            opponent_selection_names(invalid)
+    history = init_opponent_history(
+        _variables(), num_envs=4, keep_past=0, external_pin=True
+    )
+    settings = configure_opponent_selection(
+        ("left", "right"), history, ["left", "self", "right"]
+    )
+    choose = _jit(select_opponents)
+    keys = jax.random.split(jax.random.key(7), 4)
+    history, settings = choose(history, settings, jnp.ones(4, jnp.bool_), keys)
+    np.testing.assert_array_equal(history.lane_snapshot, [-2, -1, -2, -2])
+    np.testing.assert_array_equal(settings.choices, [0, 0, 1, 0])
+    assert int(settings.game_starts) == 4
+    history, settings = choose(
+        history, settings, jnp.asarray([False, True, False, True]), keys
+    )
+    np.testing.assert_array_equal(history.lane_snapshot, [-2, -1, -2, -2])
+    np.testing.assert_array_equal(settings.choices, [0, 0, 1, 1])
+    assert int(settings.game_starts) == 6
+    before = history, settings
+    history, settings = choose(history, settings, jnp.zeros(4, jnp.bool_), keys)
+    _tree_equal((history, settings), before)
+    changed = configure_opponent_selection(
+        ("left", "right"), history, ["right", "self"], previous=settings
+    )
+    history, changed = choose(
+        history, changed, jnp.asarray([True, False, False, False]), keys
+    )
+    assert int(changed.choices[0]) == 1
+    assert int(changed.game_starts) == 7
+    weighted = configure_opponent_selection(
+        ("left", "right"), history, {"right": 1}, previous=changed
+    )
+    history, weighted = choose(history, weighted, jnp.ones(4, jnp.bool_), keys)
+    np.testing.assert_array_equal(history.lane_snapshot, [-2] * 4)
+    np.testing.assert_array_equal(weighted.choices, [1] * 4)
+
+
+def test_generic_past_weights_bind_capture_ids_and_new_copies_default_uniform() -> None:
+    from marl_battlegrounds.training.opponents import (
+        configure_opponent_selection,
+        select_opponents,
+    )
+
+    history = init_opponent_history(
+        _variables(), num_envs=2, keep_past=2, capture_interval_rounds=1
+    )
+    schedule = make_training_schedule(total_env_steps=20, num_envs=2).arrays
+    for index in (1, 2):
+        history, event = refresh_opponents(
+            history,
+            _variables(index),
+            completed_rounds=jnp.int32(index),
+            update_index=jnp.int32(index),
+            schedule=schedule,
+        )
+        assert bool(event.created)
+    settings = configure_opponent_selection((), history, {"past": 1}, past={0: 1, 1: 0})
+    keys = jax.random.split(jax.random.key(91), 2)
+    selected, _ = _jit(select_opponents)(
+        history, settings, jnp.ones(2, jnp.bool_), keys
+    )
+    np.testing.assert_array_equal(selected.captured_ids[selected.lane_snapshot], [0, 0])
+    history, event = refresh_opponents(
+        history,
+        _variables(3),
+        completed_rounds=jnp.int32(3),
+        update_index=jnp.int32(3),
+        schedule=schedule,
+    )
+    assert int(event.capture_id) == 2
+    selected, _ = _jit(select_opponents)(
+        history, settings, jnp.ones(2, jnp.bool_), keys
+    )
+    # ID 0 retired, ID 1 has zero weight, and new ID 2 gets the default weight.
+    np.testing.assert_array_equal(selected.captured_ids[selected.lane_snapshot], [2, 2])
+    with pytest.raises(ValueError, match="eligible"):
+        configure_opponent_selection((), history, {"past": 1}, past={0: 1})
+
+
+def test_all_external_games_skip_native_actor_work(
+    public_setup: tuple[Environment, Observations, EnvironmentState],
+) -> None:
+    from marl_battlegrounds.evaluation.policy_execution import system_inputs
+
+    _, observations, state = public_setup
+    calls: list[int] = []
+
+    def note(value: Array) -> None:
+        calls.append(int(value))
+
+    def counted(
+        variables: Tree, memory: Array, inputs: SystemInput, keys: Array
+    ) -> SystemOutput:
+        jax.debug.callback(note, jnp.sum(inputs.valid))
+        return _apply(variables, memory, inputs, keys)
+
+    actor, pinned = replace(_actor(), apply=counted), _actor()
+    history = init_opponent_history(
+        actor.variables, num_envs=4, keep_past=0, external_pin=True
+    )._replace(lane_snapshot=jnp.full(4, -2, jnp.int32))
+    wrapper = make_opponent_system(actor, pinned=pinned)
+    inputs = system_inputs(observations, state, team=1)
+    keys = jax.random.split(jax.random.key(99), 4)
+    assert wrapper.init is not None
+    variables = (history, pinned.variables, ())
+    memory = wrapper.init(variables, inputs, keys)
+    output = _jit(wrapper.apply)(variables, memory, inputs, keys)
+    jax.block_until_ready(output)
+    jax.effects_barrier()
+    assert calls == []
+    _tree_equal(output.next_memory[0], memory[0])
+    expected = pinned.apply(pinned.variables, memory[1], inputs, keys)
+    _tree_equal(output.actions, expected.actions)

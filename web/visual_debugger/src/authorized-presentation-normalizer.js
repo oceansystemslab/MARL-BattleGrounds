@@ -5433,6 +5433,18 @@ export async function normalizeAuthorizedPresentationFrameV1(value) {
   const semantic = validateSemanticFrame(frame);
   const match = frame.match_summary;
   if (match != null) {
+    const sides = match.teams.map(
+      (/** @type {Record<string, any>} */ team) => team.display_side ?? null,
+    );
+    if (
+      !(
+        sides.every((/** @type {unknown} */ side) => side === null) ||
+        (sides[0] === "left" && sides[1] === "right") ||
+        (sides[0] === "right" && sides[1] === "left")
+      )
+    ) {
+      invalid("Match display sides must be opposite or both unavailable.");
+    }
     const roster =
       frame.researcher_space?.roster_agents ??
       frame.current_endpoint?.scene?.agents ??

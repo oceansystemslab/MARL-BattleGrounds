@@ -34,7 +34,14 @@ def test_train_cli_calls_shared_function(
     ) -> runner.TrainResult:
         calls.append((configuration, kwargs))
         return runner.TrainResult(
-            tmp_path, tmp_path / "actor", None, 8, 1, "complete", ()
+            tmp_path,
+            tmp_path / "actor",
+            None,
+            8,
+            1,
+            "complete",
+            (),
+            tmp_path / "checkpoints" / "final",
         )
 
     monkeypatch.setattr(runner, "train", fake_train)
@@ -62,7 +69,14 @@ def test_resume_cli_does_not_invent_settings(
     def fake_train(configuration: object, **kwargs: object) -> runner.TrainResult:
         calls.append((configuration, kwargs))
         return runner.TrainResult(
-            tmp_path, tmp_path / "actor", None, 8, 1, "complete", ()
+            tmp_path,
+            tmp_path / "actor",
+            None,
+            8,
+            1,
+            "complete",
+            (),
+            tmp_path / "checkpoints" / "final",
         )
 
     monkeypatch.setattr(runner, "train", fake_train)
@@ -92,7 +106,14 @@ def test_train_cli_passes_a_qmix_config_to_the_shared_function(
         del kwargs
         calls.append(configuration)
         return runner.TrainResult(
-            tmp_path, tmp_path / "actor", None, 192, 3, "complete", ()
+            tmp_path,
+            tmp_path / "actor",
+            None,
+            192,
+            3,
+            "complete",
+            (),
+            tmp_path / "checkpoints" / "final",
         )
 
     monkeypatch.setattr(runner, "train", fake_train)
@@ -132,7 +153,14 @@ def test_train_cli_passes_a_pqn_config_to_the_shared_function(
         del kwargs
         calls.append(configuration)
         return runner.TrainResult(
-            tmp_path, tmp_path / "actor", None, 176, 20, "complete", ()
+            tmp_path,
+            tmp_path / "actor",
+            None,
+            176,
+            20,
+            "complete",
+            (),
+            tmp_path / "checkpoints" / "final",
         )
 
     monkeypatch.setattr(runner, "train", fake_train)
@@ -227,7 +255,14 @@ def test_extension_cli_calls_owner_with_relative_panel(
     def extend(**arguments: object) -> runner.TrainResult:
         calls.append(arguments)
         return runner.TrainResult(
-            tmp_path, tmp_path / "actor", None, 12, 2, "complete", ()
+            tmp_path,
+            tmp_path / "actor",
+            None,
+            12,
+            2,
+            "complete",
+            (),
+            tmp_path / "checkpoints" / "final",
         )
 
     monkeypatch.setattr(runner, "extend_training", extend)

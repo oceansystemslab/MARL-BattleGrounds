@@ -2,6 +2,8 @@
 
 New panels retain any valid System or Policy and its normal M8 registration.
 Tasks preserve frozen method identities, paired schedules and durable M8 passes.
+Live candidates use those same registrations; custom map and roster conditions
+are recorded before evaluation. Repeated names get distinct panel labels.
 The learner never enters this module. New tasks keep fixed batches and live
 clients in process; historical two-actor panels keep their original protocol.
 Every new task records the Team Deathmatch Red Zone depth its games use (task
@@ -20,10 +22,12 @@ import argparse
 import json
 import math
 import os
+import re
 import subprocess
 import sys
 import time
 from collections.abc import Callable, Mapping, Sequence
+from copy import deepcopy
 from dataclasses import dataclass, field
 from fractions import Fraction
 from functools import lru_cache
@@ -36,7 +40,7 @@ from marl_battlegrounds.evaluation.sampling_evidence import (
     method_sampling_fact,
     summarize_sampling_evidence,
 )
-from marl_battlegrounds.tasks import DEFAULT_TDM_RED_ZONE_DEPTH
+from marl_battlegrounds.tasks import DEFAULT_TDM_RED_ZONE_DEPTH, AgentClassName
 from marl_battlegrounds.training.analysis import (
     _KILL_COLUMNS,  # pyright: ignore[reportPrivateUsage]
     _atomic_text,  # pyright: ignore[reportPrivateUsage]
@@ -48,6 +52,7 @@ from marl_battlegrounds.training.analysis import (
 if TYPE_CHECKING:
     from marl_battlegrounds.core.types import EnvConfig
     from marl_battlegrounds.evaluation.evaluate import EpisodeSpec
+    from marl_battlegrounds.evaluation.policy_execution import Policy, System
 
 Record = dict[str, Any]
 EventCallback = Callable[[Record], None]
@@ -371,6 +376,7 @@ def run_validation_declaration(
     panel: FrozenPanel | None,
     *,
     continuation: Mapping[str, Any] | None = None,
+    deployment: Mapping[str, Any] | None = None,
 ) -> Record:
     """Resolve one run's exact validation points and expected task settings.
 
@@ -379,7 +385,9 @@ def run_validation_declaration(
     parent's small validation declaration, learner boundary rules and optional
     changes.validation. Parent absolute targets and effective roots are kept by
     default; child final is always included. Explicit env_steps replaces future
-    targets only. Returned JSON-ready facts belong in run and checkpoint metadata.
+    targets only. deployment optionally fixes partner registrations, learner
+    slots and physical conditions; None keeps historical bare-task bytes. Returned
+    JSON-ready facts belong in run and checkpoint metadata.
 
     This host-only helper runs no games and writes nothing. It rejects unknown
     changes, invalid roots/counts, old targets and incompatible historical root
@@ -533,6 +541,11 @@ def run_validation_declaration(
         "roots": roots,
         **pairs,
         "red_zone_depth": config.get("red_zone_depth"),
+        **(
+            {"deployment": _checked_deployment(deployment)}
+            if deployment is not None
+            else {}
+        ),
         **flags,
     }
 
@@ -556,7 +569,10 @@ def saved_validation_declaration(
     if not isinstance(saved, Mapping):
         raise ValueError("Saved validation declaration must be an object")
     expected = run_validation_declaration(
-        run["config"], panel, continuation=run.get("continuation")
+        run["config"],
+        panel,
+        continuation=run.get("continuation"),
+        deployment=run.get("validation_deployment"),
     )
     if _digest(dict(cast(Mapping[str, Any], saved))) != _digest(expected):
         raise ValueError("Saved validation declaration differs from its frozen inputs")
@@ -576,7 +592,8 @@ def declared_panel_task(
 
     declaration is run_validation_declaration's saved result and panel is its
     checked frozen panel. Actor fields identify the verified originating learner.
-    purpose is routine, initialization or confirmation. Schema 1 keeps fixed
+    purpose is routine, initialization or confirmation. An optional deployment
+    also fixes partners and physical conditions. Schema 1 keeps fixed
     roots and old task hashes. Return panel_task_description's complete task;
     mismatched panels, malformed roots or unsupported purposes raise ValueError.
     No file or model is read and no game runs.
@@ -607,6 +624,12 @@ def declared_panel_task(
         ],
         root_seed=roots[purpose] if panel.schema_version == 2 else None,
         red_zone_depth=declaration.get("red_zone_depth"),
+        deployment=declaration.get("deployment"),
+        **{
+            key: declaration["deployment"][key]
+            for key in ("maps", "system_roster", "opponent_roster")
+            if key in declaration.get("deployment", {})
+        },
     )
 
 
@@ -618,12 +641,15 @@ def selection_validation_results(
     declaration: Mapping[str, Any],
     panel: FrozenPanel,
     final_checkpoint_id: str,
+    rule: str = "saved",
 ) -> tuple[list[Record], list[Record], tuple[str, ...]]:
     """Join checked ancestor candidates with child work for one final shortlist.
 
     The first two inputs are child-owned results. inherited is the checked
     ancestry reader's records/actors/used_roots result. declaration and panel are
     the child's frozen task rules. final_checkpoint_id is always the child final.
+    rule selects the existing analysis ranking: new runs pass point_margin;
+    saved keeps historical score-based choices when no new rule was recorded.
     Return combined routine rows, matching confirmations and required candidate
     IDs. A child with no eligible trained actor returns empty confirmations and
     candidate IDs; malformed rows still fail. Missing confirmations stay missing
@@ -649,7 +675,7 @@ def selection_validation_results(
         used_roots=inherited.get("used_roots", []),
     )
     try:
-        _candidates(routine)
+        _candidates(routine, rule=rule)
     except ValueError as error:
         if error.args != ("No eligible trained checkpoint is available",):
             raise
@@ -659,7 +685,7 @@ def selection_validation_results(
             ) from error
         return routine, [], ()
     candidates = confirmation_candidates(
-        routine, final_checkpoint_id=final_checkpoint_id
+        routine, final_checkpoint_id=final_checkpoint_id, rule=rule
     )
     confirmed: dict[str, Record] = {}
     for local, rows in ((False, inherited_rows), (True, confirmation_results)):
@@ -786,8 +812,9 @@ def create_panel(
     Parameters
     ----------
     opponents : sequence of System, Policy or str, optional
-        Ordered methods with distinct names. Strings are built-in names,
-        absolute actor export/checkpoint paths or installed module:function factories.
+        Ordered methods. Repeated display names gain numbered panel labels;
+        their original names and full identities stay unchanged. Strings are
+        built-in names, absolute actor paths or installed module:function factories.
         Factories run once; live methods are retained without serialization.
     output_dir : str or Path
         Folder for immutable panel.json. Conflicting contents are refused.
@@ -930,6 +957,140 @@ def _method_snapshot(value: object) -> tuple[Any, str, Record, str | None]:
         description, phase="validation"
     )
     return method, identifier, cast(Record, registration), reference
+
+
+def _checked_deployment(value: Mapping[str, Any]) -> Record:
+    """Copy a frozen partner declaration and check its exact recorded identities.
+
+    A declaration may fix only maps or rosters. Partner declarations also name
+    learner slots and ordered registrations; those two fields appear together.
+    This reads no models and creates no files. Execution and evidence reads share it.
+    """
+    from marl_battlegrounds.evaluation.recording_identity import (
+        normalize_system_registration,
+    )
+
+    result: Record = json.loads(json.dumps(dict(value), allow_nan=False))
+    allowed = {"learner_slots", "partners", "maps", "system_roster", "opponent_roster"}
+    if set(result) - allowed or not result:
+        raise ValueError("Validation deployment fields differ")
+    paired_fields = {"learner_slots", "partners"} & result.keys()
+    if not paired_fields:
+        return result
+    if paired_fields != {"learner_slots", "partners"}:
+        raise ValueError("Validation partners and learner_slots must appear together")
+    if not isinstance(result["learner_slots"], list):
+        raise ValueError("Validation learner_slots must be a list")
+    slots = cast(list[Any], result["learner_slots"])
+    if (
+        not slots
+        or len(slots) > 4
+        or any(type(slot) is not int or not 0 <= slot < 5 for slot in slots)
+        or len(set(slots)) != len(slots)
+    ):
+        raise ValueError("Validation learner_slots needs one to four distinct slots")
+    if not isinstance(result["partners"], list) or not result["partners"]:
+        raise ValueError("Validation deployment needs at least one partner")
+    entries = cast(list[Any], result["partners"])
+    names: set[str] = set()
+    for entry in entries:
+        if not isinstance(entry, dict):
+            raise ValueError("Validation partner must be an object")
+        row = cast(Record, entry)
+        if set(row) != {
+            "name",
+            "label",
+            "registration_id",
+            "registration",
+        }:
+            raise ValueError("Validation partner fields differ")
+        name = row["name"]
+        if not isinstance(name, str) or not name.strip() or name in names:
+            raise ValueError("Validation partner names must be distinct and nonempty")
+        names.add(name)
+        if row["label"] not in {"familiar", "held_out", "unknown"}:
+            raise ValueError("Partner labels must be familiar, held_out or unknown")
+        identifier, registration = normalize_system_registration(
+            row["registration"], phase="validation"
+        )
+        if identifier != row["registration_id"] or registration != row["registration"]:
+            raise ValueError("Validation partner registration differs")
+    return result
+
+
+def freeze_validation_partners(
+    partners: Mapping[str, System | Policy | str],
+    *,
+    learner_slots: Sequence[int],
+    partner_labels: Mapping[str, str] | None = None,
+) -> tuple[dict[str, Any], Record]:
+    """Freeze named partners once and return bindings plus their JSON declaration.
+
+    Names identify distinct ordered panel entries. learner_slots are physical
+    Team A slots; each partner fills their complement through ordinary team().
+    Labels are declared familiarity, not inferred training exposure. Missing
+    labels mean unknown. Factories resolve once and opaque methods stay in this
+    process. No policy decision, environment step or file write occurs here.
+    """
+    labels = {} if partner_labels is None else dict(partner_labels)
+    if set(labels) - set(partners):
+        raise ValueError("Partner labels name a missing validation partner")
+    bindings: dict[str, Any] = {}
+    rows: list[Record] = []
+    for name, value in partners.items():
+        method, identifier, registration, _ = _method_snapshot(value)
+        bindings[name] = method
+        rows.append(
+            {
+                "name": name,
+                "label": labels.get(name, "unknown"),
+                "registration_id": identifier,
+                "registration": registration,
+            }
+        )
+    declaration = _checked_deployment(
+        {"learner_slots": list(learner_slots), "partners": rows}
+    )
+    return bindings, declaration
+
+
+def _deployment_cell(task: Mapping[str, Any], index: int) -> Record | None:
+    """Describe exact constituents for one composed pass's existing sidecar."""
+    if "partners" not in task:
+        return None
+    member = task["members"][index]
+    return {
+        "learner": {
+            key: task[key]
+            for key in (
+                "checkpoint_id",
+                "actor_digest",
+                "env_steps",
+                "system_id",
+                "system",
+            )
+            if key in task
+        },
+        "learner_slots": task["learner_slots"],
+        "partner": task["partners"][member["partner_index"]],
+        "system_roster": task["system_roster"],
+        "opponent_roster": task["opponent_roster"],
+    }
+
+
+def _cell_directory(directory: Path, task: Mapping[str, Any], index: int) -> Path:
+    """Return the existing opponent folder beneath its optional partner folder."""
+    member = task["members"][index]
+    if "partners" not in task:
+        return _pass_directory(directory, index, member["name"])
+    partner_index = member["partner_index"]
+    parent = _pass_directory(
+        directory,
+        partner_index,
+        task["partners"][partner_index]["name"],
+        kind="partner",
+    )
+    return _pass_directory(parent, member["opponent_index"], member["opponent_name"])
 
 
 def _panel_roots(roots: Mapping[str, int] | None) -> Record:
@@ -1148,22 +1309,56 @@ def _create_system_panel(
     ranking: object,
     size: int | None,
 ) -> FrozenPanel:
-    """Freeze ordered methods and optional existing ranking before any game runs."""
+    """Freeze and save a System panel through the shared preparation owner."""
+    panel, content = _prepare_system_panel(
+        opponents, output_dir=output_dir, roots=roots, ranking=ranking, size=size
+    )
+    _publish_system_panel(panel, content)
+    return panel
+
+
+def _prepare_system_panel(
+    opponents: Sequence[Any],
+    *,
+    output_dir: str | Path,
+    roots: Mapping[str, int] | None,
+    ranking: object,
+    size: int | None,
+) -> tuple[FrozenPanel, Record]:
+    """Freeze ordered methods and return the checked panel plus its saved content.
+
+    opponents is the ordered methods or references accepted by create_panel;
+    factories resolve once. output_dir names the intended panel.json folder.
+    roots sets optional purpose seeds; ranking and size select an existing
+    tournament's highest-ranked members under create_panel's rules. Return the
+    checked panel and matching JSON content, retaining frozen values and live
+    clients without creating output. Publish only after team and roster checks.
+    """
     if isinstance(opponents, (str, bytes)) or not opponents:
         raise ValueError(
             "opponents must be a nonempty sequence of methods or references"
         )
     snapshots = [_method_snapshot(value) for value in opponents]
-    if len({item[0].name for item in snapshots}) != len(snapshots):
-        raise ValueError("Panel opponents need distinct names")
+    labels: list[str] = []
+    reserved = {item[0].name for item in snapshots}
+    for method, *_ in snapshots:
+        label = method.name
+        if label in labels:
+            suffix = 2
+            while f"{method.name} ({suffix})" in reserved | set(labels):
+                suffix += 1
+            label = f"{method.name} ({suffix})"
+        labels.append(label)
     records = [
         {
-            "name": method.name,
+            "name": label,
             "registration_id": identifier,
             "registration": registration,
             "reference": reference,
         }
-        for method, identifier, registration, reference in snapshots
+        for label, (_, identifier, registration, reference) in zip(
+            labels, snapshots, strict=True
+        )
     ]
     evidence = None
     if ranking is not None:
@@ -1181,11 +1376,22 @@ def _create_system_panel(
     }
     content["panel_digest"] = _panel_digest(content)
     target = Path(output_dir).resolve() / "panel.json"
+    panel = _load_system_panel(target, content, tuple(item[0] for item in snapshots))
+    return panel, content
+
+
+def _publish_system_panel(panel: FrozenPanel, content: Record) -> None:
+    """Save prepared content once, refusing a different panel at the same path.
+
+    panel and content are the matching values from _prepare_system_panel. This
+    reuses the immutable output check and atomic writer, without loading methods
+    again or changing their frozen identity. Matching existing content is reused.
+    """
+    target = panel.path
     if target.exists() and _json(target) != content:
         raise ValueError("A different immutable panel already occupies output_dir")
     if not target.exists():
         _publish(target, content)
-    return _load_system_panel(target, content, tuple(item[0] for item in snapshots))
 
 
 def _ranked_depth(evidence: object) -> float | None:
@@ -1274,13 +1480,14 @@ def _load_system_panel(
         if (
             identifier != row.get("registration_id")
             or registration != row.get("registration")
-            or method.name != row.get("name")
+            or not isinstance(row.get("name"), str)
+            or not row["name"].strip()
         ):
             raise ValueError("Panel method no longer matches its frozen M8 identity")
         methods.append(method)
         members.append(
             PanelMember(
-                name=method.name,
+                name=row["name"],
                 registration_id=identifier,
                 registration=registration,
                 reference=row.get("reference"),
@@ -1301,14 +1508,19 @@ def _load_system_panel(
 
 def panel_task_description(
     *,
-    checkpoint_id: str,
-    actor_digest: str,
-    env_steps: int,
+    checkpoint_id: str | None,
+    actor_digest: str | None,
+    env_steps: int | None,
     panel: FrozenPanel,
     purpose: str,
     seed_pairs: int,
     root_seed: int | None = None,
     red_zone_depth: float | None = None,
+    candidate: Mapping[str, Any] | None = None,
+    maps: Sequence[int] | None = None,
+    system_roster: Sequence[AgentClassName] | None = None,
+    opponent_roster: Sequence[AgentClassName] | None = None,
+    deployment: Mapping[str, Any] | None = None,
 ) -> Record:
     """Describe the saved panel's protocol without changing historical task hashes.
 
@@ -1318,12 +1530,25 @@ def panel_task_description(
 
     Parameters
     ----------
-    checkpoint_id : str
-        Nonempty ID of the learner boundary that produced the actor.
-    actor_digest : str
-        Nonempty identity of the actor's frozen weights.
-    env_steps : int
-        Real training transitions behind the actor; a plain integer, 0 or more.
+    checkpoint_id, actor_digest : str or None
+        Nonempty saved learner/actor identities. Both must be None for a live
+        candidate registration.
+    env_steps : int or None
+        Saved training transitions, 0 or more. None for a live candidate.
+    candidate : mapping or None, default=None
+        A frozen M8 method registration. With this route, the task records the
+        System identity without inventing a learner checkpoint or training step.
+    maps : sequence of int or None, default=None
+        Distinct installed map IDs. None uses development maps 42 through 46.
+    system_roster, opponent_roster : sequence of class names or None, default=None
+        Ordered physical slots, one to five members. None uses canonical 5v5.
+        Explicit conditions use task schema 5 and are checked by the evaluator's
+        shared source builder before anything is written.
+    deployment : mapping or None, default=None
+        Frozen partner registrations and learner slots, with optional conditions.
+        Partner tasks use schema 6. They reuse each opponent's roots across
+        partners so matching games stay paired in the aggregate uncertainty.
+        Maps and rosters must also be passed through their named arguments.
     panel : FrozenPanel
         The loaded panel. A legacy (schema 1) panel is handed to
         validation_task_description unchanged, so its own rules apply.
@@ -1372,7 +1597,18 @@ def panel_task_description(
     the actor and the panel. Core checks the depth against each map's width
     later, when a game's config is built.
     """
+    deployment = None if deployment is None else _checked_deployment(deployment)
+    paired_partners = deployment is not None and "partners" in deployment
+    custom_conditions = deployment is not None or any(
+        value is not None for value in (maps, system_roster, opponent_roster)
+    )
     if panel.schema_version == 1:
+        if candidate is not None or custom_conditions:
+            raise ValueError(
+                "Live candidates and custom conditions need an opponents panel"
+            )
+        if checkpoint_id is None or actor_digest is None or env_steps is None:
+            raise ValueError("Historical panels need a saved checkpoint identity")
         return validation_task_description(
             checkpoint_id=checkpoint_id,
             actor_digest=actor_digest,
@@ -1387,7 +1623,54 @@ def panel_task_description(
             red_zone_depth=red_zone_depth,
         )
     depth = _task_depth(red_zone_depth)
-    _integer(env_steps, "env_steps")
+    if candidate is None:
+        _integer(env_steps, "env_steps")
+        if not checkpoint_id or not actor_digest:
+            raise ValueError("Validation needs checkpoint and actor identities")
+        focal: Record = {
+            "checkpoint_id": checkpoint_id,
+            "actor_digest": actor_digest,
+            "env_steps": env_steps,
+        }
+    else:
+        if any(value is not None for value in (checkpoint_id, actor_digest, env_steps)):
+            raise ValueError(
+                "Supply a candidate registration or checkpoint fields, not both"
+            )
+        from marl_battlegrounds.evaluation.recording_identity import (
+            normalize_system_registration,
+        )
+
+        identifier, description = normalize_system_registration(
+            candidate, phase="validation"
+        )
+        focal = {"system_id": identifier, "system": description}
+    map_ids = tuple(VALIDATION_MAPS if maps is None else maps)
+    conditions: Record = {}
+    if custom_conditions:
+        from marl_battlegrounds.evaluation.evaluate import normalize_episode_specs
+        from marl_battlegrounds.tasks import canonical_tournament_rosters
+
+        if not map_ids or len(set(map_ids)) != len(map_ids):
+            raise ValueError("Validation maps must be nonempty and distinct")
+        for map_id in map_ids:
+            _integer(map_id, "map_id")
+        default_a, default_b = canonical_tournament_rosters()
+        roster_a = tuple(default_a if system_roster is None else system_roster)
+        roster_b = tuple(default_b if opponent_roster is None else opponent_roster)
+        normalize_episode_specs(
+            map_ids,
+            len(map_ids),
+            roster_a,
+            roster_b,
+            20,
+            300,
+            red_zone_depth=DEFAULT_TDM_RED_ZONE_DEPTH if depth is None else depth,
+        )
+        conditions = {
+            "system_roster": list(roster_a),
+            "opponent_roster": list(roster_b),
+        }
     _integer(seed_pairs, "seed_pairs", minimum=1)
     if purpose not in (*panel.roots, "assessment"):
         raise ValueError("Unknown System panel validation purpose")
@@ -1405,30 +1688,65 @@ def panel_task_description(
         raise ValueError(
             "Assessment requires a fresh root separate from selection games"
         )
-    if not checkpoint_id or not actor_digest:
-        raise ValueError("Validation needs checkpoint and actor identities")
+    registrations = [member.registration_id for member in panel.members]
     members = [
         {
             "name": member.name,
             "registration_id": member.registration_id,
             "root": int(
-                _digest({"root": root, "opponent": member.registration_id})[:8], 16
+                _digest(
+                    {
+                        "root": root,
+                        "opponent": member.registration_id,
+                        **(
+                            {"member": member.name}
+                            if registrations.count(member.registration_id) > 1
+                            else {}
+                        ),
+                    }
+                )[:8],
+                16,
             ),
         }
         for member in panel.members
     ]
     if len({member["root"] for member in members}) != len(members):
         raise ValueError("Opponent roots collided; choose a different panel root")
+    if paired_partners:
+        assert deployment is not None
+        members = [
+            {
+                **member,
+                "name": f"{partner_index + 1}: {partner['name']} / {member['name']}",
+                "opponent_name": member["name"],
+                "opponent_index": index,
+                "partner_index": partner_index,
+            }
+            for partner_index, partner in enumerate(deployment["partners"])
+            for index, member in enumerate(members)
+        ]
     result: Record = {
-        "schema_version": 2 if depth is None else 4,
+        "schema_version": 6
+        if paired_partners
+        else 5
+        if candidate is not None or custom_conditions
+        else (2 if depth is None else 4),
         "selection_schema_version": 2,
-        "checkpoint_id": checkpoint_id,
-        "actor_digest": actor_digest,
-        "env_steps": env_steps,
+        **focal,
+        **conditions,
+        **(
+            {
+                "learner_slots": cast(Record, deployment)["learner_slots"],
+                "partners": cast(Record, deployment)["partners"],
+                "paired_partners": True,
+            }
+            if paired_partners
+            else {}
+        ),
         "panel_digest": panel.digest,
         "purpose": purpose,
         "seed_pairs": seed_pairs,
-        "maps": list(VALIDATION_MAPS),
+        "maps": list(map_ids),
         "root": root,
         "members": members,
     }
@@ -1450,12 +1768,12 @@ def _verify_panel_pass(
     """Bind an existing pass to its exact task before reuse or writer recovery.
 
     actor and opponent are the already loaded frozen methods. task is the checked
-    System-panel task (schema 2, or schema 4 with its red_zone_depth);
-    member_index chooses its ordered opponent/root. num_envs and chunk_size are
-    the intended execution settings. A schema 4 task's depth is asserted
-    against the saved pass. The M8 owner verifies its generated conditions,
-    actual registrations and saved declarations without opening a writer or
-    calling either method. A mismatch raises ValueError.
+    System-panel task: schema 2, schema 4 with depth, or schema 5 with a live
+    candidate or custom conditions. member_index chooses its ordered opponent/root.
+    num_envs and chunk_size are the intended execution settings. Recorded depth,
+    maps and rosters are asserted against the saved pass. The M8 owner verifies
+    generated conditions, actual registrations and saved declarations. It opens
+    no writer and calls neither method. A mismatch raises ValueError.
     """
     from marl_battlegrounds.evaluation.evaluate import (
         _verify_evaluation,  # pyright: ignore[reportPrivateUsage]
@@ -1465,11 +1783,18 @@ def _verify_panel_pass(
     rules: Record = (
         {"red_zone_depth": task["red_zone_depth"]} if "red_zone_depth" in task else {}
     )
+    rules.update(
+        {
+            name: task[name]
+            for name in ("system_roster", "opponent_roster")
+            if name in task
+        }
+    )
     _verify_evaluation(
         cast(Any, actor),
         cast(Any, opponent),
-        num_episodes=len(VALIDATION_MAPS) * task["seed_pairs"] * 2,
-        maps=VALIDATION_MAPS,
+        num_episodes=len(task["maps"]) * task["seed_pairs"] * 2,
+        maps=task["maps"],
         spawn_mode="paired",
         seed=member["root"],
         num_envs=num_envs,
@@ -1491,6 +1816,7 @@ def _record_pass_sampling(
     first: object,
     second: object,
     run_dir: Path | None,
+    deployment: Mapping[str, Any] | None = None,
 ) -> None:
     """Save checked method facts once, before a newly created validation pass.
 
@@ -1501,10 +1827,15 @@ def _record_pass_sampling(
     """
     path = parent / "sampling_facts.json"
     if run_dir is not None and not path.exists():
+        if deployment is not None:
+            raise ValueError("Saved deployed-team pass is missing constituent evidence")
         return
     methods = [_method_snapshot(value) for value in (first, second)]
     content = {
         "schema_version": 1,
+        **(
+            {"deployment": deepcopy(dict(deployment))} if deployment is not None else {}
+        ),
         "task_id": task_id,
         "pass_id": pass_id,
         "system_ids": {
@@ -1617,8 +1948,154 @@ def validation_sampling_evidence(
     )
 
 
+def _summarize_panel_rows(
+    rows: Sequence[Mapping[str, Any]],
+    *,
+    task: Mapping[str, Any],
+    sampling: Mapping[str, Any] | None,
+    facts: Mapping[str, Mapping[str, Any]],
+    bootstrap_draws: int = 2000,
+    bootstrap_seed: int = 19_044_001,
+) -> Record:
+    """Reuse shared score reduction for bare opponents or paired partner cells.
+
+    Partner tasks keep every matched map/seed and both spawn ends in the same
+    uncertainty block. Separate per-partner summaries retain the panel's usual
+    independent opponent roots. These intervals concern fixed Systems only.
+    """
+    paired = "partners" in task
+    names = [member["name"] for member in task["members"]]
+    result = summarize_validation(
+        rows,
+        maps=task["maps"],
+        opponents=names,
+        seed_pairs=task["seed_pairs"],
+        independent_opponents=not paired,
+        actual_kills="red_zone_depth" in task,
+        bootstrap_draws=bootstrap_draws,
+        bootstrap_seed=bootstrap_seed,
+        sampling_evidence=sampling,
+    )
+    if not paired:
+        return result
+    partners: list[Record] = []
+    for index, partner in enumerate(task["partners"]):
+        names = [
+            member["name"]
+            for member in task["members"]
+            if member["partner_index"] == index
+        ]
+        selected = [row for row in rows if row["opponent"] in names]
+        evidence = (
+            validation_sampling_evidence(
+                selected,
+                facts={name: facts[name] for name in names},
+                scheduled_games=len(task["maps"]) * len(names) * task["seed_pairs"] * 2,
+                independent_opponents=True,
+            )
+            if sampling is not None
+            else None
+        )
+        summary = summarize_validation(
+            selected,
+            maps=task["maps"],
+            opponents=names,
+            seed_pairs=task["seed_pairs"],
+            independent_opponents=True,
+            actual_kills="red_zone_depth" in task,
+            bootstrap_draws=bootstrap_draws,
+            bootstrap_seed=bootstrap_seed,
+            sampling_evidence=evidence,
+        )
+        partners.append({"name": partner["name"], "label": partner["label"], **summary})
+    result["partner_results"] = partners
+    result["mean_kill_difference"] = sum(
+        row["mean_kill_difference"] for row in partners
+    ) / len(partners)
+    result["uncertainty"] = (
+        "Conditional game-sampling interval; partner comparisons "
+        "and both spawn ends stay paired"
+    )
+    return result
+
+
+def prepare_validation_teams(
+    actor: System | Policy,
+    opponents: Sequence[System | Policy | str],
+    *,
+    partners: Mapping[str, System | Policy] | None = None,
+    learner_slots: Sequence[int] | None = None,
+    maps: Sequence[int] | None = None,
+    system_roster: Sequence[AgentClassName] | None = None,
+    opponent_roster: Sequence[AgentClassName] | None = None,
+    red_zone_depth: float = DEFAULT_TDM_RED_ZONE_DEPTH,
+) -> tuple[System | Policy, ...]:
+    """Build and check every deployed team before creating any run output.
+
+    actor is the frozen learner. opponents are live methods or load references.
+    partners contains bindings from freeze_validation_partners; learner_slots
+    must be the slots that helper checked. Each partner fills their complement.
+    None keeps the bare actor. Return teams in partner order, or just the actor.
+    Maps default to 42 through 46 and rosters to canonical 5v5. These checks use
+    the shared evaluation owner and actual physical roster. An invalid member,
+    empty learner assignment or unsupported roster raises ValueError before any
+    policy call, environment step or file write. Import references may load once.
+    """
+    from marl_battlegrounds.evaluation.evaluate import normalize_episode_specs
+    from marl_battlegrounds.evaluation.policy_execution import team
+    from marl_battlegrounds.evaluation.system_evaluation import (
+        prepare_evaluation_system,
+        validate_evaluation_rosters,
+    )
+    from marl_battlegrounds.tasks import canonical_tournament_rosters
+
+    default_a, default_b = canonical_tournament_rosters()
+    roster_a = tuple(default_a if system_roster is None else system_roster)
+    roster_b = tuple(default_b if opponent_roster is None else opponent_roster)
+    map_ids = tuple(VALIDATION_MAPS if maps is None else maps)
+    if not map_ids or len(set(map_ids)) != len(map_ids):
+        raise ValueError("Validation maps must be nonempty and distinct")
+    configs = normalize_episode_specs(
+        map_ids,
+        len(map_ids),
+        roster_a,
+        roster_b,
+        20,
+        300,
+        red_zone_depth=red_zone_depth,
+    )
+    actors: tuple[System | Policy, ...] = (actor,)
+    if partners is not None:
+        if learner_slots is None or not partners:
+            raise ValueError("Partner validation needs learner_slots and partners")
+        if not any(slot < len(roster_a) for slot in learner_slots):
+            raise ValueError("Validation roster has no active learner slot")
+        remaining = [slot for slot in range(5) if slot not in learner_slots]
+        actors = tuple(
+            team(actor, partner, slots=[learner_slots, remaining])
+            for partner in partners.values()
+        )
+    elif learner_slots is not None:
+        raise ValueError("learner_slots needs partners")
+    prepared_opponents = tuple(
+        prepare_evaluation_system(_method_snapshot(value)[0]) for value in opponents
+    )
+    # Every map shares one roster profile; compatibility is independent of map.
+    for candidate in actors:
+        first, variables_a, _ = prepare_evaluation_system(candidate)
+        for second, variables_b, _ in prepared_opponents:
+            validate_evaluation_rosters(
+                first,
+                second,
+                configs[0].env_config,
+                variables_a=variables_a,
+                variables_b=variables_b,
+            )
+    return actors
+
+
 def _validate_system_panel(
-    checkpoint: str | Path,
+    checkpoint: System | Policy | str | Path,
     panel: FrozenPanel,
     *,
     output_dir: str | Path,
@@ -1629,6 +2106,12 @@ def _validate_system_panel(
     event_callback: EventCallback | None,
     root_seed: int | None,
     red_zone_depth: float,
+    maps: Sequence[int] | None = None,
+    system_roster: Sequence[AgentClassName] | None = None,
+    opponent_roster: Sequence[AgentClassName] | None = None,
+    partners: Mapping[str, System | Policy | str] | None = None,
+    learner_slots: Sequence[int] | None = None,
+    partner_labels: Mapping[str, str] | None = None,
 ) -> Record:
     """Run retained methods in stable batches using the ordinary M8 evaluator.
 
@@ -1637,8 +2120,10 @@ def _validate_system_panel(
     Only complete durable rows feed the shared summary and selection owner. A
     QMIX or PQN-VDN actor's summary also carries method and optimizer_steps
     from _method_fields; PPO summaries are unchanged. Every game uses
-    red_zone_depth (map units), which the schema 4 task records; the summary
-    reports points and recorded kills, and mean_kill_difference uses kills.
+    red_zone_depth (map units), recorded by task schema 4 or 5. Custom maps and
+    rosters remain fixed for the whole task. The summary reports native points
+    and recorded kills; live candidates keep their ordinary System registration
+    without invented learner metadata. Roster checks run before any output.
     """
     import jax
 
@@ -1649,31 +2134,71 @@ def _validate_system_panel(
     _integer(chunk_size, "chunk_size", minimum=1)
     if jax.default_backend() != "cpu" and num_envs != 32:
         raise ValueError("Training validation on GPU requires num_envs=32")
-    identity = _artifact(checkpoint)
+    from marl_battlegrounds.evaluation.policy_execution import Policy, System, policy
+
+    # Keep artifact metadata for saved learners. Built-ins, factories and live
+    # objects use the same registration as ordinary evaluation instead.
+    live = isinstance(checkpoint, (System, Policy))
+    if isinstance(checkpoint, str):
+        try:
+            policy(checkpoint)
+            live = True
+        except ValueError:
+            live = not Path(checkpoint).is_dir() and ":" in checkpoint
+    identity: Record = {}
+    registration = None
+    if live:
+        actor, _, registration, _ = _method_snapshot(checkpoint)
+    else:
+        saved = cast(str | Path, checkpoint)
+        identity = _artifact(saved)
+        actor = load_system(saved)
+    deployment = None
+    bindings: dict[str, Any] | None = None
+    if partners is not None:
+        if learner_slots is None:
+            raise ValueError("Partner validation needs learner_slots")
+        bindings, deployment = freeze_validation_partners(
+            partners, learner_slots=learner_slots, partner_labels=partner_labels
+        )
+    elif learner_slots is not None or partner_labels is not None:
+        raise ValueError("learner_slots and partner_labels need partners")
     directory = Path(output_dir).resolve()
-    task = _task(
-        directory,
-        panel_task_description(
-            checkpoint_id=identity["checkpoint_id"],
-            actor_digest=identity["actor_digest"],
-            env_steps=identity["env_steps"],
-            panel=panel,
-            purpose=purpose,
-            seed_pairs=seed_pairs,
-            root_seed=root_seed,
-            red_zone_depth=red_zone_depth,
-        ),
-        event_callback,
+    task = panel_task_description(
+        checkpoint_id=identity.get("checkpoint_id"),
+        actor_digest=identity.get("actor_digest"),
+        env_steps=identity.get("env_steps"),
+        panel=panel,
+        purpose=purpose,
+        seed_pairs=seed_pairs,
+        root_seed=root_seed,
+        red_zone_depth=red_zone_depth,
+        candidate=registration,
+        maps=maps,
+        system_roster=system_roster,
+        opponent_roster=opponent_roster,
+        deployment=deployment,
     )
-    actor = load_system(checkpoint)
+    actors = prepare_validation_teams(
+        actor,
+        panel.methods,
+        partners=bindings,
+        learner_slots=learner_slots,
+        maps=task["maps"],
+        system_roster=task.get("system_roster"),
+        opponent_roster=task.get("opponent_roster"),
+        red_zone_depth=red_zone_depth,
+    )
+    task = _task(directory, task, event_callback)
+    map_ids = task["maps"]
     rows: list[Record] = []
     paths: list[str] = []
     sampling_facts: dict[str, Record] = {}
-    for index, (member, opponent) in enumerate(
-        zip(panel.members, panel.methods, strict=True)
-    ):
-        pass_id = validation_pass_id(task["task_id"], member.name)
-        parent = directory / f"opponent-{index}"
+    for index, member in enumerate(task["members"]):
+        actor = actors[cast(int, member.get("partner_index", 0))]
+        opponent = panel.methods[member.get("opponent_index", index)]
+        pass_id = validation_pass_id(task["task_id"], member["name"])
+        parent = _cell_directory(directory, task, index)
         run_dir = _saved_run(parent, pass_id)
         if run_dir is not None:
             _verify_panel_pass(
@@ -1692,9 +2217,10 @@ def _validate_system_panel(
             first=actor,
             second=opponent,
             run_dir=run_dir,
+            deployment=_deployment_cell(task, index),
         )
         pending = _pending(
-            run_dir, pass_id=pass_id, total=len(VALIDATION_MAPS) * seed_pairs * 2
+            run_dir, pass_id=pass_id, total=len(map_ids) * seed_pairs * 2
         )
         if pending:
             if event_callback is not None:
@@ -1715,8 +2241,10 @@ def _validate_system_panel(
             result = evaluate(
                 actor,
                 opponent,
-                num_episodes=len(VALIDATION_MAPS) * seed_pairs * 2,
-                maps=VALIDATION_MAPS,
+                num_episodes=len(map_ids) * seed_pairs * 2,
+                maps=map_ids,
+                system_roster=task.get("system_roster"),
+                opponent_roster=task.get("opponent_roster"),
                 spawn_mode="paired",
                 seed=task["members"][index]["root"],
                 num_envs=num_envs,
@@ -1741,31 +2269,30 @@ def _validate_system_panel(
                 )
         assert run_dir is not None
         paths.append(str(run_dir))
-        sampling_facts[member.name] = _read_pass_sampling(
+        sampling_facts[member["name"]] = _read_pass_sampling(
             run_dir,
             task_id=task["task_id"],
             pass_id=pass_id,
         )
-        rows.extend(_rows(run_dir, pass_id=pass_id, opponent=member.name, kills=True))
+        rows.extend(
+            _rows(run_dir, pass_id=pass_id, opponent=member["name"], kills=True)
+        )
     result = {
         **task,
-        **summarize_validation(
+        **_summarize_panel_rows(
             rows,
-            maps=VALIDATION_MAPS,
-            opponents=[member.name for member in panel.members],
-            seed_pairs=seed_pairs,
-            independent_opponents=True,
-            actual_kills=True,
-            sampling_evidence=_preserve_summary_sampling(
+            task=task,
+            facts=sampling_facts,
+            sampling=_preserve_summary_sampling(
                 directory,
                 validation_sampling_evidence(
                     rows,
                     facts=sampling_facts,
-                    scheduled_games=len(VALIDATION_MAPS)
-                    * len(panel.members)
+                    scheduled_games=len(map_ids)
+                    * len(task["members"])
                     * seed_pairs
                     * 2,
-                    independent_opponents=True,
+                    independent_opponents=deployment is None,
                 ),
             ),
         ),
@@ -1780,7 +2307,7 @@ def _validate_system_panel(
             {
                 "event": "validation_complete",
                 "task_id": task["task_id"],
-                "result": result,
+                "result": deepcopy(result),
             }
         )
     return result
@@ -2148,8 +2675,30 @@ def _task(
     else:
         _publish(path, result)
         if event_callback is not None:
-            event_callback({"event": "validation_task", **result})
+            event_callback({"event": "validation_task", **deepcopy(result)})
     return result
+
+
+def _pass_directory(
+    directory: Path, index: int, name: str, *, kind: str = "opponent"
+) -> Path:
+    """Find an old pass folder or choose its clear new snake_case name.
+
+    directory is the owning task; index is its stable member order and name is
+    the saved panel label. Return a path without creating it. The index keeps
+    equal or similarly shortened names separate. Existing historical folders
+    retain their original paths. Linked, conflicting or non-directory entries
+    raise ValueError instead of being followed or replaced.
+    """
+    label = re.sub(r"[^a-z0-9]+", "_", name.lower()).strip("_")[:40].rstrip("_")
+    current = directory / f"{kind}_{index:02d}_{label or 'unnamed'}"
+    legacy = directory / f"{kind}-{index}"
+    for path in (current, legacy):
+        if path.is_symlink() or (path.exists() and not path.is_dir()):
+            raise ValueError("Validation opponent folder must be a plain directory")
+    if current.exists() and legacy.exists():
+        raise ValueError("Validation has two folders for the same opponent")
+    return legacy if legacy.exists() else current
 
 
 def _saved_run(parent: Path, pass_id: str) -> Path | None:
@@ -2475,7 +3024,7 @@ def _validate(
             "actor_digest": identity["actor_digest"],
             "opponent": opponent,
             "opponent_digest": digest,
-            "output_parent": str(directory / f"opponent-{index}"),
+            "output_parent": str(_pass_directory(directory, index, name)),
             "pass_id": pass_id,
             "maps": list(VALIDATION_MAPS),
             "seed_pairs": seed_pairs,
@@ -2532,7 +3081,7 @@ def _validate(
 
 
 def validate_checkpoint(
-    checkpoint: str | Path,
+    checkpoint: System | Policy | str | Path,
     panel: FrozenPanel | str | Path,
     *,
     output_dir: str | Path,
@@ -2543,13 +3092,43 @@ def validate_checkpoint(
     event_callback: EventCallback | None = None,
     root_seed: int | None = None,
     red_zone_depth: float = DEFAULT_TDM_RED_ZONE_DEPTH,
+    maps: Sequence[int] | None = None,
+    system_roster: Sequence[AgentClassName] | None = None,
+    opponent_roster: Sequence[AgentClassName] | None = None,
+    partners: Mapping[str, System | Policy | str] | None = None,
+    learner_slots: Sequence[int] | None = None,
+    partner_labels: Mapping[str, str] | None = None,
 ) -> Record:
-    """Evaluate one exact saved actor through the shared M8 evaluator.
+    """Validate a saved actor or any live System through the shared evaluator.
 
     Parameters
     ----------
-    checkpoint : str or Path
-        An actor export or a complete learner checkpoint.
+    checkpoint : System, Policy, str or Path
+        A live method, built-in name, module:function factory, actor export or
+        complete learner checkpoint. Numerical values are frozen for this call;
+        opaque clients remain in this process. Historical panels accept only
+        saved artifacts. Live results identify the exact registered System;
+        they do not claim a training step or built-in learner checkpoint.
+    maps : sequence of int or None, default=None
+        Distinct installed map IDs. None uses development maps 42 through 46.
+    system_roster, opponent_roster : sequence of class names or None, default=None
+        Physical slot order, one to five members, including repeated classes.
+        None uses the canonical roster. Custom conditions require a panel made
+        with opponents= and are saved in the immutable task identity.
+    partners : mapping or None, default=None
+        Named frozen teammates, each a System, Policy or normal method reference.
+        None evaluates the candidate alone. Otherwise each partner fills the
+        complement of learner_slots in a separate ordinary team() deployment.
+        Every team faces the same panel, maps and seed pairs. Saved candidates
+        retain their own checkpoint identity for selection.
+    learner_slots : sequence of int or None, default=None
+        One to four distinct Team A slots in 0 through 4, required with partners.
+        At least one must be active in system_roster. Every decision keeps its
+        original input and opaque memory boundaries through team().
+    partner_labels : mapping or None, default=None
+        Optional name-to-label values: familiar, held_out or unknown. Missing
+        labels mean unknown. These labels report the caller's declared exposure;
+        validation never infers it from names or training records.
     panel : FrozenPanel, str or Path
         The frozen panel manifest path, or a loaded FrozenPanel. A loaded panel
         keeps its live clients and avoids reopening factories. Identities are
@@ -2561,8 +3140,8 @@ def validate_checkpoint(
         panels.
     seed_pairs : int or None, default=None
         Positive paired seeds per map. None means 10, or 50 for confirmation.
-        Each pair means ten games per opponent across the five development
-        maps.
+        Each pair means two games per map and opponent, with exchanged spawn
+        ends. Team A always remains the candidate.
     num_envs : int, default=32
         Positive number of games run side by side; GPU requires 32. New panels
         keep that batch on all tails with inactive padding. Historical small
@@ -2591,9 +3170,12 @@ def validate_checkpoint(
         Complete native score, paired uncertainty, per-cell results and saved
         M8 paths. Scores are points; cells also carry mean_team_a_kills and
         mean_team_b_kills from recorded kills. New panels also report
-        mean_kill_difference (kills, not points) for declared selection. A
-        QMIX or PQN-VDN actor's summary also carries its method and its
-        optimizer_steps.
+        mean_kill_difference as a descriptive column; new checkpoint selection
+        uses only mean point margin. A QMIX or PQN-VDN actor's summary carries
+        its method and its
+        optimizer_steps. Partner tasks add partner_results with separate native
+        score summaries and declared labels. Their overall intervals keep every
+        partner comparison and both spawn ends in the same map/seed block.
 
     Raises
     ------
@@ -2639,7 +3221,27 @@ def validate_checkpoint(
             event_callback=event_callback,
             root_seed=root_seed,
             red_zone_depth=depth,
+            maps=maps,
+            system_roster=system_roster,
+            opponent_roster=opponent_roster,
+            partners=partners,
+            learner_slots=learner_slots,
+            partner_labels=partner_labels,
         )
+    if any(
+        value is not None
+        for value in (
+            maps,
+            system_roster,
+            opponent_roster,
+            partners,
+            learner_slots,
+            partner_labels,
+        )
+    ):
+        raise ValueError("Custom validation conditions need an opponents panel")
+    if not isinstance(checkpoint, (str, Path)):
+        raise ValueError("Live candidates need a panel made with opponents=")
     if root_seed is not None:
         raise ValueError("Historical panels retain their original roots")
     return _validate(
@@ -2659,6 +3261,26 @@ def validate_checkpoint(
     )
 
 
+def _random_panel() -> FrozenPanel:
+    """Describe Random through the same frozen System-panel route, without files."""
+    method, identifier, registration, _ = _method_snapshot("random")
+    member = PanelMember(
+        "Random",
+        registration_id=identifier,
+        registration=registration,
+        reference="random",
+    )
+    return FrozenPanel(
+        Path("."),
+        _digest({"random_deployment_panel": identifier}),
+        (member,),
+        True,
+        schema_version=2,
+        roots={**_panel_roots(None), "random": _ROOTS["random"]},
+        methods=(method,),
+    )
+
+
 def validate_random(
     checkpoint: str | Path,
     *,
@@ -2669,6 +3291,12 @@ def validate_random(
     chunk_size: int = 128,
     event_callback: EventCallback | None = None,
     red_zone_depth: float = DEFAULT_TDM_RED_ZONE_DEPTH,
+    partners: Mapping[str, System | Policy | str] | None = None,
+    learner_slots: Sequence[int] | None = None,
+    partner_labels: Mapping[str, str] | None = None,
+    maps: Sequence[int] | None = None,
+    system_roster: Sequence[AgentClassName] | None = None,
+    opponent_roster: Sequence[AgentClassName] | None = None,
 ) -> Record:
     """Evaluate a frozen actor against Random on the five validation maps.
 
@@ -2700,6 +3328,17 @@ def validate_random(
         one point per death. The schema 3 task records it, so a folder saved
         under another depth, or before the rule, is refused before any game.
 
+    partners, learner_slots, partner_labels : optional
+        Same team assignments and declared labels as validate_checkpoint. Each
+        deployed team faces Random under the same paired game keys. None keeps
+        the historical bare-actor task and identity.
+    maps : sequence of int or None, default=None
+        Distinct installed map IDs; None uses development maps 42 through 46.
+    system_roster, opponent_roster : sequence of class names or None, default=None
+        Fixed physical slot order; None uses canonical 5v5. Custom conditions
+        and partners use the ordinary System-panel route with live clients and
+        fixed padded batches, including recovery tails.
+
     Returns
     -------
     dict
@@ -2718,7 +3357,7 @@ def validate_random(
 
     Notes
     -----
-    Keeps canonical 5v5, K20/H300, equal map weights, and unshaped task scores.
+    Defaults to canonical 5v5, K20/H300, equal map weights, and native task scores.
     Random is diagnostic only and does not become a learned panel member.
     No learner state or training key is accepted or changed. Every installed
     map is 20.0 map units wide. A wider depth raises ValueError before any
@@ -2726,6 +3365,29 @@ def validate_random(
     depth.
     """
     root_seed = _root_seed(root_seed)
+    if partners is not None or any(
+        value is not None for value in (maps, system_roster, opponent_roster)
+    ):
+        return _validate_system_panel(
+            checkpoint,
+            _random_panel(),
+            output_dir=output_dir,
+            purpose="random",
+            seed_pairs=seed_pairs,
+            root_seed=root_seed,
+            num_envs=num_envs,
+            chunk_size=chunk_size,
+            event_callback=event_callback,
+            red_zone_depth=_checked_depth(red_zone_depth),
+            partners=partners,
+            learner_slots=learner_slots,
+            partner_labels=partner_labels,
+            maps=maps,
+            system_roster=system_roster,
+            opponent_roster=opponent_roster,
+        )
+    if any(value is not None for value in (learner_slots, partner_labels)):
+        raise ValueError("Custom Random deployment settings need partners")
     return _validate(
         checkpoint,
         [("Random", "random", "builtin-random")],
@@ -2761,6 +3423,7 @@ def read_random_initialization(
     seed_pairs: int,
     root_seed: int = _ROOTS["random"],
     red_zone_depth: float | None = DEFAULT_TDM_RED_ZONE_DEPTH,
+    deployment: Mapping[str, Any] | None = None,
 ) -> Record:
     """Read one original shared initialization result without changing any file.
 
@@ -2781,6 +3444,11 @@ def read_random_initialization(
         The depth in map units that the reusing run plays under. The record
         must have been recorded at exactly that depth, so a result saved
         before the Red Zone rule is refused unless red_zone_depth is None.
+
+    deployment : mapping or None, default=None
+        Frozen validation_deployment from the owning run. It binds partner
+        registrations, learner slots and custom conditions to saved M8 evidence.
+        None preserves the historical bare-actor checks. No weights are rebuilt.
 
     Returns
     -------
@@ -2817,6 +3485,7 @@ def read_random_initialization(
         root_seed=root_seed,
         env_steps=0,
         red_zone_depth=red_zone_depth,
+        deployment=deployment,
     )
     return record
 
@@ -2832,6 +3501,7 @@ def verify_random_result(
     run_id: str | None = None,
     seed: int | None = None,
     red_zone_depth: float | None = DEFAULT_TDM_RED_ZONE_DEPTH,
+    deployment: Mapping[str, Any] | None = None,
 ) -> Record:
     """Verify one saved Random capture and return its original scientific summary.
 
@@ -2864,6 +3534,11 @@ def verify_random_result(
         expects a record saved before the Red Zone rule (schema 1 task, no
         depth option, kills read from scores).
 
+    deployment : mapping or None, default=None
+        Frozen validation_deployment from the owning run. It binds partner
+        registrations, learner slots and custom conditions to saved M8 evidence.
+        None preserves the historical bare-actor checks. No weights are rebuilt.
+
     Returns
     -------
     dict
@@ -2893,6 +3568,7 @@ def verify_random_result(
         run_id=run_id,
         seed=seed,
         red_zone_depth=red_zone_depth,
+        deployment=deployment,
     )
     return summary
 
@@ -2908,6 +3584,7 @@ def _verified_random_result(
     run_id: str | None = None,
     seed: int | None = None,
     red_zone_depth: float | None = DEFAULT_TDM_RED_ZONE_DEPTH,
+    deployment: Mapping[str, Any] | None = None,
 ) -> tuple[Record, list[Record]]:
     """Verify a runner's Random result against its original complete M8 evidence.
 
@@ -2941,6 +3618,11 @@ def _verified_random_result(
         with recorded kills. None expects a record saved before the Red Zone
         rule: the schema 1 task, no depth option and kills read from scores.
 
+    deployment : mapping or None, default=None
+        Frozen validation_deployment from the owning run. It binds partner
+        registrations, learner slots and custom conditions to saved M8 evidence.
+        None preserves the historical bare-actor checks. No weights are rebuilt.
+
     Returns
     -------
     tuple of dict and list of dict
@@ -2965,11 +3647,14 @@ def _verified_random_result(
     checked method facts; its public and conditional bounds must match. Historical
     summaries without that metadata keep their original conditional calculation.
     For a QMIX or PQN-VDN actor the M8 focal variables
-    digest is compared with the digest of the loaded greedy System's variables
+    digest in a bare-actor pass is compared with the loaded greedy System's variables
     (the Q-network plus epsilon 0; for PQN-VDN the network is its parameters
     plus its frozen normalization statistics, so a statistics-only change
     breaks reuse), and the rebuilt summary carries its method and
-    optimizer_steps. No policy call, learner change, writer recovery or new
+    optimizer_steps. Deployed passes instead bind the native actor component and
+    declared partner through the existing sampling sidecar and actual pass IDs.
+    This verifies recorded constituents, not unavailable partner weights.
+    No policy call, learner change, writer recovery or new
     evaluation occurs. This is an integrity check, not a usefulness gate.
     """
     from marl_battlegrounds.evaluation.results import load_results
@@ -3045,6 +3730,7 @@ def _verified_random_result(
             run_id=run_id,
             seed=seed,
             red_zone_depth=depth,
+            deployment=deployment,
         )
     actor = _artifact(path(result["actor_path"], "actor_path"))
     if (
@@ -3055,6 +3741,44 @@ def _verified_random_result(
         or (seed is not None and actor["seed"] != seed)
     ):
         raise ValueError("Random result differs from the expected actor or boundary")
+    if deployment is not None:
+        from marl_battlegrounds.training._selection_evidence import (
+            _panel_evidence,  # pyright: ignore[reportPrivateUsage]
+            _Snapshot,  # pyright: ignore[reportPrivateUsage]
+        )
+
+        declared = _checked_deployment(deployment)
+        panel = _random_panel()
+        expected = panel_task_description(
+            checkpoint_id=actor["checkpoint_id"],
+            actor_digest=actor_digest,
+            env_steps=actor["env_steps"],
+            panel=panel,
+            purpose="random",
+            seed_pairs=seed_pairs,
+            root_seed=root_seed,
+            red_zone_depth=depth,
+            deployment=declared,
+            **{
+                key: declared[key]
+                for key in ("maps", "system_roster", "opponent_roster")
+                if key in declared
+            },
+        )
+        summary_path = path(result["summary_path"], "summary_path")
+        if (
+            summary_path.name != "validation_summary.json"
+            or _json(summary_path) != original
+            or _json(path(str(summary_path.parent / "task.json"), "task")) != expected
+            or any(original.get(key) != value for key, value in expected.items())
+        ):
+            raise ValueError("Random deployed-team task or summary differs")
+        reduced, rows = _panel_evidence(
+            summary_path, original, expected, actor, panel, _Snapshot()
+        )
+        if reduced != original:
+            raise ValueError("Random summary disagrees with its saved M8 games")
+        return original, rows
     expected = validation_task_description(
         checkpoint_id=actor["checkpoint_id"],
         actor_digest=actor_digest,
@@ -3080,7 +3804,7 @@ def _verified_random_result(
         raise ValueError("Random diagnostic needs its one complete M8 pass")
     paths = cast(list[Any], raw_paths)
     run_dir = path(paths[0], "pass_path")
-    parent = directory / "opponent-0"
+    parent = _pass_directory(directory, 0, "Random")
     if run_dir.parent != parent or sorted(parent.glob("*/run_details.json")) != [
         run_dir / "run_details.json"
     ]:

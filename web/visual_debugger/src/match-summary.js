@@ -6,6 +6,17 @@
 import { isAuthorizedPresentationFrame } from "./authorized-presentation-adapter.js";
 
 /**
+ * Read a normalized match's display side, using the historical layout if absent.
+ * teamId is 1 or 2. This reads recorded metadata, never current actor positions.
+ * @param {Record<string, any> | null | undefined} match
+ * @param {number} teamId
+ * @returns {"left" | "right"}
+ */
+export function matchTeamSide(match, teamId) {
+  return match?.teams?.[teamId - 1]?.display_side ?? (teamId === 1 ? "left" : "right");
+}
+
+/**
  * Build labels from a recognized presentation's match_summary, or return null.
  *
  * presentation may be any input. Unrecognized frames and missing summaries
@@ -33,6 +44,7 @@ export function matchSummaryView(presentation) {
       (/** @type {Record<string, any>} */ team, /** @type {number} */ index) =>
         Object.freeze({
           teamId: team.team_id,
+          side: matchTeamSide(match, team.team_id),
           label: `Team ${index === 0 ? "A (Blue)" : "B (Red)"}`,
           name: team.display_name,
           score: tdm ? `${match.scores[index]}/${match.score_threshold}` : null,
@@ -57,7 +69,7 @@ export function matchSummaryView(presentation) {
 /**
  * Replace the supplied scoreboard DOM with the current authorized match labels.
  *
- * elements supplies root, task text, two team containers in Team A/B order and
+ * elements supplies root, task text, two team containers in left/right order and
  * the task selector. presentation is passed to matchSummaryView. If unavailable,
  * hide the root, clear team contents and disable the selector. Otherwise show
  * task/map text, team names, TDM scores and any final result; policy references
@@ -78,8 +90,11 @@ export function renderMatchSummary(elements, presentation) {
   }
   elements.task.textContent = `Task mode: ${summary.task}${summary.map ? ` · Map: ${summary.map}` : ""}`;
   elements.taskSelect.disabled = summary.taskMode !== 1;
-  for (const [index, team] of summary.teams.entries()) {
-    const root = elements.teams[index];
+  for (const team of summary.teams) {
+    const root = elements.teams[team.side === "left" ? 0 : 1];
+    root.dataset.team = String(team.teamId);
+    root.classList.toggle("match-scoreboard__team--a", team.teamId === 1);
+    root.classList.toggle("match-scoreboard__team--b", team.teamId === 2);
     const title = root.ownerDocument.createElement("strong");
     title.className = "match-scoreboard__team-label";
     title.textContent = team.label;

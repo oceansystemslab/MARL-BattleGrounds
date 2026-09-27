@@ -423,14 +423,30 @@ def test_panel_accepts_same_method_exports_renamed_by_factories(
     )
 
 
-def test_panel_refuses_two_unrenamed_exports_of_one_method(
+def test_panel_keeps_two_exports_with_the_same_name_separate(
     actors: tuple[Path, Path],
     tmp_path: Path,
 ) -> None:
     assert [load_system(path).name for path in actors] == ["Recurrent MAPPO"] * 2
-    with pytest.raises(ValueError, match="distinct names"):
-        create_panel(opponents=[str(path) for path in actors], output_dir=tmp_path)
-    assert not (tmp_path / "panel.json").exists()
+    panel = create_panel(opponents=[str(path) for path in actors], output_dir=tmp_path)
+    assert [member.name for member in panel.members] == [
+        "Recurrent MAPPO",
+        "Recurrent MAPPO (2)",
+    ]
+    assert [member.reference for member in panel.members] == [
+        str(path) for path in actors
+    ]
+    assert [method.name for method in panel.methods] == ["Recurrent MAPPO"] * 2
+    assert load_panel(tmp_path) == panel
+    task = panel_task_description(
+        checkpoint_id="actor",
+        actor_digest="weights",
+        env_steps=8,
+        panel=panel,
+        purpose="routine",
+        seed_pairs=1,
+    )
+    assert len({member["root"] for member in task["members"]}) == 2
 
 
 @pytest.mark.parametrize("kind", ("panel", "slot"))
@@ -865,7 +881,10 @@ def test_kill_difference_and_selection_use_recorded_kills_not_points() -> None:
         "checkpoint_id": "b",
         "mean_kill_difference": summary(3, 3)["mean_kill_difference"],
     }
-    assert select_checkpoint([more_points, more_kills])["checkpoint_id"] == "b"
+    assert (
+        select_checkpoint([more_points, more_kills], rule="saved")["checkpoint_id"]
+        == "b"
+    )
     for other in (
         {**more_kills, "red_zone_depth": 0.0},
         {key: value for key, value in more_kills.items() if key != "red_zone_depth"},

@@ -24,7 +24,7 @@ helper is pure JAX for jit and scan; the checks in ``validate_pqn_learner``
 are host-only. Requires the training extra.
 """
 
-from collections.abc import Callable
+from collections.abc import Callable, Mapping, Sequence
 from functools import lru_cache
 from typing import Any, NamedTuple, cast
 
@@ -44,6 +44,7 @@ from marl_battlegrounds.baselines.inputs import (
     spawn_frame_flag,
     team_obstacle_partners,
 )
+from marl_battlegrounds.baselines.ppo import _actor_groups
 from marl_battlegrounds.baselines.pqn import (
     DEFAULT_PQN_CONFIG,
     PQN_HIDDEN_SIZE,
@@ -75,6 +76,8 @@ from marl_battlegrounds.training._content import PreparedTrainingContent
 from marl_battlegrounds.training._continuation_schedules import (
     LearnerContinuation,
     continuation_boundary,
+    continuation_config,
+    reward_refill_end,
     schedule_continuation,
 )
 
@@ -90,6 +93,7 @@ from marl_battlegrounds.training.collection import (
     _padding,
     _validate_training_continuation,
     init_training_collection,
+    learner_memory,
 )
 from marl_battlegrounds.training.curriculum import TrainingSchedule
 from marl_battlegrounds.training.learner import (
@@ -109,9 +113,11 @@ from marl_battlegrounds.training.learner import (
 from marl_battlegrounds.training.opponents import (
     OpponentHistory,
     SnapshotEvent,
-    _history_invalid,
+    opponent_counter_row,
+    publication_valid,
     refresh_opponents,
 )
+from marl_battlegrounds.training.shaping import RewardFunction
 
 type Tree = Any
 
@@ -126,7 +132,6 @@ The same number and meaning as the QMIX learner's code. It is kept here
 because the QMIX learner module imports Flashbax, which PQN never loads."""
 _MAX_COUNT = int(np.iinfo(np.int32).max)
 _STAGES = 17
-_OPPONENT_ROWS = 21
 _SNAPSHOT_SLOTS = 20
 
 
@@ -149,9 +154,13 @@ class PQNRow(NamedTuple):
         Int32 (5,) categorical indices of the submitted Team A actions, world
         frame.
     task_reward : Array
-        Float32 team task reward: the mean native reward over configured slots.
+        Float32 native team reward plus the mean custom adjustment over owned
+        active slots. The native team reward enters once, not once per actor.
     shaping_reward : Array
         Float32 team shaping reward (0 when shaping is off).
+    learner_active : Array or None, default=None
+        Bool (5,) slots owned by this learner. None owns all active slots.
+        Stored only when partners are enabled; adds 5 bytes per game row.
     active, alive : Array
         Bool (5,) configured and living Team A slots before the action.
     episode_start, ended, valid : Array
@@ -191,6 +200,7 @@ class PQNRow(NamedTuple):
     learner_update: Array
     opponent_update: Array
     opponent_snapshot: Array
+    learner_active: Array | None = None
 
 
 class PQNRecent(NamedTuple):
@@ -242,8 +252,8 @@ class PQNUsedCounts(NamedTuple):
     exposure_by_source : Array
         Int32 (bank,) pairs by the left row's source-bank row.
     exposure_by_opponent : Array
-        Int32 (21,) pairs by opponent: row 0 current self-play, row k the
-        historical (or pinned, for slot 0) opponent in slot k-1.
+        Int32 (C+2,) pairs by stable opponent: row 0 self, row 1 pin,
+        then capture_id+2. C is the configured capture-count bound.
 
     Notes
     -----
@@ -320,6 +330,9 @@ class PQNUpdateResult(NamedTuple):
         Bool. True only when the block ran its optimizer steps and published.
     failed, failure_reason : Array
         Mirror the returned state's sticky failure.
+    reward, reward_identity : callable and dict or None, defaults=None
+        Optional pure training reward and its saved identity. Forwarded to
+        init_training_collection; None skips callback work and extra storage.
     metrics : PQNMetrics
         Leaves with leading (epochs, num_minibatches). Zeros unless a learning
         block ran; a rejected learning block keeps its attempted values.
@@ -376,7 +389,14 @@ def _pqn_rows(rows: TrainingTransition) -> tuple[PQNRow, Array]:
         rows.observations.source_availability[..., :TEAM_SLOTS, :TEAM_SLOTS],
         rows.action_mask,
         encode_actions(native),
-        team_task_reward(rows.task_rewards, rows.active),
+        team_task_reward(
+            rows.task_rewards
+            if rows.custom_rewards is None
+            else rows.task_rewards + rows.custom_rewards,
+            rows.active
+            if rows.learner_active is None
+            else rows.active & rows.learner_active,
+        ),
         rows.shaping_reward,
         rows.active,
         rows.alive,
@@ -391,6 +411,7 @@ def _pqn_rows(rows: TrainingTransition) -> tuple[PQNRow, Array]:
         rows.learner_update,
         rows.opponent_update,
         rows.opponent_snapshot,
+        rows.learner_active,
     )
     return packed, outputs.pre_memory
 
@@ -500,7 +521,9 @@ def _expand_minibatch(rows: PQNRow, initial_memory: Array, pqn: PQNConfig) -> PQ
     Team B rows and a zero 10x10 permission matrix, then passed through
     ``build_team_actor_input`` for Team A, the same builder as live action
     selection. In the "left" frame, flagged rows' views, masks and stored
-    world actions are reflected. Rewards are task plus shaping. Returns float32
+    world actions are reflected. Actor groups come from raw self classes or
+    physical slots before encoding. They are temporary batch fields, not stored
+    data. Rewards are task plus shaping. Returns float32
     (C,D,5,5165) features among the PQNBatch leaves: 27,271,200 bytes for
     C=132 and D=2. Pure JAX.
     """
@@ -523,6 +546,11 @@ def _expand_minibatch(rows: PQNRow, initial_memory: Array, pqn: PQNConfig) -> PQ
     )
     observations = Observations(jax.tree.map(ten_rows, flat.observation), permissions)
     actors = jax.vmap(build_team_actor_input, in_axes=(0, None))(observations, 0)
+    groups = (
+        None
+        if pqn.parameter_sharing == "all"
+        else _actor_groups(actors, pqn.parameter_sharing)
+    )
     mask, actions = flat.action_mask, flat.actions
     if pqn.spawn_frame != "world":
         flag = spawn_frame_flag(actors, pqn.spawn_frame)
@@ -550,6 +578,8 @@ def _expand_minibatch(rows: PQNRow, initial_memory: Array, pqn: PQNConfig) -> PQ
         rows.valid,
         rows.active,
         initial_memory,
+        actor_group=None if groups is None else restore(groups),
+        learner_active=rows.learner_active,
     )
 
 
@@ -566,7 +596,7 @@ def _state_shapes(state: PQNLearnerState, pqn: PQNConfig) -> int:
     """
     games = state.carry.state.episode_id.shape[0]
     _array(
-        state.carry.memory.team_a,
+        learner_memory(state.carry),
         (games, TEAM_SLOTS, PQN_HIDDEN_SIZE),
         jnp.float32,
         "Actor memory",
@@ -593,6 +623,13 @@ def _state_shapes(state: PQNLearnerState, pqn: PQNConfig) -> int:
         "kept pre_memory",
     )
     _array(state.recent.size, (), jnp.int32, "kept size")
+    if state.recent.rows.learner_active is not None:
+        _array(
+            state.recent.rows.learner_active,
+            (window, games, TEAM_SLOTS),
+            jnp.bool_,
+            "stored learner_active",
+        )
     for leaf in jax.tree.leaves(state.recent.rows):
         if leaf.shape[:2] != (window, games):
             raise ValueError("PQN kept rows must hold memory_window rows per game")
@@ -603,14 +640,26 @@ def init_pqn_learner(
     *,
     schedule: TrainingSchedule,
     seed: int = 42,
+    initial_actor: Tree | None = None,
     prepared: PreparedTrainingContent | None = None,
     shaping: bool = False,
     shaping_coefficient: float = 0.01,
     shaping_mode: str = "potential",
+    reward: RewardFunction | None = None,
+    reward_identity: dict[str, object] | None = None,
     metrics: str = "priority",
     recording: bool = False,
     pinned_opponent_share: float = 0.0,
     pinned_opponent: System | Policy | str | None = None,
+    keep_past: int = 20,
+    history_capture_capacity: int = 20,
+    minimum_capture_rounds: int = 1,
+    capture_interval_rounds: int = 0,
+    opponent_population: Mapping[str, System | Policy | str] | None = None,
+    opponent_selection: Mapping[str, float] | Sequence[str] | None = None,
+    learner_slots: tuple[int, ...] | None = None,
+    partner_population: Mapping[str, System | Policy | str] | None = None,
+    partner_selection: Mapping[str, float] | Sequence[str] | None = None,
     pqn: PQNConfig = DEFAULT_PQN_CONFIG,
 ) -> tuple[TrainingCollection, PQNLearnerState]:
     """Initialize one untrained PQN-VDN learner and its verified collection setup.
@@ -624,6 +673,12 @@ def init_pqn_learner(
     seed : int, default=42
         Python run seed, excluding bool. Collection keeps its own streams; the
         model key and shuffle root come from version-1 PQN tags.
+    initial_actor : numerical actor tree or None, default=None
+        Compatible actor weights copied into a fresh learner before history is
+        initialized. PPO takes actor parameters; QMIX takes online Q parameters
+        (also used for its targets); PQN takes parameters and running statistics.
+        Critic, mixer, optimizer, memory and counters start fresh. Initial
+        exploration and collection keep this method's normal rules.
     prepared : PreparedTrainingContent or None, default=None
         Existing verified content, or None to verify installed content now.
     shaping : bool, default=False
@@ -642,20 +697,41 @@ def init_pqn_learner(
     pqn : PQNConfig, default=DEFAULT_PQN_CONFIG
         Static PQN settings shared by the actor, kept rows and every update.
 
+    keep_past, history_capture_capacity : int, defaults=20, 20
+        Rolling copy count and maximum stable capture count. See
+        init_training_collection for storage and counter meanings.
+    minimum_capture_rounds, capture_interval_rounds : int, defaults=1, 0
+        Minimum actual capture gap and optional recurring gap. The public runner
+        checks the maximum game horizon and passes it as the minimum.
+
+    opponent_population, opponent_selection : mapping, sequence or None
+        Named frozen Systems and future-game shares or exact repeating order.
+        Forwarded to init_training_collection; None keeps the existing recipe.
+        Open member resources around setup and training, as public train does.
+
+    learner_slots : tuple[int, ...] or None, default=None
+        Physical Team A slots trained by this learner. None owns all slots.
+    partner_population, partner_selection : mapping, sequence or None
+        Frozen named partners and their future-game shares or repeating order.
+        Forwarded to init_training_collection with learner_slots.
+
     Returns
     -------
     tuple[TrainingCollection, PQNLearnerState]
         Stable host descriptor (no physical state, no step hook) and the
         numerical zero-experience boundary: exploration rate exactly 1.0 for
-        initial random collection, empty kept rows, running mean 0 and
-        variance 1, and all counters zero.
+        initial random collection, empty kept rows and all counters zero.
+        Random initialization starts with running mean 0 and variance 1;
+        a warm start keeps the imported running statistics.
 
     Raises
     ------
     TypeError, ValueError
         Setup types, the batch or budget guards (including R < H + T + 1),
-        verified content, or the collection and shaping contracts fail. The
-        guards run before any array is allocated.
+        verified content, or the collection and shaping contracts fail. An
+        initial actor has incompatible arrays, nonfinite values or negative
+        running variance. Batch and budget checks run before model allocation;
+        imported actor checks run before collection setup.
 
     Notes
     -----
@@ -679,12 +755,21 @@ def init_pqn_learner(
         pqn=pqn,
         planned_learning_blocks=planned,
     )
+    if initial_actor is not None:
+        from marl_battlegrounds.training.checkpoints import initial_actor_variables
+
+        initialized = initialized._replace(
+            network=initial_actor_variables(initial_actor, initialized.network)
+        )
+        if not _nonnegative_variances(initialized.network.batch_stats):
+            raise ValueError("Initial actor running variance must be nonnegative")
     variables = PQNActorVariables(initialized.network, jnp.float32(1.0))
     actor = make_pqn_system(
         initialized.network,
         epsilon=1.0,
         input_scale=pqn.input_scale,
         spawn_frame=pqn.spawn_frame,
+        parameter_sharing=pqn.parameter_sharing,
     )
     collection, carry = init_training_collection(
         actor,
@@ -694,6 +779,8 @@ def init_pqn_learner(
         prepared=prepared,
         shaping=shaping,
         shaping_mode=shaping_mode,
+        reward=reward,
+        reward_identity=reward_identity,
         discount=pqn.gamma,
         coefficient=shaping_coefficient,
         collect_training_state=False,
@@ -701,6 +788,16 @@ def init_pqn_learner(
         recording=recording,
         pinned_opponent_share=pinned_opponent_share,
         pinned_opponent=pinned_opponent,
+        keep_past=keep_past,
+        history_capture_capacity=history_capture_capacity,
+        minimum_capture_rounds=minimum_capture_rounds,
+        capture_interval_rounds=capture_interval_rounds,
+        opponent_population=opponent_population,
+        opponent_selection=opponent_selection,
+        learner_slots=learner_slots,
+        partner_population=partner_population,
+        partner_selection=partner_selection,
+        vectorize_opponent_lanes=pqn.parameter_sharing == "all",
         actor_variables_at_step=None,
     )
     state = PQNLearnerState(
@@ -757,6 +854,20 @@ def _rollout_shapes(
     for name in ("active", "alive"):
         _array(getattr(rows, name), (length, games, TEAM_SLOTS), jnp.bool_, name)
     _array(rows.task_rewards, (length, games, TEAM_SLOTS), jnp.float32, "task_rewards")
+    if rows.learner_active is not None:
+        _array(
+            rows.learner_active,
+            (length, games, TEAM_SLOTS),
+            jnp.bool_,
+            "learner_active",
+        )
+    if rows.custom_rewards is not None:
+        _array(
+            rows.custom_rewards,
+            (length, games, TEAM_SLOTS),
+            jnp.float32,
+            "custom_rewards",
+        )
     _array(rows.shaping_reward, (length, games), jnp.float32, "shaping_reward")
     for name in ("learner_update", "opponent_update", "opponent_snapshot"):
         _array(getattr(rows, name), (length, games), jnp.int32, name)
@@ -801,6 +912,13 @@ def _boundary_valid(
     learning = state.learning_blocks
     refreshed = prior.history.last_refresh_rounds
     initial, length = pqn.initial_rounds, pqn.rollout_length
+    refill_end = reward_refill_end(
+        continuation, initial_rounds=initial, memory_window=pqn.memory_window
+    )
+    reset = None if continuation is None else continuation.reward_reset
+    elapsed = rounds - (0 if reset is None else reset.rounds)
+    learned_before = 0 if reset is None else reset.learning_blocks
+    refreshed_before = 0 if reset is None else reset.last_refresh_rounds
     total = collected.schedule.total_rounds
     after = rounds > initial
     expected_learning = jnp.where(after, _ceil(rounds - initial, length), 0)
@@ -808,25 +926,35 @@ def _boundary_valid(
         after, -(-initial // length) + expected_learning, _ceil(rounds, length)
     )
     expected_chunk = jnp.where(
-        rounds < initial,
-        jnp.minimum(length, initial - rounds),
+        rounds < refill_end,
+        jnp.minimum(length, refill_end - rounds),
         jnp.minimum(length, total - rounds),
     )
-    learning_now = rounds >= initial
+    learning_now = rounds >= refill_end
     snapshot = rows.opponent_snapshot
-    captured = collected.history.captured_updates[
-        jnp.clip(snapshot, 0, _SNAPSHOT_SLOTS - 1)
-    ]
+    history = collected.history
+    matched = (snapshot[..., None] == history.captured_ids) & (snapshot[..., None] >= 0)
+    captured = jnp.sum(jnp.where(matched, history.captured_updates, 0), axis=-1)
+    pin_update = jnp.where(history.external_pin, -2, history.pinned_update)
     opponent_version = jnp.where(
-        snapshot < 0,
+        snapshot == -1,
         rows.opponent_update == learning,
-        (rows.opponent_update == captured) | (rows.opponent_update == -2),
+        jnp.where(
+            snapshot == -2,
+            rows.opponent_update == pin_update,
+            jnp.any(matched, axis=-1) & (rows.opponent_update == captured),
+        ),
     )
+    if collected.opponent_selection is not None:
+        members = collected.opponent_selection.shares.shape[0] - 2
+        opponent_version |= (
+            (snapshot <= -3) & (snapshot >= -2 - members) & (rows.opponent_update == -2)
+        )
     planned = _ceil(jnp.maximum(total - initial, 0), length)
     if continuation is not None:
         start = continuation.start_rounds
-        warm = jnp.maximum(0, jnp.minimum(rounds, initial) - start)
-        learned_rounds = jnp.maximum(0, rounds - max(start, initial))
+        warm = jnp.maximum(0, jnp.minimum(rounds, refill_end) - start)
+        learned_rounds = jnp.maximum(0, rounds - max(start, refill_end))
         new_learning = _ceil(learned_rounds, length)
         expected_learning = continuation.start_learning_blocks + new_learning
         expected_blocks = continuation.start_blocks + _ceil(warm, length) + new_learning
@@ -839,8 +967,9 @@ def _boundary_valid(
         & (learning == expected_learning)
         & (state.completed_updates == learning * pqn.epochs * pqn.num_minibatches)
         & (prior.history.current_update == learning)
-        & (refreshed == jnp.where(learning > 0, rounds, 0))
-        & (state.recent.size == jnp.minimum(rounds, pqn.memory_window))
+        & (refreshed == jnp.where(learning > learned_before, rounds, refreshed_before))
+        & (elapsed >= 0)
+        & (state.recent.size == jnp.minimum(elapsed, pqn.memory_window))
         & (planned == planned_learning_blocks)
         & (collected.history.current_update == learning)
         & (collected.history.last_refresh_rounds == refreshed)
@@ -852,7 +981,7 @@ def _boundary_valid(
         & jnp.all(rows.valid == prefix)
         & jnp.all(jnp.where(rows.valid, rows.learner_update == learning, True))
         & jnp.all(jnp.where(rows.valid, opponent_version, True))
-        & jnp.all(rollout.initial_memory == prior.memory.team_a)
+        & jnp.all(rollout.initial_memory == learner_memory(prior))
         & jnp.all(rollout.final_ended == collected.state.done.done)
     )
 
@@ -900,7 +1029,12 @@ def _sequence_valid(rows: PQNRow, learning: Array) -> Array:
 
 
 def _minibatch_counts(
-    rows: PQNRow, metrics: PQNMetrics, bank: int, window: int
+    rows: PQNRow,
+    metrics: PQNMetrics,
+    bank: int,
+    window: int,
+    opponent_rows: int,
+    capture_capacity: int | Array = 20,
 ) -> PQNUsedCounts:
     """Count one minibatch step's pairs by stage, source row and opponent row.
 
@@ -908,7 +1042,10 @@ def _minibatch_counts(
     rows 0..H-1 are kept-row pairs.
     """
     step = metrics.performed.astype(jnp.int32)
-    pair = (rows.valid[:-1] & rows.valid[1:]).astype(jnp.int32) * step
+    pair = rows.valid[:-1] & rows.valid[1:]
+    if rows.learner_active is not None:
+        pair &= jnp.any((rows.active & rows.learner_active)[:-1], axis=-1)
+    pair = pair.astype(jnp.int32) * step
     kept = (jnp.arange(pair.shape[0]) < window)[:, None]
 
     def count(index: Array, size: int) -> Array:
@@ -927,11 +1064,14 @@ def _minibatch_counts(
         jnp.sum(pair * kept, dtype=jnp.int32),
         count(rows.episode_stage, _STAGES),
         count(rows.source_index, bank),
-        count(rows.opponent_snapshot + 1, _OPPONENT_ROWS),
+        count(
+            opponent_counter_row(rows.opponent_snapshot, capture_capacity),
+            opponent_rows,
+        ),
     )
 
 
-def _absent_counts(bank: int) -> PQNUsedCounts:
+def _absent_counts(bank: int, opponent_rows: int) -> PQNUsedCounts:
     """Return zero used counts with the fixed shapes."""
     zero = jnp.int32(0)
     return PQNUsedCounts(
@@ -941,7 +1081,7 @@ def _absent_counts(bank: int) -> PQNUsedCounts:
         zero,
         jnp.zeros(_STAGES, jnp.int32),
         jnp.zeros(bank, jnp.int32),
-        jnp.zeros(_OPPONENT_ROWS, jnp.int32),
+        jnp.zeros(opponent_rows, jnp.int32),
     )
 
 
@@ -970,6 +1110,7 @@ def _absent_snapshot() -> SnapshotEvent:
         jnp.int32(-1),
         jnp.int32(-1),
         jnp.zeros(_SNAPSHOT_SLOTS, jnp.bool_),
+        jnp.int32(-1),
     )
 
 
@@ -1072,6 +1213,8 @@ def learn_window(
     pqn: PQNConfig,
     planned_learning_blocks: int,
     bank: int,
+    opponent_rows: int = 22,
+    capture_capacity: int | Array = 20,
     continuation: LearnerContinuation | None = None,
 ) -> tuple[PQNTrainState, PQNMetrics, PQNUsedCounts]:
     """Run every epoch and minibatch of one learning window.
@@ -1134,7 +1277,14 @@ def learn_window(
         )
         return candidate, (
             metrics,
-            _minibatch_counts(selected, metrics, bank, pqn.memory_window),
+            _minibatch_counts(
+                selected,
+                metrics,
+                bank,
+                pqn.memory_window,
+                opponent_rows,
+                capture_capacity,
+            ),
         )
 
     final, (metrics, counts) = run_epochs(
@@ -1148,14 +1298,32 @@ def learn_window(
     return final, metrics, cast(PQNUsedCounts, jax.tree.map(total, counts))
 
 
-def _count_leaves_equal(opt_state: Tree, steps: Array) -> Array:
-    """Say whether every integer optimizer count leaf equals steps."""
-    checks = [
-        jnp.all(leaf == steps)
+def _count_leaves_equal(
+    opt_state: Tree, steps: Array, *, grouped: bool = False
+) -> Array:
+    """Check complete optimizer clocks against the run-wide int32 step count.
+
+    Shared mode requires every scalar count to equal steps. Grouped mode lets
+    absent actors keep local counts: all five counts must be in [0, steps],
+    and RAdam/schedule counts must agree for each group. A nonzero run count
+    requires at least one used group. This check works under jit.
+    """
+    counts = [
+        leaf
         for leaf in jax.tree.leaves(opt_state)
         if jnp.issubdtype(leaf.dtype, jnp.integer)
     ]
-    return jnp.all(jnp.stack(checks)) if checks else jnp.bool_(True)
+    if not counts:
+        return jnp.bool_(True)
+    if not grouped:
+        return jnp.all(jnp.stack([jnp.all(leaf == steps) for leaf in counts]))
+    first = counts[0]
+    valid = jnp.all((first >= 0) & (first <= steps)) & (
+        (steps == 0) | jnp.any(first > 0)
+    )
+    for count in counts[1:]:
+        valid = valid & jnp.all(count == first)
+    return valid
 
 
 def _choose[T](flag: Array, new: T, old: T) -> T:
@@ -1166,33 +1334,6 @@ def _choose[T](flag: Array, new: T, old: T) -> T:
         return jnp.where(flag, a, b)
 
     return cast(T, jax.tree.map(pick, new, old))
-
-
-def _publishable(
-    history: OpponentHistory, rounds: Array, index: Array, total: Array, due: Array
-) -> Array:
-    """Repeat refresh_opponents' own acceptance rule before publishing.
-
-    history is the collected opponent history; rounds is the int32 0-d round
-    count at the boundary being published; index is the int32 0-d version to
-    publish (the learning block count after this block); total is the
-    schedule's int32 0-d total rounds; due is the bool (20,) mask of history
-    thresholds whose capture falls due at rounds. Returns a bool 0-d array:
-    True when the history is valid, the version is below the int32 maximum
-    and exactly one above the current one, rounds are above the last refresh
-    and within the total, and a due capture has a free slot. The updater
-    checks this first, so the shared publisher can never reject a publication
-    the updater allowed; a failing check rejects the block with reason 6 and
-    keeps the previous history. Pure JAX.
-    """
-    return (
-        ~_history_invalid(history)
-        & (history.current_update < _MAX_COUNT)
-        & (index == history.current_update + 1)
-        & (rounds > history.last_refresh_rounds)
-        & (rounds <= total)
-        & (~jnp.any(due) | (history.count < _SNAPSHOT_SLOTS))
-    )
 
 
 def update_pqn_learner(
@@ -1231,7 +1372,8 @@ def update_pqn_learner(
 
     continuation : LearnerContinuation or None, default=None
         Checked static child boundary and future schedules. The original PQN
-        horizon, saved blocks, retained rows and optimizer clocks continue.
+        horizon, saved blocks and optimizer clocks continue. If stored rewards
+        changed, only kept rows restart; learning waits for a clean H-row prefix.
 
     Returns
     -------
@@ -1265,11 +1407,12 @@ def update_pqn_learner(
 
     Inputs are not donated, so the previous boundary survives a rejection.
     The learning branch returns only the network, optimizer state, metrics
-    and used counts; the 20-slot opponent bank never passes through it. One
+    and used counts; the opponent bank never passes through it. One
     three-way switch then makes the new history: publish, keep (initial
     chunks, with the rate write at W) or restore the previous one. Pure JAX;
     wrap in jit with fixed settings.
     """
+    pqn = continuation_config(pqn, continuation)
     capacity, games = _rollout_shapes(state, rollout, pqn)
     validate_pqn_batch_size(games, pqn)
     if collected.state.episode_id.shape != (games,):
@@ -1279,7 +1422,9 @@ def update_pqn_learner(
     rounds = collected.progress.rounds
     learning = state.learning_blocks
     nonempty = rollout.real_steps > 0
-    learn_now = state.carry.progress.rounds >= pqn.initial_rounds
+    learn_now = state.carry.progress.rounds >= reward_refill_end(
+        continuation, initial_rounds=pqn.initial_rounds, memory_window=pqn.memory_window
+    )
     entry_reason = jnp.where(
         _failed(state.carry) | _failed(collected),
         LEARNER_ERROR_COLLECTION,
@@ -1324,7 +1469,12 @@ def update_pqn_learner(
 
     def skip(_: None) -> tuple[PQNTrainState, PQNMetrics, PQNUsedCounts, Array]:
         """Leave the network and optimizer untouched."""
-        return train, _absent_metrics(pqn), _absent_counts(bank), jnp.bool_(True)
+        return (
+            train,
+            _absent_metrics(pqn),
+            _absent_counts(bank, state.carry.progress.opponent_steps.shape[0]),
+            jnp.bool_(True),
+        )
 
     if capacity == pqn.rollout_length:
 
@@ -1338,13 +1488,19 @@ def update_pqn_learner(
                 pqn=pqn,
                 planned_learning_blocks=planned_learning_blocks,
                 bank=bank,
+                opponent_rows=state.carry.progress.opponent_steps.shape[0],
+                capture_capacity=state.carry.history.capture_capacity,
                 continuation=continuation,
             )
             complete = (
                 jnp.all(metrics.performed)
                 & jnp.all(metrics.finite)
                 & (final.optimizer_steps == state.completed_updates + steps_per_block)
-                & _count_leaves_equal(final.opt_state, final.optimizer_steps)
+                & _count_leaves_equal(
+                    final.opt_state,
+                    final.optimizer_steps,
+                    grouped=pqn.parameter_sharing != "all",
+                )
                 & _finite(final)
             )
             return final, metrics, used, complete
@@ -1354,14 +1510,11 @@ def update_pqn_learner(
         learned, metrics, used, complete = skip(None)
     history = collected.history
     index = learning + jnp.int32(1)
-    due = (history.threshold_to_snapshot == -1) & (
-        rounds >= collected.schedule.history_threshold_rounds
-    )
-    threshold_count = getattr(collected.schedule, "history_threshold_count", None)
-    if threshold_count is not None:
-        due &= jnp.arange(_SNAPSHOT_SLOTS) < threshold_count
-    publishable = _publishable(
-        history, rounds, index, collected.schedule.total_rounds, due
+    publishable = publication_valid(
+        history,
+        completed_rounds=rounds,
+        update_index=index,
+        schedule=collected.schedule,
     )
     later_reason = jnp.where(
         attempted & ~complete,
@@ -1446,8 +1599,16 @@ def update_pqn_learner(
         final_state.failure_reason,
         metrics,
         event,
-        _summary(rollout),
-        _choose(publish, used, _absent_counts(bank)),
+        _summary(
+            rollout,
+            collected.progress.opponent_steps.shape[0],
+            collected.history.capture_capacity,
+        ),
+        _choose(
+            publish,
+            used,
+            _absent_counts(bank, state.carry.progress.opponent_steps.shape[0]),
+        ),
     )
     return final_state, result
 
@@ -1482,17 +1643,24 @@ def _epsilon_matches(
     return abs(value - expected) <= 2e-6
 
 
-def _check_recent(state: PQNLearnerState, pqn: PQNConfig) -> None:
+def _check_recent(
+    state: PQNLearnerState,
+    pqn: PQNConfig,
+    continuation: LearnerContinuation | None = None,
+) -> None:
     """Check the kept rows are the latest real suffix of every game.
 
     Raises ValueError when the size, the valid prefix, in-game order, learner
     versions, the link to the carry's last successor or the stored memories
-    (zero at episode starts and in inactive slots) are wrong. Host-only.
+    (zero at episode starts and in inactive slots) are wrong. A reward reset
+    begins an empty suffix at its saved round offset. Host-only.
     """
     recent = state.recent
     rounds = int(state.carry.progress.rounds)
     size = int(recent.size)
-    if size != min(pqn.memory_window, rounds):
+    reset = None if continuation is None else continuation.reward_reset
+    elapsed = rounds - (0 if reset is None else reset.rounds)
+    if elapsed < 0 or size != min(pqn.memory_window, elapsed):
         raise ValueError("PQN kept rows hold the wrong number of real rows")
     rows = cast(PQNRow, jax.tree.map(np.asarray, recent.rows))
     if not (rows.valid[:size].all() and not rows.valid[size:].any()):
@@ -1557,8 +1725,10 @@ def validate_pqn_learner(
     k, ``completed_updates == k * epochs * num_minibatches``,
     ``history.current_update == k`` and the last refresh at the current
     rounds once learning has started (0 before). The shuffle root must be
-    re-derived from the run root. Every integer optimizer count equals
-    completed_updates, and every running variance is at least zero. The kept
+    re-derived from the run root. Shared optimizer counts equal completed_updates.
+    Grouped actor counts may be lower when that group was absent; RAdam and
+    schedule counts must agree within each group. All local counts are bounded
+    by completed_updates, and every running variance is at least zero. The kept
     rows must hold ``min(H, rounds)`` real rows in game order that lead into
     the carried successor, with zero memory at episode starts and in inactive
     slots. The current rate is exactly 1 before W and follows the block clock
@@ -1572,6 +1742,7 @@ def validate_pqn_learner(
     if not isinstance(cast(object, pqn), PQNConfig):
         raise TypeError("pqn must be a PQNConfig")
     continuation = schedule_continuation(collection.schedule)
+    pqn = continuation_config(pqn, continuation)
     games = _state_shapes(state, pqn)
     validate_pqn_batch_size(games, pqn)
     if (
@@ -1614,13 +1785,17 @@ def validate_pqn_learner(
             rollout_length=pqn.rollout_length,
             initial_rounds=pqn.initial_rounds,
         )
+    reset = None if continuation is None else continuation.reward_reset
+    learned_before = 0 if reset is None else reset.learning_blocks
+    refreshed_before = 0 if reset is None else reset.last_refresh_rounds
     if (
         reachable != rounds
         or int(state.completed_blocks) != ordinal
         or learning != expected_learning
         or updates != learning * pqn.epochs * pqn.num_minibatches
         or int(history.current_update) != learning
-        or int(history.last_refresh_rounds) != (rounds if learning else 0)
+        or int(history.last_refresh_rounds)
+        != (rounds if learning > learned_before else refreshed_before)
     ):
         raise ValueError("PQN block, update and collection counts disagree")
     expected_key = jax.random.fold_in(state.carry.root_key, PQN_SHUFFLE_ROOT_TAG)
@@ -1638,9 +1813,14 @@ def validate_pqn_learner(
         jax.tree.leaves(numerical), jax.tree.leaves(template), strict=True
     ):
         _array(actual, expected.shape, expected.dtype, "PQN network/optimizer leaf")
-    for leaf in cast(list[Array], jax.tree.leaves(state.opt_state)):
-        if jnp.issubdtype(leaf.dtype, jnp.integer) and int(leaf) != updates:
-            raise ValueError("PQN optimizer count differs from completed updates")
+    if not bool(
+        _count_leaves_equal(
+            state.opt_state,
+            state.completed_updates,
+            grouped=pqn.parameter_sharing != "all",
+        )
+    ):
+        raise ValueError("PQN optimizer count differs from completed updates")
 
     def empty_recent(values: TrainingCarry) -> PQNRecent:
         """Trace the kept-row layout this collection and settings allocate."""
@@ -1661,7 +1841,7 @@ def validate_pqn_learner(
         and _nonnegative_variances(history.historical_variables.network.batch_stats)
     ):
         raise ValueError("A PQN running variance is negative")
-    _check_recent(state, pqn)
+    _check_recent(state, pqn, continuation)
 
     def epsilon_matches(value: float, block: int) -> bool:
         """Check the active future rule without changing inherited opponents."""
@@ -1675,12 +1855,35 @@ def validate_pqn_learner(
             raise ValueError("Initial random collection must explore with rate 1")
     elif not epsilon_matches(rate, learning):
         raise ValueError("Current exploration rate disagrees with the block clock")
+    inherited = (
+        {}
+        if continuation is None
+        else dict(
+            zip(
+                continuation.frozen_capture_ids,
+                continuation.frozen_epsilon,
+                strict=True,
+            )
+        )
+    )
     captured = np.asarray(history.captured_updates)
+    ids = np.asarray(history.captured_ids)
     rates = np.asarray(history.historical_variables.epsilon)
-    for slot in range(int(history.count)):
-        if continuation is not None and slot < len(continuation.frozen_epsilon):
-            matches = float(rates[slot]) == continuation.frozen_epsilon[slot]
-        else:
-            matches = epsilon_matches(float(rates[slot]), int(captured[slot]))
+    for slot in np.flatnonzero(ids >= 0):
+        expected = inherited.get(int(ids[slot]))
+        matches = (
+            float(rates[slot]) == expected
+            if expected is not None
+            else epsilon_matches(float(rates[slot]), int(captured[slot]))
+        )
         if not matches:
             raise ValueError("A frozen opponent's exploration rate disagrees")
+    if history.pinned_variables is not None and int(history.pinned_update) >= 0:
+        rate = float(history.pinned_variables.epsilon)
+        expected = None if continuation is None else continuation.pinned_epsilon
+        if expected is not None:
+            matches = rate == expected
+        else:
+            matches = epsilon_matches(rate, int(history.pinned_update))
+        if not matches:
+            raise ValueError("The permanent pin's exploration rate disagrees")

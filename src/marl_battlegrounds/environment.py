@@ -3,7 +3,8 @@
 Use ``make`` to prepare an environment, ``reset`` to start games, and ``step``
 to advance them. Finished games stay finished until an explicit reset. Core owns
 observations, masks, game rules and rewards; this module owns batching, episode
-IDs, lifecycle counters and optional metric/replay capture. It writes no files.
+IDs, lifecycle counters, optional metric/replay capture and selected training
+facts. It writes no files.
 
 Scalar calls have no leading environment axis. Native batches add an axis of
 length ``num_envs`` to each numerical state leaf. Returned state is a JAX PyTree:
@@ -189,6 +190,88 @@ class EnvironmentState(NamedTuple):
     last_reserved_episode_id: Array
 
 
+class TrainingFacts(NamedTuple):
+    """Read selected Core combat and death facts for optional training feedback.
+
+    These privileged arrays describe the producing transition. They must never
+    enter actor inputs or memory. Agent axes use global slots: Team A occupies
+    0 through 4 and Team B occupies 5 through 9. Scalar games use arrays (10,);
+    native batches add B. No value is inferred from health changes.
+
+    Attributes
+    ----------
+    has_transition : Array
+        Boolean scalar or (B,). False means padding, not an observed event.
+    combat_effect_recipient_global_slot_by_source : Array
+        Int32 chosen recipient per source, 0 through 9 or -1 for no recipient.
+    source_modified_damage_output_by_source : Array
+        Float32 accepted damage after source modifiers, before recipient
+        mitigation and health clipping, in health units.
+    recipient_damage_modifier_by_source : Array
+        Float32 chosen recipient's damage factor. Zero for no positive routed
+        damage. Multiplying it by source-modified damage gives gross damage.
+    source_modified_healing_output_by_source : Array
+        Float32 healing before recipient modification, in health units.
+    recipient_healing_modifier_by_source : Array
+        Float32 chosen recipient's healing factor. Zero for no positive routed
+        healing. Multiplying it by source-modified healing gives gross healing.
+    total_effective_damage_by_recipient : Array
+        Float32 gross incoming damage after all modifiers. This precedes net
+        healing and health clipping; it is not realized health loss.
+    total_effective_healing_by_recipient : Array
+        Float32 gross incoming healing after all modifiers. This precedes net
+        damage and maximum-health clipping; it is not realized health gain.
+    is_newly_dead_by_recipient : Array
+        Boolean new deaths after health effects and recovery, before respawn.
+        An existing corpse does not count again.
+    contributed_to_new_death_by_source : Array
+        Boolean sources that dealt positive effective damage to a new death.
+        Several sources can contribute; this does not select one killer.
+    attributed_death_damage_by_source : Array
+        Float32 gross effective damage to newly dead recipients, by source.
+        It may exceed realized health loss and is not divided among contributors.
+
+    Notes
+    -----
+    This immutable tuple selects existing arrays without copying or changing
+    them. It retains 341 numerical bytes per game per step when returned.
+    Padding has recipient IDs -1 and other values zero/False. Terminal facts
+    describe the old game even if AutoReset returns a replacement state.
+    The normal recording path excludes this optional training-only payload.
+    """
+
+    has_transition: Array
+    combat_effect_recipient_global_slot_by_source: Array
+    source_modified_damage_output_by_source: Array
+    recipient_damage_modifier_by_source: Array
+    source_modified_healing_output_by_source: Array
+    recipient_healing_modifier_by_source: Array
+    total_effective_damage_by_recipient: Array
+    total_effective_healing_by_recipient: Array
+    is_newly_dead_by_recipient: Array
+    contributed_to_new_death_by_source: Array
+    attributed_death_damage_by_source: Array
+
+
+def _training_facts(info: Info) -> TrainingFacts:
+    """Select existing combat/death arrays without recomputing any Core fact."""
+    facts = info.transition_facts
+    combat, deaths = facts.combat_transition_facts, facts.death_facts
+    return TrainingFacts(
+        facts.has_transition,
+        combat.combat_effect_recipient_global_slot_by_source,
+        combat.source_modified_damage_output_by_source,
+        combat.recipient_damage_modifier_by_source,
+        combat.source_modified_healing_output_by_source,
+        combat.recipient_healing_modifier_by_source,
+        combat.total_effective_damage_by_recipient,
+        combat.total_effective_healing_by_recipient,
+        deaths.is_newly_dead_by_recipient,
+        deaths.contributed_to_new_death_by_source,
+        deaths.attributed_death_damage_by_source,
+    )
+
+
 class EpisodeInfo(NamedTuple):
     """Numeric step results; completed selects exactly one record per episode.
 
@@ -233,6 +316,10 @@ class EpisodeInfo(NamedTuple):
         Optional pre-reset observations and masks from AutoReset. Its valid mask
         selects completed episodes. Base steps leave this None. This learner-only
         data is excluded from automatic recording and actor inputs.
+    training_facts : TrainingFacts | None
+        Selected privileged Core facts for this transition, or None by default.
+        Enable with make(training_facts=True). Native batches add B to each
+        array. This optional view is excluded from actor inputs and recording.
 
     Notes
     -----
@@ -255,6 +342,7 @@ class EpisodeInfo(NamedTuple):
     episode_start_records: EpisodeStartRecords | None = None
     episode_tracking_error: Array | None = None
     final: FinalEpisodeData | None = None
+    training_facts: TrainingFacts | None = None
 
     @property
     def class_ids(self) -> Array:
@@ -389,6 +477,8 @@ class _Execution:
         Number of distinct explicitly selected full-metric episode IDs.
     replay_capacity : int
         Number of distinct explicitly selected replay episode IDs.
+    training_facts : bool
+        Whether step retains the optional privileged training-facts view.
 
     Notes
     -----
@@ -401,6 +491,7 @@ class _Execution:
     metrics: MetricMode
     full_capacity: int
     replay_capacity: int
+    training_facts: bool = False
 
 
 @jax.tree_util.register_dataclass
@@ -416,7 +507,7 @@ class Environment:
     Reusing a handle does not mutate its defaults or advance any hidden RNG.
     Pass each returned state onward and supply distinct random keys as needed.
     Prepared config values are dynamic; batch shape, metric mode and capture
-    capacities determine the compiled structure.
+    capacities and optional training facts determine the compiled structure.
     """
 
     _execution: _Execution = field(metadata={"static": True})
@@ -435,6 +526,11 @@ class Environment:
     def metrics(self) -> MetricMode:
         """Default metric mode: priority, full or none; explicit selections add full."""
         return self._execution.metrics
+
+    @property
+    def training_facts(self) -> bool:
+        """Whether steps return selected privileged facts for training feedback."""
+        return self._execution.training_facts
 
     @property
     def full_metrics_episodes(self) -> tuple[int, ...]:
@@ -1173,6 +1269,7 @@ class Environment:
             core_state.step_count - state.initial_step_count,
             core_state.team_deathmatch_scores,
             successor.lifecycle_error,
+            training_facts=_training_facts(info) if self.training_facts else None,
         )
         return successor, reward, result, info
 
@@ -1327,7 +1424,8 @@ class Environment:
             the next compact Observations tree. Reward.rewards is float32 with
             shape ``(10,)`` or ``(B, 10)``. DoneFlags has scalar or ``(B,)``
             termination/truncation leaves. EpisodeInfo holds completion flags
-            and selected metric/replay data; its fields are privileged.
+            and selected metric/replay data, plus training facts when enabled;
+            its fields are privileged.
 
         Notes
         -----
@@ -1453,6 +1551,7 @@ def make(
     metrics: MetricMode = "priority",
     full_metrics_episodes: Iterable[int] = (),
     replay_episodes: Iterable[int] = (),
+    training_facts: bool = False,
 ) -> Environment:
     """Prepare a map-based environment, an exact config, or an unconfigured handle.
 
@@ -1506,6 +1605,12 @@ def make(
     replay_episodes : Iterable[int], default=()
         Optional positive int32 IDs selected for replay capture.
         Capture is independent of metric mode and writes no files itself.
+    training_facts : bool, default=False
+        Retain selected Core combat/death arrays in info.training_facts for
+        custom training feedback. These privileged facts never enter actor
+        inputs or automatic records. False adds no retained numerical output;
+        True retains 341 bytes per game per step before any caller projection.
+        This structural choice changes the compiled output tree.
 
     Returns
     -------
@@ -1519,7 +1624,7 @@ def make(
         Unsupported task/mode, invalid batch or selection IDs,
         conflicting setup inputs, or invalid map/roster/config values.
     TypeError
-        Unsupported config/roster structure or a non-Boolean balance
+        Unsupported config/roster structure or a non-Boolean balance/facts
         setting. Physical validation uses the existing Core validators.
 
     Notes
@@ -1550,6 +1655,8 @@ def make(
         raise ValueError("metrics must be 'none', 'priority', or 'full'")
     if type(balance_spawn_locations) is not bool:
         raise TypeError("balance_spawn_locations must be a boolean")
+    if type(training_facts) is not bool:
+        raise TypeError("training_facts must be a boolean")
     has_rules = (
         team_a_roster is not None
         or team_b_roster is not None
@@ -1599,7 +1706,7 @@ def make(
     full_array.flags.writeable = False
     replay_array.flags.writeable = False
     return Environment(
-        _Execution(num_envs, metrics, len(full_ids), len(replay_ids)),
+        _Execution(num_envs, metrics, len(full_ids), len(replay_ids), training_facts),
         full_array,
         replay_array,
         defaults,

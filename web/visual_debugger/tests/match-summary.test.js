@@ -149,3 +149,44 @@ test("friendly map display and technical identity retain the explicitly recorded
     "Three Body Problem",
   );
 });
+
+test("recorded spawn sides change layout without swapping team scores or results", async () => {
+  const raw = structuredClone(fixture.presentations.replay_oracle);
+  raw.match_summary.teams[0].display_side = "right";
+  raw.match_summary.teams[1].display_side = "left";
+  raw.match_summary.task_mode = 1;
+  raw.match_summary.score_threshold = 7;
+  raw.match_summary.scores = [6, 2];
+  raw.match_summary.outcome = "team_a_win";
+  const view = matchSummaryView(await normalizeAuthorizedPresentationFrameV1(raw));
+  assert.ok(view);
+  assert.deepEqual(
+    view.teams.map((/** @type {Record<string, any>} */ team) => [
+      team.teamId,
+      team.side,
+      team.score,
+      team.result,
+    ]),
+    [
+      [1, "right", "6/7", "VICTORY"],
+      [2, "left", "2/7", "DEFEAT"],
+    ],
+  );
+  delete raw.match_summary.teams[0].display_side;
+  delete raw.match_summary.teams[1].display_side;
+  const legacy = matchSummaryView(await normalizeAuthorizedPresentationFrameV1(raw));
+  assert.deepEqual(
+    legacy?.teams.map((/** @type {Record<string, any>} */ team) => team.side),
+    ["left", "right"],
+  );
+  raw.match_summary.teams[0].display_side = "right";
+  await assert.rejects(
+    () => normalizeAuthorizedPresentationFrameV1(raw),
+    /display sides/u,
+  );
+  raw.match_summary.teams[1].display_side = "right";
+  await assert.rejects(
+    () => normalizeAuthorizedPresentationFrameV1(raw),
+    /display sides/u,
+  );
+});

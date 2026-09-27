@@ -55,6 +55,7 @@ from marl_battlegrounds.baselines.methods import (
 from marl_battlegrounds.baselines.ppo import (
     DEFAULT_PPO_CONFIG,
     PPOConfig,
+    _parameter_sharing,  # pyright: ignore[reportPrivateUsage]
     initialize_ppo,
     make_ppo_system,
     validate_ppo_method,
@@ -511,6 +512,20 @@ def _actor_input_scale(details: dict[str, Any]) -> float:
     return _config_input_scale(details["metadata"]["config"])
 
 
+def _actor_parameter_sharing(details: dict[str, Any]) -> str:
+    """Read saved actor weight ownership, with all-shared historical default."""
+    value = (
+        details.get("parameter_sharing", "all")
+        if details["kind"] == "actor"
+        else _settings_block(details["metadata"]["config"]).get(
+            "parameter_sharing", "all"
+        )
+    )
+    if not isinstance(value, str):
+        raise ValueError("Saved parameter_sharing must be all, class or none")
+    return _parameter_sharing(value)
+
+
 def _inference_digest(details: dict[str, Any]) -> str:
     """Bind weights, scale and spawn frame; keep old identities where unchanged.
 
@@ -532,6 +547,26 @@ def _inference_digest(details: dict[str, Any]) -> str:
     scale = _actor_input_scale(details)
     frame = _actor_spawn_frame(details)
     method = _schema_method(details.get("schemas", _SCHEMAS))
+    sharing = _actor_parameter_sharing(details)
+    if sharing != "all":
+        return sha256(
+            _json_bytes(
+                {
+                    "kind": "grouped_actor_inference",
+                    "version": 1,
+                    "model": _MODELS[method],
+                    "actor_digest": details["actor_digest"],
+                    "input_scale": scale,
+                    "spawn_frame": frame,
+                    "parameter_sharing": sharing,
+                    **(
+                        {}
+                        if is_ppo_method(method)
+                        else {"epsilon": 0.0, "tie_rule": QMIX_TIE_RULE}
+                    ),
+                }
+            )
+        ).hexdigest()
     if method == "pqn_vdn":
         exported = details["kind"] == "actor"
         return sha256(
@@ -794,13 +829,21 @@ def _counters(state: Tree, games: int, method: str) -> dict[str, int]:
     return counters
 
 
-def _check_qmix_counters(counters: object, qmix: QMIXConfig, games: int) -> None:
+def _check_qmix_counters(
+    counters: object,
+    qmix: QMIXConfig,
+    games: int,
+    *,
+    continuation: LearnerContinuation | None = None,
+) -> None:
     """Check saved QMIX counters from metadata alone, before arrays are read.
 
     counters must hold exactly updates, env_steps, completed_blocks and
     learning_blocks as nonnegative plain integers, env_steps a whole number of
     rounds, updates equal to learning_blocks * epochs, and a reachable
-    readiness-aware block sequence. Raises ValueError.
+    readiness-aware block sequence. After a reward change, that sequence starts
+    at the saved reset offset; cumulative counters remain unchanged. Raises
+    ValueError. continuation is the checked child declaration, or None.
     """
     from marl_battlegrounds.training.qmix_learner import (
         _block_counts_possible,  # pyright: ignore[reportPrivateUsage]
@@ -815,10 +858,11 @@ def _check_qmix_counters(counters: object, qmix: QMIXConfig, games: int) -> None
         value["learning_blocks"] * qmix.epochs
     ):
         raise ValueError("QMIX checkpoint counters are impossible")
+    reset = None if continuation is None else continuation.reward_reset
     if not _block_counts_possible(
-        value["env_steps"] // games,
-        value["completed_blocks"],
-        value["learning_blocks"],
+        value["env_steps"] // games - (0 if reset is None else reset.rounds),
+        value["completed_blocks"] - (0 if reset is None else reset.blocks),
+        value["learning_blocks"] - (0 if reset is None else reset.learning_blocks),
         rollout_length=qmix.rollout_length,
         minimum=qmix.min_buffer_size,
     ):
@@ -981,6 +1025,8 @@ def _check_context(
     for key in ("config", "source", "dependencies"):
         if not _object(value[key], key):
             raise ValueError(f"{key} must not be empty")
+    if "selection_rule" in value and value["selection_rule"] != "point_margin":
+        raise ValueError("Unknown recorded checkpoint selection rule")
     if "execution" in value:
         _object(value["execution"], "Execution identity")
     if require_execution and value.get("execution") != execution_identity():
@@ -1012,9 +1058,22 @@ def _collection_details(collection: TrainingCollection) -> dict[str, Any]:
             "collect_training_state": collection.collect_training_state,
             "metrics": collection.metrics,
             "recording": collection.recording,
+            "opponent_rows": collection.carry_spec.progress.opponent_steps.shape[0],
+            "history_capture_capacity": (
+                collection.carry_spec.progress.opponent_steps.shape[0]
+                - 2
+                - len(collection.opponent_names)
+            ),
         },
         "Collection details",
     )
+    if collection.reward_identity is not None:
+        details["reward_identity"] = collection.reward_identity
+    if collection.opponent_names:
+        details["opponent_members"] = list(collection.opponent_records)
+    if collection.learner_slots is not None:
+        details["learner_slots"] = list(collection.learner_slots)
+        details["partner_members"] = list(collection.partner_records)
     if collection.pinned_opponent is not None:
         details["pinned_opponent"] = collection.pinned_opponent
     if collection.actor_variables_at_step is not None:
@@ -1224,7 +1283,15 @@ default="mappo"
     details["checkpoint_id"] = identifier
     _atomic_json(temporary / _DESCRIPTION, details)
     _sync_tree(temporary)
-    destination = directory / identifier
+    existing = artifact_directory(root, "checkpoints", identifier)
+    destination = (
+        existing
+        if existing.exists()
+        else directory
+        / artifact_name(
+            method, "checkpoint", details["counters"]["env_steps"], identifier
+        )
+    )
     if destination.exists():
         if read_checkpoint_details(destination) != details:
             raise ValueError("Checkpoint identity already contains different data")
@@ -1237,12 +1304,112 @@ default="mappo"
         {
             "schema_version": 1,
             "checkpoint_id": identifier,
-            "relative_path": f"checkpoints/{identifier}",
+            "relative_path": str(destination.relative_to(root)),
         },
     )
     for ancestor in (root, *root.parents):
         _sync_dir(ancestor)
     return destination
+
+
+def artifact_name(method: str, kind: str, env_steps: int, identifier: str) -> str:
+    """Name one saved boundary by method, purpose, steps and exact identity.
+
+    method is a built-in training method, kind is checkpoint or actor,
+    env_steps is its actual nonnegative transition count, and identifier is its
+    full lowercase SHA-256. Return a lowercase snake_case basename. Keeping the
+    full suffix avoids short-name collisions; publication still verifies bytes
+    before reusing an existing immutable directory. This function writes nothing.
+    """
+    validate_training_method(method)
+    if kind not in ("checkpoint", "actor"):
+        raise ValueError("Saved artifact kind must be checkpoint or actor")
+    if type(env_steps) is not int or env_steps < 0:
+        raise ValueError("Saved environment steps must be a nonnegative integer")
+    _digest(identifier, "Saved artifact identity")
+    return f"{method}_{kind}_step_{env_steps:012d}_{identifier}"
+
+
+def artifact_directory(run_dir: str | Path, kind: str, identifier: str) -> Path:
+    """Find a run's saved checkpoint or actor without equating its name and ID.
+
+    kind is checkpoints or actors. identifier is the full checkpoint identity;
+    an actor stores that origin in its metadata. Accept historical hash-only
+    basenames and readable basenames ending in the full identity. Verify the
+    description and reject links, mismatched identities or multiple candidates.
+    If no artifact exists, return the historical path so the normal reader gives
+    its missing-file error. No files change and numerical payloads are not read.
+    """
+    if kind not in ("checkpoints", "actors"):
+        raise ValueError("Saved artifact directory must be checkpoints or actors")
+    _digest(identifier, "Saved artifact identity")
+    directory = Path(run_dir) / kind
+    legacy = directory / identifier
+    candidates = ([legacy] if legacy.exists() or legacy.is_symlink() else []) + list(
+        directory.glob(f"*_{identifier}")
+    )
+    if len(candidates) > 1:
+        raise ValueError("Multiple saved artifacts claim the same checkpoint identity")
+    if not candidates:
+        return legacy
+    path = candidates[0]
+    details = read_checkpoint_description(path)
+    saved = (
+        details["checkpoint_id"]
+        if kind == "checkpoints"
+        else details["metadata"].get("checkpoint_id")
+    )
+    if (
+        details["kind"] != ("learner" if kind == "checkpoints" else "actor")
+        or saved != identifier
+    ):
+        raise ValueError("Saved artifact name and full identity differ")
+    return path
+
+
+def validation_directory(
+    run_dir: str | Path, purpose: str, identifier: str, *, actor: Path | None = None
+) -> Path:
+    """Locate a boundary's validation output, preserving historical paths.
+
+    run_dir owns the validation output. purpose is a single Python identifier
+    such as routine, confirmation or random. identifier is the full originating
+    checkpoint ID. Optional actor supplies an inherited actor outside this run;
+    otherwise look in its actors directory. Read only the small description to
+    name new output by method and actual step. Existing historical purpose-ID
+    paths stay in use. Reject competing directories; the validation owner checks
+    their task identity before reuse. No files or numerical arrays change.
+    """
+    if not purpose.isidentifier():
+        raise ValueError("Validation purpose must be a single identifier")
+    _digest(identifier, "Validation checkpoint identity")
+    root = Path(run_dir) / "validation"
+    legacy = root / f"{purpose}-{identifier}"
+    matches = list(root.glob(f"{purpose}_*_{identifier}"))
+    if legacy.exists() or legacy.is_symlink():
+        matches.append(legacy)
+    if len(matches) > 1:
+        raise ValueError("Multiple validation directories claim this saved boundary")
+    if matches:
+        return matches[0]
+    actor = (
+        artifact_directory(run_dir, "actors", identifier) if actor is None else actor
+    )
+    stem = f"saved_actor_{identifier}"
+    if actor.exists():
+        details = read_checkpoint_description(actor)
+        if (
+            details["kind"] != "actor"
+            or details["metadata"].get("checkpoint_id") != identifier
+        ):
+            raise ValueError("Validation actor differs from its checkpoint identity")
+        stem = artifact_name(
+            _schema_method(details["schemas"]),
+            "actor",
+            details["metadata"]["env_steps"],
+            identifier,
+        )
+    return root / f"{purpose}_{stem}"
 
 
 def read_checkpoint_description(path: str | Path) -> dict[str, Any]:
@@ -1326,8 +1493,11 @@ def read_checkpoint_description(path: str | Path) -> dict[str, Any]:
     else:
         # Actor exports carry these optional inference settings only when set.
         required |= {key for key in ("input_scale", "spawn_frame") if key in details}
+    if details["kind"] == "actor" and "parameter_sharing" in details:
+        required.add("parameter_sharing")
     if set(details) != required:
         raise ValueError("Checkpoint description fields differ from its schema")
+    _actor_parameter_sharing(details)
     if method in ("qmix", "pqn_vdn") and details["kind"] == "actor":
         steps = _object(details["metadata"], "Actor provenance").get("optimizer_steps")
         if (
@@ -1510,6 +1680,7 @@ default="mappo"
             normalized.setdefault("method", "mappo")
             normalized.setdefault("pinned_opponent_share", 0.0)
             normalized.setdefault("pinned_opponent", None)
+            normalized.setdefault("initial_actor", None)
             normalized.setdefault("validation_opponents", None)
             normalized.setdefault("slot_diagnostic_actor", None)
             ppo_record = normalized.get("ppo", {})
@@ -1541,8 +1712,15 @@ default="mappo"
         if _actor_spawn_frame(details) != settings.spawn_frame:
             raise ValueError("Checkpoint spawn_frame differs from QMIX settings")
         _check_qmix_settings(details["metadata"]["config"], settings)
+        from marl_battlegrounds.training._continuation_schedules import (
+            schedule_continuation,
+        )
+
         _check_qmix_counters(
-            details["counters"], settings, collection.schedule.num_envs
+            details["counters"],
+            settings,
+            collection.schedule.num_envs,
+            continuation=schedule_continuation(collection.schedule),
         )
     elif method == "pqn_vdn":
         if _actor_input_scale(details) != chosen.input_scale:
@@ -1575,6 +1753,9 @@ default="mappo"
     saved_collection.setdefault("shaping_mode", "potential")
     saved_collection.setdefault("score_threshold_curriculum", False)
     saved_collection.setdefault("pinned_opponent_share", 0.0)
+    saved_collection.setdefault(
+        "history_capture_capacity", saved_collection.get("opponent_rows", 22) - 2
+    )
     if saved_collection.pop("pinned_opponent", None) != collection.pinned_opponent:
         raise ValueError("Checkpoint pinned opponent differs")
     current_collection = _collection_details(collection)
@@ -1660,36 +1841,82 @@ def _check_restored_pinned_opponent(
     collection: TrainingCollection,
     state: LearnerState | QMIXLearnerState | PQNLearnerState,
 ) -> None:
-    """Apply the pinned opponent's resume rules to already restored arrays.
+    """Check frozen weights and refuse unrestorable live host-game memory.
 
-    A JAX pinned System's restored weights must match the digest recorded when
-    the run started. A pinned host method whose memory is not saved can only
-    continue when none of its games is unfinished: every lane assigned to it
-    must have finished its game at this checkpoint. Raises ValueError otherwise.
-    Called inside restore_checkpoint before it returns, so a refusal happens
-    before any recording or log file changes. Reads small arrays; writes nothing.
+    Numerical opponent and partner weights are restored by the normal array
+    loader. Accessible host parameter arrays use that same saved tree; opaque
+    clients must be rebound. No current host memory is serialized, so a stateful
+    host member cannot resume an unfinished game. Check this before changing any
+    recording or log. Partner A and mirrored Partner B have separate memory;
+    an external opponent replaces all of Team B and uses no mirrored partner.
     """
+    from marl_battlegrounds.evaluation.policy_execution import (
+        _CompositionVariables,  # pyright: ignore[reportPrivateUsage]
+    )
+
+    carry = state.carry
     record = collection.pinned_opponent
-    if record is None:
-        return
-    digest = record.get("variables_digest")
-    pinned = cast(tuple[Any, ...], state.carry.pinned_opponent)
-    if digest is not None and tree_digest(pinned[0]) != digest:
-        raise ValueError("Restored pinned opponent weights differ from its record")
+    if record is not None:
+        pinned = cast(tuple[Any, ...], carry.pinned_opponent)
+        if collection.opponent_records and collection.host_opponent is None:
+            variables = cast(_CompositionVariables, pinned[0])
+            _check_member_weights(collection.opponent_records, variables.members)
+        elif (
+            record.get("variables_digest") is not None
+            and tree_digest(pinned[0]) != record["variables_digest"]
+        ):
+            raise ValueError("Restored pinned opponent weights differ from its record")
+    if collection.partner_records and collection.host_partners is None:
+        variables = cast(_CompositionVariables, carry.partner_values[0])
+        _check_member_weights(collection.partner_records, variables.members)
+
+    unfinished = ~np.asarray(carry.state.done.done)
+    external = np.asarray(carry.history.lane_snapshot) == -2
     host = collection.host_opponent
     if host is not None and host.stateful:
-        carry = state.carry
-        unfinished = np.asarray(
-            (carry.history.lane_snapshot == 0) & ~carry.state.done.done
+        _require_finished_host_games(unfinished & external, "opponent")
+    partners = collection.host_partners
+    if partners is not None:
+        assert collection.learner_slots is not None
+        owned = np.asarray([slot not in collection.learner_slots for slot in range(5)])
+        for side, holder in enumerate(partners):
+            active = np.asarray(carry.state.config.agent_profile.active_mask)[
+                :, side * 5 : (side + 1) * 5
+            ]
+            playing = unfinished & np.any(active & owned, axis=1)
+            if side == 1 and record is not None:
+                playing &= ~external
+            if holder.stateful:
+                _require_finished_host_games(playing, f"Team {'AB'[side]} partner")
+    saved_hosts = iter(carry.frozen_host_values)
+    if host is not None:
+        host.restore_values(next(saved_hosts))
+    if partners is not None:
+        values = next(saved_hosts)
+        for holder in partners:
+            holder.restore_values(values)
+
+
+def _check_member_weights(
+    records: tuple[dict[str, Any], ...], values: tuple[Any, ...]
+) -> None:
+    """Compare each frozen JAX member with its saved declaration, in alias order."""
+    if len(records) != len(values):
+        raise ValueError("Restored population size differs")
+    for member, weights in zip(records, values, strict=True):
+        if tree_digest(weights) != member["variables_digest"]:
+            raise ValueError(f"Restored member {member['name']!r} weights differ")
+
+
+def _require_finished_host_games(unfinished: np.ndarray, name: str) -> None:
+    """Refuse loss of active host memory before checkpoint recovery writes files."""
+    if bool(unfinished.any()):
+        raise ValueError(
+            f"The {name} host method's memory is not saved, and "
+            f"{int(unfinished.sum())} of its games are unfinished at this checkpoint; "
+            "ordinary resume cannot continue them without that memory. Resume from "
+            "a checkpoint where none of its games is unfinished, or start a new run."
         )
-        if bool(unfinished.any()):
-            raise ValueError(
-                "The pinned host method's memory is not saved, and "
-                f"{int(unfinished.sum())} of its games are unfinished at this "
-                "checkpoint; ordinary resume "
-                "cannot continue them without that memory. Resume from a checkpoint "
-                "where none of its games is unfinished, or start a new run."
-            )
 
 
 def resume_recording(
@@ -1762,7 +1989,9 @@ def finish_checkpoint_recovery(
 
 @lru_cache(maxsize=16, typed=True)
 def _actor_template(
-    method: str = "mappo", actor_input_schema: int = ACTOR_INPUT_SCHEMA_VERSION
+    method: str = "mappo",
+    actor_input_schema: int = ACTOR_INPUT_SCHEMA_VERSION,
+    parameter_sharing: str = "all",
 ) -> Tree:
     """Cache actor shapes/dtypes for one checked method and actor input schema.
 
@@ -1803,18 +2032,23 @@ def _actor_template(
     template cached for 1 and is refused like any other non-int schema.
     """
     method = validate_training_method(method)
+    sharing = _parameter_sharing(parameter_sharing)
     if (
         type(actor_input_schema) is not int
         or actor_input_schema not in ACTOR_FEATURE_SIZES
     ):
         raise ValueError("actor_input_schema must be 1 or 2.")
     if method == "qmix":
-        template = qmix_actor_template()
+        template = qmix_actor_template(QMIXConfig(parameter_sharing=sharing))
     elif method == "pqn_vdn":
-        template = _pqn_actor_item(pqn_actor_template())
+        template = _pqn_actor_item(pqn_actor_template(parameter_sharing=sharing))
     else:
         template = jax.eval_shape(
-            partial(initialize_ppo, method=validate_ppo_method(method)),
+            partial(
+                initialize_ppo,
+                config=PPOConfig(parameter_sharing=sharing),
+                method=validate_ppo_method(method),
+            ),
             jax.random.key(0),
         ).actor_params
     width = ACTOR_FEATURE_SIZES[actor_input_schema]
@@ -1839,6 +2073,7 @@ def export_system(
     input_scale: float = 1.0,
     spawn_frame: str,
     method: str = "mappo",
+    parameter_sharing: str = "all",
 ) -> Path:
     """Publish a standalone immutable actor artifact (sampled PPO, greedy Q-values).
 
@@ -1854,8 +2089,11 @@ def export_system(
         reused; different weights, scale or provenance at this path are rejected.
     metadata : dict
         Finite JSON provenance with run_id, nonnegative integer seed and
-        env_steps, and the originating checkpoint_id. QMIX and PQN-VDN also
-        need a nonnegative integer optimizer_steps. Extra facts are retained.
+        env_steps, and either the originating checkpoint_id or capture_origin.
+        A capture origin records capture_id, update_index, the content binding
+        and sampled exploration (epsilon, or None for PPO). It does not claim a
+        complete learner checkpoint exists. QMIX and PQN-VDN also need a
+        nonnegative integer optimizer_steps. Extra facts are retained.
     input_scale : float, default=1.0
         Finite positive factor applied before the actor's first Dense layer.
         Use the originating learner config's value. It is part of
@@ -1904,6 +2142,7 @@ default="mappo"
     the current schemas.
     """
     method = validate_training_method(method)
+    sharing = _parameter_sharing(parameter_sharing)
     if method == "pqn_vdn":
         if not isinstance(cast(object, actor_variables), PQNInferenceVariables):
             raise TypeError("A PQN-VDN export takes PQNInferenceVariables")
@@ -1911,10 +2150,8 @@ default="mappo"
     input_scale = _input_scale(input_scale)
     spawn_frame = _spawn_frame(spawn_frame)
     context = _object(metadata, "Actor provenance")
-    if not {"run_id", "seed", "env_steps", "checkpoint_id"} <= context.keys():
-        raise ValueError(
-            "Actor provenance needs run_id, seed, env_steps and checkpoint_id"
-        )
+    if not {"run_id", "seed", "env_steps"} <= context.keys():
+        raise ValueError("Actor provenance needs run_id, seed and env_steps")
     if not isinstance(context["run_id"], str) or not context["run_id"]:
         raise ValueError("Actor run ID must be nonempty")
     counts = (
@@ -1928,15 +2165,45 @@ default="mappo"
     for name in counts:
         if type(context.get(name)) is not int or context[name] < 0:
             raise ValueError(f"Actor {name} must be a nonnegative integer")
-    _digest(context["checkpoint_id"], "Origin checkpoint")
+    if ("checkpoint_id" in context) == ("capture_origin" in context):
+        raise ValueError(
+            "Actor provenance needs exactly one checkpoint_id or capture_origin"
+        )
+    if "checkpoint_id" in context:
+        _digest(context["checkpoint_id"], "Origin checkpoint")
+    else:
+        origin = _object(context["capture_origin"], "Capture origin")
+        if set(origin) != {"capture_id", "update_index", "content_binding", "epsilon"}:
+            raise ValueError("Capture origin fields differ")
+        if any(
+            type(origin[name]) is not int or origin[name] < 0
+            for name in ("capture_id", "update_index")
+        ):
+            raise ValueError("Capture identity and update must be nonnegative integers")
+        from marl_battlegrounds.training._content import TrainingContentBinding
+
+        TrainingContentBinding.model_validate_json(
+            _json_bytes(origin["content_binding"])
+        )
+        epsilon = origin["epsilon"]
+        if is_ppo_method(method):
+            if epsilon is not None:
+                raise ValueError("A PPO capture has no epsilon")
+        elif (
+            isinstance(epsilon, bool)
+            or not isinstance(epsilon, (int, float))
+            or not math.isfinite(epsilon)
+            or not 0 <= epsilon <= 1
+        ):
+            raise ValueError("A Q capture needs its sampled epsilon within [0, 1]")
     layout = _layout(actor_variables)
-    if layout == _layout(_actor_template(method, 1)):
+    if layout == _layout(_actor_template(method, 1, sharing)):
         raise ValueError(
             "These weights use historical actor input schema 1 (5,164 features). "
             "Export writes current actors only; keep the original artifact, "
             "which load_system reads directly."
         )
-    if layout != _layout(_actor_template(method)):
+    if layout != _layout(_actor_template(method, parameter_sharing=sharing)):
         raise ValueError("Actor variables differ from the selected model schema")
     if not all(
         bool(jnp.all(jnp.isfinite(value))) for value in jax.tree.leaves(actor_variables)
@@ -1957,6 +2224,7 @@ default="mappo"
             and saved["actor_digest"] == digest
             and _actor_input_scale(saved) == input_scale
             and _actor_spawn_frame(saved) == spawn_frame
+            and _actor_parameter_sharing(saved) == sharing
             and saved["metadata"] == context
         ):
             return target
@@ -1974,6 +2242,8 @@ default="mappo"
         "input_scale": input_scale,
         "files": _inventory(temporary),
     }
+    if sharing != "all":
+        details["parameter_sharing"] = sharing
     if method in ("qmix", "pqn_vdn"):
         details["epsilon"] = 0.0
         details["tie_rule"] = QMIX_TIE_RULE
@@ -2107,7 +2377,8 @@ def load_system(checkpoint: str | Path) -> System:
     details = read_checkpoint_details(root)
     method = _schema_method(details["schemas"])
     schema = cast(int, details["schemas"]["actor_input"])
-    template = _actor_template(method, schema)
+    sharing = _actor_parameter_sharing(details)
+    template = _actor_template(method, schema, sharing)
     if details["actor_layout"] != _layout(template):
         raise ValueError("Actor artifact schema differs from the installed model")
     actor = _restore_arrays(root / "actor", template, None)
@@ -2117,32 +2388,93 @@ def load_system(checkpoint: str | Path) -> System:
         raise ValueError("Restored actor is nonfinite or its digest differs")
     if method == "pqn_vdn" and not _nonnegative_variances(actor["batch_stats"]):
         raise ValueError("A PQN-VDN running variance is negative")
+    display_name = details.get("metadata", {}).get("display_name")
+    if not isinstance(display_name, str) or not display_name.strip():
+        display_name = None
     if method == "qmix":
         return make_qmix_system(
             actor,
+            name=display_name or "QMIX",
             epsilon=0.0,
             checkpoint=_inference_digest(details),
             input_scale=_actor_input_scale(details),
             spawn_frame=_actor_spawn_frame(details),
             actor_input_schema=schema,
+            parameter_sharing=sharing,
         )
     if method == "pqn_vdn":
         return make_pqn_system(
             _pqn_network(actor),
+            name=display_name or "PQN-VDN",
             epsilon=0.0,
             checkpoint=_inference_digest(details),
             input_scale=_actor_input_scale(details),
             spawn_frame=_actor_spawn_frame(details),
             actor_input_schema=schema,
+            parameter_sharing=sharing,
         )
     return make_ppo_system(
         actor,
         method=method,
+        name=display_name,
         checkpoint=_inference_digest(details),
         input_scale=_actor_input_scale(details),
         spawn_frame=_actor_spawn_frame(details),
         actor_input_schema=schema,
+        parameter_sharing=sharing,
     )
+
+
+def initial_actor_variables(initial: Tree, template: Tree) -> Tree:
+    """Check copied actor arrays against a fresh learner's actor tree.
+
+    ``initial`` is an already loaded numerical actor, including PQN running
+    statistics. ``template`` is the fresh actor with the requested layout.
+    Return the immutable input tree without copying device arrays. Shape,
+    dtype, structure or nonfinite values raise ValueError. Optimizer, critic,
+    mixer, replay and random state never enter this operation.
+    """
+    import jax
+    import jax.numpy as jnp
+
+    if _layout(initial) != _layout(template) or jax.tree.structure(
+        initial
+    ) != jax.tree.structure(template):
+        raise ValueError("Initial actor structure, shapes or dtypes differ")
+    if not all(bool(jnp.all(jnp.isfinite(x))) for x in jax.tree.leaves(initial)):
+        raise ValueError("Initial actor weights must be finite")
+    return initial
+
+
+def load_initial_actor(
+    path: str | Path,
+    *,
+    method: str,
+    input_scale: float,
+    spawn_frame: str,
+    parameter_sharing: str = "all",
+) -> tuple[System, dict[str, Any]]:
+    """Load compatible built-in weights before a new training run opens files.
+
+    ``path`` names an actor export or full learner checkpoint. Only its actor
+    is imported. The method, current actor schema, input scale and spawn frame
+    must match; load_system checks layout, dtypes, payload hashes and values.
+    Return that System and its verified description for provenance. This is a
+    warm start with fresh learner state, not a continuation. Generic Systems
+    remain supported through the opponent and researcher-owned loop APIs.
+    """
+    details = read_checkpoint_description(path)
+    if _schema_method(details["schemas"]) != method:
+        raise ValueError("Initial actor method differs from the new learner")
+    if details["schemas"] != checkpoint_schemas(method):
+        raise ValueError("Initial actor schema differs from the installed learner")
+    if _actor_input_scale(details) != input_scale:
+        raise ValueError("Initial actor input_scale differs from the new learner")
+    if _actor_spawn_frame(details) != spawn_frame:
+        raise ValueError("Initial actor spawn_frame differs from the new learner")
+    if _actor_parameter_sharing(details) != _parameter_sharing(parameter_sharing):
+        raise ValueError("Initial actor parameter_sharing differs from the new learner")
+    return load_system(path), details
 
 
 def checkpoint_schemas(method: str = "mappo") -> dict[str, int | str]:
@@ -2239,82 +2571,22 @@ def runtime_identity(method: str = "mappo") -> dict[str, object]:
 def continuation_source_compatibility(
     parent_source: object, current_source: object
 ) -> dict[str, object]:
-    """Check exact source equality or one retained, qualified source transition.
+    """Record a source change without treating a version string as incompatibility.
 
-    Parameters
-    ----------
-    parent_source, current_source : object
-        Saved source identity and the current runtime's independently discovered
-        identity. Both must be nonempty JSON objects. Exact equality needs no
-        migration. A different source must match the packaged qualification
-        record and every target file hash; arbitrary edited installs fail.
-
-    Returns
-    -------
-    dict[str, object]
-        Both actual identities and the named qualification, when applicable.
-        The caller still checks dependencies, schemas and execution separately.
-
-    Raises
-    ------
-    ValueError
-        No exact qualified transition supports these source bytes. This writes
-        no file and never substitutes the parent's identity for the current one.
+    Both inputs are actual nonempty source identities. The complete checkpoint
+    restore still checks schema, array layout, input and game contracts, content,
+    dependencies and execution settings. This record alone proves neither
+    numerical equivalence nor learning quality. Old validation evidence keeps
+    its original source identity. No file is written or old identity replaced.
     """
     parent = _object(parent_source, "Parent source")
     current = _object(current_source, "Current source")
     if not parent or not current:
         raise ValueError("Continuation needs complete source identities")
-    if parent == current:
-        return {
-            "parent_source": parent,
-            "child_source": current,
-            "qualification": "Exact source",
-        }
-    record_path = Path(__file__).with_name("continuation_compatibility.json")
-    if not record_path.is_file():
-        raise ValueError(
-            "This parent source has no qualified continuation transition to the "
-            "current source. Its actor remains loadable for inference."
-        )
-    record = _read_json(record_path)
-    if (
-        record.get("schema_version") != 1
-        or not isinstance(record.get("parent_sources"), list)
-        or parent not in record["parent_sources"]
-    ):
-        raise ValueError(
-            "Parent source is outside the qualified continuation transition"
-        )
-    targets = _object(record.get("target_files"), "Qualified target files")
-    package = Path(__file__).resolve().parents[1]
-    if not targets or any(
-        Path(name).is_absolute()
-        or ".." in Path(name).parts
-        or not isinstance(digest, str)
-        or not (package / name).is_file()
-        or sha256((package / name).read_bytes()).hexdigest() != digest
-        for name, digest in targets.items()
-    ):
-        raise ValueError(
-            "Current source differs from the qualified continuation target"
-        )
-    expected_names = {
-        path.relative_to(package).as_posix()
-        for path in package.rglob("*")
-        if path.is_file()
-        and "__pycache__" not in path.parts
-        and path.suffix != ".pyc"
-        and path != record_path
-        and path.relative_to(package).parts[:2] != ("viewer", "web")
-    }
-    if set(targets) != expected_names:
-        raise ValueError(
-            "Qualified continuation target has missing or extra package files"
-        )
     return {
         "parent_source": parent,
         "child_source": current,
-        "qualification": record["qualification"],
-        "qualification_sha256": sha256(record_path.read_bytes()).hexdigest(),
+        "qualification": "Exact source"
+        if parent == current
+        else "Checkpoint contract checks",
     }

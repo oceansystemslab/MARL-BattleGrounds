@@ -1193,7 +1193,7 @@ def test_match_summary_names_gamma_team_b() -> None:
     # The BETA label proves the scenario-pressure naming path is active here.
     assert names == {
         "tdm_gamma": _GAMMA_LABEL,
-        "scenario_5": "tdm-scenario-5-controller-beta",
+        "scenario_5": "TDM Scenario 5 BETA Controller",
     }
 
 

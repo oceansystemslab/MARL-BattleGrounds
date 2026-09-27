@@ -17,6 +17,7 @@ import {
   isAuthorizedPresentationFrame,
 } from "./authorized-presentation-adapter.js";
 import { layoutCrossPhaseOccupancy } from "./layout.js";
+import { matchTeamSide } from "./match-summary.js";
 import { createRouteGeometry, routeMarkerPose } from "./routes.js";
 import {
   DEFAULT_VISUAL_FILTER_STATE,
@@ -505,21 +506,24 @@ function point(value) {
 /**
  * Choose a fixed presentation corner for a recorded team-wave cue.
  *
- * teamId must be 1 or 2 and surface must provide viewportBounds; otherwise return
+ * teamSide is left or right and surface must provide viewportBounds; otherwise return
  * null. Return frozen screen x/y with an inset based on viewport width. The corner
  * is UI layout, not a team world position; viewport values are caller-validated.
  *
- * @param {number | null} teamId
+ * @param {"left" | "right"} teamSide
  * @param {ProjectionSurface | null} surface
  */
-function teamClockPoint(teamId, surface) {
+function teamClockPoint(teamSide, surface) {
   const bounds = surface?.viewportBounds;
-  if (!bounds || (teamId !== 1 && teamId !== 2)) {
+  if (!bounds) {
     return null;
   }
   const horizontalInset = Math.min(112, Math.max(76, Number(bounds.width) * 0.2));
   return Object.freeze({
-    x: teamId === 1 ? bounds.left + horizontalInset : bounds.right - horizontalInset,
+    x:
+      teamSide === "left"
+        ? bounds.left + horizontalInset
+        : bounds.right - horizontalInset,
     y: bounds.top + 24,
   });
 }
@@ -1618,8 +1622,9 @@ function authorizedAnchor(rawAnchor, surface) {
  * identity, side and label, or null. No body location is inferred from team identity.
  *
  * @param {unknown} rawAnchor
+ * @param {Record<string, any> | null | undefined} match
  */
-function authorizedTeamWaveIdentity(rawAnchor) {
+function authorizedTeamWaveIdentity(rawAnchor, match) {
   const teamAnchor = record(rawAnchor);
   const teamIndex = integer(teamAnchor?.team_index);
   const teamId = integer(teamAnchor?.team_id);
@@ -1633,7 +1638,7 @@ function authorizedTeamWaveIdentity(rawAnchor) {
   return Object.freeze({
     teamIndex,
     teamId,
-    teamSide: teamIndex === 0 ? "left" : "right",
+    teamSide: matchTeamSide(match, teamId),
     label: `EVENT: Team ${teamIndex === 0 ? "A" : "B"} Respawn`,
   });
 }
@@ -2849,7 +2854,10 @@ function buildAuthorizedPresentationChoreographyPlan(
       continue;
     }
     if (row.kind === "respawn_wave_occurred") {
-      const waveIdentity = authorizedTeamWaveIdentity(event.team_anchor);
+      const waveIdentity = authorizedTeamWaveIdentity(
+        event.team_anchor,
+        presentation.match_summary,
+      );
       const paintDecision = authorizedPaintDecision(
         { kind: "semantic_pulse", cueSemantic: row.kind },
         visualFilters,
@@ -2858,7 +2866,7 @@ function buildAuthorizedPresentationChoreographyPlan(
         return null;
       }
       const anchor = paintDecision.enabled
-        ? teamClockPoint(waveIdentity.teamId, surface)
+        ? teamClockPoint(waveIdentity.teamSide, surface)
         : null;
       planned.push(
         Object.freeze({
@@ -3093,6 +3101,7 @@ function buildAuthorizedPresentationChoreographyPlan(
       const teamId = members.every((member) => member.killingTeamId === sideId)
         ? sideId
         : null;
+      const teamSide = matchTeamSide(presentation.match_summary, sideId);
       const width = Math.min(220, (viewport.width - 24) / 2);
       const { rows, height } = deathAnnouncementRows(members, width);
       planned.push(
@@ -3103,7 +3112,7 @@ function buildAuthorizedPresentationChoreographyPlan(
           cueSemantic: "death_announcement",
           teamId,
           teamIndex: teamId === null ? null : teamId - 1,
-          teamSide: sideId === 1 ? "left" : "right",
+          teamSide,
           sideId,
           label:
             teamId === null ? "Agent Deaths" : `Team ${teamId === 1 ? "A" : "B"} Kills`,
@@ -3113,7 +3122,7 @@ function buildAuthorizedPresentationChoreographyPlan(
           panelHeight: height,
           anchor: Object.freeze({
             x:
-              sideId === 1
+              teamSide === "left"
                 ? viewport.left + 8 + width / 2
                 : viewport.right - 8 - width / 2,
             y: viewport.top + 48 + height / 2,

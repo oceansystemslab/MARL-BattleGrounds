@@ -109,12 +109,32 @@ def test_recorded_map_names_splits_geometry_and_safe_filenames(
     if map_id == 48:
         assert metadata.display_name == "Three Body Problem"
     name = generated_replay_filename(context, "a" * 64, episode_id=17)
-    assert name.startswith(f"{expected.name}__episode-17__seed-42__stream-23__a-")
-    assert "__b-BETA__" in name
+    display_name = expected.name.replace("-", "_")
+    assert name.startswith(f"{display_name}__episode_17__seed_42__stream_23__a_")
+    assert "__b_beta__" in name
     assert name.endswith(f"{'a' * 64}.marlbg-replay.json")
     assert name.isascii() and len(name.encode("ascii")) <= 255
     assert name == generated_replay_filename(context, "a" * 64, episode_id=17)
     assert name != generated_replay_filename(context, "b" * 64, episode_id=17)
+    # Equal short prefixes cannot merge two distinct replay identities.
+    same_prefix = "a" * 12 + "b" * 52
+    assert name != generated_replay_filename(context, same_prefix, episode_id=17)
+    named = context.model_copy(
+        update={
+            "aggregation_keys": (
+                *context.aggregation_keys,
+                AggregationKeyV1(
+                    name="marl_bgs.system_name.team_a", value="My Research System"
+                ),
+                AggregationKeyV1(
+                    name="marl_bgs.system_name.team_b", value="Baseline Partner"
+                ),
+            )
+        }
+    )
+    readable = generated_replay_filename(named, "d" * 64, episode_id=17)
+    assert "__a_my_research_system__b_baseline_partner__" in readable
+    assert readable.endswith("d" * 64 + ".marlbg-replay.json")
     longest = context.model_copy(
         update={
             "policy_assignments": tuple(
@@ -131,7 +151,7 @@ def test_recorded_map_names_splits_geometry_and_safe_filenames(
     bounded = generated_replay_filename(longest, "c" * 64, episode_id=2**63 - 1)
     assert bounded.isascii() and len(bounded.encode("ascii")) <= 255
     assert "/" not in bounded and ".." not in bounded
-    assert bounded.startswith(expected.name) and bounded.endswith(
+    assert bounded.startswith(display_name) and bounded.endswith(
         "c" * 64 + ".marlbg-replay.json"
     )
     roundtrip = type(context).model_validate_json(context.model_dump_json())
@@ -157,7 +177,7 @@ def test_recorded_map_names_splits_geometry_and_safe_filenames(
     assert recorded_map(legacy) == legacy_metadata
     assert legacy.model_dump_json() == legacy_bytes
     assert generated_replay_filename(legacy, "a" * 64, episode_id=17) == name.replace(
-        expected.name, original_name, 1
+        display_name, original_name.replace("-", "_"), 1
     )
     previous = context.model_copy(update={"resolved_env_config": old_resolved})
     assert recorded_map(previous) == metadata
@@ -482,7 +502,7 @@ def test_custom_trainer_unknown_history_and_seeds_stay_absent(mode: str) -> None
     assert recorded_map(context).display_name == "Custom Map"
     filename = generated_replay_filename(context, "f" * 64, episode_id=7)
     assert filename.startswith("tdm_custom_map_")
-    assert "__episode-7__seed-unknown__stream-unknown__" in filename
+    assert "__episode_7__seed_unknown__stream_unknown__" in filename
 
 
 def test_installed_package_records_real_content_without_inventing_git(

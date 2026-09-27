@@ -381,107 +381,185 @@ Both modes log task reward and shaping separately, save the mode for exact
 resume, and evaluate with unmodified native rewards. Compare them with declared
 seeds and budgets. A higher shaped return alone does not show better play.
 
-### Current And Historical Self-Play
+### Train With Frozen Partners
 
-Each new opponent game uses current actor weights until history exists. After
-that, its assignment is 80% current and 20% uniformly sampled from stored
-snapshots. Assignment probabilities are not promises about observed episode or
-transition shares. A historical game keeps its chosen weights until it ends.
-Current-policy games use newly published actor weights while retaining their
-own recurrent memory. Team A and Team B never share memory.
-
-An optional pinned near-start opponent is available through
-`TrainConfig(pinned_opponent_share=0.1)`. A positive share moves the first
-history capture to the first completed update, so slot 0 holds the actor after
-one update for the whole run, and drops the never-played 100% capture. Each new
-game then meets slot 0 with that probability, one of the other stored snapshots
-with total probability 0.2 once any exist, and current weights otherwise. While
-only slot 0 exists, that 0.2 goes to current weights. The share must lie within
-[0, 0.8]. Leaving it at zero keeps the recipe above with exactly today's random
-draws. Evaluation opponents are unaffected. The realized share of game starts
-and steps that met slot 0 appears in `exposure.json`, row 1 of the opponent
-lists. A pinned opponent is a development setting for the self-play recipe; it
-is not evidence of learning until a declared comparison shows it.
-
-`TrainConfig(pinned_opponent=...)` makes the pinned share play a named System
-instead of that first-update actor:
+Choose the learner's physical slots and name the teammates that fill the other
+slots. The same tools work with scripted policies, learned actors, mixed Systems
+and host methods such as LLMs:
 
 ```python
 from marl_battlegrounds import training
 
 config = training.TrainConfig(
-    pinned_opponent="tdm-alpha",  # or "/abs/path/run/actors/<id>", or "pkg.agents:make_team"
-    pinned_opponent_share=0.1,
+    learner_slots=(0, 2),
+    partners={"alpha_partner": 0.5, "beta_partner": 0.5},
+    validation_partners={"new_partner": "random"},
+    validation_partner_labels={"new_partner": "held_out"},
+)
+result = training.train(
+    config,
+    output_dir="artifacts/partner_training",
+    partners={"alpha_partner": "tdm-alpha", "beta_partner": "tdm-beta"},
 )
 ```
 
-The reference is a built-in name (`"random"`, `"tdm-alpha"`, `"tdm-beta"`,
-`"tdm-gamma"`), an absolute path to a supported actor export or complete learner checkpoint, or a
-`module:function` factory that returns a `System` or `Policy`; the library
-route's `init_training_collection(..., pinned_opponent=...)` also takes the
-object itself. Slot 0 still marks the assignment, so row 1 of the opponent lists in
-`exposure.json` counts games against the named System, and `exposure.json`
-labels every row. Learner rows record `opponent_update=-2` for those games. The
-named System is frozen once, registered the way evaluation registers it, and
-follows the same rules as a Team B method in evaluation: only its own games are
-valid, it starts each new game with fresh memory, and it may use its own
-`reset_memory` hook. A Policy acts per actor, so it is computed on its own
-games only: inside the compiled step those games use the smallest fitting
-quarter, half or full batch, rounded up. Unused rows are padding, and their
-results are ignored.
-A generic System is given the whole Team B batch with the other games
-marked invalid, and it must ignore them, as M8 requires of every System. A JAX
-method runs inside the compiled step and is skipped on steps where no game
-uses it; its initializer still runs when one of its games starts. A host
-method, such as an LLM agent, runs once per step on the host through the same
-helper evaluation uses. Training does not open a pinned System's `resource_scope`.
-For an LLM opponent, its factory must supply an already open caller-owned client,
-or your code must keep that System's scope open around training. Automatic
-managed-client setup currently belongs to evaluation and tournaments.
-A step with no pinned game copies no policy inputs to the host;
-otherwise Team B's inputs are copied, about 94 KB per game: only the pinned
-games for a Policy, all games for a generic System. The method's own time comes
-on top. `collect_training_rollout` runs that route;
-`scan_training_rollout` and `advance_training_step` refuse such a collection.
-A host collection serves each training round once, and after a method error it
-refuses reuse, so a stale carry never meets newer opponent memory.
+Partners keep their frozen weights and separate game memory. The physical roster
+stays intact. A second learner mask controls losses, targets, normalization and
+optimizer updates. `self` and `past` opponents mirror the learner slots and draw
+from the same partner population independently. A named external opponent controls
+all of Team B. To use a partial external method, compose its full team with
+`marl_bgs.team(...)` first. Partners themselves are named frozen methods; `self`
+and `past` are opponent choices.
 
-Resume checks the pinned opponent identity and supported saved memory.
-Opaque provider state and remote behavior are not guaranteed to repeat.
-JAX methods keep their
-memory in the saved state. A host method's memory is never saved: a host method
-with no initializer, no reset hook and no memory template has none and resumes
-normally, and any other host method can resume only from a checkpoint where
-none of its games is unfinished. Use absolute artifact paths; a moved export or checkpoint
-fails the resume check. A named pinned System is a training opponent of that
-run and of any run that later pins an export of it. Results against it are
-familiar-opponent results, and a different name is not proof of an unfamiliar
-opponent: Beta's rules include Alpha's, and Gamma's descriptor records Beta's
-as its ancestry. The run's record says what is known about the opponent's own
-training history: `exposure` is `none`, `known` (which scripted scenario
-controllers) or `unknown`. Pinning `tdm-alpha`, `tdm-beta` or
-`tdm-gamma`, directly or through an export trained that way, makes all eight
-protected scenarios familiar (Gamma is recorded as known exposure to Beta,
-`scenario-5-pressure-controller@5`, when the run protects that Beta version, and
-as unknown exposure otherwise), so their results from that run are not
-protected-scenario evidence. The validation panel is declared separately and
-does not change because a System was pinned.
+Routine validation and confirmation evaluate the learner with every declared
+training partner separately. They also add declared evaluation partners. Each
+training partner is labelled `familiar`; other labels are `familiar`, `held_out`
+or `unknown`. These are declarations, not proof of an external method's history.
+The aggregate gives equal weight to the declared partner/opponent cells. Results
+retain one readable row per partner. For a custom curriculum, validation uses
+its final declared rosters throughout, so checkpoints face the same task. The
+existing development maps and native evaluation scoring remain unchanged.
 
-Call `refresh_opponents` once after each completed learner update and before
-the next block. Supply already-updated actor-only variables, the exact next
-`update_index`, the carry's completed real rounds and its numerical schedule.
-Keep the returned history in the carry. The helper performs no learning.
-It captures one immutable actor when an unmet 5%, 10%, ..., 100% threshold has
-been reached; with a positive pinned share the thresholds are round 1, then 5%
-through 95%. Several thresholds crossed by one update share one stored
-snapshot. The bank has room for 20 snapshots, with no eviction. Record actual
-capture rounds/updates from `SnapshotEvent`; a final snapshot may see no play.
+Run [the complete partner example](../../examples/partner_training.py) to train,
+load and evaluate the resulting team. It accepts all six built-in learners.
 
-Opponent slots use `-1` for current and zero-based snapshot indices otherwise.
-Invalid update notifications or assignments set a sticky error and block further
-collection. The actor must keep its variable tree, shapes, dtypes and information
-rights. Critic and optimizer state stay outside the bank. The supplied example
-does not refresh weights, so it creates no historical snapshots or update claims.
+### Choose Actor Parameter Sharing
+
+Every built-in learner accepts `parameter_sharing` in its ordinary method
+settings: `PPOConfig`, `QMIXConfig` or `PQNConfig`.
+
+| Value | Actor Weights |
+| --- | --- |
+| `"all"` | One shared actor; the default and historical architecture. |
+| `"class"` | One actor per class. Repeated members of a class share weights. |
+| `"none"` | One actor per physical team slot. |
+
+Memory stays separate for each physical actor. Only groups with learner samples
+update their actor weights, optimizer state and actor statistics. The critic or
+mixer keeps its method's existing ownership. Sharing mode is part of actor and
+checkpoint compatibility; a warm start must use the saved mode. These options
+change parameter ownership, not an actor's right to read private information.
+They do not by themselves establish better learning.
+
+### Use A Custom Training Reward
+
+Put a pure JAX function in an importable module and set
+`TrainConfig(reward="my_rewards:reward", ...)`. Its signature is
+`reward(before, facts, after, progress)`. Return a float32 array with ten global
+agent slots. `before` and `after` are training-only physical state for the same
+action. `facts` describes that transition. `progress` counts completed parallel
+training rounds before it. Actors never receive these privileged inputs.
+
+The adjustment is added once to each learner slot. QMIX and PQN learn one team
+objective: native team reward plus the mean adjustment over learner-owned active
+slots, plus enabled team shaping. They do not promise separate objectives for
+individual actors. PPO retains per-agent rewards and learner masks.
+
+The update log keeps `task_reward_mean`, `shaping_mean` and, when enabled,
+`custom_reward_mean` separate. Native scores still decide games and checkpoint
+selection. Disabled custom rewards request no extra facts. See the
+[CTDE and fading-reward example](competitive_marl.md#write-your-own-ctde-learner)
+for the facts' exact meanings and a learner that owns its actual parameter update.
+
+### Current And Historical Self-Play
+
+`TrainConfig.opponents` chooses the opponent when each game starts. Give relative
+weights, or a repeating list for an exact order. A weight of 1 for one member
+makes a fixed choice. These rules change new games; a running game keeps its
+opponent and memory. Current-weight games see each newly published actor while
+keeping their own memory.
+
+```python
+from marl_battlegrounds import training
+
+config = training.TrainConfig(
+    opponents={"self": 0.6, "past": 0.2, "tdm-alpha": 0.1, "tdm-beta": 0.1},
+    keep_past=20,
+    past_capture_interval=5_000_000,
+)
+run = training.train(config, output_dir="runs/mixed_self_play")
+```
+
+`self` means current learner weights. `past` means frozen earlier copies, sampled
+uniformly unless a researcher rule supplies per-copy weights. Before any copy
+exists, the past share goes to current weights. Other names can be built-ins,
+absolute saved actor/checkpoint paths or `module:function` factories. For a live
+System or Policy, use an alias in the config and bind it separately:
+
+```python
+config = training.TrainConfig(opponents={"self": 0.8, "guest": 0.2})
+run = training.train(config, opponents={"guest": guest_system},
+                     output_dir="runs/custom_opponent")
+```
+
+Every valid System can use this route. The built-in learner does not require its
+opponents to share its model, framework, memory layout or execution mode. Managed
+resource scopes stay open through setup and training. Host methods, including
+LLMs, use the existing host execution route. An unused member is not called.
+Host time and required input transfers are part of that method's cost; they do
+not force host execution onto an all-JAX population.
+
+A list chooses across actual game starts, including the initial batch, in lane
+order. It repeats after its last entry. It is one sequence, not one sequence per
+parallel game:
+
+```python
+config = training.TrainConfig(opponents=["self", "tdm-alpha", "tdm-beta"])
+```
+
+A `matchmaking(statistics, env_steps)` callback can return new `opponents` shares
+or an order, and `past` weights keyed by stable capture ID. It runs between
+updates, outside compiled steps. `statistics["members"]` identifies the members
+and their cumulative and last-update wins, draws, losses and native points.
+Initial games use the config; later choices affect future game starts only.
+The callback owns the research rule. MARL-BGs owns selection, state and records.
+See the [competitive training example](../../examples/competitive_training.py)
+for league selection, population-based training and PSRO in ordinary Python.
+
+The past bank keeps the **latest `keep_past` copies**, dropping the oldest from
+future draws. A spare slot lets unfinished games finish with their old copy.
+Capture spacing must be at least the longest configured game, measured in full
+parallel rounds. The runner rejects incompatible spacing before training.
+`past_capture_interval` counts real environment transitions and does not depend
+on the final budget. A request is rounded up to a whole parallel round, then
+captured at the first completed learning update reaching it. The next interval
+starts at that actual capture, whose exact step is saved in the record.
+The bank and cadence continue across `extend_training`.
+
+With no interval or explicit points, the default remains 20 requested captures
+at 5%, 10%, ..., 100% of the budget. A short wiring check should use
+`keep_past=0` or sparse `history_capture_env_steps`; the runner never silently
+changes an impossible schedule. Interval and explicit points are alternatives.
+The at-most-20 explicit-point table is a request table; it does not limit how
+many recurring captures a long run can make.
+
+Every capture is a loadable actor export under `past_copies`, with a readable
+method/step/capture name. Eviction from the bank does not delete that export.
+Records keep the actual capture step and stable ID, not a reused physical slot.
+Per-member update results retain that identity after eviction. A Q-method export
+uses the normal greedy evaluation rule; its metadata separately records the
+exploration rate used by its training copy.
+
+Continuation restores frozen numerical weights and supported memory. A live-only
+method needs its binding again; a saved reference loads through the same method
+loader. `extend_training(..., changes={"opponents": ...}, opponents={...})` may
+append members and change future shares or order. Old names keep their identity;
+use a new name for a different member. An opaque host method with unsaved memory
+cannot resume an unfinished game. Such a resume fails before changing outputs;
+there is no silent restart.
+
+The legacy `pinned_opponent_share` setting remains available. It reserves a
+permanent first-update actor, or the named `pinned_opponent`, outside the rolling
+bank. That pin remains with `keep_past=0`; before a first-update pin exists its
+share goes to self. Its old share limit is [0, 0.8]. It cannot be combined with
+`opponents`; generic population weights have no such cap. Legacy pinned-resource
+scopes remain caller-owned. New work should normally use `opponents`.
+
+A researcher-owned low-level loop calls `refresh_opponents` after accepted
+learning updates. The shared collection route handles resets, fixed game
+assignments and exact IDs. Actor shapes and information rights stay fixed;
+critics and optimizer state do not enter the history bank. Engineering checks
+of these tools do not establish learned skill or sample efficiency.
 
 ### Compact Data For A Learner
 
@@ -790,10 +868,11 @@ training.analyze([result.run_dir], output_dir="runs/qmix-example/analysis")
 Curriculum and reward shaping are the usual one-line changes:
 `curriculum=True`, `shaping=True`, or both. Shaping uses `qmix.gamma`.
 
-**Team reward.** QMIX learns from one team reward per decision: the mean task
-reward over the Team A slots that are in the game, plus the shaping value when
-shaping is on. The donor averages over all five slots; the two differ only
-when a curriculum stage has fewer than five players per team.
+**Team reward.** QMIX learns from one team reward per decision: native task
+reward plus custom adjustments, averaged over active learner-owned Team A slots,
+plus enabled team shaping once. With no partners or custom reward, this is the
+mean task reward over the configured Team A slots. The donor averages over all
+five slots; smaller rosters, frozen partners and custom feedback are BG changes.
 
 **Model and actors.** One shared local Q-network (256 wide, with a 256-wide
 GRU) turns each actor's permitted inputs and own memory into 198 action
@@ -815,8 +894,10 @@ with that block's weights and epsilon.
 
 **Replay and warmup.** Here "game" means one of the `num_envs` parallel
 games; each plays many episodes. Replay keeps the last `buffer_size` decisions
-of each parallel game; it is never flushed, including across curriculum
-stages. A block adds its real decisions, then learns only once at least
+of each parallel game. Curriculum and opponent changes retain valid rows.
+A declared change to stored reward feedback clears and refills replay, as
+explained under [continuation](#continue-a-full-learner-checkpoint).
+A block adds its real decisions, then learns only once at least
 `min_buffer_size` rows per game are stored. Earlier blocks are warmup blocks:
 their decisions are stored, and no optimizer step runs. Each ready block takes
 `epochs` optimizer steps; each step draws `sample_batch_size` sequences of
@@ -838,8 +919,11 @@ curriculum stage, source row and opponent. The runner keeps these totals as
 exact whole numbers; low-level callers of `update_qmix_learner` receive
 per-block counts and must add them up themselves.
 
-**Memory and disk.** One replay row is 29,688 bytes per game: 950,016,000
-bytes for 32 games and 1,000 rows. While a block is checked the learner keeps
+**Memory and disk.** The earlier full-learner, shared-actor measurements used
+29,688 bytes per game row: 950,016,000 bytes for 32 games and 1,000 rows.
+Those measurements used the earlier 20-slot history. Partner rows add five
+ownership bytes; grouped actors and frozen members add their own weight arrays.
+While a block is checked the learner keeps
 the previous replay (for rollback) and the replay with the new rows, plus
 working space, so plan for up to about three times that; at those sizes XLA
 estimates about 4.0 GB for the whole update on CPU, and the GPU run used about
@@ -857,11 +941,11 @@ kept. The number is fixed when the config is built, so
 keeps PPO's 25 unless that call also passes `checkpoint_interval_updates=None`. Exports hold only the
 Q-network, about 7 MB.
 
-A run keeps the complete checkpoint, replay included, at every boundary with an
-exported actor (initialization, each validation fraction, each extra save point
-and the final boundary), plus the two newest recovery saves. A ten-fraction
-panel run at 32 games therefore keeps about 11 complete checkpoints, up to
-roughly 12 GB before compression. Memory and disk grow with
+A run keeps the complete checkpoint, replay included, at initialization, each
+validation fraction, each extra save point and the final boundary, plus the two
+newest recovery saves. Rotating past-copy exports retain no extra full checkpoint.
+In the earlier layout, a ten-fraction panel run at 32 games kept about 11 complete
+checkpoints, up to roughly 12 GB before compression. Memory and disk grow with
 `num_envs × buffer_size`: at 256 games one replay is about 7.6 GB and a block
 briefly holds three (about 23 GB), and 512 games with 1,000 rows do not fit a
 32 GB card. Lower `buffer_size` or `num_envs` for large batches.
@@ -1000,21 +1084,29 @@ block, so used counts are not new experience. The runner keeps exact whole
 numbers; low-level callers of `update_pqn_learner` receive per-block counts and
 add them up themselves.
 
-**Memory and disk.** One kept row is 26,008 bytes per game plus its actors'
-memory; the kept rows are about 4.6 MB at 32 games. A whole default window is
-about 110 MB of rows, but only one minibatch's games are expanded to network
-inputs at a time (about 27 MB). The 20-slot opponent history holds about 369 MB
-of frozen networks. A complete checkpoint holds the network, optimizer,
-history and kept rows (about 0.43 GB of arrays at 32 games before
-compression); an export holds only the network and its statistics, about 18 MB.
+**Memory and disk.** The earlier shared-actor, full-learner measurements used
+26,008 bytes per kept game row plus actor memory: about 4.6 MB at 32 games.
+A default window held about 110 MB of rows, with one minibatch expanded to
+network inputs at a time (about 27 MB). That earlier 20-slot history held about
+369 MB of frozen networks. Complete checkpoints held about 0.43 GB of arrays
+at 32 games before compression; actor exports held about 18 MB of network
+weights and statistics. These remain measurements of that earlier layout.
+
+The current rolling bank uses `keep_past + 1` slots when enabled: 21 at the
+default, with permanent pins stored separately. See
+[current and historical self-play](#current-and-historical-self-play).
+A frozen-partner row also stores five learner-ownership bytes. Grouped actor
+weights and embedded numerical partner/opponent weights add their own storage;
+the earlier checkpoint sizes do not measure those optional configurations.
 `checkpoint_interval_updates` counts optimizer steps; its default of 1,600 saves
 every 25 learning blocks at the defaults. Initial chunks take no optimizer steps
 and never cause a periodic save. As for the other methods, a run keeps the
-complete checkpoint at every boundary with an exported actor (initialization,
-each validation fraction, each extra save point and the final boundary) plus
-the two newest recovery saves. A ten-fraction panel run at 32 games therefore
-keeps about 11 complete checkpoints, about 4.8 GB of arrays before compression;
-measured checkpoints took 172-189 MB on disk each. The number is fixed when the
+complete checkpoint at initialization, each validation fraction, each extra
+save point and the final boundary, plus the two newest recovery saves. Rotating
+past-copy exports retain no extra full checkpoint. In the earlier layout, a
+ten-fraction panel run at 32 games kept about 11 complete checkpoints, about
+4.8 GB of arrays before compression; measured checkpoints took 172-189 MB on disk
+each. The number is fixed when the
 config is built, so `dataclasses.replace(ppo_config, method="pqn_vdn")` keeps
 PPO's 25 (a save after every 64-step block) unless that call also passes
 `checkpoint_interval_updates=None`.
@@ -1232,7 +1324,7 @@ A new run requires a new or empty exact output directory. Resume requires the
 path of a complete learner checkpoint, not an actor export or run directory:
 
 ```python
-resumed = training.train(resume_from="RUN/checkpoints/CHECKPOINT_ID")
+resumed = training.train(resume_from="RUN/checkpoints/SAVED_CHECKPOINT")
 ```
 
 Omit config to inherit it. Supplying one asserts exact equality; resume cannot
@@ -1271,7 +1363,7 @@ replace `CHECKPOINT_ID` with its saved identity. `REPORT` holds derived reports:
 JAX_PLATFORMS=cpu uv run --no-sync python -m marl_battlegrounds train \
   --config CONFIG.json --output-dir RUN
 JAX_PLATFORMS=cpu uv run --no-sync python -m marl_battlegrounds train \
-  --resume-from RUN/checkpoints/CHECKPOINT_ID
+  --resume-from RUN/checkpoints/SAVED_CHECKPOINT
 uv run --no-sync python -m marl_battlegrounds analyze-training RUN --output-dir REPORT
 ```
 
@@ -1339,12 +1431,12 @@ These are separate routes; the file's age alone does not change new-run defaults
 **Points and kills are different numbers.** Scores, winning thresholds (K20
 and the score-threshold curriculum) and `score_delta` shaping count points.
 Validation cells report both: `mean_team_a_score` in points and
-`mean_team_a_kills` from recorded kills. `mean_kill_difference`, the checkpoint
-selection tiebreak and the kills and deaths shown for Random checks use
-recorded kills. A Red Zone kill therefore adds 2 to a score but 1 to a kill
-difference. Results saved before the rule read kills from their scores, where
-the two were equal. Selection never mixes results recorded under different
-depths.
+`mean_team_a_kills` from recorded kills. `mean_kill_difference` and the kills
+and deaths shown for Random checks use recorded kills. New checkpoint choices
+use mean point margin alone. Historical choices keep their saved tie rules.
+A Red Zone kill adds 2 to a score but 1 to a kill difference. Results saved
+before the rule read kills from their scores, where the two were equal.
+Selection never mixes results recorded under different depths.
 
 **Panels.** A panel frozen directly from opponents works at any depth. A panel
 chosen from a tournament ranking records the depth the ranking was played at;
@@ -1555,7 +1647,7 @@ panel = create_panel(
     output_dir="artifacts/alpha-panel",
 )
 validation = validate_checkpoint(
-    "RUN/actors/CHECKPOINT_ID", panel,
+    "RUN/actors/SAVED_ACTOR", panel,
     output_dir="artifacts/standalone-validation", seed_pairs=4,
 )
 print(validation["score"], validation["mean_kill_difference"])
@@ -1617,17 +1709,20 @@ ordinary Systems like these. Do not rename a System built from Policies, such as
 one from `shared_policy` or `independent_policies`, with `dataclasses.replace`:
 the copy loses the Policies inside it.
 
-Validation uses maps 42–46, mirrored canonical 5v5, K20/H300, and both spawn ends.
-Each seed pair means ten games per opponent across those five maps. Defaults are
+Validation defaults to maps 42–46, mirrored canonical 5v5, K20/H300, and both
+spawn ends. Custom-stage runs use their final declared rosters throughout;
+partner-trained runs evaluate each declared deployed team. Each seed pair means
+ten games per opponent and deployed team across those five maps. Defaults are
 10 routine pairs and 50 confirmation pairs. Initialization cannot be selected.
 Requested progress fractions round up to completed blocks (PPO updates, QMIX
 blocks, or PQN-VDN's initial chunks and blocks); final is included. QMIX warmup
 actors and PQN-VDN initial-collection actors, with no optimizer step, are never
 selected.
 The best two routine checkpoints plus final, when distinct, receive fresh
-confirmation. The highest native score wins: win 1, draw 0.5, loss 0. Exact ties
-use mean kill difference (recorded kills, not points), then earlier training
-step, then checkpoint ID.
+confirmation. New runs rank both stages by mean point margin: Team A points
+minus Team B points. Exact ties use the earlier training step, then checkpoint
+ID. Wins, draws, losses and kills remain report columns. Historical runs keep
+their saved selection rules when resumed or checked again.
 Incomplete cells cannot select a checkpoint. Maps and opponents have equal weight.
 
 New panels give each opponent its own deterministic root derived from the declared
@@ -1660,6 +1755,58 @@ comparison explicitly; ordinary validation works without it.
 
 
 
+### Cross-Play And Zero-Shot Coordination
+
+[The cross-play example](../../examples/cross_play_and_zsc.py) fixes one focal,
+one partner and one opponent for each comparison. The focal controls Team A
+slots 0 through 3; the partner controls slot 4. It plays canonical 5v5 rosters,
+from both spawn ends, while keeping the focal on Team A. The default partners
+are a JAX random policy and a local fake host that returns idle actions. No
+external provider or learner is needed.
+
+Run the four-game CPU demonstration:
+
+```bash
+JAX_PLATFORMS=cpu uv run --no-sync python examples/cross_play_and_zsc.py \
+  --output-dir artifacts/cross_play_demo
+```
+
+Its two-step games prove the workflow only. For a useful evaluation budget,
+choose real actor exports and a full game horizon. Repeat each method argument
+to play every focal, partner and opponent combination:
+
+```bash
+JAX_PLATFORMS=cpu uv run --no-sync python examples/cross_play_and_zsc.py \
+  --output-dir artifacts/cross_play_study \
+  --focal /absolute/path/to/selected-actor \
+  --partner /absolute/path/to/partner-actor --partner tdm-alpha \
+  --opponent tdm-beta --opponent tdm-gamma \
+  --maps 47 48 49 50 51 --seed-pairs 8 --max-steps 300
+```
+
+Python callers can pass named live `System` or `Policy` objects to the example's
+`run()` function. A `familiarity` mapping declares exposure for each focal and
+partner: `{"focal": {"partner": "held_out"}}`. The CLI reads the same JSON with
+`--familiarity FILE`, using the method argument strings as names. Allowed labels
+are `familiar`, `held_out` and `unknown`; missing pairs are `unknown`. These are
+researcher declarations, not verified training histories.
+
+`cross_play_settings.json` saves the conditions and available member identities
+before games. Numerical member values are snapshotted once for all cells.
+The script prints each cell's games, W/D/L, mean points and point margin through
+the shared `head_to_head()` result view, so partner results can be compared.
+`games.csv` keeps every game's focal, partner, opponent, familiarity,
+member IDs, actual checkpoint labels when present, recorded team IDs, map,
+spawn end, native points and saved run path. `team_a` and `team_b` in `spawn_end`
+mean the map's original spawn banks. Each cell contains ordinary evaluator
+records, readable with `marl_bgs.load_results(path)`. Repeating the same command
+rebinds the methods, checks their identity and resumes through the evaluator.
+Changed methods or declarations need a new output directory. Host sessions
+must be supplied again; their unknown external state is not proved frozen.
+No checkpoint label is invented for a method without one, and this example
+does not claim zero-shot coordination competence.
+
+
 ### Re-Select From Saved Results
 
 `training.reselect_checkpoint` makes a separate decision. It checks saved actor
@@ -1673,8 +1820,8 @@ records. Save this as `choice.json`:
 ```json
 {
   "schema_version": 1,
-  "name": "Saved score with kill-difference ties",
-  "rule": "score_then_kills",
+  "name": "Mean Point Margin",
+  "rule": "point_margin",
   "shortlist_size": 2
 }
 ```
@@ -1706,13 +1853,14 @@ set `JAX_PLATFORMS=cpu` before starting Python, as above. This avoids reserving 
 memory just to read records. It does not change an already initialized backend
 inside your training script. No model is restored or updated.
 
-The declaration accepts these rules:
+New decisions use `point_margin`, the default and only new rule. This is mean
+Team A points minus Team B points, with equal weight for each map/opponent cell.
+Higher margins win. Ties use the earlier training step, then checkpoint ID.
+Wins and kills remain report columns; neither changes this order.
 
-| Rule | Order |
-|---|---|
-| `saved` (default) | The original schema's score and tie order. |
-| `score_then_kills` | Score, kill difference, earlier step, checkpoint ID. |
-| `score_then_step` | Score, earlier step, checkpoint ID. |
+Existing decision files keep their saved rules when read or checked again.
+A separate new decision from an old run needs finite saved points for both teams
+in every validation cell. Missing points cannot be replaced by wins or kills.
 
 The new rule builds its own routine shortlist. It always adds the final actor
 when that actor is not already listed. A winner needs complete confirmation for
@@ -1730,8 +1878,8 @@ paths supplied in a Python mapping resolve from the working directory.
 
 By default each run gets its own decision. To choose between run finalists, set
 `across_runs` to `true` and supply `seed_order`, listing each run's training seed
-once in the order to use for exact ties. Missing, failed and unfinished runs
-remain visible and prevent a completed across-run choice. A missing run leaves
+once in the order to use only when point margin, training step and checkpoint ID
+all tie. Missing, failed and unfinished runs remain visible and prevent a completed across-run choice. A missing run leaves
 its seed unverified; the tool cannot use that entry to name a winner. No
 replacement seed is added.
 Different validation roots require `allow_different_roots: true`; those
@@ -1959,7 +2107,7 @@ To request a particular complete checkpoint, use its absolute path:
 
 ```bash
 bash /absolute/path/mappo-run-package/resume.sh \
-  --checkpoint /absolute/path/mappo-run-package/run/checkpoints/CHECKPOINT_ID
+  --checkpoint /absolute/path/mappo-run-package/run/checkpoints/SAVED_CHECKPOINT
 ```
 
 Resume keeps the same source, environment, settings, panel and run identity.
@@ -2003,7 +2151,7 @@ training or games. To resume from Python, replace the new-run call with:
 
 ```python
 result = training.train(
-    resume_from="/absolute/path/mappo-direct-run/checkpoints/CHECKPOINT_ID"
+    resume_from="/absolute/path/mappo-direct-run/checkpoints/SAVED_CHECKPOINT"
 )
 ```
 
@@ -2031,7 +2179,7 @@ CUDA_VISIBLE_DEVICES=GPU-INTERNAL-UUID JAX_PLATFORMS=cuda,cpu \
 
 CUDA_VISIBLE_DEVICES=GPU-INTERNAL-UUID JAX_PLATFORMS=cuda,cpu \
   uv run --no-sync python -m marl_battlegrounds train \
-  --resume-from /absolute/path/mappo-direct-run/checkpoints/CHECKPOINT_ID
+  --resume-from /absolute/path/mappo-direct-run/checkpoints/SAVED_CHECKPOINT
 
 uv run --no-sync python -m marl_battlegrounds analyze-training \
   /absolute/path/mappo-direct-run \
@@ -2308,11 +2456,13 @@ readable but are not rebuilt.
 Learner resume uses its original frozen source package. Historical frozen actors
 remain usable through `load_system`.
 
-Validation always has its own fixed rules. `validate_random` keeps maps 42–46,
-canonical 5v5 and K20/H300 even when training uses K1; it plays at the run's
-`red_zone_depth` (its own `red_zone_depth` argument, default 5.0, when called
-directly). Its optional `root_seed`
-argument selects the actual paired evaluation streams and is part of the saved
+Validation keeps its own fixed scoring rules. Random checks use maps 42–46
+and K20/H300 even when training uses K1. Canonical 5v5 is the default;
+custom-stage runs use their final declared rosters and partner-trained runs
+use the deployed teams. Checks use the run's `red_zone_depth`; a direct
+`validate_random` call defaults to 5.0 and accepts explicit rosters and partners.
+Its optional `root_seed` argument selects the actual paired evaluation streams
+and is part of the saved
 task identity. The default is 19,043,001. For example, a declared fresh check can
 use `seed_pairs=20, root_seed=19_044_791` for 200 games. Merely raising
 `seed_pairs` with the old root would reuse the earlier games' streams.
@@ -2334,7 +2484,7 @@ an exact full learner checkpoint, an added budget, and a new child folder:
 from marl_battlegrounds import training
 
 result = training.extend_training(
-    "parent/checkpoints/CHECKPOINT_ID",
+    "parent/checkpoints/SAVED_CHECKPOINT",
     additional_env_steps=1_048_576,
     output_dir="child",
 )
@@ -2344,7 +2494,7 @@ print(result.selected_actor)
 The matching CLI uses the same function:
 
 ```bash
-python -m marl_battlegrounds extend-training parent/checkpoints/CHECKPOINT_ID \
+python -m marl_battlegrounds extend-training parent/checkpoints/SAVED_CHECKPOINT \
   --additional-env-steps 1048576 --output-dir child
 ```
 
@@ -2360,12 +2510,14 @@ segment separately. If recording was enabled, it checks the parent's complete
 saved recording boundary before creating child output and carries only the
 unfinished games' needed prefixes. Large saved histories can take time to verify.
 
-A full learner folder is required. `actors/ID` contains inference weights only,
+A full learner folder is required. `actors/SAVED_ACTOR` contains inference weights only,
 and a pruned learner folder is missing state needed to train. Supported old
 actors still load for evaluation, but checkpoints from before Red Zone cannot
-be continuation parents. Source, dependencies, schemas and execution must match,
-or use a specifically qualified source transition. This is not a general model
-migration tool. Ordinary `train(resume_from=...)` still requires the child's exact
+be continuation parents. A changed package version or source identity alone
+does not block continuation. Schema, array layout, game/input contracts,
+content, dependencies and execution must still match. Both real source
+identities remain recorded; old validation evidence is never relabelled.
+This is not a general model migration tool. Ordinary `train(resume_from=...)` still requires the child's exact
 saved settings.
 
 Keep parent checkpoint folders and their descriptions at the recorded paths.
@@ -2375,8 +2527,25 @@ must stay. Moving or deleting it breaks that saved path; the error names the
 folder to restore. Starting another continuation from that ancestor still needs
 its full learner checkpoint.
 
-`changes` accepts only future validation, learning-rate, exploration and history
-capture declarations. No model, batch, reward or optimizer migration is implied.
+`changes` accepts future validation, learning-rate, exploration and history
+capture declarations, plus the following narrow changes. No model, batch or
+optimizer-layout migration is implied.
+
+| Change | Meaning |
+| --- | --- |
+| `seed` | Branch library-owned action, reset, selection, initialization and learner random streams once. Preserve current games and method memory; remote randomness stays method-owned. Validation seeds stay fixed. |
+| `ppo` | Override `gamma`, `gae_lambda`, `clip_epsilon`, `entropy_coefficient`, `value_coefficient` or `max_grad_norm`. |
+| `qmix` | Override `gamma`. |
+| `pqn` | Override `gamma`, `td_lambda` or `max_grad_norm`. |
+| `opponents`, `partners` | Set future shares or a repeating game-start order. New bindings may append; live games keep their members. Valid off-policy rows stay. |
+| `keep_past`, `past_capture_interval` | Change the rolling window or future spacing while preserving every live copy. Retired exports remain loadable. |
+| `reward`, `shaping`, `shaping_mode`, `shaping_coefficient` | Change future reward feedback. Empty and refill Q experience when its stored reward definition changes. |
+| `curriculum` | Append researcher stages through the existing schedule. Current games keep their original reset conditions. |
+
+For example, `changes={"seed": 43, "ppo": {"entropy_coefficient": 0.02}}`
+branches a PPO child. Optimizer state and running statistics carry over. The
+child shares its parent's training ancestry; it is not an independent seed.
+Resuming that child does not branch the streams again.
 The following rate choices preserve the existing optimizer state:
 
 | Method | `changes["learning_rate"]` |
@@ -2408,7 +2577,7 @@ A parent panel with live-only Systems needs those same Systems again:
 
 ```python
 child = training.extend_training(
-    "parent/checkpoints/CHECKPOINT_ID",
+    "parent/checkpoints/SAVED_CHECKPOINT",
     additional_env_steps=1_048_576,
     output_dir="child",
     validation_opponents=[my_system],  # The parent's frozen member order.
@@ -2424,17 +2593,37 @@ The CLI can reload saved references but cannot accept a caller's live objects.
 
 Compatible parent candidates keep their exact original identities. The child
 selects the best eligible confirmed candidate, which can be a parent actor;
-`final_actor` always identifies the child's final actor. Extra history captures
+`final_actor` always identifies the child's final actor. `final_checkpoint`
+identifies the full saved learner for the next resume or extension. Extra history captures
 use `history_capture_env_steps`, a list of future cumulative steps. Existing
-snapshots and pending captures stay fixed, and the twenty-slot bank cannot grow.
+copies keep their identities. The rolling bank uses `keep_past + 1` physical slots;
+its result records can grow without keeping every old weight copy in memory.
+The twenty-entry explicit-target table does not cap recurring captures.
 For Q-learning methods, optional `exploration` declarations affect future current
 actors only; frozen history actors keep their recorded exploration values.
 
 The [complete continuation example](../../examples/training_continuation.py)
 accepts the same checkpoint, child folder, budget and optional JSON changes.
+Its `complete_example(output_dir)` function also trains a small parent, extends
+it, resumes the child, evaluates the saved actor and starts a fresh learner from
+its weights. Set `JAX_PLATFORMS=cpu` for that four-lane software example.
 When a JSON changes file names a relative validation panel, the CLI and example
 resolve it beside that file. These short workflows check software behavior;
 they do not establish policy competence or sample efficiency.
+
+Changing a custom reward definition, built-in shaping mode, on/off setting or
+coefficient clears QMIX replay and PQN recent rows. Changing `gamma` also clears
+those rows when stored potential shaping depends on it. Otherwise a new discount
+is applied when targets are built. Optimizer state, statistics, actor memory,
+current exploration and cumulative counters carry over. QMIX waits for its
+configured replay minimum; PQN collects a clean `memory_window` before its next
+learning block. This work counts against the child's budget. An unchanged
+progress-driven fade is one reward definition and causes no repeated clearing.
+
+Host methods remain usable even when they cannot save opaque game memory.
+Their accessible frozen array weights are included in the checkpoint; client
+objects must be rebound. Exact resume refuses an unfinished game whose host
+memory is unavailable. There is no silent restart or discarded-game fallback.
 
 A child can stop during the parent's warmup, before any optimizer update. It
 still saves a full checkpoint and a loadable final actor. If there is no eligible
@@ -2622,3 +2811,137 @@ training workers in order, with one CPU declaration check and saved-result
 analysis around them. The earlier MAPPO search keeps its saved clocks and
 records. Raw checks, exact source identities and the coverage map are retained
 under `artifacts/m9-m10/closeout/b3/`; these local files are not shipped.
+
+
+Saved artifact names identify their method, purpose and actual training step.
+For example, a new folder starts with `mappo_checkpoint_step_000005000000_`
+or `mappo_actor_step_000005000000_`. The full saved identity follows that prefix.
+Use `result.final_checkpoint`, `result.final_actor` or the path in
+`latest_checkpoint.json`; the readable filename is not the checkpoint ID.
+Old hash-only folders still load without renaming them.
+
+The DevClient and Replay Viewer show plain-English actor names, including the
+method, saved step and run. Exact identities remain in saved metadata. Two
+artifacts may have the same readable name without becoming the same artifact.
+Writers preserve different saved work when names collide. They reuse immutable
+output only after checking its identity and content. Files whose stated purpose
+is to update the current status or latest pointer keep that update behavior.
+
+
+To send the normal update rows to your own logger, pass a live callback:
+
+```python
+def show_update(row):
+    print(row["env_steps"], row.get("policy_loss"))
+
+result = training.train(config, output_dir="runs/my_run", on_update=show_update)
+```
+
+This fragment uses the `TrainConfig` you already prepared. `on_update` receives a
+copy of each row after `training_updates.jsonl` has been appended and closed.
+The callback runs between collection blocks, including Q-method warmup blocks;
+it adds no per-step call or device work. Changing the copy cannot change saved
+results. Omit it to skip both the copy and call. `extend_training` accepts the
+same callback. Supply it again when resuming; callbacks are not saved in JSON.
+
+If your callback raises an exception, training stops and preserves the saved row.
+Resume from the latest complete checkpoint. The existing writer does not add a
+per-row disk sync for callbacks. Recovery may repeat work, so external loggers
+should use the saved `run_id` and `env_steps` to recognize repeated steps, keeping
+`attempt_id` if they need to distinguish attempts. Delivery is not exactly once.
+
+
+### Validate The System You Deploy
+
+`validate_checkpoint` accepts a live `System`, `Policy`, built-in name, factory,
+or saved actor. Use the same System you pass to `evaluate`; a custom learner does
+not need to produce a built-in learner checkpoint.
+
+```python
+import marl_battlegrounds as marl_bgs
+from marl_battlegrounds import training
+
+panel = training.create_panel(
+    opponents=["tdm-alpha", "tdm-beta"], output_dir="checks/panel")
+mixed = marl_bgs.team("random", "tdm-beta", slots=[[0], [1]])
+summary = training.validate_checkpoint(
+    mixed, panel, maps=[42],
+    system_roster=["mage", "mage"], opponent_roster=["warrior", "priest"],
+    seed_pairs=1, output_dir="checks/mixed_team")
+print(summary["games"], summary["cells"])
+```
+
+This small example plays four games: one seed pair per opponent on one map.
+Team A remains the candidate while the pair exchanges spawn ends. Omitted maps
+use development maps 42–46; omitted rosters use canonical 5v5. Use a different
+output directory for a different candidate or condition. Repeating the same
+call verifies and reuses complete results, or resumes unfinished work. It never
+replaces a different task just because the directory name matches.
+
+Numerical parameters are frozen for the call. Host clients stay in the current
+process; supply the same live methods again to resume. A registration identifies
+what the method declares, but cannot freeze an external service's hidden state.
+Live summaries record the System identity without inventing a training step.
+Saved built-in actors retain their checkpoint and experience metadata.
+
+Panel members may share a display name. Numbered panel labels keep their rows
+separate, while the original names and exact registrations remain saved.
+Names alone never establish that two members are the same. Checkpoint selection
+also rejects results with different maps or ordered rosters; point margins must
+be measured under the same declared conditions.
+
+
+## Measured Full Training Cost
+
+A bounded check on 27 September 2026 used one RTX 5090, 512 environments,
+128-round rollouts, four PPO epochs and 3,932,160 real transitions per case.
+It kept priority metrics, ordinary checkpoints, twenty past-copy exports and
+reports enabled. No validation panel or replay recording was requested.
+
+| Opponent Setup | Whole Run | Setup | First Block, Including Compilation | Later Training Blocks | Saves, Exports And Reports |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| Default self-play | 251 s | 33 s | 35 s | 21,844 transitions/s | 4.6 s |
+| Same settings, 20% ALPHA | 300 s | 39 s | 56 s | 19,435 transitions/s | 4.7 s |
+| Same settings, 20% GAMMA | 353 s | 43 s | 76 s | 16,915 transitions/s | 4.6 s |
+
+The later-block rates exclude setup, the first block and output work. They must
+not be compared directly with a whole-run rate. About one second per run remains
+outside the named timers; it includes logging and other unmeasured work. These
+cases did not reveal a bookkeeping bottleneck that justified a product change.
+They do show the extra cost of the chosen opponent workload.
+
+Sampled process GPU memory peaked at 18.66–18.67 GB, including the allocator's
+retained pool and CUDA overhead. JAX reported about 10.1–10.2 GB of live arrays
+at peak. Process RAM peaked at 4.60–5.87 GB. Each run wrote 202 MB of normal
+artifacts. GPU preallocation was disabled and the allocator limit was 80%.
+Host setup and compilation shared CPU time with focused checks. These are
+observed costs for one seed and workload, not an isolated-machine comparison,
+a general speed guarantee or evidence of learned skill. Compilation alone and
+individual host/device transfers were not separately measured.
+
+The reusable command is `python -m scripts.dev.benchmark_mappo_training
+--full-training-config CONFIG.json --gpu-uuid GPU_UUID --output NEW_DIRECTORY`.
+It reads the complete training config without changing it. Enforce the declared
+wall limit with the caller's `timeout 600s`; the tool limits this route to MAPPO
+at 512 GPU environments and at most 3,932,160 transitions. Its CPU tool check
+uses four environments with `--cpu-smoke`. Existing evidence is never overwritten.
+Raw settings, source hashes, normal training outputs and phase times are under
+`artifacts/m11_5/full_training_cost_20260927/` in the qualification checkout.
+
+
+A separate small check combined frozen partners, two learner slots, grouped
+actors and a progress-driven custom reward at 32 environments and four steps
+per collection. FF-IPPO used one actor per slot; QMIX and PQN shared actors by
+class. Two later collection-and-update blocks took 38–49 ms, 56–67 ms and
+54–73 ms per 128 real transitions, respectively. Peak live JAX arrays were
+0.56/1.11/1.68 GB, and process RAM was 3.92/4.35/4.64 GB. Setup took 34–36 s;
+collection compilation took 16–20 s and update compilation 10–16 s.
+
+All three made real parameter updates while keeping partner weights fixed.
+Changing weights and game state reused the collector and update programs, and
+warm calls passed the explicit host/device transfer guard. Custom reward rows
+added 2,560 retained bytes per collection; turning them off removed those rows
+without changing the collected physical trajectory. These tiny runs establish
+correctness and bounded cost for the tested paths, not large-batch speed or
+learned skill. Their settings, source hashes and measurements are under
+`artifacts/m11_5/composed_training_cost/` in the qualification checkout.

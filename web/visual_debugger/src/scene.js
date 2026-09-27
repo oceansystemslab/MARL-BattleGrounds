@@ -806,6 +806,11 @@ export class BattlefieldRenderer {
     });
     const obstacle = createLayer("obstacle", { "aria-label": "Map obstacles" });
     const body = createLayer("body", { "aria-label": "Authorized agents" });
+    this.bodyLayers = {
+      dead: svgElement("g", { "data-body-state": "dead" }),
+      living: svgElement("g", { "data-body-state": "living" }),
+    };
+    body.append(this.bodyLayers.dead, this.bodyLayers.living);
     const selectionLegality = createLayer("selection-legality", {
       "aria-label": "Selection and exact actor-owned legality",
     });
@@ -1174,7 +1179,8 @@ export class BattlefieldRenderer {
     this.rangeCues.replaceChildren();
     this.layers.pendingRoute.replaceChildren();
     this.layers.obstacle.replaceChildren();
-    this.layers.body.replaceChildren();
+    this.bodyLayers.dead.replaceChildren();
+    this.bodyLayers.living.replaceChildren();
     this.selectionCues.replaceChildren();
     this.legalityCues.replaceChildren();
     this.layers.durableStatusModifier.replaceChildren();
@@ -1463,8 +1469,8 @@ export class BattlefieldRenderer {
    *
    * scene supplies accepted agents/selection; transform projects positions/radii;
    * visualPolicy controls durable pieces. Remove missing identities, reuse/create
-   * remaining nodes, register audience-appropriate tooltips and reorder DOM to scene
-   * order. Return ProjectedAgent rows with screen center/radius and separate global,
+   * remaining nodes and register audience-appropriate tooltips. Shared body groups
+   * keep every corpse below every living body, retaining scene order within each. Return ProjectedAgent rows with screen center/radius and separate global,
    * presentation and layout identities. Layout fallback indices never become public
    * slot facts. Source records remain unchanged.
    *
@@ -1534,9 +1540,10 @@ export class BattlefieldRenderer {
       );
 
       // Appending an existing child reorders it without replacing its identity.
-      this.layers.body.append(nodes.root);
+      const bodyLayer = agent.alive ? this.bodyLayers.living : this.bodyLayers.dead;
+      bodyLayer.append(nodes.root);
       if (visualPolicy.showSpawnShield && nodes.shieldRoot !== null) {
-        this.layers.body.append(nodes.shieldRoot);
+        bodyLayer.append(nodes.shieldRoot);
       } else {
         nodes.shieldRoot?.remove();
       }
@@ -1564,7 +1571,9 @@ export class BattlefieldRenderer {
    * and exactly matching observation_key. transform projects their authorized values;
    * showDurationStatusBadges controls status paint and matching accessible text.
    * Retain nodes by relation-row key, remove absent bodies and update hover/keyboard
-   * inspection. These hit regions do not become target/control regions. Return
+   * inspection. Use the same corpse/living paint groups as ordinary agents so later
+   * observed corpses cannot hide living actors. These hit regions do not become
+   * target/control regions. Return
    * undefined; no hidden body identity or position is invented.
    *
    * @param {JsonRecord} scene
@@ -1787,7 +1796,7 @@ export class BattlefieldRenderer {
         root,
         explainPovAgent(body, { controlled: false, selected: false }),
       );
-      this.layers.body.append(root);
+      (body.alive ? this.bodyLayers.living : this.bodyLayers.dead).append(root);
     }
   }
 

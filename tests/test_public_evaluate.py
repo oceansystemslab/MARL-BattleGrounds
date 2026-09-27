@@ -581,7 +581,7 @@ def test_persistence_keeps_scalar_tables_and_replays_independently(
     replays = list(result.paths["replays"].glob("*.json"))
     assert len(replays) == 1
     assert replays[0].name.startswith("tdm_custom_map_")
-    assert "__episode-2__seed-0__stream-2__a-random__b-random__" in replays[0].name
+    assert "__episode_2__seed_0__stream_2__a_random__b_random__" in replays[0].name
     details = json.loads(result.paths["run_details"].read_text())
     record = next(iter(details["passes"].values()))["replays"]["2"]
     assert record["path"] == str(

@@ -368,7 +368,9 @@ Oracle View. That overlay is same-tick, paint-and-inspection-only evidence; it
 may additionally admit only a death/respawn presentation cue and that cue's
 owned endpoint. It cannot admit another event, move an ability route, or change
 policy input, masks, targeting, legality, accepted actions, or simulator
-transitions.
+transitions. Every allowed corpse is drawn below every living body, so overlapping
+corpses cannot hide living actors or take their mouse targets. Live play keeps
+its normal presentation speed.
 
 ## Manual Input and Joint Turns
 
@@ -459,8 +461,10 @@ Turning the filter off only hides the tint.
 
 Death Announcer names the killing team and shows a compact list of victims.
 Hover or focus a victim to see every associated **Kill Contributor**, including
-useful same-tick Priest support. Team A's kills appear in blue on the left and
-Team B's in red on the right. Contributor details use the same accessible
+useful same-tick Priest support. Team A stays blue and Team B stays red. The
+Death Announcer, respawn banners and scoreboard follow their recorded spawn
+sides. Missing or non-left-right spawn banks keep Team A on the left and Team B
+on the right. Contributor details use the same accessible
 event-information tooltip machinery as Respawn Wave. Missing historical credit
 is identified as unavailable rather than guessed.
 
