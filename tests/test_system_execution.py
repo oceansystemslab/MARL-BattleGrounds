@@ -287,7 +287,7 @@ def test_shared_and_independent_adapters_preserve_distinct_initial_memories(
     )
     np.testing.assert_array_equal(memory.team_a[0], (8, 9))
     np.testing.assert_array_equal(memory.team_a[1]["vector"], ((11, 21), (12, 22)))
-    np.testing.assert_array_equal(memory.team_b, ((8,) * 5, (9,) * 5))
+    np.testing.assert_array_equal(memory.team_b, ((8, 8, 8, 7, 7), (9, 9, 9, 7, 7)))
 
 
 def test_independent_adapter_rejects_wrong_roster_size_and_mixed_modes() -> None:
@@ -710,6 +710,7 @@ def test_actual_system_input_keeps_restricted_sources_and_no_runner_fields() -> 
             "active_mask",
             "episode_start",
             "valid",
+            "controlled_mask",
         )
         return SystemOutput(_idle(inputs), memory, learning_outputs=inputs.actors)
 

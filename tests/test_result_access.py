@@ -5,7 +5,9 @@ The tests reject ambiguous scopes, incomplete summaries and destructive restore,
 while preserving recorded row order, optional metrics and legacy result fields.
 A host-schema-2 run reads its full report with the header of its own scalar
 schema: a saved schema-14 report keeps its 11,148 metric columns, and a
-schema-14 manifest cannot claim a schema-15 header.
+schema-14 manifest cannot claim a schema-15 header. Head-to-head and matrix
+views preserve exact identities, directional points, physical spawn banks,
+missing cells and recorded interval limits without requiring combat metrics.
 """
 
 import csv
@@ -812,3 +814,179 @@ def test_saved_sampling_summary_keeps_text_exact_counts_and_missing_units(
     assert columns["declared_blocks"].tolist() == [2**24 + 1]
     assert columns["supported_independent_sampling_units"].tolist() == [supported]
     assert columns["independent_blocks"].tolist() == [supported]
+
+
+def test_head_to_head_saved_and_live_keep_points_maps_and_focal_spawn_banks(
+    tmp_path: Path,
+) -> None:
+    directory, manifest = _fixture(tmp_path, modes=("none",))
+    entry = manifest["passes"]["0"]
+    rows = [_row(episode_id=value) for value in (1, 2, 3)]
+    for row, (a, b, outcome, map_id) in zip(
+        rows, ((10, 2, 1, 0), (1, 4, 2, 0), (3, 3, 3, 1)), strict=True
+    ):
+        row.update(
+            team_a_policy="Same",
+            team_b_policy="Same",
+            team_a_score=a,
+            team_b_score=b,
+            outcome=outcome,
+            map_id=map_id,
+        )
+    entry["episodes"]["3"] = {"spawn_locations": 0, "map_id": 1, "config_id": "cfg"}
+    entry["completed_episode_ids"] = [1, 2, 3]
+    _table(directory, manifest, "episodes.csv", EPISODE_COLUMNS, rows)
+    _save(directory, manifest)
+    saved = load_results(directory)
+    live = EvaluationResult(
+        {},
+        {},
+        tuple(
+            EpisodeResult(
+                **{
+                    name: row[name]
+                    for name in (
+                        "episode_id",
+                        "seed_id",
+                        "map_id",
+                        "config_id",
+                        "outcome",
+                        "episode_length",
+                        "team_a_score",
+                        "team_b_score",
+                    )
+                }
+            )
+            for row in rows
+        ),
+        {
+            "phase": "evaluation",
+            "pass_id": "same",
+            "run_id": "run",
+            "metrics": "none",
+            "system_ids": entry["system_ids"],
+            "policies": [{"name": "Same"}, {"name": "Same"}],
+            "schedule": entry["episodes"],
+            **entry["details"],
+        },
+    )
+    before = {path: path.read_bytes() for path in directory.iterdir()}
+    for by in ("overall", "map", "spawn"):
+        expected, actual = saved.head_to_head(by), live.head_to_head(by)
+        assert expected.keys() == actual.keys()
+        for field in expected:
+            np.testing.assert_equal(actual[field], expected[field])
+    overall = saved.head_to_head()
+    assert overall["system_id"].tolist() == ["a", "b"]
+    assert overall["system_name"].tolist() == ["Same", "Same"]
+    assert overall["games"].tolist() == [3, 3]
+    for field in ("wins", "draws", "losses"):
+        assert overall[field].tolist() == [1, 1]
+    np.testing.assert_allclose(
+        overall["mean_point_margin"].astype(np.float64), [5 / 3, -5 / 3]
+    )
+    assert overall["expected_score"].tolist() == [0.5, 0.5]
+    assert np.isnan(overall["expected_score_ci_low"]).all()
+    maps = saved.head_to_head("map")
+    assert maps["map_id"].tolist() == [0, 1, 0, 1]
+    assert maps["games"].tolist() == [2, 1, 2, 1]
+    spawn = saved.head_to_head("spawn")
+    assert spawn["spawn_end"].tolist() == ["team_a", "team_b", "team_a", "team_b"]
+    assert spawn["games"].tolist() == [2, 1, 1, 2]
+    assert spawn["mean_point_margin"].tolist() == [4, -3, 3, -4]
+    matrix = saved.opponent_matrix()
+    assert matrix["system_ids"] == ("a", "b")
+    assert matrix["system_names"] == ("Same", "Same")
+    np.testing.assert_allclose(
+        matrix["values"], [[np.nan, 5 / 3], [-5 / 3, np.nan]], equal_nan=True
+    )
+    assert saved.table("priority_metrics") == {}
+    assert {path: path.read_bytes() for path in directory.iterdir()} == before
+
+
+def test_head_to_head_keeps_unplayed_cells_and_single_self_play_perspective(
+    tmp_path: Path,
+) -> None:
+    directory, manifest = _fixture(tmp_path, modes=("none", "none"))
+    manifest["passes"]["1"]["system_ids"] = {"team_a": "a", "team_b": "c"}
+    manifest["passes"]["1"]["completed_episode_ids"] = []
+    manifest["passes"]["1"]["result_state"]["status"] = "incomplete"
+    _table(directory, manifest, "episodes.csv", EPISODE_COLUMNS, [_row()])
+    _save(directory, manifest)
+    result = load_results(directory)
+    matrix = result.opponent_matrix("games")
+    assert matrix["system_ids"] == ("a", "b", "c")
+    assert matrix["values"][0, 1] == matrix["values"][1, 0] == 1
+    assert np.isnan(matrix["values"][2]).all()
+    assert np.isnan(matrix["values"][:, 2]).all()
+    manifest["passes"]["0"]["system_ids"]["team_b"] = "a"
+    _save(directory, manifest)
+    self_play = load_results(directory, phase="evaluation")
+    assert self_play.head_to_head()["games"].tolist() == [1]
+    assert self_play.opponent_matrix("games")["values"].tolist() == [[1.0]]
+
+
+def test_historical_head_to_head_never_guesses_identity_spawn_or_points(
+    tmp_path: Path,
+) -> None:
+    directory, manifest = _fixture(tmp_path, modes=("none",), historical=True)
+    row = _row()
+    row["team_a_score"] = None
+    manifest["passes"]["0"]["episodes"]["1"].pop("spawn_locations")
+    _table(directory, manifest, "episodes.csv", EPISODE_COLUMNS, [row])
+    _save(directory, manifest)
+    result = load_results(directory)
+    assert np.isnan(result.head_to_head()["mean_point_margin"]).all()
+    with pytest.raises(ValueError, match="spawn end was not saved"):
+        result.head_to_head("spawn")
+    with pytest.raises(ValueError, match="by must"):
+        result.head_to_head("other")
+    with pytest.raises(ValueError, match="Unsupported"):
+        result.opponent_matrix("kills")
+    manifest["passes"]["0"].pop("system_ids")
+    _save(directory, manifest)
+    with pytest.raises(ValueError, match="System IDs were not saved"):
+        load_results(directory).head_to_head()
+
+
+def test_overall_head_to_head_reuses_only_saved_matching_tournament_intervals(
+    tmp_path: Path,
+) -> None:
+    directory, manifest = _fixture(tmp_path)
+    manifest["passes"]["0"]["phase"] = "tournament"
+    manifest["tournament_summary"] = {"digest": "qualified"}
+    row = _row(phase="tournament")
+    _table(directory, manifest, "match_results.csv", MATCH_COLUMNS, [row])
+    _table(
+        directory,
+        manifest,
+        "matchup_results.csv",
+        (
+            "policy",
+            "opponent",
+            "matches",
+            "expected_score_ci_low",
+            "expected_score_ci_high",
+            "expected_score_interval_status",
+        ),
+        [
+            {
+                "policy": "001",
+                "opponent": "B",
+                "matches": 1,
+                "expected_score_ci_low": 0.2,
+                "expected_score_ci_high": 0.8,
+                "expected_score_interval_status": "recorded",
+            }
+        ],
+    )
+    _save(directory, manifest)
+    result = load_results(directory)
+    rows = result.head_to_head()
+    assert rows["expected_score_ci_low"][0] == 0.2
+    assert rows["expected_score_ci_high"][0] == 0.8
+    assert rows["expected_score_interval_status"].tolist() == [
+        "recorded",
+        "unavailable",
+    ]
+    assert np.isnan(result.head_to_head("map")["expected_score_ci_low"]).all()

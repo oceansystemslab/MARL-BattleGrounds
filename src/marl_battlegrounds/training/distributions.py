@@ -17,6 +17,7 @@ from jax.core import Tracer
 
 from marl_battlegrounds.core.types import (
     MAX_AGENTS_PER_TEAM,
+    NUM_CLASSES,
     PRIEST_CLASS_ID,
     EnvConfig,
 )
@@ -87,7 +88,9 @@ def _control_shapes(eligible_maps: Array, team_size: Array) -> None:
         raise TypeError("team_size must have int32 dtype")
 
 
-def validate_training_distribution(*, eligible_maps: Array, team_size: Array) -> None:
+def validate_training_distribution(
+    *, eligible_maps: Array, team_size: Array, roster_class_ids: Array | None = None
+) -> None:
     """Check map eligibility and equal team size before compiled sampling.
 
     Parameters
@@ -97,6 +100,10 @@ def validate_training_distribution(*, eligible_maps: Array, team_size: Array) ->
         True is required. This function does not inspect content eligibility.
     team_size : Array
         Scalar int32 in 1..5, used by both teams. Boolean and float values fail.
+    roster_class_ids : Array or None, default=None
+        Optional int32 (10,) explicit Team A then Team B roster. Each team has
+        one through five classes 1..5 followed by zero padding. Repeats and
+        unequal team sizes are allowed. An all-zero row keeps team_size sampling.
 
     Returns
     -------
@@ -113,7 +120,8 @@ def validate_training_distribution(*, eligible_maps: Array, team_size: Array) ->
 
     Notes
     -----
-    Host-only; reading device controls can synchronize and transfer 43 values.
+    Host-only; reading device controls can synchronize and transfer 43 values,
+    plus ten when an explicit roster control is supplied.
     It reads no files and writes no state. No curriculum schedule is implied.
     """
     _control_shapes(eligible_maps, team_size)
@@ -123,6 +131,32 @@ def validate_training_distribution(*, eligible_maps: Array, team_size: Array) ->
         raise ValueError("eligible_maps must contain at least one eligible map")
     if not 1 <= int(np.asarray(team_size)) <= MAX_AGENTS_PER_TEAM:
         raise ValueError("team_size must be in 1..5")
+    if roster_class_ids is not None:
+        _roster_shape(roster_class_ids)
+        if isinstance(roster_class_ids, Tracer):
+            raise TypeError("Validate roster controls on the host before compiled use")
+        rows = np.asarray(roster_class_ids).reshape(2, MAX_AGENTS_PER_TEAM)
+        if not np.any(rows):
+            return
+        active = rows > 0
+        sizes = active.sum(axis=-1)
+        if (
+            np.any(rows < 0)
+            or np.any(rows >= NUM_CLASSES)
+            or np.any(sizes == 0)
+            or not np.array_equal(
+                active, np.arange(MAX_AGENTS_PER_TEAM) < sizes[:, None]
+            )
+        ):
+            raise ValueError("Explicit rosters need compact nonempty classes 1..5")
+
+
+def _roster_shape(roster_class_ids: Array) -> None:
+    """Check the static ten-slot roster contract without reading array values."""
+    if np.shape(roster_class_ids) != (2 * MAX_AGENTS_PER_TEAM,):
+        raise ValueError("roster_class_ids must have shape (10,)")
+    if getattr(roster_class_ids, "dtype", None) != jnp.int32:
+        raise TypeError("roster_class_ids must have int32 dtype")
 
 
 def _counter(value: Array, *, name: str, shape: tuple[int, ...] | None = None) -> None:
@@ -242,6 +276,7 @@ def sample_training_configs(
     eligible_maps: Array,
     team_size: Array,
     score_threshold: Array | None = None,
+    roster_class_ids: Array | None = None,
 ) -> SampledTrainingConfigs:
     """Sample approved maps and independent equal-size teams for reset.
 
@@ -264,6 +299,11 @@ def sample_training_configs(
         Scalar int32 score present in the prepared bank. None selects K20.
         This changes only the selected source block, not map/roster random keys.
         Validate concrete values before passing them through jit or scan.
+    roster_class_ids : Array or None, default=None
+        Optional int32 (10,) ordered roster, with Team A then Team B classes
+        and zero padding. A nonzero row replaces random roster selection and
+        may contain repeated classes or unequal team sizes. None or an all-zero
+        row retains the existing team_size distribution and its random keys.
 
     Returns
     -------
@@ -289,15 +329,22 @@ def sample_training_configs(
     or a training loop. It needs base dependencies only.
     """
     _control_shapes(eligible_maps, team_size)
+    if roster_class_ids is not None:
+        _roster_shape(roster_class_ids)
     threshold = (
         jnp.asarray(20, jnp.int32) if score_threshold is None else score_threshold
     )
     if np.shape(threshold) != () or getattr(threshold, "dtype", None) != jnp.int32:
         raise TypeError("score_threshold must be scalar int32")
-    if not isinstance(eligible_maps, Tracer) and not isinstance(team_size, Tracer):
-        validate_training_distribution(eligible_maps=eligible_maps, team_size=team_size)
-    eligible_maps = cast(Array, eligible_maps)
-    team_size = cast(Array, team_size)
+    if not any(
+        isinstance(value, Tracer)
+        for value in (eligible_maps, team_size, roster_class_ids)
+    ):
+        validate_training_distribution(
+            eligible_maps=eligible_maps,
+            team_size=team_size,
+            roster_class_ids=roster_class_ids,
+        )
     _counter(reset_generation, name="reset_generation")
     batch = reset_generation.shape[0]
     if batch % 2:
@@ -350,12 +397,25 @@ def sample_training_configs(
 
         return jax.vmap(draw_lane)(lane_keys)
 
+    def sampled_rosters() -> Array:
+        """Keep the original random/canonical roster rule and key ownership."""
+        return cast(
+            Array,
+            jax.lax.cond(
+                team_size == MAX_AGENTS_PER_TEAM,
+                lambda: jnp.broadcast_to(canonical.reshape(10), (batch, 10)),
+                draw_rosters,
+            ),
+        )
+
     classes = cast(
         Array,
-        jax.lax.cond(
-            team_size == MAX_AGENTS_PER_TEAM,
-            lambda: jnp.broadcast_to(canonical.reshape(10), (batch, 10)),
-            draw_rosters,
+        sampled_rosters()
+        if roster_class_ids is None
+        else jax.lax.cond(
+            jnp.any(roster_class_ids != 0),
+            lambda: jnp.broadcast_to(roster_class_ids, (batch, 10)),
+            sampled_rosters,
         ),
     )
     selected, _ = _source_config_with_class_ids(selected, classes)

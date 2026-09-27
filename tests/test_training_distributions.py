@@ -4,7 +4,10 @@ Independent scalar key and roster calculations, exhaustive permutation counts,
 fixed-seed frequency checks and public partial reset cover the approved training
 distribution. Synthetic source banks keep unit tests small; content preparation
 has separate full-catalog tests. These CPU checks do not claim learning quality
-or GPU throughput. No simulator or class-catalog rule is copied here.
+or GPU throughput. Explicit repeated-class and asymmetric rosters use the same
+sampler without
+changing map keys or spawn ownership. No simulator or class-catalog rule is
+copied here.
 """
 
 # pyright: reportPrivateUsage=false
@@ -588,3 +591,95 @@ def test_public_partial_reset_adopts_only_finished_lanes(bank: EnvConfig) -> Non
     assert int(indices[1]) == int(first.source_indices[1])
     np.testing.assert_array_equal(after.reset_generation, [1, 0])
     assert np.asarray(observations.observation.self_features).shape[0] == 2
+
+
+def test_explicit_repeated_asymmetric_rosters_use_existing_profile_and_map_keys(
+    bank: EnvConfig,
+) -> None:
+    rosters: tuple[list[tasks.AgentClassName], list[tasks.AgentClassName]] = (
+        ["mage", "mage", "priest"],
+        ["warrior"],
+    )
+    classes = jnp.asarray(
+        [
+            *tasks._roster_ids(rosters[0], name="system"),
+            *tasks._roster_ids(rosters[1], name="opponent"),
+        ],
+        jnp.int32,
+    )
+    root, generations = jax.random.key(23), jnp.zeros(4, jnp.int32)
+    arguments = {"eligible_maps": jnp.asarray(_ALL_MAPS), "team_size": jnp.int32(5)}
+    ordinary = cast(
+        SampledTrainingConfigs, _sample(bank, root, generations, **arguments)
+    )
+    explicit = cast(
+        SampledTrainingConfigs,
+        _sample(bank, root, generations, roster_class_ids=classes, **arguments),
+    )
+    np.testing.assert_array_equal(explicit.source_indices, ordinary.source_indices)
+    np.testing.assert_array_equal(
+        explicit.source_class_ids, np.broadcast_to(classes, (4, 10))
+    )
+    expected = make_standard_team_deathmatch_config(
+        map_id=0, team_a_roster=rosters[0], team_b_roster=rosters[1]
+    ).agent_profile
+    for lane in range(4):
+        _assert_tree(_row(explicit.config.agent_profile, lane), expected)
+        source = _row(bank, int(explicit.source_indices[lane]))
+        pads = (
+            source.team_spawn_pad_positions
+            if lane < 2
+            else source.team_spawn_pad_positions[::-1]
+        )
+        np.testing.assert_array_equal(
+            explicit.config.team_spawn_pad_positions[lane], pads
+        )
+    zero = cast(
+        SampledTrainingConfigs,
+        _sample(
+            bank,
+            root,
+            generations,
+            roster_class_ids=jnp.zeros(10, jnp.int32),
+            **arguments,
+        ),
+    )
+    _assert_tree(zero, ordinary)
+
+
+@pytest.mark.parametrize(
+    "row",
+    [
+        [1, 0, 2, 0, 0, 1, 0, 0, 0, 0],
+        [1, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+        [6, 0, 0, 0, 0, 1, 0, 0, 0, 0],
+        [-1] * 10,
+    ],
+)
+def test_invalid_explicit_roster_fails_before_sampling(row: list[int]) -> None:
+    with pytest.raises(ValueError, match="rosters"):
+        validate_training_distribution(
+            eligible_maps=jnp.asarray(_ALL_MAPS),
+            team_size=jnp.int32(5),
+            roster_class_ids=jnp.asarray(row, jnp.int32),
+        )
+
+
+def test_dynamic_explicit_rosters_reuse_the_compiled_sampler(bank: EnvConfig) -> None:
+    program = jax.jit(sample_training_configs)
+    values = dict(
+        eligible_maps=jnp.asarray(_ALL_MAPS),
+        team_size=jnp.int32(2),
+        roster_class_ids=jnp.asarray([1, 1, 0, 0, 0, 2, 0, 0, 0, 0], jnp.int32),
+    )
+    first = cast(
+        SampledTrainingConfigs,
+        program(bank, jax.random.key(4), jnp.zeros(2, jnp.int32), **values),
+    )
+    values["roster_class_ids"] = jnp.asarray([3, 4, 0, 0, 0, 5, 5, 0, 0, 0], jnp.int32)
+    second = cast(
+        SampledTrainingConfigs,
+        program(bank, jax.random.key(4), jnp.zeros(2, jnp.int32), **values),
+    )
+    assert not np.array_equal(first.source_class_ids, second.source_class_ids)
+    assert program._cache_size() == 1  # pyright: ignore[reportAttributeAccessIssue]

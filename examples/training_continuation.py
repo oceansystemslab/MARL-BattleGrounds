@@ -15,7 +15,57 @@ import json
 from pathlib import Path
 from typing import Any, cast
 
+import marl_battlegrounds as marl_bgs
 from marl_battlegrounds import training
+
+
+def complete_example(output_dir: str | Path) -> dict[str, object]:
+    """Train, extend, resume, evaluate and warm-start through the public API.
+
+    ``output_dir`` must be new or empty. This small example uses four CPU lanes
+    and 16 transitions to prove the workflow, not learned skill. Set the device
+    before calling; GPU examples must use the project's allowed batch sizes.
+    Every child has its own folder. Return the parent, child, warm-start result
+    and evaluation, including their saved paths and full resumable checkpoints.
+    """
+    from dataclasses import replace
+
+    from marl_battlegrounds.baselines.ppo import PPOConfig
+
+    root = Path(output_dir)
+    if root.exists() and any(root.iterdir()):
+        raise ValueError("Example output_dir must be new or empty")
+    config = training.TrainConfig(
+        keep_past=0,
+        method="ff_ippo",
+        num_envs=4,
+        total_env_steps=16,
+        ppo=PPOConfig(rollout_length=2, epochs=1),
+        metrics="none",
+        verbose=False,
+    )
+    parent = training.train(config, output_dir=root / "parent")
+    child = training.extend_training(
+        parent.final_checkpoint,
+        additional_env_steps=8,
+        output_dir=root / "child",
+        changes={"seed": 43, "ppo": {"entropy_coefficient": 0.02}},
+    )
+    resumed = training.train(resume_from=child.final_checkpoint)
+    actor = training.load_system(resumed.final_actor)
+    results = marl_bgs.evaluate(
+        actor, "tdm-alpha", num_episodes=2, maps=[0], seed=7, num_envs=2
+    )
+    warm = training.train(
+        replace(config, initial_actor=str(child.final_actor)),
+        output_dir=root / "warm_start",
+    )
+    return {
+        "parent": parent,
+        "child": resumed,
+        "warm_start": warm,
+        "evaluation": results,
+    }
 
 
 def main() -> None:
@@ -56,6 +106,7 @@ def main() -> None:
     print(f"Child Run: {result.run_dir}")
     print(f"Selected Actor: {result.selected_actor}")
     print(f"Final Actor: {result.final_actor}")
+    print(f"Final Checkpoint: {result.final_checkpoint}")
 
 
 if __name__ == "__main__":

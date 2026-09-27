@@ -223,7 +223,16 @@ def test_shared_adapter_preserves_exact_legacy_actor_actions_and_memory(
         actor_keys=actor_keys,
         keep_learning_outputs=False,
     )
-    _assert_tree((action, updated.team_a, updated.team_b), expected)
+    _assert_tree(action, expected[0])
+    # The legacy helper calls inactive capacity slots; System ownership freezes them.
+    for count, previous, actual, reference in (
+        (2, memory.team_a, updated.team_a, expected[1]),
+        (3, memory.team_b, updated.team_b, expected[2]),
+    ):
+        active = itemgetter((slice(None), slice(None, count)))
+        inactive = itemgetter((slice(None), slice(count, None)))
+        _assert_tree(jax.tree.map(active, actual), jax.tree.map(active, reference))
+        _assert_tree(jax.tree.map(inactive, actual), jax.tree.map(inactive, previous))
     assert learning == ((), ())
     np.testing.assert_array_equal(updated.policy_trace.decision_step, [0, 0])
     np.testing.assert_array_equal(updated.policy_trace.valid, [True, True])

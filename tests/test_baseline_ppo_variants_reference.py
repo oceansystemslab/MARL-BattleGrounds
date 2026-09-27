@@ -224,7 +224,7 @@ def _select(reference: Reference, indices: Array) -> ppo.PPOMinibatch:
 
     sequence = tuple(jax.vmap(rows)(leaf, indices) for leaf in reference.batch[:12])
     memory = (
-        tuple(jax.vmap(memory_rows)(leaf, indices) for leaf in reference.batch[12:])
+        tuple(jax.vmap(memory_rows)(leaf, indices) for leaf in reference.batch[12:14])
         if reference.recurrent
         else ((), ())
     )

@@ -5,6 +5,7 @@ adapter templates, avoid calling providers, and keep unknown evidence unknown.
 Replay metadata distinguishes whole-System ownership from optional routing.
 """
 
+import json
 from dataclasses import replace
 from hashlib import sha256
 from types import SimpleNamespace
@@ -35,6 +36,7 @@ from marl_battlegrounds.evaluation.recording_types import (
     EpisodeStartRecords,
     validate_recording_errors,
 )
+from marl_battlegrounds.evaluation.replay_io import generated_replay_filename
 from marl_battlegrounds.evaluation.runtime_provenance import capture_runtime_provenance
 from marl_battlegrounds.tasks import make_standard_team_deathmatch_config
 
@@ -164,8 +166,19 @@ def test_start_record_is_public_numerical_tree_and_errors_reject_all_rows() -> N
         validate_recording_errors(SimpleNamespace(lifecycle_error=np.array(1)))
 
 
-def test_replay_system_ownership_is_separate_from_unknown_internal_choices() -> None:
-    system = System("researcher", _never_call, components=({"name": "expert"},))
+@pytest.mark.parametrize(
+    ("name", "filename_label"),
+    [
+        ("Researcher Run 3 Step 120000", "researcher_run_3_step_12"),
+        ("Équipe One", "quipe_one"),
+        ("Researcher\nTeam", "researcher_team"),
+    ],
+)
+def test_replay_system_ownership_is_separate_from_unknown_internal_choices(
+    name: str,
+    filename_label: str,
+) -> None:
+    system = System(name, _never_call, components=({"name": "expert"},))
     system_id, description = normalize_system_registration(system, phase="evaluation")
     context, _ = build_recording_context(
         make_standard_team_deathmatch_config(
@@ -191,5 +204,10 @@ def test_replay_system_ownership_is_separate_from_unknown_internal_choices() -> 
         assert assignment.lifecycle == "evolving"
     assert context.policy_assignments[1].assignment_status == "not_applicable"
     metadata = {entry.name: entry.value for entry in context.aggregation_keys}
+    assert json.loads(metadata["marl_bgs.system_name.team_a"]) == name
+    assert json.loads(metadata["marl_bgs.system_name.team_b"]) == name
+    filename = generated_replay_filename(context, "a" * 64, episode_id=1)
+    assert f"__a_{filename_label}__b_{filename_label}__" in filename
+    assert filename.endswith("a" * 64 + ".marlbg-replay.json")
     assert metadata["marl_bgs.parameter_status.team_a"] == "unknown"
     assert metadata["marl_bgs.policy_assignments"] == "policy_assignments.csv"

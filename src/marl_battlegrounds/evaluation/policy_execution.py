@@ -18,11 +18,12 @@ from __future__ import annotations
 
 # Private System adapter fields are shared only by their owning module's helpers.
 # pyright: reportPrivateUsage=false
-from collections.abc import Callable, Sequence
-from contextlib import AbstractContextManager, nullcontext
+from collections.abc import Callable, Generator, Mapping, Sequence
+from contextlib import AbstractContextManager, ExitStack, contextmanager, nullcontext
 from dataclasses import dataclass, field
 from functools import partial
 from numbers import Integral
+from types import MethodType
 from typing import TYPE_CHECKING, Any, Literal, NamedTuple, cast
 
 import jax
@@ -31,7 +32,7 @@ import numpy as np
 from jax import Array
 from jax.core import Tracer
 
-from marl_battlegrounds.core.types import Action, ActionMask
+from marl_battlegrounds.core.types import AGENT_FEATURE_CLASS_ID, Action, ActionMask
 from marl_battlegrounds.evaluation.host_evidence import team_scope
 from marl_battlegrounds.evaluation.models import canonical_digest_sha256
 from marl_battlegrounds.policies.actor import (
@@ -467,33 +468,85 @@ def _apply_actor_rows(
     keys: Array,
     *,
     execution: PolicyExecution,
+    valid: Array | None = None,
 ) -> tuple[ActorAction, PolicyTree]:
-    """Apply scalar Policy callbacks to one leading row axis.
+    """Apply scalar callbacks on a known row axis, retaining unowned memory.
 
-    Inputs are already redacted. JAX vmaps rows; host mode visits them in order
-    and converts only actor inputs and masks to NumPy. Variables, memory and
-    keys keep their representation. Return checked actions and stacked memory.
-    Empty memory trees are supported. Policy callbacks own fixed tree shapes.
+    JAX batches rows; host mode skips invalid rows before calling the Policy.
+    Only actor inputs and masks cross a host boundary. Variables, memory and
+    physical-slot keys keep their representation. None for valid keeps the
+    original scalar Policy path. Ownership never changes observation rows.
     """
 
     def one(
         carry: PolicyTree, actor: ActorInput, mask: ActionMask, key: Array
     ) -> tuple[ActorAction, PolicyTree]:
-        """Call one scalar policy once, then check structural action validity."""
+        """Call one scalar Policy and check its action structure."""
         if execution == "host":
             actor, mask = jax.device_get((actor, mask))
         action, updated = apply(variables, carry, actor, mask, key)
         return _checked_action(action), updated
 
+    def skip(
+        carry: PolicyTree, actor: ActorInput, mask: ActionMask, key: Array
+    ) -> tuple[ActorAction, PolicyTree]:
+        """Leave an unowned row's memory unchanged without choosing an action."""
+        del actor, mask, key
+        return ActorAction(*(jnp.array(0, jnp.int32) for _ in range(3))), carry
+
     if execution == "jax":
-        return jax.vmap(one)(memory, actors, masks, keys)
-    rows = [
-        one(*jax.tree.map(partial(_array_row, index=i), (memory, actors, masks, keys)))
-        for i in range(keys.shape[0])
-    ]
+        if valid is None:
+            return jax.vmap(one)(memory, actors, masks, keys)
+
+        def selected(
+            carry: PolicyTree,
+            actor: ActorInput,
+            mask: ActionMask,
+            key: Array,
+            owned: Array,
+        ) -> tuple[ActorAction, PolicyTree]:
+            """Preserve known Policy memory when its physical row is not owned."""
+            return cast(
+                tuple[ActorAction, PolicyTree],
+                jax.lax.cond(owned, one, skip, carry, actor, mask, key),
+            )
+
+        return jax.vmap(selected)(memory, actors, masks, keys, valid)
+    rows = []
+    for index in range(keys.shape[0]):
+        row = jax.tree.map(
+            partial(_array_row, index=index), (memory, actors, masks, keys)
+        )
+        rows.append(one(*row) if valid is None or valid[index] else skip(*row))
+    return cast(tuple[ActorAction, PolicyTree], jax.tree.map(_stack_arrays, *rows))
+
+
+def _apply_owned_policy_rows(
+    apply: PolicyApply,
+    variables: PolicyTree,
+    memory: PolicyTree,
+    actors: ActorInput,
+    masks: ActionMask,
+    keys: Array,
+    valid: Array,
+) -> tuple[ActorAction, PolicyTree]:
+    """Skip a wholly unowned physical Policy column before batched model work."""
+
+    def selected(_: None) -> tuple[ActorAction, PolicyTree]:
+        """Keep the established leading-lane batch for owned Policy rows."""
+        return _apply_actor_rows(
+            apply, variables, memory, actors, masks, keys, execution="jax", valid=valid
+        )
+
+    def unused(_: None) -> tuple[ActorAction, PolicyTree]:
+        """Preserve this physical slot's memory without a model call."""
+        return ActorAction(
+            *(jnp.zeros(valid.shape, jnp.int32) for _ in range(3))
+        ), memory
+
     return cast(
         tuple[ActorAction, PolicyTree],
-        jax.tree.map(_stack_arrays, *rows),
+        jax.lax.cond(jnp.any(valid), selected, unused, None),
     )
 
 
@@ -515,6 +568,10 @@ class SystemInput(NamedTuple):
     valid : Array
         Boolean (B,) live decisions, or selected lanes during initialization.
         False lanes are padding and must not update method-owned memory.
+    controlled_mask : Array | None
+        Optional Boolean (B,5) action ownership. None means every active slot.
+        Actor rows and physical activity remain unchanged. Ownership grants no
+        extra information rights. This trailing field changes tuple unpacking.
 
     Notes
     -----
@@ -528,6 +585,7 @@ class SystemInput(NamedTuple):
     active_mask: Array
     episode_start: Array
     valid: Array
+    controlled_mask: Array | None = None
 
 
 @jax.tree_util.register_dataclass
@@ -625,7 +683,7 @@ type SystemInit = Callable[[PolicyTree, SystemInput, Array], PolicyTree]
 type SystemReset = Callable[[PolicyTree, PolicyTree, Array], PolicyTree]
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, eq=False)
 class _SystemExecution:
     """Hash only stable callables and adapter layout, never numerical values.
 
@@ -640,6 +698,44 @@ class _SystemExecution:
     policies: tuple[PolicyApply, ...] = ()
     shared: bool = False
     component_count: int = 0
+
+    def _key(self) -> tuple[object, ...]:
+        """Compare rebuilt compositions by their static layout, not owner address.
+
+        Python bound methods use their owner's identity. Our immutable composition
+        owner contains only static call structure, so include its value once
+        beside its hook functions. Other methods keep ordinary callable identity.
+        Numerical values remain outside this descriptor.
+        """
+        callbacks: tuple[object, ...] = (self.apply, self.init, self.reset)
+        owner = getattr(self.apply, "__self__", None)
+        if isinstance(self.apply, MethodType) and isinstance(owner, _Composition):
+            callbacks = (
+                owner,
+                *(
+                    callback.__func__
+                    if isinstance(callback, MethodType) and callback.__self__ is owner
+                    else callback
+                    for callback in callbacks
+                ),
+            )
+        return (
+            *callbacks,
+            self.execution,
+            self.policies,
+            self.shared,
+            self.component_count,
+        )
+
+    def __hash__(self) -> int:
+        """Hash only the call structure used by the compiled program."""
+        return hash(self._key())
+
+    def __eq__(self, other: object) -> bool:
+        """Match equal call structures while leaving numerical weights dynamic."""
+        if not isinstance(other, _SystemExecution):
+            return NotImplemented
+        return self._key() == other._key()
 
 
 @dataclass(frozen=True, eq=False)
@@ -868,6 +964,591 @@ def independent_policies(policies: Sequence[Policy]) -> System:
     return result
 
 
+class _CompositionVariables(NamedTuple):
+    """Keep member parameters, pool shares, selectors and templates dynamic.
+
+    members and templates retain one separate tree per member. weights is a
+    normalized float32 vector for a pool, or empty for a team. slots is a Boolean
+    (members,10) table: five physical positions followed by five class selectors.
+    Replace members or weights with same-shaped values to reuse compiled work.
+    choices is an optional int32 (B,) game-start assignment supplied by training.
+    None keeps ordinary pool sampling. Concrete choices are checked here; a
+    compiled caller must supply valid member indices for every valid fresh game.
+    """
+
+    members: tuple[PolicyTree, ...]
+    weights: Array
+    slots: Array
+    templates: tuple[PolicyTree, ...]
+    choices: Array | None = None
+
+
+class _CompositionMemory(NamedTuple):
+    """Retain a pool's per-game choice and every member's untouched memory layout."""
+
+    choice: Array
+    members: tuple[PolicyTree, ...]
+
+
+def _controlled(inputs: SystemInput) -> Array:
+    """Resolve optional ownership without changing physical roster activity."""
+    supplied = inputs.controlled_mask
+    if supplied is None:
+        return inputs.active_mask
+    if supplied.shape != inputs.active_mask.shape or supplied.dtype != jnp.bool_:
+        raise ValueError("controlled_mask must be Boolean (B,5)")
+    return supplied & inputs.active_mask
+
+
+def _composition(execution: _SystemExecution) -> _Composition | None:
+    """Recognize the ordinary bound callback to preserve nested adapter keys."""
+    owner = getattr(execution.apply, "__self__", None)
+    return owner if isinstance(owner, _Composition) else None
+
+
+def _member_keys(keys: Array, index: int) -> Array:
+    """Keep member zero's keys; fold the MEMB domain and index for later members."""
+    if index == 0:
+        return keys
+
+    def tagged(key: Array) -> Array:
+        """Keep one fixed domain for the additional generic member streams."""
+        return jax.random.fold_in(jax.random.fold_in(key, 0x4D454D42), index)
+
+    return jax.vmap(tagged)(keys)
+
+
+def _slot_keys(keys: Array) -> Array:
+    """Keep physical slot streams independent of a team's member grouping."""
+
+    def slots(key: Array) -> Array:
+        """Fold physical indices without changing the root key representation."""
+        return jax.vmap(jax.random.fold_in, in_axes=(None, 0))(
+            key, jnp.arange(5, dtype=jnp.uint32)
+        )
+
+    return jax.vmap(slots)(keys)
+
+
+@dataclass(frozen=True)
+class _Composition:
+    """Share the System executor across a fixed member layout.
+
+    Only callables and component offsets are static. Numerical parameters,
+    selectors, shares, templates, choices and memories remain explicit values.
+    A host composition transfers only each host child's permitted inputs; JAX
+    children keep a compiled batched path. No member memory is sliced or packed.
+    """
+
+    members: tuple[_SystemExecution, ...]
+    pooled: bool
+    offsets: tuple[int, ...]
+    fallback_ids: tuple[int, ...]
+
+    def masks(
+        self, variables: _CompositionVariables, inputs: SystemInput, choice: Array
+    ) -> tuple[Array, ...]:
+        """Resolve class names against each current roster and check team coverage.
+
+        Coverage concerns incoming owned active slots in valid lanes only.
+        Concrete invalid layouts fail before action selection. Compiled callers
+        retain this precondition when changing selector or roster values.
+        """
+        owned = _controlled(inputs)
+        if self.pooled:
+            return tuple(
+                owned & (choice == index)[:, None] for index in range(len(self.members))
+            )
+        classes = inputs.actors.observation.self_features[
+            ..., AGENT_FEATURE_CLASS_ID
+        ].astype(jnp.int32)
+        selections = tuple(
+            owned
+            & (
+                row[:5][None, :]
+                | jnp.any(
+                    row[5:][None, None, :] & (classes[..., None] == jnp.arange(1, 6)),
+                    axis=-1,
+                )
+            )
+            for row in variables.slots
+        )
+        coverage = jnp.sum(jnp.stack(selections), axis=0)
+        if not isinstance(coverage, Tracer):
+            required = np.asarray(owned) & np.asarray(inputs.valid)[:, None]
+            if np.any(np.asarray(coverage)[required] != 1):
+                raise ValueError(
+                    "team slots must cover each controlled active slot exactly once"
+                )
+        return selections
+
+    def init(
+        self, variables: _CompositionVariables, inputs: SystemInput, keys: Array
+    ) -> _CompositionMemory:
+        """Choose pool members for fresh games and initialize full member batches."""
+        if self.pooled and variables.choices is not None:
+            choice = variables.choices
+            if choice.shape != inputs.valid.shape or choice.dtype != jnp.int32:
+                raise ValueError("Pool game-start choices must be int32 (B,)")
+            if not isinstance(choice, Tracer) and not isinstance(inputs.valid, Tracer):
+                selected = np.asarray(choice)[np.asarray(inputs.valid)]
+                if np.any((selected < 0) | (selected >= len(self.members))):
+                    raise ValueError("Pool game-start choice is outside its members")
+        elif self.pooled and len(self.members) > 1:
+            if not isinstance(variables.weights, Tracer):
+                _check_weights(variables.weights)
+
+            def choose(key: Array) -> Array:
+                """Choose from shares in a separate pool-selection key domain."""
+                return jax.random.categorical(
+                    jax.random.fold_in(key, 0x504F4F4C), jnp.log(variables.weights)
+                )
+
+            choice = jax.vmap(choose)(keys).astype(jnp.int32)
+        else:
+            choice = jnp.zeros(inputs.valid.shape, jnp.int32)
+        choice = cast(Array, choice)
+        memories: list[PolicyTree] = []
+        for index, (execution, owned) in enumerate(
+            zip(self.members, self.masks(variables, inputs, choice), strict=True)
+        ):
+            child = inputs._replace(
+                controlled_mask=owned, valid=inputs.valid & jnp.any(owned, axis=1)
+            )
+            _validate_adapter_roster(
+                execution, child.active_mask, controlled=owned, valid=child.valid
+            )
+            if execution.execution == "host" and _composition(execution) is None:
+                child = jax.device_get(child)
+            memories.append(
+                _initial_memory(
+                    execution,
+                    variables.members[index],
+                    variables.templates[index],
+                    child,
+                    _member_keys(keys, index),
+                )
+            )
+        return _CompositionMemory(choice, tuple(memories))
+
+    def reset(
+        self, memory: _CompositionMemory, fresh: _CompositionMemory, reset_mask: Array
+    ) -> _CompositionMemory:
+        """Delegate each opaque memory reset to its existing hook without slicing."""
+        updated: list[PolicyTree] = []
+        for execution, old, new in zip(
+            self.members, memory.members, fresh.members, strict=True
+        ):
+            mask = (
+                cast(Array, np.asarray(reset_mask))
+                if execution.execution == "host"
+                else reset_mask
+            )
+            updated.append(
+                execution.reset(old, new, mask)
+                if execution.reset is not None
+                else _default_reset(
+                    old,
+                    new,
+                    mask,
+                    host=execution.execution == "host" and not execution.policies,
+                )
+            )
+        return _CompositionMemory(
+            jnp.where(reset_mask, fresh.choice, memory.choice), tuple(updated)
+        )
+
+    def apply(
+        self,
+        variables: _CompositionVariables,
+        memory: _CompositionMemory,
+        inputs: SystemInput,
+        keys: Array,
+    ) -> SystemOutput:
+        """Apply a composition as an ordinary System callback with full input axes."""
+        return self.run(variables, memory, inputs, keys)
+
+    def run(
+        self,
+        variables: _CompositionVariables,
+        memory: _CompositionMemory,
+        inputs: SystemInput,
+        keys: Array,
+        *,
+        actor_keys: Array | None = None,
+        keep_learning_outputs: bool = True,
+    ) -> SystemOutput:
+        """Reuse child execution and combine only each child's owned actions."""
+        if actor_keys is None:
+            actor_keys = _slot_keys(keys)
+        actions = ActorAction(
+            *(jnp.zeros(inputs.active_mask.shape, jnp.int32) for _ in range(3))
+        )
+        ids = jnp.full(inputs.active_mask.shape, -1, jnp.int32)
+        memories: list[PolicyTree] = []
+        learning: list[PolicyTree] = []
+        for index, (execution, owned) in enumerate(
+            zip(self.members, self.masks(variables, inputs, memory.choice), strict=True)
+        ):
+            child = inputs._replace(
+                controlled_mask=owned, valid=inputs.valid & jnp.any(owned, axis=1)
+            )
+            _validate_adapter_roster(
+                execution, child.active_mask, controlled=owned, valid=child.valid
+            )
+            child_keys = _member_keys(keys, index)
+            if execution.execution == "host":
+                output = _host_apply(
+                    execution,
+                    variables.members[index],
+                    variables.templates[index],
+                    memory.members[index],
+                    child,
+                    child_keys,
+                    child_keys,
+                    jnp.zeros_like(inputs.valid),
+                    actor_keys=actor_keys,
+                    keep_learning_outputs=keep_learning_outputs,
+                )
+            else:
+                output = cast(
+                    SystemOutput,
+                    _composed_jax_apply(
+                        execution,
+                        variables.members[index],
+                        variables.templates[index],
+                        memory.members[index],
+                        child,
+                        child_keys,
+                        actor_keys,
+                        keep_learning_outputs=keep_learning_outputs,
+                    ),
+                )
+            retained = owned & inputs.valid[:, None]
+            actions = ActorAction(
+                *(
+                    jnp.where(retained, new, old)
+                    for old, new in zip(actions, output.actions, strict=True)
+                )
+            )
+            reported = cast(Array, output.policy_ids)
+            child_ids = jnp.where(
+                reported >= 0,
+                reported + self.offsets[index],
+                self.fallback_ids[index],
+            )
+            ids = jnp.where(retained, child_ids, ids)
+            memories.append(output.next_memory)
+            learning.append(output.learning_outputs)
+        return SystemOutput(
+            actions,
+            _CompositionMemory(memory.choice, tuple(memories)),
+            learning_outputs=tuple(learning) if keep_learning_outputs else (),
+            policy_ids=ids,
+        )
+
+
+@partial(jax.jit, static_argnums=0, static_argnames=("keep_learning_outputs",))
+def _composed_jax_apply(
+    execution: _SystemExecution,
+    variables: PolicyTree,
+    template: PolicyTree,
+    memory: PolicyTree,
+    inputs: SystemInput,
+    keys: Array,
+    actor_keys: Array,
+    *,
+    keep_learning_outputs: bool,
+) -> SystemOutput:
+    """Skip unassigned JAX members while retaining a fixed learner-output shape.
+
+    Shape tracing happens only when compiling a new member structure. It does
+    not call host providers or execute numerical action work. This same compiled
+    boundary keeps JAX members batched inside mixed host compositions.
+    """
+
+    def apply(_: None) -> SystemOutput:
+        """Apply one member through the shared numerical execution owner."""
+        return _jax_apply(
+            execution,
+            variables,
+            template,
+            memory,
+            inputs,
+            keys,
+            keys,
+            jnp.zeros_like(inputs.valid),
+            actor_keys=actor_keys,
+            keep_learning_outputs=keep_learning_outputs,
+            sparse_policies=True,
+        )
+
+    shape = jax.eval_shape(apply, None)
+
+    def skip(_: None) -> SystemOutput:
+        """Keep memory and replace unused learner arrays with fixed-shape zeros."""
+        padding = _padding_output(memory, inputs.valid.shape[0])
+
+        def zero(leaf: jax.ShapeDtypeStruct) -> Array:
+            """Allocate only the fixed learner output needed by the skipped branch."""
+            return jnp.zeros(leaf.shape, leaf.dtype)
+
+        learning = jax.tree.map(zero, shape.learning_outputs)
+        return SystemOutput(
+            padding.actions,
+            memory,
+            learning_outputs=learning,
+            policy_ids=padding.policy_ids,
+        )
+
+    return cast(SystemOutput, jax.lax.cond(jnp.any(inputs.valid), apply, skip, None))
+
+
+def _resolve_member(member: System | Policy | str) -> System:
+    """Use the shared method loader and adapt scalar Policies without new wrappers."""
+    if isinstance(member, str):
+        from marl_battlegrounds._method_loading import load_method
+
+        member = load_method(member)
+    if isinstance(member, Policy):
+        return shared_policy(member)
+    if not isinstance(cast(object, member), System):
+        raise TypeError(
+            "team and pool members must be Systems, Policies or method references"
+        )
+    return member
+
+
+def _check_weights(weights: PolicyTree) -> np.ndarray:
+    """Require finite nonnegative pool shares with a positive finite total."""
+    values = np.asarray(weights, dtype=np.float64)
+    if (
+        values.ndim != 1
+        or not len(values)
+        or not np.all(np.isfinite(values))
+        or np.any(values < 0)
+        or not np.isfinite(values.sum())
+        or values.sum() <= 0
+    ):
+        raise ValueError(
+            "pool shares must be finite, nonnegative and have a positive total"
+        )
+    return values
+
+
+def _build_composition(
+    members: tuple[System, ...], *, pooled: bool, weights: Array, slots: Array
+) -> System:
+    """Build ordinary System hooks and record each known member/component identity."""
+    from marl_battlegrounds.evaluation.recording_identity import _callable_evidence
+
+    components: list[dict[str, Any]] = []
+    offsets: list[int] = []
+    fallback_ids: list[int] = []
+    for member in members:
+        if member._policies or _composition(_execution(member)) is not None:
+            fallback_ids.append(-1)
+        else:
+            fallback_ids.append(len(components))
+            components.append(
+                {
+                    "name": member.name,
+                    "code_digest": canonical_digest_sha256(
+                        {
+                            "apply": _callable_evidence(member.apply),
+                            "init": _callable_evidence(member.init),
+                            "reset": _callable_evidence(member.reset_memory),
+                        }
+                    ),
+                    **({"checkpoint": member.checkpoint} if member.checkpoint else {}),
+                }
+            )
+        offsets.append(len(components))
+        for index, component in enumerate(member.components or ()):
+            identity = dict(component)
+            if member._policies:
+                identity.setdefault(
+                    "code_digest",
+                    canonical_digest_sha256(
+                        {"apply": _callable_evidence(member._policies[index].apply)}
+                    ),
+                )
+            components.append(identity)
+    owner = _Composition(
+        tuple(_execution(member) for member in members),
+        pooled,
+        tuple(offsets),
+        tuple(fallback_ids),
+    )
+    factories = tuple(
+        member.resource_scope for member in members if member.resource_scope is not None
+    )
+
+    def scope(recording: bool) -> AbstractContextManager[None]:
+        """Validate child recording requirements before acquiring any resources."""
+        scopes = tuple(factory(recording) for factory in factories)
+
+        @contextmanager
+        def opened() -> Generator[None]:
+            """Close every entered child scope, including when a later child fails."""
+            with ExitStack() as stack:
+                for child_scope in scopes:
+                    stack.enter_context(child_scope)
+                yield
+
+        return opened()
+
+    return System(
+        ("Pool: " if pooled else "Team: ")
+        + " / ".join(member.name for member in members),
+        owner.apply,
+        variables=_CompositionVariables(
+            tuple(member.variables for member in members),
+            weights,
+            slots,
+            tuple(_adapter_template(member) for member in members),
+        ),
+        init=owner.init,
+        reset_memory=owner.reset,
+        execution="host"
+        if any(member.execution == "host" for member in members)
+        else "jax",
+        components=tuple(components),
+        resource_scope=scope if factories else None,
+    )
+
+
+def team(
+    *members: System | Policy | str,
+    slots: Sequence[Sequence[int | str] | int | str] | None = None,
+) -> System:
+    """Combine methods into one ordinary System with explicit action ownership.
+
+    Parameters
+    ----------
+    *members : System | Policy | str
+        Methods or shared-loader references. One member defaults to every slot;
+        five default to slots 0 through 4. Other counts require slots.
+    slots : sequence[sequence[int | str] | int | str] | None
+        One selector per member. Integers name physical slots 0 through 4.
+        Class names Mage, Warrior, Hunter, Rogue and Priest select every matching
+        actor in the current roster. Mixing integers and names is supported.
+        Every incoming controlled active slot must have exactly one owner.
+
+    Returns
+    -------
+    System
+        An ordinary JAX or host System usable in raw loops, evaluation and
+        tournaments. variables.members and memory.members keep separate trees.
+        learning_outputs is a tuple in member order. All actor rows and physical
+        roster masks remain intact; controlled_mask limits retained actions.
+
+    Notes
+    -----
+    Ownership grants no extra information rights. Whole-team members must honor
+    each actor's permitted input and memory. Custom memory keeps its existing
+    reset hook. Member zero retains initialization/action keys; later generic
+    members fold the fixed MEMB domain and index. Scalar Policy adapters always
+    retain physical-slot keys, including evaluator-supplied keys.
+    Concrete coverage is checked at initialization/application; compiled callers
+    must preserve coverage when changing roster or selector values.
+
+    Raises
+    ------
+    TypeError
+        A member or slot selector has an unsupported type.
+    ValueError
+        Members/selectors are empty, their counts differ, or a slot is invalid.
+        Overlap and missing coverage fail when the current roster is available.
+    """
+    if not members:
+        raise ValueError("team requires at least one member")
+    if slots is None:
+        if len(members) == 1:
+            slots = [list(range(5))]
+        elif len(members) == 5:
+            slots = list(range(5))
+        else:
+            raise ValueError(
+                "teams with two, three or four members need explicit slots"
+            )
+    if len(slots) != len(members):
+        raise ValueError("slots needs one selector per team member")
+    names = {"mage": 5, "warrior": 6, "hunter": 7, "rogue": 8, "priest": 9}
+    table = np.zeros((len(members), 10), np.bool_)
+    for index, selection in enumerate(slots):
+        entries = cast(
+            Sequence[int | str],
+            [selection] if isinstance(selection, (str, Integral)) else selection,
+        )
+        for entry in entries:
+            if isinstance(entry, str) and entry.casefold() in names:
+                table[index, names[entry.casefold()]] = True
+            elif (
+                isinstance(entry, Integral)
+                and not isinstance(cast(object, entry), bool)
+                and 0 <= int(entry) < 5
+            ):
+                table[index, int(entry)] = True
+            else:
+                raise ValueError("slots must be integers 0..4 or known class names")
+    return _build_composition(
+        tuple(_resolve_member(member) for member in members),
+        pooled=False,
+        weights=jnp.empty(0, jnp.float32),
+        slots=jnp.asarray(table),
+    )
+
+
+def pool[Member: System | Policy | str](
+    member_weights: Mapping[Member, float],
+) -> System:
+    """Choose one weighted System per game and keep it until that game's reset.
+
+    Parameters
+    ----------
+    member_weights : mapping[System | Policy | str, float]
+        Ordered members and finite nonnegative shares with a positive total.
+        Live Systems and Policies are identity-hashable, even with array weights.
+        Strings use the shared method loader. Ordered training stages are not
+        accepted here. Shares are normalized once during construction.
+
+    Returns
+    -------
+    System
+        An ordinary System with separate variables.members and memory.members.
+        variables.weights contains dynamic normalized shares. Replacing shares
+        affects only later game choices; memory.choice keeps current choices.
+        Same-shaped numerical updates reuse compiled execution. Membership or
+        method structure changes may require a new compiled program.
+
+    Notes
+    -----
+    Sampling uses the POOL initialization-key domain. A singleton preserves its
+    member's keys. Generic member key tags and information rights follow team.
+    Resources use each member's existing scope and memory reset hook. Members
+    with no assigned valid games do no action/provider work. A mixture evaluation
+    does not promise paired member draws across spawn ends: evaluate each fixed
+    member separately when paired per-member results are needed.
+
+    Raises
+    ------
+    TypeError
+        Input is not a mapping, or a member cannot be loaded as a System/Policy.
+    ValueError
+        Shares are empty, negative, nonfinite or sum to zero.
+    """
+    if not isinstance(cast(object, member_weights), Mapping):
+        raise TypeError("pool requires a mapping of members to shares")
+    weights = _check_weights(list(member_weights.values()))
+    return _build_composition(
+        tuple(_resolve_member(member) for member in member_weights),
+        pooled=True,
+        weights=jnp.asarray(weights / weights.sum(), jnp.float32),
+        slots=jnp.empty((len(weights), 10), jnp.bool_),
+    )
+
+
 def _team_index(team: int) -> int:
     """Require a static integer role 0/1; booleans are not routing identifiers."""
     if isinstance(team, bool) or not isinstance(team, Integral) or team not in (0, 1):
@@ -939,6 +1620,7 @@ def _prepare_system_inputs(
         active[:, start : start + 5],
         starts,
         valid,
+        active[:, start : start + 5],
     )
 
 
@@ -1140,16 +1822,41 @@ def _initial_memory(
     return execution.init(variables, inputs, keys)
 
 
-def _validate_adapter_roster(execution: _SystemExecution, active: Array) -> None:
-    """Reject incompatible concrete active prefixes before choosing any action.
+def _validate_adapter_roster(
+    execution: _SystemExecution,
+    active: Array,
+    *,
+    controlled: Array | None = None,
+    valid: Array | None = None,
+) -> None:
+    """Require independent Policies to cover their owned physical slots.
 
-    Traced masks obey the same precondition without callbacks. Host validation
-    reuses already delivered NumPy masks. Generic Systems and shared Policies
-    accept all valid roster sizes and need no numerical check here.
+    active and optional controlled are Boolean masks ending in five slots.
+    Without controlled, active must match the adapter's complete prefix roster.
+    With controlled, only those owned slots must have a Policy; gaps are allowed.
+    The caller has already intersected controlled with physical activity. valid
+    optionally selects the game lanes to check; invalid lanes are ignored.
+
+    Incompatible concrete masks raise ValueError before any action. Traced masks
+    obey the same precondition without callbacks. Host validation reuses NumPy
+    masks already delivered. Generic Systems and shared Policies need no check.
     """
-    if execution.policies and not execution.shared and not isinstance(active, Tracer):
+    if (
+        execution.policies
+        and not execution.shared
+        and not any(isinstance(value, Tracer) for value in (active, controlled, valid))
+    ):
         expected = np.arange(5) < len(execution.policies)
-        if np.any(np.asarray(active) != expected):
+        owned = np.asarray(active if controlled is None else controlled)
+        selected = (
+            np.ones(owned.shape[:-1], np.bool_) if valid is None else np.asarray(valid)
+        )
+        incompatible = (
+            (np.asarray(active) != expected)
+            if controlled is None
+            else (owned & ~expected)
+        )
+        if np.any(incompatible & np.asarray(selected)[..., None]):
             raise ValueError(
                 "independent_policies length must match the active prefix roster"
             )
@@ -1291,7 +1998,7 @@ def _init_system_pair(
     ):
         inputs = system_inputs(observations, state, team=team)
         _validate_adapter_roster(execution, inputs.active_mask)
-        if execution.execution == "host":
+        if execution.execution == "host" and _composition(execution) is None:
             inputs = jax.device_get(inputs)
         memories.append(
             _initial_memory(
@@ -1396,30 +2103,29 @@ def _adapter_actions(
     keys: Array,
     *,
     actor_keys: Array | None = None,
+    sparse: bool = False,
 ) -> SystemOutput:
-    """Batch scalar Policies with generic team keys or exact legacy actor keys.
+    """Apply Policies at fixed physical slots, retaining variables, memory and keys.
 
-    keys contains B team keys. Optional actor_keys contains (B,5) typed keys
-    or (B,5,2) uint32 legacy keys, already assigned to these team-local rows by
-    the evaluator's global-slot authority. Supplied actor keys are used unchanged;
-    otherwise fold local slots into keys. Parameters and memory stay separate.
+    Optional actor_keys are exact evaluator-supplied slot keys. Otherwise fold
+    physical indices into team keys. The control mask selects actions and known
+    memory updates; it never packs rows or changes the real active roster.
+    sparse enables runtime column skipping for composition. Ordinary shared
+    adapters keep their original fully batched compilation path.
     """
-    count = inputs.valid.shape[0]
-
-    def actor_streams(key: Array) -> Array:
-        """Split a generic team's key by local actor index; legacy keys bypass this."""
-        return jax.vmap(jax.random.fold_in, in_axes=(None, 0))(
-            key, jnp.arange(5, dtype=jnp.uint32)
-        )
-
+    owned = _controlled(inputs) & inputs.valid[:, None]
     if actor_keys is None:
-        actor_keys = jax.vmap(actor_streams)(keys)
+        actor_keys = _slot_keys(keys)
     if execution.shared:
 
         def lane(
-            carry: PolicyTree, actors: ActorInput, masks: ActionMask, lane_keys: Array
+            carry: PolicyTree,
+            actors: ActorInput,
+            masks: ActionMask,
+            lane_keys: Array,
+            selected: Array,
         ) -> tuple[ActorAction, PolicyTree]:
-            """Use the scalar Policy authority across one team's actor rows."""
+            """Apply one shared Policy to separate physical actor rows."""
             return _apply_actor_rows(
                 execution.policies[0],
                 variables,
@@ -1428,83 +2134,113 @@ def _adapter_actions(
                 masks,
                 lane_keys,
                 execution=execution.execution,
+                valid=selected,
             )
 
         if execution.execution == "jax":
-            actions, updated = jax.vmap(lane)(
-                memory, inputs.actors, inputs.action_mask, actor_keys
-            )
-        else:
-            rows = []
-            for index in range(count):
-                row = jax.tree.map(
-                    partial(_array_row, index=index),
-                    (memory, inputs.actors, inputs.action_mask, actor_keys),
+
+            def full(_: None) -> tuple[ActorAction, PolicyTree]:
+                """Keep one batched actor/lane call for whole-team shared control."""
+                return jax.vmap(lane)(
+                    memory, inputs.actors, inputs.action_mask, actor_keys, owned
                 )
-                if inputs.valid[index]:
-                    rows.append(lane(*row))
-                else:
-                    rows.append(
-                        (
-                            ActorAction(*(jnp.zeros(5, jnp.int32) for _ in range(3))),
-                            row[0],
+
+            def partial_columns(_: None) -> tuple[ActorAction, PolicyTree]:
+                """Visit fixed columns and skip model work for unowned columns."""
+                columns: list[tuple[ActorAction, PolicyTree]] = []
+                for index in range(5):
+                    column_memory, actor, mask = jax.tree.map(
+                        partial(_actor_column, index=index),
+                        (memory, inputs.actors, inputs.action_mask),
+                    )
+                    columns.append(
+                        _apply_owned_policy_rows(
+                            execution.policies[0],
+                            variables,
+                            column_memory,
+                            actor,
+                            mask,
+                            actor_keys[:, index],
+                            owned[:, index],
                         )
                     )
+
+                def assemble(*leaves: Array) -> Array:
+                    """Restore the original (B,5,...) known Policy layout."""
+                    return jnp.stack(leaves, axis=1)
+
+                return cast(
+                    tuple[ActorAction, PolicyTree], jax.tree.map(assemble, *columns)
+                )
+
+            whole_team = jnp.all(
+                owned == (inputs.active_mask & jnp.any(owned, axis=1)[:, None])
+            )
+            actions, updated = (
+                cast(
+                    tuple[ActorAction, PolicyTree],
+                    jax.lax.cond(whole_team, full, partial_columns, None),
+                )
+                if sparse
+                else full(None)
+            )
+        else:
+            rows = [
+                lane(
+                    *jax.tree.map(
+                        partial(_array_row, index=index),
+                        (memory, inputs.actors, inputs.action_mask, actor_keys, owned),
+                    )
+                )
+                for index in range(inputs.valid.shape[0])
+            ]
             actions, updated = jax.tree.map(_stack_arrays, *rows)
-        ids = jnp.where(inputs.active_mask, 0, -1).astype(jnp.int32)
+        ids = jnp.where(owned, 0, -1).astype(jnp.int32)
     else:
         heads: list[ActorAction] = []
         carries: list[PolicyTree] = []
         for index, apply in enumerate(execution.policies):
             actor = jax.tree.map(partial(_actor_column, index=index), inputs.actors)
             mask = jax.tree.map(partial(_actor_column, index=index), inputs.action_mask)
-            if execution.execution == "host":
-                rows = []
-                for lane_index in range(count):
-                    row = jax.tree.map(
-                        partial(_array_row, index=lane_index),
-                        (memory[index], actor, mask, actor_keys[:, index]),
-                    )
-                    if inputs.valid[lane_index]:
-                        result, carry = apply(variables[index], *row)
-                        rows.append((_checked_action(result), carry))
-                    else:
-                        rows.append(
-                            (
-                                ActorAction(
-                                    *(jnp.array(0, jnp.int32) for _ in range(3))
-                                ),
-                                row[0],
-                            )
-                        )
-                action, updated_one = jax.tree.map(_stack_arrays, *rows)
-            else:
-                action, updated_one = _apply_actor_rows(
+            if execution.execution == "jax":
+                action, carry = _apply_owned_policy_rows(
                     apply,
                     variables[index],
                     memory[index],
                     actor,
                     mask,
                     actor_keys[:, index],
-                    execution="jax",
+                    owned[:, index],
+                )
+            else:
+                action, carry = _apply_actor_rows(
+                    apply,
+                    variables[index],
+                    memory[index],
+                    actor,
+                    mask,
+                    actor_keys[:, index],
+                    execution="host",
+                    valid=owned[:, index],
                 )
             heads.append(action)
-            carries.append(updated_one)
+            carries.append(carry)
         actions = ActorAction(
             *(
                 jnp.pad(
-                    jnp.stack([head[i] for head in heads], axis=1),
+                    jnp.stack([head[index] for head in heads], axis=1),
                     ((0, 0), (0, 5 - len(heads))),
                 )
-                for i in range(3)
+                for index in range(3)
             )
         )
         updated = tuple(carries)
-        ids = jnp.where(inputs.active_mask, jnp.arange(5), -1).astype(jnp.int32)
-    actions = ActorAction(
-        *(jnp.where(inputs.active_mask, value, 0) for value in actions)
+        ids = jnp.where(owned, jnp.arange(5), -1).astype(jnp.int32)
+    return SystemOutput(
+        ActorAction(*(jnp.where(owned, value, 0) for value in actions)),
+        updated,
+        policy_ids=ids,
     )
-    return SystemOutput(actions, updated, policy_ids=ids)
 
 
 def _normal_output(
@@ -1584,6 +2320,7 @@ def _jax_apply(
     *,
     actor_keys: Array | None = None,
     keep_learning_outputs: bool = True,
+    sparse_policies: bool = False,
 ) -> SystemOutput:
     """Apply one numerical team, with selected reset and no host callbacks.
 
@@ -1592,15 +2329,31 @@ def _jax_apply(
     legacy adapter draws. Generic methods use keys unchanged. The static
     keep_learning_outputs flag defaults to True; False drops unused learner
     values inside the compiled call, without another method invocation.
+    sparse_policies enables known-column skipping for composed Policy members.
     """
     memory = _reset_for_decision(
         execution, variables, template, memory, inputs, init_keys, reset_mask
     )
     result = (
         _adapter_actions(
-            execution, variables, memory, inputs, keys, actor_keys=actor_keys
+            execution,
+            variables,
+            memory,
+            inputs,
+            keys,
+            actor_keys=actor_keys,
+            sparse=sparse_policies,
         )
         if execution.policies
+        else owner.run(
+            variables,
+            memory,
+            inputs,
+            keys,
+            actor_keys=actor_keys,
+            keep_learning_outputs=keep_learning_outputs,
+        )
+        if (owner := _composition(execution)) is not None
         else execution.apply(variables, memory, inputs, keys)
     )
     output = _normal_output(
@@ -1663,7 +2416,7 @@ def _mixed_jax_apply(
     )
     action_keys = (
         actor_keys[:, 0]
-        if actor_keys is not None
+        if actor_keys is not None and execution.policies
         else _action_keys(key, episode_ids, team)
     )
     init_keys = action_keys
@@ -1726,8 +2479,16 @@ def _host_apply(
     values after the one method call; it never converts or serializes them.
     The remaining arguments follow the shared numerical team's call contract.
     """
-    inputs, selected = jax.device_get((inputs, reset_mask))
-    _validate_adapter_roster(execution, inputs.active_mask)
+    if _composition(execution) is None:
+        inputs, selected = jax.device_get((inputs, reset_mask))
+    else:
+        selected = jax.device_get(reset_mask)
+    _validate_adapter_roster(
+        execution,
+        inputs.active_mask,
+        controlled=_controlled(inputs),
+        valid=inputs.valid,
+    )
     memory = _reset_for_decision(
         execution, variables, template, memory, inputs, init_keys, selected
     )
@@ -1738,6 +2499,15 @@ def _host_apply(
             execution, variables, memory, inputs, keys, actor_keys=actor_keys
         )
         if execution.policies
+        else owner.run(
+            variables,
+            memory,
+            inputs,
+            keys,
+            actor_keys=actor_keys,
+            keep_learning_outputs=keep_learning_outputs,
+        )
+        if (owner := _composition(execution)) is not None
         else execution.apply(variables, memory, inputs, keys)
     )
     output = _normal_output(
@@ -1926,7 +2696,8 @@ def _apply_system_pair(
             continue
         team_actor_keys = (
             actor_keys[:, team * 5 : team * 5 + 5]
-            if actor_keys is not None and execution.policies
+            if actor_keys is not None
+            and (execution.policies or _composition(execution) is not None)
             else None
         )
         if mixed and execution.execution == "jax":
@@ -1963,7 +2734,7 @@ def _apply_system_pair(
         function = _host_apply if execution.execution == "host" else _jax_apply
         action_keys = (
             team_actor_keys[:, 0]
-            if team_actor_keys is not None
+            if team_actor_keys is not None and execution.policies
             else _action_keys(action_roots, ids, team)
         )
         # Adapters broadcast stored templates; they never consume init RNG.

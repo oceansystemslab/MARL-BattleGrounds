@@ -37,6 +37,7 @@ def test_qmix_partial_child_matches_full_state_and_resumes(
     )
     parent = train(
         TrainConfig(
+            keep_past=0,
             method="qmix",
             num_envs=2,
             total_env_steps=10,

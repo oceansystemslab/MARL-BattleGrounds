@@ -2,6 +2,7 @@
 
 Synthetic verified evidence isolates orchestration and rule choices. The separate
 selection-evidence tests exercise real artifact and saved-game verification.
+New choices use saved point margins alone; old choices keep their saved rules.
 No learning, provider call or GPU work occurs. Missing confirmation tasks must
 produce executable public calls, never a provisional winner presented as final.
 """
@@ -65,6 +66,15 @@ def _evidence(root: Path, seed: int = 1) -> dict[str, Any]:
                     "complete": True,
                     "score": score,
                     "mean_kill_difference": kills,
+                    "cells": [
+                        {
+                            "map_id": map_id,
+                            "opponent": "Opponent",
+                            "mean_team_a_score": 10 + kills,
+                            "mean_team_b_score": 10,
+                        }
+                        for map_id in task["maps"]
+                    ],
                 }
             )
     return {
@@ -128,6 +138,10 @@ def test_new_rule_builds_own_shortlist_and_missing_confirmation_calls(
 ) -> None:
     root = tmp_path / "run"
     item = _evidence(root)
+    for row in item["records"]:
+        if row["checkpoint_id"] == "b":
+            for cell in row["cells"]:
+                cell["mean_team_a_score"] = 11
     item["records"] = [
         row
         for row in item["records"]
@@ -139,7 +153,7 @@ def test_new_rule_builds_own_shortlist_and_missing_confirmation_calls(
         [root],
         declaration={
             "name": "Earlier Ties",
-            "rule": "score_then_step",
+            "rule": "point_margin",
             "shortlist_size": 1,
         },
         output_dir=output,
@@ -162,11 +176,15 @@ def test_completed_follow_up_keeps_pending_decision_and_rule(
 ) -> None:
     root = tmp_path / "run"
     item = _evidence(root)
+    for row in item["records"]:
+        if row["checkpoint_id"] == "b":
+            for cell in row["cells"]:
+                cell["mean_team_a_score"] = 11
     missing = item["records"].pop(1)
     _reader(monkeypatch, {root: item})
     declaration = {
         "name": "Earlier Ties",
-        "rule": "score_then_step",
+        "rule": "point_margin",
         "shortlist_size": 1,
     }
     pending = selection.reselect_checkpoint(
@@ -190,19 +208,26 @@ def test_completed_follow_up_keeps_pending_decision_and_rule(
             declaration={
                 **declaration,
                 "previous_decision": str(path),
-                "rule": "saved",
+                "shortlist_size": 2,
             },
             output_dir=tmp_path / "bad",
         )
 
 
-def test_seed_order_breaks_across_run_ties_before_checkpoint_step(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+@pytest.mark.parametrize(("first_steps", "expected_seed"), [(6, 11), (8, 22)])
+def test_earlier_checkpoint_step_breaks_point_ties_before_seed_order(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    first_steps: int,
+    expected_seed: int,
 ) -> None:
     roots = [tmp_path / "first", tmp_path / "second"]
     items = {
         root: _evidence(root, seed) for root, seed in zip(roots, (11, 22), strict=True)
     }
+    for row in items[roots[0]]["records"]:
+        if row["checkpoint_id"] == "b":
+            row["env_steps"] = first_steps
     _reader(monkeypatch, items)
     result = selection.reselect_checkpoint(
         roots,
@@ -213,7 +238,7 @@ def test_seed_order_breaks_across_run_ties_before_checkpoint_step(
         },
         output_dir=tmp_path / "choice",
     )
-    assert result["across_run_selection"]["seed"] == 22
+    assert result["across_run_selection"]["seed"] == expected_seed
     assert len(result["runs"]) == 2
     with pytest.raises(ValueError, match="exactly once"):
         selection.reselect_checkpoint(
@@ -513,6 +538,7 @@ def test_child_reselection_uses_effective_defaults_and_original_parent_actor(
                 "complete": True,
                 "score": prior["score"],
                 "mean_kill_difference": prior["mean_kill_difference"],
+                "cells": prior["cells"],
             }
         )
     _reader(monkeypatch, {root: item})
@@ -615,3 +641,60 @@ def test_across_run_routine_roots_require_permission_and_keep_unpaired_label(
         result["across_run_selection"]["confirmation_comparison"]
         == "Common Declared Root"
     )
+
+
+@pytest.mark.parametrize("rule", ["saved", "score_then_kills", "score_then_step"])
+def test_historical_rules_stay_readable_but_cannot_create_new_decisions(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, rule: str
+) -> None:
+    root = tmp_path / "run"
+    evidence = _evidence(root)
+    for row in evidence["records"]:
+        row.pop("cells")
+    _reader(monkeypatch, {root: evidence})
+    declaration = {"name": "Historical Choice", "rule": rule}
+    historical = selection._build_selection(
+        [root],
+        selection._declaration(declaration, allow_historical=True),
+        tmp_path / "historical",
+        None,
+    )
+    path = tmp_path / "saved_decision.json"
+    path.write_text(json.dumps(historical))
+    before = path.read_bytes()
+    assert selection.read_selection_decision(path, verify_evidence=True) == historical
+    expected = "a" if rule == "score_then_step" else "b"
+    assert historical["runs"][0]["winner"]["checkpoint_id"] == expected
+    assert path.read_bytes() == before
+    with pytest.raises(ValueError, match="New selection decisions require"):
+        selection.reselect_checkpoint(
+            [root], declaration=declaration, output_dir=tmp_path / "new"
+        )
+    assert not (tmp_path / "new").exists()
+
+
+def test_new_saved_decision_uses_points_not_wins_kills_or_unverified_totals(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root = tmp_path / "run"
+    evidence = _evidence(root)
+    for row in evidence["records"]:
+        if row["checkpoint_id"] == "b":
+            row["score"] = 0.0
+            row["mean_kill_difference"] = -100
+        else:
+            row["mean_point_margin"] = 10000
+    _reader(monkeypatch, {root: evidence})
+    result = selection.reselect_checkpoint(
+        [root], declaration={"name": "Points Only"}, output_dir=tmp_path / "new"
+    )
+    assert result["declaration"]["rule"] == "point_margin"
+    assert result["runs"][0]["winner"]["checkpoint_id"] == "b"
+    for row in evidence["records"]:
+        row.pop("cells")
+    _reader(monkeypatch, {root: evidence})
+    with pytest.raises(ValueError, match="saved points"):
+        selection.reselect_checkpoint(
+            [root], declaration={"name": "Missing Points"}, output_dir=tmp_path / "bad"
+        )
+    assert not (tmp_path / "bad").exists()

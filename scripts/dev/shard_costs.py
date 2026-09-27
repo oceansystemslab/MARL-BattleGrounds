@@ -8,8 +8,8 @@ Run from the repository root after preparing the locked uv environment:
     scripts/dev/check_frontend.sh --timings /tmp/timings  # full browser gate + timings
     uv run --no-sync python scripts/dev/shard_costs.py browser /tmp/timings
 
-``update`` reads the ``python-shard-N.xml`` JUnit files that ``check.sh
---timings`` saves, sums each test file's seconds, splits files that are too
+``update`` reads complete passing ``python-shard-N.xml`` JUnit reports from
+``check.sh``, sums each test file's seconds, splits files that are too
 large for one shard at test-function boundaries where the scheduler allows it,
 rewrites ``scripts/dev/pytest_shard_costs.json`` and prints the predicted
 seconds of every shard. ``plan`` prints that prediction for the current table
@@ -64,9 +64,9 @@ from scripts.dev.pytest_shard import (  # noqa: E402
     validate_split_fixture_affinity,
 )
 
-DEFAULT_SHARD_COUNT = 12
-RESERVED_REASON = "Hosted CI runs Pyright before the tests of shard 12."
-RESERVED_SECONDS = {"12": [0] * 11 + [50]}
+DEFAULT_SHARD_COUNT = 19
+RESERVED_REASON = "Hosted CI runs Pyright before the tests of shard 19."
+RESERVED_SECONDS = {"19": [0] * 18 + [50]}
 
 
 @dataclass(frozen=True)
@@ -170,7 +170,7 @@ def read_junit_seconds(
         Folder holding ``python-shard-1.xml`` to ``python-shard-N.xml``, written
         by ``scripts/dev/check.sh --timings``.
     shard_count : int, optional
-        Number of shard files that must all be present. Default 12.
+        Number of shard files that must all be present. Default 19.
     expected_cases : Collection[str] | None, optional
         Exact current pytest case IDs. When supplied, every case must appear
         exactly once across the reports. The update command always supplies
@@ -209,8 +209,8 @@ def read_junit_seconds(
         cases = list(root.iter("testcase"))
         if problems or not cases:
             raise ValueError(
-                f"shard {shard} did not pass completely ({path}); use timings "
-                "from a gate where every shard passed"
+                f"shard {shard} did not pass completely ({path}); use a complete "
+                "set of passing current shard reports"
             )
         for case in cases:
             classname = case.get("classname", "")
@@ -356,7 +356,7 @@ def build_cost_table(
         Current collection. Families that were not collected are ignored, so
         stale timings never enter the table.
     shard_count : int, optional
-        Number of shards to balance for. Default 12.
+        Number of shards to balance for. Default 19.
     max_unit_seconds : int or None, optional
         Largest work unit wanted. Files above it are split at test-function
         boundaries, slowest functions first, until the rest fits. None uses
@@ -477,7 +477,7 @@ def predict_shards(
     collected : CollectedTests
         Current collection.
     shard_count : int, optional
-        Number of shards. Default 12.
+        Number of shards. Default 19.
 
     Returns
     -------
@@ -672,7 +672,7 @@ def format_browser_seconds(
 
 
 def _current_commit() -> str:
-    """Return the checkout's short commit hash, or ``unknown`` without Git."""
+    """Return HEAD at refresh, or ``unknown``; this is not a tested-tree identity."""
     try:
         result = subprocess.run(
             ["git", "-C", str(_REPOSITORY_ROOT), "rev-parse", "--short", "HEAD"],
@@ -708,7 +708,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     )
     commands = parser.add_subparsers(dest="command", required=True)
     update = commands.add_parser(
-        "update", help="rewrite the cost table from check.sh --timings output"
+        "update", help="rewrite the cost table from complete passing shard reports"
     )
     update.add_argument("timings", type=Path, help="folder with python-shard-N.xml")
     update.add_argument(
@@ -740,10 +740,13 @@ def main(argv: Sequence[str] | None = None) -> int:
             max_unit_seconds=arguments.max_unit,
             measured_on=datetime.now(UTC).date().isoformat(),
             measured_with=(
-                "Full gate (scripts/dev/check.sh --timings), all twelve Python "
-                f"shards on a {os.cpu_count()}-CPU machine; per-test "
-                "JUnit time including setup and teardown, summed per file and "
-                "rounded up to whole seconds."
+                "Complete passing set of nineteen Python shard reports from "
+                f"{arguments.timings}. Per-test JUnit time includes setup and "
+                "teardown, summed per file and rounded up to whole seconds. "
+                "Report origins, tested source and run conditions are recorded "
+                "in timing_sources.md beside those reports. measured_commit is "
+                "HEAD at refresh; it does not prove that clean HEAD was tested "
+                "or qualify a candidate."
             ),
         )
         table["measured_commit"] = _current_commit()

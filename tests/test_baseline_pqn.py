@@ -495,6 +495,7 @@ def test_mirror_twins_act_alike_from_either_spawn_end(
         "active_mask",
         "episode_start",
         "valid",
+        "controlled_mask",
     }
     env, observations, state = _two_lane_reset()
     del env

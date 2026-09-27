@@ -2,7 +2,7 @@
 
 Host setup verifies content and freezes callables. Numerical carry keeps changing
 weights, games, memories and counters. Pure scan and bounded recording share one
-step. A named pinned opponent plays the lanes assigned to history slot 0: a JAX
+step. A named pinned opponent plays lanes assigned to the separate pin (-2): a JAX
 method inside the compiled step, a host method through a host loop in
 collect_training_rollout. An optional ActorVariablesAtStep hook, such as QMIX
 exploration, sets changing actor values from the round count before every
@@ -13,6 +13,7 @@ learning run or durable learner checkpoint lives here.
 from __future__ import annotations
 
 import json
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, replace
 from functools import lru_cache, partial
 from pathlib import Path
@@ -52,10 +53,17 @@ from marl_battlegrounds.evaluation.policy_execution import (
     System,
     SystemState,
     _action_keys,
+    _CompositionMemory,
+    _execution,
+    _initial_memory,
     _initialization_keys,
+    _member_keys,
+    _validate_adapter_roster,
     init_systems,
+    pool,
     shared_policy,
     system_inputs,
+    team,
 )
 from marl_battlegrounds.evaluation.recording_identity import (
     normalize_system_registration,
@@ -97,16 +105,26 @@ from marl_battlegrounds.training.opponents import (
     HOST_ACTIONS_SYSTEM,
     HostOpponent,
     OpponentHistory,
+    OpponentSelection,
     _history_invalid,
     _history_shapes,
     _pinned_share,
+    _schema,
     assign_opponents,
+    configure_opponent_selection,
     init_opponent_history,
     make_opponent_system,
+    opponent_counter_row,
+    opponent_identity,
+    opponent_selection_names,
+    select_opponents,
 )
 from marl_battlegrounds.training.shaping import (
+    RewardFunction,
+    reward_adjustments,
     team_potential_shaping,
     team_score_delta_shaping,
+    validate_reward,
     validate_shaping,
 )
 
@@ -167,6 +185,15 @@ class TrainingCarry(NamedTuple):
     for a JAX method, or (this step's host actions, ()) for a host method,
     whose own memory stays on the collection's HostOpponent. No host evidence,
     critic, optimizer, writer or expanded actor features enters this tree.
+    opponent_selection is None for the legacy recipe, otherwise the saved
+    numerical future-game rule, dense start counter and external member indices.
+    partner_selection is None without fixed partners, otherwise the same selector
+    for each team. partner_values stores a JAX partner pool once; both teams use
+    separate choices and memory. Host partners instead supply partner_actions
+    for this step and retain their opaque memory on the collection.
+    frozen_host_values stores numeric frozen variables/templates for checkpoints,
+    first the host opponent if present, then the shared host partner population.
+    It does not save opaque host memory or drive live execution.
     """
 
     env: Environment
@@ -183,6 +210,11 @@ class TrainingCarry(NamedTuple):
     discount: Array
     coefficient: Array
     pinned_opponent: Tree = ()
+    opponent_selection: OpponentSelection | None = None
+    partner_selection: tuple[OpponentSelection, OpponentSelection] | None = None
+    partner_values: Tree = ()
+    partner_actions: tuple[ActorAction, ActorAction] | None = None
+    frozen_host_values: tuple[Tree, ...] = ()
 
 
 class TrainingTransition(NamedTuple):
@@ -197,11 +229,17 @@ class TrainingTransition(NamedTuple):
     Int32 identity/version fields are (B,); requested_stage and episode_stage
     name original distribution slots, including in child segments. The former
     is the latest reset request; the latter names the producing game's reset.
-    opponent_snapshot=-1 means current.
+    opponent_snapshot is a stable capture ID, -1 current, -2 legacy permanent
+    pin, or -3-index for a named member in its fixed declaration order.
+    Reusing a physical history slot never changes a stored transition identity.
     opponent_update is the learner version the opponent's weights come from;
-    for games against a named pinned System (opponent_snapshot 0 when the
-    collection has one) it is -2, because that System is not a learner version.
+    for games against a named pinned System it is -2, because that System
+    is not a learner version.
     training_state is float32 (B,920) or None and never enters an actor.
+    custom_rewards is float32 (B,5) for Team A when a reward callback is enabled,
+    otherwise None. It stays separate from native rewards and built-in shaping.
+    learner_active is optional bool (B,5) ownership; None means all active
+    slots learn. It never replaces the physical active mask. Padding owns none.
     Invalid padding has neutral-only masks, zero payloads and -1 identities.
     """
 
@@ -229,6 +267,8 @@ class TrainingTransition(NamedTuple):
     opponent_update: Array
     opponent_snapshot: Array
     training_state: Array | None
+    custom_rewards: Array | None = None
+    learner_active: Array | None = None
 
 
 class TrainingRollout(NamedTuple):
@@ -238,6 +278,7 @@ class TrainingRollout(NamedTuple):
     the first real row's episode_start handles a pending episode reset. Final
     observations/masks and active/alive/ended belong to the returned carry before
     reset, never to padding. final_training_state is optional (B,920).
+    final_learner_active matches successor ownership or None for all slots.
     real_steps is scalar int32 rounds, not B-multiplied experience. Zero means
     unchanged carry and no learning/bootstrap work. Critic memory is external.
     """
@@ -251,6 +292,7 @@ class TrainingRollout(NamedTuple):
     final_ended: Array
     final_training_state: Array | None
     real_steps: Array
+    final_learner_active: Array | None = None
 
 
 @dataclass(frozen=True, eq=False)
@@ -267,9 +309,9 @@ class TrainingCollection:
     carry_spec records shapes and static settings without retaining arrays;
     root_bits, key_schema and reward_settings bind in-memory continuation.
     pinned_opponent_share is the static probability that a reset lane meets the
-    pinned first-update actor in history slot 0; zero keeps the 80/20 recipe.
+    permanent first-update actor outside rotating history; zero keeps the 80/20 recipe.
     pinned_opponent is None, or the JSON record of a named System that plays
-    slot-0 lanes instead (reference, name, execution, registration and its ID,
+    permanent-pin lanes instead (reference, name, execution, registration and its ID,
     variables digest, evidence, memory rule). host_opponent is the mutable
     HostOpponent of a pinned host method, else None; a collection that has one
     serves each training round once and must not be replayed.
@@ -277,6 +319,19 @@ class TrainingCollection:
     whose rate changes only between blocks), or the learner's
     ActorVariablesAtStep hook, which sets values such as QMIX's exploration
     rate on the shared current variables before each decision.
+    opponent_names, opponent_records and opponent_systems hold the fixed named
+    declaration order, frozen identity records and original member callbacks.
+    Changing ordinary shares leaves these alone. Append new members only at a
+    child boundary. Resource scopes belong to the calling runner.
+    reward is the optional pure scalar callback; reward_identity is its copied
+    JSON evidence from shaping.resolve_reward. Both are None when disabled.
+    The callback receives privileged training state, never actor state.
+    learner_slots is None for the unchanged full-learner path, otherwise fixed
+    physical slots 0..4. learner_actor retains the native learner callbacks;
+    actor is the deployed team. partner records and Systems follow the opponent
+    binding contract. host_partners holds separate full-batch A/B memories.
+    Named opponents control their whole team; only native self/past/permanent
+    actor copies use the mirrored learner slots and a separate partner draw.
     Reuse this descriptor across blocks to reuse compiled functions. It is not
     a PyTree or a durable checkpoint and must stay outside numerical carry.
     """
@@ -300,6 +355,264 @@ class TrainingCollection:
     pinned_opponent: dict[str, Any] | None = None
     host_opponent: HostOpponent | None = None
     actor_variables_at_step: ActorVariablesAtStep | None = None
+    opponent_names: tuple[str, ...] = ()
+    opponent_records: tuple[dict[str, Any], ...] = ()
+    opponent_systems: tuple[System, ...] = ()
+    reward: RewardFunction | None = None
+    reward_identity: dict[str, object] | None = None
+    vectorize_opponent_lanes: bool = True
+    opponent_trace_rows: tuple[int, ...] = ()
+    learner_slots: tuple[int, ...] | None = None
+    learner_actor: System | None = None
+    partner_names: tuple[str, ...] = ()
+    partner_records: tuple[dict[str, Any], ...] = ()
+    partner_systems: tuple[System, ...] = ()
+    host_partners: tuple[HostOpponent, HostOpponent] | None = None
+    partner_trace_rows: tuple[tuple[int, ...], tuple[int, ...]] = ((), ())
+    pinned_system: System | None = None
+
+
+def _frozen_host_values(
+    opponent: HostOpponent | None, partners: tuple[HostOpponent, HostOpponent] | None
+) -> tuple[Tree, ...]:
+    """Save numeric frozen parameters once per holder population, never its memory."""
+    result: list[Tree] = []
+    if opponent is not None:
+        result.append(opponent.checkpoint_values())
+    if partners is not None:
+        result.append(partners[0].checkpoint_values())
+    return tuple(result)
+
+
+def _check_learner_slots(
+    slots: tuple[int, ...] | None, schedule: TrainingSchedule
+) -> tuple[int, ...] | None:
+    """Check fixed physical learner slots and at least one learner in every stage."""
+    if slots is None:
+        return None
+    if (
+        not isinstance(cast(object, slots), (tuple, list))
+        or not slots
+        or any(type(slot) is not int or not 0 <= slot < 5 for slot in slots)
+        or len(set(slots)) != len(slots)
+    ):
+        raise ValueError(
+            "learner_slots must contain distinct physical slots 0 through 4"
+        )
+    if len(slots) == 5:
+        return None
+    for stage, teams in enumerate(_stage_active_masks(schedule)):
+        if not np.all(np.any(teams[:, list(slots)], axis=-1)):
+            raise ValueError(
+                f"Training stage {stage} has no active learner slot on a mirrored team"
+            )
+    return tuple(slots)
+
+
+def _stage_active_masks(schedule: TrainingSchedule) -> np.ndarray:
+    """Read both declared roster masks for every preserved distribution."""
+    stages = int(
+        schedule.arrays.stage_count
+        if schedule.arrays.distribution_count is None
+        else schedule.arrays.distribution_count
+    )
+    roster = schedule.arrays.roster_class_ids
+    return np.stack(
+        [
+            (np.asarray(roster[stage]).reshape(2, 5) != 0)
+            if roster is not None and np.any(np.asarray(roster[stage]))
+            else np.tile(np.arange(5) < int(schedule.arrays.team_sizes[stage]), (2, 1))
+            for stage in range(stages)
+        ]
+    )
+
+
+def _check_partner_rosters(
+    system: System, schedule: TrainingSchedule, slots: tuple[int, ...]
+) -> None:
+    """Use the shared adapter check on every controlled future-stage slot."""
+    active = jnp.asarray(_stage_active_masks(schedule).reshape(-1, 5))
+    controlled = active & jnp.asarray(
+        [slot not in slots for slot in range(5)], jnp.bool_
+    )
+    _validate_adapter_roster(
+        _execution(system),
+        active,
+        controlled=controlled,
+        valid=jnp.any(controlled, axis=1),
+    )
+
+
+def _partner_rule(names: tuple[str, ...], selection: object) -> object:
+    """Require only declared frozen names; omitted shares use every member equally."""
+    if any(
+        not isinstance(cast(object, name), str)
+        or not name.strip()
+        or name in ("self", "past")
+        for name in names
+    ):
+        raise ValueError("Partner names must be nonempty and exclude self/past")
+    if selection is None:
+        return {name: 1.0 for name in names} if names else None
+    selected = opponent_selection_names(selection)
+    if set(selected) - set(names):
+        raise ValueError("Partner selection must name declared frozen members")
+    return selection
+
+
+def _select_partners(
+    history: OpponentHistory,
+    settings: tuple[OpponentSelection, OpponentSelection],
+    root: Array,
+    state: EnvironmentState,
+    *,
+    mask: Array | None = None,
+) -> tuple[OpponentSelection, OpponentSelection]:
+    """Share dense game order but separate team keys for weighted partner choices."""
+    if mask is None:
+        mask = jnp.ones_like(state.episode_start)
+    keys = training_keys(root, state.reset_generation, stream="opponent")
+
+    def tagged(key: Array, tag: int) -> Array:
+        """Keep partner sampling separate from opponent and other-team draws."""
+        return jax.random.fold_in(key, tag)
+
+    return cast(
+        tuple[OpponentSelection, OpponentSelection],
+        tuple(
+            select_opponents(
+                history,
+                side,
+                mask,
+                jax.vmap(partial(tagged, tag=0x50415254 + team_index))(keys),
+            )[1]
+            for team_index, side in enumerate(settings)
+        ),
+    )
+
+
+def _training_teams(
+    learner: System,
+    partners: System,
+    slots: tuple[int, ...],
+    pinned: System | None,
+    *,
+    vectorize_lanes: bool,
+) -> tuple[System, System]:
+    """Compose native learner slots, retaining whole-team external opponents."""
+    complement = tuple(slot for slot in range(5) if slot not in slots)
+    actor = team(learner, partners, slots=(slots, complement))
+    native = team(
+        make_opponent_system(learner, vectorize_lanes=vectorize_lanes),
+        partners,
+        slots=(slots, complement),
+    )
+
+    # Templates keep selectors, not frozen weights. Carry owns the values once.
+    def layout(system: System) -> System:
+        """Keep the fixed composition layout without captured changing parameters."""
+        return replace(
+            system,
+            variables=system.variables._replace(members=((), ()), templates=((), ())),
+        )
+
+    actor, native = layout(actor), layout(native)
+    if pinned is None:
+        return actor, native
+    opponent = pool({native: 1.0, pinned: 1.0})
+    return actor, replace(
+        opponent,
+        variables=opponent.variables._replace(
+            members=(native.variables, ()),
+            templates=((), ()),
+        ),
+    )
+
+
+def _team_variables(
+    actor: System,
+    opponent: System,
+    history: OpponentHistory,
+    pinned: Tree,
+    selection: tuple[OpponentSelection, OpponentSelection] | None,
+    partners: Tree,
+    host_actions: tuple[ActorAction, ActorAction] | None,
+) -> tuple[Tree, Tree]:
+    """Supply current learner weights and one shared frozen pool as dynamic values."""
+    if selection is None:
+        return history.current_variables, history if not len(pinned) else (
+            history,
+            *pinned,
+        )
+
+    def fixed(side: int) -> tuple[Tree, Tree]:
+        """Use that side's saved member choice or already produced host actions."""
+        if host_actions is not None:
+            return host_actions[side], ()
+        return partners[0]._replace(choices=selection[side].choices), partners[1]
+
+    a_values, a_template = fixed(0)
+    a = actor.variables._replace(
+        members=(history.current_variables, a_values), templates=((), a_template)
+    )
+    b_values, b_template = fixed(1)
+    native_history = (
+        history
+        if not len(pinned)
+        else history._replace(
+            lane_snapshot=jnp.where(
+                history.lane_snapshot == -2, -1, history.lane_snapshot
+            )
+        )
+    )
+    b_layout = opponent.variables if not len(pinned) else opponent.variables.members[0]
+    native = b_layout._replace(
+        members=(native_history, b_values), templates=((), b_template)
+    )
+    if not len(pinned):
+        return a, native
+    return a, opponent.variables._replace(
+        members=(native, pinned[0]),
+        templates=((), pinned[1]),
+        choices=(history.lane_snapshot == -2).astype(jnp.int32),
+    )
+
+
+def _learner_active(
+    collection: TrainingCollection, state: EnvironmentState
+) -> Array | None:
+    """Keep physical activity separate from slots whose decisions train."""
+    if collection.learner_slots is None:
+        return None
+    return state.config.agent_profile.active_mask[:, :5] & jnp.asarray(
+        [slot in collection.learner_slots for slot in range(5)], jnp.bool_
+    )
+
+
+def learner_memory(carry: TrainingCarry) -> Tree:
+    """Return only the learner's memory; fixed partners keep their own full trees."""
+    return (
+        carry.memory.team_a
+        if carry.partner_selection is None
+        else carry.memory.team_a.members[0]
+    )
+
+
+def _partner_inputs(
+    observations: Observations,
+    state: EnvironmentState,
+    slots: tuple[int, ...] | None,
+    side: int,
+) -> Tree:
+    """Give a fixed partner full permitted inputs and only its complement slots."""
+    assert slots is not None
+    inputs = system_inputs(observations, state, team=side)
+    owned = inputs.active_mask & jnp.asarray(
+        [slot not in slots for slot in range(5)], jnp.bool_
+    )
+    return inputs._replace(
+        controlled_mask=owned, valid=inputs.valid & jnp.any(owned, axis=1)
+    )
 
 
 def _zeros(tree: Tree) -> Tree:
@@ -453,6 +766,87 @@ def _validate_training_continuation(  # pyright: ignore[reportUnusedFunction]
     ):
         raise ValueError("Continuation batch or recording settings changed")
     _check_carry(carry)
+    selection = carry.opponent_selection
+    if selection is not None:
+        categories = 2 + len(collection.opponent_names)
+        shares = np.asarray(selection.shares)
+        order = np.asarray(selection.order)
+        choices = np.asarray(selection.choices)
+        starts = (
+            sum(int(x) for x in np.asarray(carry.state.reset_generation))
+            + collection.schedule.num_envs
+        )
+        if (
+            shares.shape != (categories,)
+            or order.ndim != 1
+            or not order.size
+            or choices.shape != carry.state.episode_id.shape
+            or np.any(~np.isfinite(shares))
+            or np.any(shares < 0)
+            or (not bool(selection.ordered) and not np.isclose(shares.sum(), 1.0))
+            or np.any(order < 0)
+            or np.any(order >= categories)
+            or np.any(choices < 0)
+            or (
+                len(collection.opponent_names)
+                and np.any(choices >= len(collection.opponent_names))
+            )
+            or int(selection.game_starts) != starts
+            or not 0 <= int(selection.order_start) <= starts
+            or selection.past_ids.shape != carry.history.captured_ids.shape
+            or selection.past_weights.shape != carry.history.captured_ids.shape
+            or np.any(~np.isfinite(selection.past_weights))
+            or np.any(np.asarray(selection.past_weights) < 0)
+        ):
+            raise ValueError(
+                "Continuation opponent selection or game-start count is invalid"
+            )
+    _check_learner_slots(collection.learner_slots, collection.schedule)
+    if (carry.partner_selection is None) != (collection.learner_slots is None):
+        raise ValueError("Continuation learner slots and partner selection disagree")
+    if carry.partner_selection is not None:
+        if (
+            carry.progress.partner_used is None
+            or carry.progress.partner_used.shape != (len(collection.partner_names),)
+            or carry.progress.partner_used.dtype != jnp.bool_
+        ):
+            raise ValueError(
+                "Continuation partner exposure flags differ from declared members"
+            )
+        starts = (
+            sum(int(x) for x in np.asarray(carry.state.reset_generation))
+            + collection.schedule.num_envs
+        )
+        for settings in carry.partner_selection:
+            shares, order, choices = map(
+                np.asarray, (settings.shares, settings.order, settings.choices)
+            )
+            if (
+                shares.shape != (2 + len(collection.partner_names),)
+                or np.any(shares[:2] != 0)
+                or np.any(~np.isfinite(shares))
+                or np.any(shares < 0)
+                or (not bool(settings.ordered) and not np.isclose(shares.sum(), 1.0))
+                or order.ndim != 1
+                or not order.size
+                or (
+                    bool(settings.ordered)
+                    and np.any((order < 2) | (order >= len(shares)))
+                )
+                or choices.shape != carry.state.episode_id.shape
+                or np.any((choices < 0) | (choices >= len(collection.partner_names)))
+                or int(settings.game_starts) != starts
+                or not 0 <= int(settings.order_start) <= starts
+            ):
+                raise ValueError(
+                    "Continuation partner choices or game-start count are invalid"
+                )
+    if carry.progress.opponent_steps.shape[0] != int(
+        carry.history.capture_capacity
+    ) + 2 + len(collection.opponent_names):
+        raise ValueError(
+            "Continuation opponent counter rows differ from declared members"
+        )
     snapshot = _boundary_snapshot(carry.tracking, carry.state)
     rounds = int(carry.progress.rounds)
     offset = (
@@ -499,6 +893,15 @@ def _validate_training_continuation(  # pyright: ignore[reportUnusedFunction]
         raise ValueError(
             "Continuation score thresholds disagree with their episode sources"
         )
+    if carry.schedule.roster_class_ids is not None:
+        declared = np.asarray(carry.schedule.roster_class_ids)[episode_stages]
+        fixed = np.any(declared != 0, axis=-1)
+        if not np.array_equal(
+            np.asarray(carry.source_class_ids)[fixed], declared[fixed]
+        ):
+            raise ValueError(
+                "Continuation rosters disagree with their producing stages"
+            )
     count = collection.schedule.num_envs
     expected_spawns = np.concatenate((np.zeros(count // 2), np.ones(count // 2)))
     if not np.array_equal(carry.tracking.spawn_locations, expected_spawns):
@@ -549,50 +952,55 @@ def _validate_training_continuation(  # pyright: ignore[reportUnusedFunction]
         )
     ):
         raise ValueError("Continuation episode exposure or decision counts are invalid")
-    history_count = int(carry.history.count)
-    update = int(carry.history.current_update)
-    refreshed = int(carry.history.last_refresh_rounds)
-    captured_rounds, captured_updates, mapping = jax.device_get(
-        (
-            carry.history.captured_rounds,
-            carry.history.captured_updates,
-            carry.history.threshold_to_snapshot,
-        )
+    history = carry.history
+    update = int(history.current_update)
+    refreshed = int(history.last_refresh_rounds)
+    ids, captured_rounds, captured_updates, mapping = map(
+        np.asarray,
+        jax.device_get(
+            (
+                history.captured_ids,
+                history.captured_rounds,
+                history.captured_updates,
+                history.threshold_to_snapshot,
+            )
+        ),
     )
-    used_rounds = captured_rounds[:history_count]
-    used_updates = captured_updates[:history_count]
+    occupied = ids >= 0
+    order = np.argsort(ids[occupied])
+    used_rounds, used_updates = (
+        captured_rounds[occupied][order],
+        captured_updates[occupied][order],
+    )
     threshold_count = (
         20
         if carry.schedule.history_threshold_count is None
         else int(carry.schedule.history_threshold_count)
     )
-    active_thresholds = np.arange(20) < threshold_count
-    expected_mapping = np.searchsorted(
-        used_rounds, np.asarray(carry.schedule.history_threshold_rounds), side="left"
-    )
-    expected_mapping = np.where(
-        active_thresholds & (expected_mapping < history_count), expected_mapping, -1
-    )
+    active = np.arange(20) < threshold_count
+    captures = int(history.next_capture_id)
     if (
-        not 0 <= history_count <= update <= refreshed <= rounds
+        not 0 <= int(history.count) <= captures <= update <= refreshed <= rounds
+        or captures > int(history.capture_capacity)
         or ((update == 0) != (refreshed == 0))
+        or len(set(ids[occupied].tolist())) != int(history.count)
         or np.any(used_rounds <= 0)
         or np.any(used_rounds > refreshed)
-        or np.any(np.diff(used_rounds) <= 0)
+        or np.any(np.diff(used_rounds) < int(history.minimum_capture_rounds))
         or np.any(used_updates <= 0)
         or np.any(used_updates > update)
         or np.any(np.diff(used_updates) <= 0)
-        or np.any(captured_rounds[history_count:] != -1)
-        or np.any(captured_updates[history_count:] != -1)
-        or not np.array_equal(mapping, expected_mapping)
-        or set(int(x) for x in mapping if x >= 0) != set(range(history_count))
+        or np.any(captured_rounds[~occupied] != -1)
+        or np.any(captured_updates[~occupied] != -1)
+        or np.any(mapping < -1)
+        or np.any(mapping >= captures)
+        or np.any(mapping[~active] != -1)
         or np.any(
-            (
-                active_thresholds
-                & (np.asarray(carry.schedule.history_threshold_rounds) <= refreshed)
-            )
-            != (mapping >= 0)
+            (mapping >= 0)
+            & (np.asarray(carry.schedule.history_threshold_rounds) > refreshed)
         )
+        or (captures == 0 and int(history.last_capture_rounds) != -1)
+        or (captures > 0 and not 0 < int(history.last_capture_rounds) <= refreshed)
     ):
         raise ValueError("Continuation opponent snapshot metadata is inconsistent")
 
@@ -605,10 +1013,10 @@ def _continuation_history_thresholds(  # pyright: ignore[reportUnusedFunction]
     carry must already pass its parent's collection check. future_rounds contains
     strictly increasing Python integers after the actual checkpoint round; the
     runner checks them against the child's declared end and learner boundaries.
-    Return an ordered active threshold tuple with one marker per existing slot,
-    all distinct pending old thresholds and the added points. Passed duplicate
-    requests are retained in the archived parent proof, not copied into new
-    active slots. Reject invalid points or more than 20 required table entries.
+    Return pending parent thresholds and added points in order. Completed
+    requests stay in the archived parent proof; stable capture IDs stay with
+    history and saved records. They need no entry in the new request table.
+    Reject invalid points or more than 20 required table entries.
     Host-only: reads small history arrays and changes no numerical state.
     """
     rounds = int(carry.progress.rounds)
@@ -623,24 +1031,77 @@ def _continuation_history_thresholds(  # pyright: ignore[reportUnusedFunction]
         raise ValueError(
             "Future captures must be ordered distinct rounds after the checkpoint"
         )
-    count = int(carry.history.count)
     active = (
         20
         if carry.schedule.history_threshold_count is None
         else int(carry.schedule.history_threshold_count)
     )
-    captured = tuple(
-        int(value) for value in np.asarray(carry.history.captured_rounds)[:count]
-    )
     thresholds = np.asarray(carry.schedule.history_threshold_rounds)[:active]
     mapping = np.asarray(carry.history.threshold_to_snapshot)[:active]
     pending = {int(value) for value in thresholds[mapping == -1]}
-    combined = (*captured, *sorted(pending | set(future_rounds)))
+    combined = tuple(sorted(pending | set(future_rounds)))
     if len(combined) > 20:
-        raise ValueError(
-            "Added captures cannot fit the 20 history slots and pending requests"
-        )
+        raise ValueError("Added captures exceed the 20 explicit pending requests")
     return combined
+
+
+def _expanded_stage_sources(
+    collection: TrainingCollection, carry: TrainingCarry, schedule: TrainingSchedule
+) -> tuple[TrainingContentBinding, EpisodeTrackingState]:
+    """Append score-source blocks without changing any live game's source row.
+
+    The new schedule retains every old distribution ID and winning score. Only
+    new score blocks may extend the verified source bank. Installed scientific
+    content and all old bank rows must match exactly. Return the new binding and
+    tracker with its extended bank/digest; game bindings, counters and memories
+    are unchanged. This host boundary reads content, never writes files or resets.
+    """
+    old_scores = collection.binding.score_thresholds
+    scores = schedule.score_thresholds
+    if scores == old_scores:
+        return collection.binding, carry.tracking
+    if scores[: len(old_scores)] != old_scores:
+        raise ValueError("Child source scores must preserve the original bank prefix")
+    prepared = prepare_training_content(
+        score_thresholds=scores, red_zone_depth=collection.binding.red_zone_depth
+    )
+    omitted = {"source_bank", "source_configurations", "score_thresholds"}
+    old_content = {
+        k: v
+        for k, v in collection.binding.scientific_projection().items()
+        if k not in omitted
+    }
+    new_content = {
+        k: v
+        for k, v in prepared.binding.scientific_projection().items()
+        if k not in omitted
+    }
+    if canonical_digest_sha256(old_content) != canonical_digest_sha256(new_content):
+        raise ValueError("Changed stages cannot replace installed scientific content")
+    assert carry.tracking.source_configs is not None
+    old_rows = 42 * len(old_scores)
+    if any(
+        not np.array_equal(old, new[:old_rows])
+        for old, new in zip(
+            jax.tree.leaves(carry.tracking.source_configs),
+            jax.tree.leaves(prepared.source_configs),
+            strict=True,
+        )
+    ):
+        raise ValueError(
+            "Changed stages must retain every original source configuration"
+        )
+    table_id = carry.tracking.source_table_id
+    if table_id is not None:
+        table_id = jnp.asarray(
+            np.frombuffer(
+                bytes.fromhex(prepared.binding.source_bank.canonical_digest),
+                dtype=">u4",
+            ).astype(np.uint32)
+        )
+    return prepared.binding, replace(
+        carry.tracking, source_configs=prepared.source_configs, source_table_id=table_id
+    )
 
 
 def _begin_training_segment(  # pyright: ignore[reportUnusedFunction]
@@ -660,8 +1121,8 @@ def _begin_training_segment(  # pyright: ignore[reportUnusedFunction]
     schedule : TrainingSchedule
         Pending child schedule from curriculum._make_continuation_schedule at
         this carry's cumulative rounds. An optional learner declaration is kept.
-        Explicit history thresholds may regroup passed duplicate requests, but
-        every existing snapshot must keep a marker and no slot may be removed.
+        Explicit history thresholds may drop completed requests, which remain
+        in the parent proof. Every pending request must remain.
 
     Returns
     -------
@@ -676,7 +1137,7 @@ def _begin_training_segment(  # pyright: ignore[reportUnusedFunction]
     ------
     ValueError
         Parent validation fails, the declaration describes another boundary,
-        a history change drops old snapshots, or the child accounting is invalid.
+        a history change drops a pending request, or child accounting is invalid.
 
     Notes
     -----
@@ -715,11 +1176,20 @@ def _begin_training_segment(  # pyright: ignore[reportUnusedFunction]
             else int(carry.schedule.history_threshold_count)
         )
     )
+    replacement_stages = next(
+        (
+            change["curriculum"]
+            for change in declaration.get("curriculum_changes", ())
+            if change["segment_index"] == declaration["segment_index"]
+        ),
+        None,
+    )
     expected = _make_continuation_schedule(
         collection.schedule,
         completed_rounds=rounds,
         additional_env_steps=declaration["additional_env_steps"],
         history_threshold_rounds=None if same_history else thresholds[:active],
+        curriculum=replacement_stages,
     )
     expected_details = _continuation_details(expected)
     assert expected_details is not None
@@ -764,21 +1234,32 @@ def _begin_training_segment(  # pyright: ignore[reportUnusedFunction]
         raise ValueError("Child parent stage proof differs from the actual carry")
     declaration["parent_stage_proof"] = proof
     schedule = _restore_continuation_schedule(declaration)
+    _check_learner_slots(collection.learner_slots, schedule)
+    if collection.learner_slots is not None:
+        for member in collection.partner_systems:
+            _check_partner_rosters(member, schedule, collection.learner_slots)
     history = carry.history
     if not same_history:
-        count = int(history.count)
-        captures = np.asarray(history.captured_rounds)[:count]
-        mapping = np.searchsorted(
-            captures, np.asarray(thresholds[:active]), side="left"
+        old_active = (
+            20
+            if carry.schedule.history_threshold_count is None
+            else int(carry.schedule.history_threshold_count)
         )
-        mapping = np.where(mapping < count, mapping, -1).astype(np.int32)
-        if set(int(value) for value in mapping if value >= 0) != set(range(count)):
-            raise ValueError("Child history requests must retain every saved snapshot")
-        history = history._replace(
-            threshold_to_snapshot=jnp.asarray(
-                np.pad(mapping, (0, 20 - active), constant_values=-1)
+        old_thresholds = np.asarray(carry.schedule.history_threshold_rounds)[
+            :old_active
+        ]
+        old_mapping = np.asarray(history.threshold_to_snapshot)[:old_active]
+        saved = dict(zip(old_thresholds.tolist(), old_mapping.tolist(), strict=True))
+        pending = {int(point) for point, identity in saved.items() if identity < 0}
+        if not pending <= set(thresholds[:active]):
+            raise ValueError(
+                "Child history requests must retain pending parent captures"
             )
+        mapping = [saved.get(point, -1) for point in thresholds[:active]]
+        history = history._replace(
+            threshold_to_snapshot=jnp.asarray(mapping + [-1] * (20 - active), jnp.int32)
         )
+    binding, tracking = _expanded_stage_sources(collection, carry, schedule)
     changed = carry._replace(
         schedule=schedule.arrays,
         progress=carry.progress._replace(
@@ -788,7 +1269,7 @@ def _begin_training_segment(  # pyright: ignore[reportUnusedFunction]
             stage_complete=jnp.zeros_like(carry.progress.stage_complete),
         ),
         tracking=replace(
-            carry.tracking,
+            tracking,
             stage_ordinal=jnp.int32(0),
             stage_round_budget=schedule.arrays.round_budgets[0],
             stage_rounds=jnp.int32(0),
@@ -801,10 +1282,298 @@ def _begin_training_segment(  # pyright: ignore[reportUnusedFunction]
         # A mixed placement would compile again after the first block commits it.
         changed = jax.device_put(changed, carry.root_key.sharding)
     child = replace(
-        collection, schedule=schedule, carry_spec=jax.eval_shape(_retain, changed)
+        collection,
+        binding=binding,
+        schedule=schedule,
+        carry_spec=jax.eval_shape(_retain, changed),
     )
     _validate_training_continuation(child, changed, recheck_installed_content=False)
     return child, changed
+
+
+def _resize_training_history(  # pyright: ignore[reportUnusedFunction]
+    collection: TrainingCollection,
+    carry: TrainingCarry,
+    *,
+    keep_past: int,
+    history_capture_capacity: int,
+) -> tuple[TrainingCollection, TrainingCarry]:
+    """Resize history once at a checked child boundary without changing live games.
+
+    collection/carry describe the existing verified boundary. keep_past is the
+    new nonnegative rolling window, and history_capture_capacity is the total
+    stable capture bound, including old IDs. Old counter rows are never removed.
+    Keep every unfinished game's copy plus the newest eligible copies. A shrink
+    that cannot fit those copies in K+1 slots raises ValueError before mutation.
+    K=0 needs no live historical games. Finished lanes can return to self before
+    their pending reset. Stable IDs, clocks, current/pinned values, live memory,
+    replay/recent rows and cumulative counters stay unchanged.
+
+    Return the descriptor with refreshed shape evidence and the resized carry.
+    This host-only setup reads small metadata and gathers each bank leaf once;
+    changed shapes may compile a new learner program. No game or action runs.
+    """
+    if type(keep_past) is not int or keep_past < 0:
+        raise ValueError("keep_past must be a nonnegative integer")
+    old_capacity = int(carry.history.capture_capacity)
+    if (
+        type(history_capture_capacity) is not int
+        or history_capture_capacity < int(carry.history.next_capture_id)
+        or history_capture_capacity < old_capacity
+    ):
+        raise ValueError("History counter capacity must retain every saved row and ID")
+    history = carry.history
+    capacity = keep_past + 1 if keep_past else 0
+    ids, eligible, slots, ended = map(
+        np.asarray,
+        jax.device_get(
+            (
+                history.captured_ids,
+                history.eligible,
+                history.lane_snapshot,
+                carry.state.done.done,
+            )
+        ),
+    )
+    live = set(int(slot) for slot in slots[~ended] if slot >= 0)
+    newest = sorted(
+        np.flatnonzero(eligible), key=lambda slot: int(ids[slot]), reverse=True
+    )[:keep_past]
+    retained = sorted(live | set(newest), key=lambda slot: int(ids[slot]))
+    if len(retained) > capacity:
+        raise ValueError(
+            f"keep_past={keep_past} cannot retain {len(retained)} required copies "
+            f"in {capacity} slots; unfinished games still use "
+            f"capture IDs {[int(ids[slot]) for slot in sorted(live)]}"
+        )
+    # Preserve the old layout when its size is unchanged; no ordinary copy is needed.
+    if capacity == ids.size:
+        next_history = history
+    else:
+        selected = jnp.asarray(retained, jnp.int32)
+
+        def resize(bank: Array) -> Array:
+            """Gather retained resident leaves, then add empty physical slots."""
+            kept = jnp.take(bank, selected, axis=0)
+            padding = [(0, capacity - len(retained)), *[(0, 0)] * (bank.ndim - 1)]
+            return jnp.pad(kept, padding)
+
+        remap = {old: new for new, old in enumerate(retained)}
+        lane_slots = np.asarray(
+            [remap.get(int(slot), -1) if slot >= 0 else slot for slot in slots],
+            np.int32,
+        )
+        metadata = {}
+        for name in ("captured_ids", "captured_rounds", "captured_updates"):
+            values = np.take(
+                np.asarray(getattr(history, name)),
+                np.asarray(retained, np.intp),
+                axis=0,
+            )
+            metadata[name] = jnp.asarray(
+                np.pad(values, (0, capacity - len(retained)), constant_values=-1)
+            )
+        next_history = history._replace(
+            historical_variables=jax.tree.map(resize, history.historical_variables),
+            count=jnp.int32(len(retained)),
+            lane_snapshot=jnp.asarray(lane_slots),
+            eligible=jnp.asarray(
+                [old in newest for old in retained]
+                + [False] * (capacity - len(retained))
+            ),
+            **metadata,
+        )
+    padding = history_capture_capacity - old_capacity
+
+    def pad_counts(values: Array) -> Array:
+        """Insert fresh capture rows before stable named-member rows."""
+        return jnp.concatenate(
+            (
+                values[: old_capacity + 2],
+                jnp.zeros((padding, values.shape[1]), values.dtype),
+                values[old_capacity + 2 :],
+            )
+        )
+
+    progress = carry.progress._replace(
+        opponent_starts=pad_counts(carry.progress.opponent_starts),
+        opponent_steps=pad_counts(carry.progress.opponent_steps),
+    )
+    next_history = next_history._replace(
+        capture_capacity=jnp.int32(history_capture_capacity)
+    )
+    selection = carry.opponent_selection
+    if selection is not None:
+        selection = configure_opponent_selection(
+            collection.opponent_names,
+            next_history,
+            _selection_value(collection, selection),
+            previous=selection,
+        )
+    partner_selection = carry.partner_selection
+    if partner_selection is not None:
+        rule = partner_selection_value(collection, carry)
+        partner_selection = cast(
+            tuple[OpponentSelection, OpponentSelection],
+            tuple(
+                configure_opponent_selection(
+                    collection.partner_names, next_history, rule, previous=side
+                )
+                for side in partner_selection
+            ),
+        )
+    changed = carry._replace(
+        history=next_history,
+        progress=progress,
+        opponent_selection=selection,
+        partner_selection=partner_selection,
+    )
+    if carry.root_key.committed:
+        changed = jax.device_put(changed, carry.root_key.sharding)
+    collection = replace(collection, carry_spec=jax.eval_shape(_retain, changed))
+    return _opponent_component_table(collection, changed), changed
+
+
+def change_training_reward(
+    collection: TrainingCollection,
+    carry: TrainingCarry,
+    *,
+    shaping: bool,
+    shaping_mode: str,
+    discount: float,
+    coefficient: float,
+    reward: RewardFunction | None = None,
+    reward_identity: dict[str, object] | None = None,
+) -> tuple[TrainingCollection, TrainingCarry]:
+    """Change reward settings at a checked child boundary without playing a step.
+
+    Parameters match init_training_collection. The caller first restores the
+    parent, then clears stored shaped experience when its objective changed.
+    This helper changes only reward settings and optional facts in the static
+    environment handle. Games, observations, memory, keys and progress remain
+    unchanged. Shape tracing checks callback output and refreshes padding data;
+    it executes no numerical reset or step. Unsupported callback shape/dtype or
+    non-JSON identity fails before a changed collection is returned.
+    """
+    if type(shaping) is not bool:
+        raise TypeError("shaping must be bool")
+    validate_shaping(discount=discount, coefficient=coefficient, mode=shaping_mode)
+    if (reward is None) != (reward_identity is None):
+        raise ValueError("reward and reward_identity must be supplied together")
+    if reward is not None:
+        if not callable(reward):
+            raise TypeError("reward must be callable")
+        if not isinstance(reward_identity, dict) or any(
+            not isinstance(key, str)
+            for key in cast(dict[object, object], reward_identity)
+        ):
+            raise TypeError("reward_identity must be a JSON object with string keys")
+        reward_identity = json.loads(json.dumps(reward_identity, allow_nan=False))
+    changed = carry._replace(
+        env=replace(
+            carry.env,
+            _execution=replace(carry.env._execution, training_facts=reward is not None),
+        ),
+        discount=jnp.asarray(discount, jnp.float32),
+        coefficient=jnp.asarray(coefficient, jnp.float32),
+    )
+    if carry.root_key.committed:
+        changed = jax.device_put(changed, carry.root_key.sharding)
+    shape = jax.eval_shape(
+        partial(_apply, actor=collection.actor, opponent=collection.opponent), changed
+    )
+    if reward is not None:
+        assert shape[4][4].training_facts is not None
+
+        def scalar_spec(value: Array | jax.ShapeDtypeStruct) -> jax.ShapeDtypeStruct:
+            """Remove the environment axis for the scalar callback contract."""
+            return jax.ShapeDtypeStruct(value.shape[1:], value.dtype)
+
+        validate_reward(
+            reward,
+            jax.tree.map(scalar_spec, changed.state.core_state),
+            jax.tree.map(scalar_spec, shape[4][4].training_facts),
+            jax.tree.map(scalar_spec, shape[4][1].core_state),
+            changed.progress.rounds,
+        )
+    return replace(
+        collection,
+        shaping=shaping,
+        shaping_mode=shaping_mode,
+        reward=reward,
+        reward_identity=reward_identity,
+        reward_settings=(float(changed.discount), float(changed.coefficient)),
+        info_spec=shape[4][4],
+        carry_spec=jax.eval_shape(_retain, changed),
+    ), changed
+
+
+def _check_opponent_rosters(system: System, schedule: TrainingSchedule) -> None:
+    """Require independent Policy lists to cover every declared Team B roster."""
+    if system._policies and not system._shared:
+        stages = int(
+            schedule.arrays.stage_count
+            if schedule.arrays.distribution_count is None
+            else schedule.arrays.distribution_count
+        )
+        sizes: set[int] = set()
+        explicit = schedule.arrays.roster_class_ids
+        for stage in range(stages):
+            row = None if explicit is None else np.asarray(explicit[stage])
+            sizes.add(
+                int(schedule.arrays.team_sizes[stage])
+                if row is None or not np.any(row)
+                else int(np.count_nonzero(row[5:]))
+            )
+        if sizes != {len(system._policies)}:
+            raise ValueError(
+                "An independent_policies pinned opponent needs every Team B "
+                f"roster size to equal its {len(system._policies)} Policies; "
+                f"the schedule uses {sorted(sizes)}"
+            )
+
+
+def _prepare_opponent_member(
+    name: str,
+    value: System | Policy | str,
+    schedule: TrainingSchedule,
+    binding: TrainingContentBinding,
+    *,
+    team_index: int | None = 1,
+) -> tuple[System, dict[str, Any]]:
+    """Freeze and register one declared member using evaluation's existing owners."""
+    if (
+        not isinstance(cast(object, name), str)
+        or not name.strip()
+        or name in ("self", "past")
+    ):
+        raise ValueError("Opponent names must be nonempty and exclude self/past")
+    reference = value if isinstance(value, str) else None
+    method = freeze_evaluation_method(
+        load_method(value) if isinstance(value, str) else value
+    )
+    system = shared_policy(method) if isinstance(method, Policy) else method
+    if team_index is not None:
+        _check_opponent_rosters(system, schedule)
+    registration = normalize_system_registration(
+        system, phase="validation", frozen=True
+    )[1]
+    record = {
+        "name": name,
+        "reference": reference,
+        "system_name": system.name,
+        "registration_id": canonical_digest_sha256(registration),
+        "registration": registration,
+        "execution": system.execution,
+        "variables_digest": tree_digest(system.variables)
+        if system.execution == "jax"
+        else None,
+    }
+    export = (
+        Path(reference) if reference is not None and Path(reference).is_dir() else None
+    )
+    record["evidence"] = pinned_opponent_evidence(binding, method, export=export)
+    return system, json.loads(json.dumps(record))
 
 
 def init_training_collection(
@@ -824,6 +1593,18 @@ def init_training_collection(
     pinned_opponent_share: float = 0.0,
     pinned_opponent: System | Policy | str | None = None,
     actor_variables_at_step: ActorVariablesAtStep | None = None,
+    keep_past: int = 20,
+    history_capture_capacity: int = 20,
+    minimum_capture_rounds: int = 1,
+    capture_interval_rounds: int = 0,
+    opponent_population: Mapping[str, System | Policy | str] | None = None,
+    opponent_selection: Mapping[str, float] | Sequence[str] | None = None,
+    vectorize_opponent_lanes: bool = True,
+    reward: RewardFunction | None = None,
+    reward_identity: dict[str, object] | None = None,
+    learner_slots: tuple[int, ...] | None = None,
+    partner_population: Mapping[str, System | Policy | str] | None = None,
+    partner_selection: Mapping[str, float] | Sequence[str] | None = None,
 ) -> tuple[TrainingCollection, TrainingCarry]:
     """Verify and initialize one fixed-batch experiment without choosing actions.
 
@@ -860,14 +1641,14 @@ def init_training_collection(
         Enable start declarations for a writer supplied at every host collection.
     pinned_opponent_share : float, default 0.0
         Static probability, within [0, 0.8], that a reset lane meets the pinned
-        first-update actor kept in history slot 0. Zero keeps the 80% current
+        first-update actor kept outside rotating history. Zero keeps the 80% current
         and 20% uniform-history recipe and traces today's program. A positive
         share requires schedule.early_history_capture=True, and that flag
         requires a positive share; the pair is checked here before any reset.
     pinned_opponent : System, Policy, str or None, default None
-        None keeps slot 0 as the network's first-update snapshot, exactly as
-        before. Otherwise the method that plays every lane assigned to slot 0,
-        instead of that snapshot: a System or Policy object, or a reference
+        None uses the network's separate first-update pin. Otherwise this
+        method plays every permanent-pin lane (assignment -2): a System or Policy
+        object, or a reference
         string resolved by ``load_method`` (a built-in name, an absolute
         actor-export or full learner checkpoint directory, or ``module:function``).
         Requires a positive
@@ -888,6 +1669,64 @@ def init_training_collection(
         variables only (see ActorVariablesAtStep). Setup checks with
         ``jax.eval_shape`` that it keeps the variable tree, shapes and dtypes,
         and that its identity is a JSON object; it runs no real decision.
+
+    keep_past, history_capture_capacity : int, defaults=20, 20
+        Resident rolling window size and maximum stable capture count. The bank
+        has keep_past+1 slots, or zero when disabled; counters have capacity+2
+        rows. The public runner computes capacity from its capture schedule.
+    minimum_capture_rounds, capture_interval_rounds : int, defaults=1, 0
+        Minimum actual capture gap and optional recurring gap, in full rounds.
+        Public train checks the maximum game horizon before setup and passes it
+        here. The low-level default keeps small direct fixtures usable. A zero
+        interval uses only the schedule's explicit thresholds.
+
+    vectorize_opponent_lanes : bool, default=True
+        Internal built-in actor execution choice. False uses lax.map for mixed
+        opponent lanes when grouped models cannot use an outer vmap. The shared
+        default and full-current batch call keep their existing compiled routes.
+
+    reward : callable or None, default=None
+        Pure JAX callback from shaping.resolve_reward. It receives one game's
+        public training state before/after the action, selected training facts,
+        and completed rounds before the step. Return float32 (10,) adjustments.
+        Team A feedback is stored separately; learner masks own its reduction.
+        None skips facts and callback work. Setup checks shape/dtype, while the
+        learner rejects nonfinite real-step values.
+    reward_identity : dict[str, object] or None, default=None
+        Matching JSON evidence from shaping.resolve_reward, copied at setup.
+        Supply both callback and identity, or neither. The checked continuation
+        owner may use the saved identity with a shape-only placeholder while
+        restoring a parent; replace it before collecting the changed child.
+
+    opponent_population : mapping[str, System | Policy | str] or None
+        Frozen named members in stable declaration order. Values use the same
+        loader, registration, roster and information rules as evaluation. Extra
+        members may start with zero share and become available to a later rule.
+        Open member resource scopes around setup and use; the public runner
+        handles this. Host members keep full-batch opaque memory outside carry.
+    opponent_selection : mapping[str, float], sequence[str] or None
+        Relative shares or an exact repeating order across actual game starts,
+        including initial games, in ascending lane order. Names are self, past
+        and declared aliases. Past uses uniform eligible copies unless changed
+        through update_opponent_selection; no eligible copy falls back to self.
+        None plus no population keeps the existing recipe and its random draws.
+        Cannot mix this API with legacy pinned settings. Padding consumes no
+        choice; unfinished games keep their chosen member. Game starts obey the
+        environment's existing int32 allocation limit.
+
+    learner_slots : tuple[int, ...] or None, default=None
+        Physical Team A slots whose decisions train. None or all five slots
+        keeps the full-learner route. Every stage needs an active learner slot.
+        All other active slots use fixed partners; physical roster masks stay
+        unchanged. Self/past/native pin opponents mirror this slot split.
+    partner_population, partner_selection : mapping or sequence or None
+        Frozen named methods and their relative shares or repeating game order,
+        using the same name and binding rules as opponents. Omitted shares use
+        all declared partners equally. Partners may not be self/past. Both teams
+        draw at actual game starts, using separate team keys for weighted draws
+        and the same dense game index for lists. A living game keeps its member.
+        Named external opponents remain whole-team replacements. Open resource
+        scopes before setup and retain them through collection, as the runner does.
 
     Returns
     -------
@@ -922,12 +1761,24 @@ def init_training_collection(
         )
     _check_training_schedule(schedule)
     if type(seed) is not int or any(
-        type(x) is not bool for x in (shaping, collect_training_state, recording)
+        type(x) is not bool
+        for x in (shaping, collect_training_state, recording, vectorize_opponent_lanes)
     ):
         raise TypeError("seed must be an integer and collection switches must be bool")
     if metrics not in ("none", "priority"):
         raise ValueError("training metrics must be priority or none")
     validate_shaping(discount=discount, coefficient=coefficient, mode=shaping_mode)
+    if (reward is None) != (reward_identity is None):
+        raise ValueError("reward and reward_identity must be supplied together")
+    if reward is not None:
+        if not callable(reward):
+            raise TypeError("reward must be callable")
+        if not isinstance(reward_identity, dict) or any(
+            not isinstance(key, str)
+            for key in cast(dict[object, object], reward_identity)
+        ):
+            raise TypeError("reward_identity must be a JSON object with string keys")
+        reward_identity = json.loads(json.dumps(reward_identity, allow_nan=False))
     _pinned_share(pinned_opponent_share)
     if (pinned_opponent_share > 0) != schedule.early_history_capture:
         raise ValueError(
@@ -951,7 +1802,6 @@ def init_training_collection(
             )
     if actor_variables_at_step is not None:
         _check_variables_hook(actor_variables_at_step, actor_variables)
-    history = init_opponent_history(actor_variables, num_envs=schedule.num_envs)
     if prepared is None:
         prepared = prepare_training_content(score_thresholds=schedule.score_thresholds)
     elif not isinstance(cast(object, prepared), PreparedTrainingContent):
@@ -965,12 +1815,84 @@ def init_training_collection(
         )
     if prepared.binding.score_thresholds != schedule.score_thresholds:
         raise ValueError("Prepared score thresholds differ from the training schedule")
+    generic = opponent_selection is not None or opponent_population is not None
+    frozen_members: list[System] = []
+    names: tuple[str, ...] = ()
+    members: tuple[dict[str, Any], ...] = ()
+    if generic:
+        opponent_selection_names(opponent_selection)
+        if pinned_opponent is not None or pinned_opponent_share:
+            raise ValueError(
+                "Generic opponent selection cannot mix with legacy pinned settings"
+            )
+        population = {} if opponent_population is None else dict(opponent_population)
+        names = tuple(population)
+        if any(
+            not isinstance(cast(object, n), str)
+            or not n.strip()
+            or n in ("self", "past")
+            for n in names
+        ):
+            raise ValueError(
+                "Opponent binding names must be nonempty and exclude self/past"
+            )
+        unknown = set(opponent_selection_names(opponent_selection)) - {
+            "self",
+            "past",
+            *names,
+        }
+        if unknown:
+            raise ValueError(f"Opponent members need bindings: {sorted(unknown)}")
+        frozen_members = []
+        records: list[dict[str, Any]] = []
+        for name, value in population.items():
+            system, record = _prepare_opponent_member(
+                name, value, schedule, prepared.binding
+            )
+            records.append(record)
+            frozen_members.append(system)
+        members = tuple(json.loads(json.dumps(records)))
+        if frozen_members:
+            pinned_opponent = pool({member: 1.0 for member in frozen_members})
+    slots = _check_learner_slots(learner_slots, schedule)
+    partner_names = () if partner_population is None else tuple(partner_population)
+    partner_systems: list[System] = []
+    partner_records: list[dict[str, Any]] = []
+    partner_rule = _partner_rule(partner_names, partner_selection)
+    if slots is None:
+        if partner_names or partner_selection is not None:
+            raise ValueError(
+                "Partners require learner_slots with at least one free slot"
+            )
+    else:
+        if not partner_names:
+            raise ValueError(
+                "Fixed partners must cover the slots outside learner_slots"
+            )
+        assert partner_population is not None
+        for name, value in partner_population.items():
+            system, record = _prepare_opponent_member(
+                name, value, schedule, prepared.binding, team_index=None
+            )
+            _check_partner_rosters(system, schedule, slots)
+            partner_systems.append(system)
+            partner_records.append(record)
+    history = init_opponent_history(
+        actor_variables,
+        num_envs=schedule.num_envs,
+        keep_past=keep_past,
+        capture_capacity=history_capture_capacity,
+        minimum_capture_rounds=minimum_capture_rounds,
+        capture_interval_rounds=capture_interval_rounds,
+        pin_first_update=pinned_opponent_share > 0 and pinned_opponent is None,
+        external_pin=pinned_opponent is not None,
+    )
     pinned_record: dict[str, Any] | None = None
     host: HostOpponent | None = None
     pinned_values: Tree = ()
     pinned_system: System | None = None
     if pinned_opponent is not None:
-        if not pinned_opponent_share > 0:
+        if not generic and not pinned_opponent_share > 0:
             raise ValueError("A pinned opponent needs a positive pinned_opponent_share")
         reference = pinned_opponent if isinstance(pinned_opponent, str) else None
         method = (
@@ -978,19 +1900,9 @@ def init_training_collection(
             if isinstance(pinned_opponent, str)
             else pinned_opponent
         )
-        frozen = freeze_evaluation_method(method)
+        frozen = method if generic else freeze_evaluation_method(method)
         system = shared_policy(frozen) if isinstance(frozen, Policy) else frozen
-        if system._policies and not system._shared:
-            stages = int(schedule.arrays.stage_count)
-            sizes = {
-                int(size) for size in np.asarray(schedule.arrays.team_sizes)[:stages]
-            }
-            if sizes != {len(system._policies)}:
-                raise ValueError(
-                    "An independent_policies pinned opponent needs every Team B "
-                    f"roster size to equal its {len(system._policies)} Policies; "
-                    f"the schedule uses {sorted(sizes)}"
-                )
+        _check_opponent_rosters(system, schedule)
         registration = (
             policy_description(
                 frozen, frozen.variables, frozen.initial_carry, include_digests=True
@@ -1006,7 +1918,7 @@ def init_training_collection(
             else None
         )
         if system.execution == "host":
-            host = HostOpponent(system, schedule.num_envs)
+            host = HostOpponent(system, schedule.num_envs, external_selection=generic)
             pinned_system = HOST_ACTIONS_SYSTEM
             zero = jnp.zeros((schedule.num_envs, 5), jnp.int32)
             pinned_values = (ActorAction(zero, zero, zero), ())
@@ -1038,7 +1950,9 @@ def init_training_collection(
                 }
             )
         )
-    opponent = make_opponent_system(actor, pinned=pinned_system)
+    opponent = make_opponent_system(
+        actor, pinned=pinned_system, vectorize_lanes=vectorize_opponent_lanes
+    )
     root = jax.random.key(seed, impl="threefry2x32")
     generation = jnp.zeros(schedule.num_envs, jnp.int32)
     sampled = sample_training_configs(
@@ -1048,31 +1962,114 @@ def init_training_collection(
         eligible_maps=schedule.arrays.eligible_maps[0],
         team_size=schedule.arrays.team_sizes[0],
         score_threshold=schedule.arrays.score_thresholds[0],
+        roster_class_ids=None
+        if schedule.arrays.roster_class_ids is None
+        else schedule.arrays.roster_class_ids[0],
     )
     env = make(
         "tdm",
         env_config=sampled.config,
         num_envs=schedule.num_envs,
         metrics=cast(Any, metrics),
+        training_facts=reward is not None,
     )
     observations, state = env.reset(training_keys(root, generation, stream="reset"))
+    selection_state = None
+    if generic:
+        selection_state = configure_opponent_selection(
+            names, history, opponent_selection
+        )
+        history, selection_state = select_opponents(
+            history,
+            selection_state,
+            jnp.ones(schedule.num_envs, jnp.bool_),
+            training_keys(root, generation, stream="opponent"),
+        )
+        if pinned_system is not None:
+            if host is not None:
+                host.variables = host.variables._replace(
+                    choices=selection_state.choices
+                )
+            else:
+                pinned_values = (
+                    pinned_values[0]._replace(choices=selection_state.choices),
+                    pinned_values[1],
+                )
+    else:
+        history = assign_opponents(
+            history,
+            jnp.ones(schedule.num_envs, jnp.bool_),
+            training_keys(root, generation, stream="opponent"),
+            pinned_share=pinned_opponent_share,
+        )
     if bool(np.asarray(jnp.any(state.lifecycle_error) | _history_invalid(history))):
         raise ValueError("Training reset or opponent initialization failed")
-    actor = replace(actor, variables=())
+    native_actor = actor
+    partner_settings: tuple[OpponentSelection, OpponentSelection] | None = None
+    partner_values: Tree = ()
+    partner_actions: tuple[ActorAction, ActorAction] | None = None
+    host_partners: tuple[HostOpponent, HostOpponent] | None = None
+    if slots is not None:
+        partner_pool = pool({member: 1.0 for member in partner_systems})
+        initial_selection = configure_opponent_selection(
+            partner_names, history, partner_rule
+        )
+        partner_settings = (initial_selection, initial_selection)
+        partner_settings = _select_partners(history, partner_settings, root, state)
+        if partner_pool.execution == "host":
+            host_partners = (
+                HostOpponent(partner_pool, schedule.num_envs, external_selection=True),
+                HostOpponent(partner_pool, schedule.num_envs, external_selection=True),
+            )
+            zero = jnp.zeros((schedule.num_envs, 5), jnp.int32)
+            idle_actions = ActorAction(zero, zero, zero)
+            partner_actions = (idle_actions, idle_actions)
+            partner_system = HOST_ACTIONS_SYSTEM
+        else:
+            _, values, template = prepare_evaluation_system(partner_pool)
+            partner_values = jax.tree.map(_uncommitted, (values, template))
+            partner_system = partner_pool
+        actor, opponent = _training_teams(
+            native_actor,
+            partner_system,
+            slots,
+            pinned_system,
+            vectorize_lanes=vectorize_opponent_lanes,
+        )
+    else:
+        actor = replace(actor, variables=())
+    variables_a, variables_b = _team_variables(
+        actor,
+        opponent,
+        history,
+        pinned_values,
+        partner_settings,
+        partner_values,
+        partner_actions,
+    )
     memory = init_systems(
         actor,
         opponent,
         observations,
         state,
         training_keys(root, generation, stream="initialization"),
-        variables_a=actor_variables,
-        variables_b=history if pinned_system is None else (history, *pinned_values),
+        variables_a=variables_a,
+        variables_b=variables_b,
     )
     if host is not None:
         host.start(
             jax.device_get(system_inputs(observations, state, team=1)),
             _initialization_keys(memory.init_key, state.episode_id, 1),
         )
+    if host_partners is not None:
+        for side, holder in enumerate(host_partners):
+            view = _partner_inputs(observations, state, slots, side)
+            holder.start(
+                jax.device_get(view),
+                _member_keys(
+                    _initialization_keys(memory.init_key, state.episode_id, side), 1
+                ),
+            )
     tracking = init_episode_tracking(
         env,
         state,
@@ -1093,14 +2090,38 @@ def init_training_collection(
         sampled.source_indices,
         sampled.source_class_ids,
         schedule.arrays,
-        _init_training_progress(num_envs=schedule.num_envs),
+        _init_training_progress(
+            num_envs=schedule.num_envs,
+            history_capture_capacity=history_capture_capacity,
+            opponent_members=len(names),
+            partner_members=len(partner_names),
+        ),
         history,
         jnp.asarray(discount, jnp.float32),
         jnp.asarray(coefficient, jnp.float32),
         pinned_values,
+        selection_state,
+        partner_settings,
+        partner_values,
+        partner_actions,
+        _frozen_host_values(host, host_partners),
     )
     _check_carry(carry)
     shape = jax.eval_shape(partial(_apply, actor=actor, opponent=opponent), carry)
+    if reward is not None:
+        assert shape[4][4].training_facts is not None
+
+        def scalar_spec(value: Array | jax.ShapeDtypeStruct) -> jax.ShapeDtypeStruct:
+            """Drop only the environment axis for a scalar callback shape check."""
+            return jax.ShapeDtypeStruct(value.shape[1:], value.dtype)
+
+        validate_reward(
+            reward,
+            jax.tree.map(scalar_spec, state.core_state),
+            jax.tree.map(scalar_spec, shape[4][4].training_facts),
+            jax.tree.map(scalar_spec, shape[4][1].core_state),
+            jnp.int32(0),
+        )
     collection = TrainingCollection(
         actor,
         opponent,
@@ -1110,7 +2131,7 @@ def init_training_collection(
         collect_training_state,
         metrics,
         recording,
-        shape[2][0],
+        shape[2][0] if slots is None else shape[2][0][0],
         shape[4][4],
         jax.eval_shape(_retain, carry),
         tuple(int(x) for x in np.asarray(jax.random.key_data(root))),
@@ -1121,8 +2142,81 @@ def init_training_collection(
         pinned_opponent=pinned_record,
         host_opponent=host,
         actor_variables_at_step=actor_variables_at_step,
+        opponent_names=names,
+        opponent_records=members,
+        opponent_systems=tuple(frozen_members),
+        reward=reward,
+        reward_identity=reward_identity,
+        vectorize_opponent_lanes=vectorize_opponent_lanes,
+        learner_slots=slots,
+        learner_actor=None if slots is None else replace(native_actor, variables=()),
+        partner_names=partner_names,
+        partner_records=tuple(partner_records),
+        partner_systems=tuple(partner_systems),
+        host_partners=host_partners,
+        pinned_system=pinned_system,
     )
-    return collection, carry
+    return _opponent_component_table(collection, carry), carry
+
+
+def _opponent_component_table(
+    collection: TrainingCollection, carry: TrainingCarry
+) -> TrainingCollection:
+    """Label the writer's fixed component table with stable training identities."""
+    if not collection.recording:
+        return collection
+    components = list(collection.opponent.components or ())
+    lookup = {
+        str(component.get("version")): index
+        for index, component in enumerate(components)
+    }
+    rows: list[int] = []
+    for record in opponent_member_records(collection, carry):
+        version = f"opponent_snapshot_{record['snapshot']}"
+        if version not in lookup:
+            component = {"name": record["label"], "version": version}
+            if record["kind"] == "past":
+                component["checkpoint"] = f"capture_{record['capture_id']}"
+            elif record["kind"] == "named":
+                component["checkpoint"] = record["registration_id"]
+                if record.get("variables_digest") is not None:
+                    component["parameters_digest"] = record["variables_digest"]
+            lookup[version] = len(components)
+            components.append(component)
+        rows.append(lookup[version])
+    actor = collection.actor
+    partner_rows: list[tuple[int, ...]] = []
+    for team_components in (list(actor.components or ()), components):
+        partner_lookup = {
+            str(item.get("version")): index
+            for index, item in enumerate(team_components)
+        }
+        indices: list[int] = []
+        for index, member in enumerate(collection.partner_records):
+            version = f"partner_member_{index}"
+            if version not in partner_lookup:
+                entry = {
+                    "name": member["name"],
+                    "version": version,
+                    "checkpoint": member["registration_id"],
+                }
+                if member.get("variables_digest") is not None:
+                    entry["parameters_digest"] = member["variables_digest"]
+                partner_lookup[version] = len(team_components)
+                team_components.append(entry)
+            indices.append(partner_lookup[version])
+        partner_rows.append(tuple(indices))
+        if len(partner_rows) == 1:
+            actor = replace(actor, components=tuple(team_components))
+    return replace(
+        collection,
+        actor=actor,
+        opponent=replace(collection.opponent, components=tuple(components)),
+        opponent_trace_rows=tuple(rows),
+        partner_trace_rows=cast(
+            tuple[tuple[int, ...], tuple[int, ...]], tuple(partner_rows)
+        ),
+    )
 
 
 def _check_variables_hook(hook: ActorVariablesAtStep, variables: Tree) -> None:
@@ -1155,6 +2249,15 @@ def _apply(carry: TrainingCarry, actor: System, opponent: System) -> Tree:
     """Supply exact action/step keys and dynamic variables to the shared step."""
     state = carry.state
     local_step = state.core_state.step_count - state.initial_step_count
+    variables_a, variables_b = _team_variables(
+        actor,
+        opponent,
+        carry.history,
+        carry.pinned_opponent,
+        carry.partner_selection,
+        carry.partner_values,
+        carry.partner_actions,
+    )
     return _apply_and_track(
         carry.env,
         carry.observations,
@@ -1163,10 +2266,8 @@ def _apply(carry: TrainingCarry, actor: System, opponent: System) -> Tree:
         carry.tracking,
         actor=actor,
         opponent=opponent,
-        variables_a=carry.history.current_variables,
-        variables_b=carry.history
-        if len(carry.pinned_opponent) == 0
-        else (carry.history, *carry.pinned_opponent),
+        variables_a=variables_a,
+        variables_b=variables_b,
         action_keys=training_keys(
             carry.root_key,
             state.reset_generation,
@@ -1220,6 +2321,12 @@ def _padding(
         jnp.zeros((b, TRAINING_STATE_FEATURE_SIZE), jnp.float32)
         if collection.collect_training_state
         else None,
+        custom_rewards=jnp.zeros((b, 5), jnp.float32)
+        if collection.reward is not None
+        else None,
+        learner_active=None
+        if collection.learner_slots is None
+        else jnp.zeros((b, 5), jnp.bool_),
     )
 
 
@@ -1280,13 +2387,21 @@ def _reset_pending(
         eligible_maps=carry.schedule.eligible_maps[stage],
         team_size=carry.schedule.team_sizes[stage],
         score_threshold=carry.schedule.score_thresholds[stage],
+        roster_class_ids=None
+        if carry.schedule.roster_class_ids is None
+        else carry.schedule.roster_class_ids[stage],
     )
-    history = assign_opponents(
-        carry.history,
-        mask,
-        training_keys(carry.root_key, state.reset_generation, stream="opponent"),
-        pinned_share=collection.pinned_opponent_share,
-    )
+    selection = carry.opponent_selection
+    pinned = carry.pinned_opponent
+    keys = training_keys(carry.root_key, state.reset_generation, stream="opponent")
+    if selection is None:
+        history = assign_opponents(
+            carry.history, mask, keys, pinned_share=collection.pinned_opponent_share
+        )
+    else:
+        history, selection = select_opponents(carry.history, selection, mask, keys)
+        if collection.opponent_names and collection.host_opponent is None:
+            pinned = (pinned[0]._replace(choices=selection.choices), pinned[1])
     progress = carry.progress._replace(
         episode_stage=jnp.where(mask, stage, carry.progress.episode_stage)
     )
@@ -1297,6 +2412,13 @@ def _reset_pending(
         source_class_ids=classes,
         history=history,
         progress=progress,
+        pinned_opponent=pinned,
+        opponent_selection=selection,
+        partner_selection=None
+        if carry.partner_selection is None
+        else _select_partners(
+            history, carry.partner_selection, carry.root_key, state, mask=mask
+        ),
     )
 
 
@@ -1329,7 +2451,14 @@ def _real_step(
     valid = info.decision_step >= 0
     ended = info.completed & valid
     lanes = jnp.arange(before.episode_id.shape[0])
-    slot = carry.history.lane_snapshot + 1
+    opponent_snapshot, opponent_update = opponent_identity(carry.history)
+    if carry.opponent_selection is not None:
+        opponent_snapshot = jnp.where(
+            opponent_snapshot == -2,
+            -3 - carry.opponent_selection.choices,
+            opponent_snapshot,
+        )
+    slot = opponent_counter_row(opponent_snapshot, carry.history.capture_capacity)
     progress = progress._replace(
         map_steps=progress.map_steps.at[carry.source_indices % 42, lanes].add(
             valid.astype(jnp.int32)
@@ -1341,21 +2470,29 @@ def _real_step(
             valid.astype(jnp.int32)
         ),
     )
+    if carry.partner_selection is not None:
+        assert (
+            progress.partner_used is not None and collection.learner_slots is not None
+        )
+        complement = jnp.asarray(
+            [slot not in collection.learner_slots for slot in range(5)], jnp.bool_
+        )
+        used = progress.partner_used
+        for side, settings in enumerate(carry.partner_selection):
+            alive = before.core_state.alive_mask[:, side * 5 : (side + 1) * 5]
+            active = before.config.agent_profile.active_mask[
+                :, side * 5 : (side + 1) * 5
+            ]
+            played = valid & jnp.any(active & alive & complement, axis=1)
+            if side == 1 and len(carry.pinned_opponent):
+                played &= carry.history.lane_snapshot != -2
+            used = used.at[settings.choices].max(played)
+        progress = progress._replace(partner_used=used)
     priority = info.priority
     if priority is not None:
         availability = priority.valid & ended[:, None]
         priority = MetricValues(
             jnp.where(availability, priority.values, 0), availability
-        )
-    opponent_update = jnp.where(
-        carry.history.lane_snapshot < 0,
-        carry.history.current_update,
-        carry.history.captured_updates[jnp.maximum(carry.history.lane_snapshot, 0)],
-    )
-    if collection.pinned_opponent is not None:
-        # Slot 0 marks the named pinned System, not a learner version.
-        opponent_update = jnp.where(
-            carry.history.lane_snapshot == 0, -2, opponent_update
         )
     if not collection.shaping:
         shaping = jnp.zeros_like(rewards.rewards[:, 0])
@@ -1372,11 +2509,23 @@ def _real_step(
             info,
             coefficient=carry.coefficient,
         )[:, 0]
+    custom = None
+    if collection.reward is not None:
+        assert info.training_facts is not None
+        custom = jax.vmap(
+            partial(reward_adjustments, collection.reward),
+            in_axes=(0, 0, 0, None),
+        )(
+            before.core_state,
+            info.training_facts,
+            state.core_state,
+            carry.progress.rounds,
+        )[:, :5]
     row = TrainingTransition(
         carry.observations,
         _team_mask(before),
         actions,
-        learning[0],
+        learning[0] if collection.learner_slots is None else learning[0][0],
         rewards.rewards[:, :5],
         shaping,
         before.config.agent_profile.active_mask[:, :5],
@@ -1403,14 +2552,42 @@ def _real_step(
         carry.source_indices,
         jnp.full_like(info.episode_id, carry.history.current_update),
         opponent_update,
-        carry.history.lane_snapshot,
+        opponent_snapshot,
         encode_training_state(before.core_state, before.config)
         if collection.collect_training_state
         else None,
+        custom_rewards=custom,
+        learner_active=_learner_active(collection, before),
     )
-    trace = memory.policy_trace._replace(
-        policy_ids=jnp.full_like(memory.policy_trace.policy_ids, -1)
-    )
+    policy_ids = jnp.full_like(memory.policy_trace.policy_ids, -1)
+    if collection.recording:
+        policy_ids = memory.policy_trace.policy_ids.at[:, 5:].set(
+            jnp.where(
+                before.config.agent_profile.active_mask[:, 5:],
+                jnp.asarray(collection.opponent_trace_rows, jnp.int32)[slot, None],
+                -1,
+            )
+        )
+    if collection.recording and carry.partner_selection is not None:
+        assert collection.learner_slots is not None
+        complement = jnp.asarray(
+            [slot not in collection.learner_slots for slot in range(5)], jnp.bool_
+        )
+        for side, settings in enumerate(carry.partner_selection):
+            active = before.config.agent_profile.active_mask[
+                :, side * 5 : (side + 1) * 5
+            ]
+            owned = active & complement
+            if side == 1 and len(carry.pinned_opponent):
+                owned &= (carry.history.lane_snapshot != -2)[:, None]
+            member_ids = jnp.asarray(collection.partner_trace_rows[side], jnp.int32)[
+                settings.choices
+            ]
+            prior = policy_ids[:, side * 5 : (side + 1) * 5]
+            policy_ids = policy_ids.at[:, side * 5 : (side + 1) * 5].set(
+                jnp.where(owned, member_ids[:, None], prior)
+            )
+    trace = memory.policy_trace._replace(policy_ids=policy_ids)
     memory = memory._replace(policy_trace=trace)
     return carry._replace(
         observations=observations,
@@ -1427,7 +2604,7 @@ def _refuse_host(collection: TrainingCollection, name: str) -> None:
     Raises ValueError naming the helper when collection.host_opponent is set;
     does nothing otherwise. Called at trace time, so it adds nothing to programs.
     """
-    if collection.host_opponent is not None:
+    if collection.host_opponent is not None or collection.host_partners is not None:
         raise ValueError(
             f"{name} cannot call a pinned host method; use collect_training_rollout, "
             "which runs the host route"
@@ -1511,7 +2688,7 @@ def _package(
     state = carry.state
     return TrainingRollout(
         rows,
-        initial.memory.team_a,
+        learner_memory(initial),
         carry.observations,
         _team_mask(state),
         state.config.agent_profile.active_mask[:, :5],
@@ -1521,6 +2698,7 @@ def _package(
         if collection.collect_training_state
         else None,
         carry.progress.rounds - initial.progress.rounds,
+        final_learner_active=_learner_active(collection, state),
     )
 
 
@@ -1630,7 +2808,7 @@ def collect_training_rollout(
     if collection.recording != (writer is not None):
         raise ValueError("Supply a writer exactly when collection recording is enabled")
     _check_carry(carry)
-    if collection.host_opponent is not None:
+    if collection.host_opponent is not None or collection.host_partners is not None:
         if writer is not None:
             _check_collection_writer(
                 writer,
@@ -1680,6 +2858,623 @@ def collect_training_rollout(
     return carry, rollout
 
 
+def _selection_value(
+    collection: TrainingCollection, settings: OpponentSelection
+) -> Mapping[str, float] | Sequence[str]:
+    """Read the small saved selection table as its original public value."""
+    return _selection_declaration(collection.opponent_names, settings)
+
+
+def _selection_declaration(
+    member_names: tuple[str, ...], settings: OpponentSelection
+) -> Mapping[str, float] | Sequence[str]:
+    """Read one selector without changing its choice cursor or live bindings."""
+    names = ("self", "past", *member_names)
+    if bool(settings.ordered):
+        return [names[int(index)] for index in np.asarray(settings.order)]
+    return dict(zip(names, np.asarray(settings.shares).tolist(), strict=True))
+
+
+def _bind_opponent_references(  # pyright: ignore[reportUnusedFunction]
+    collection: TrainingCollection, references: Mapping[str, str]
+) -> TrainingCollection:
+    """Attach original references after the runner resolves and opens members.
+
+    references must come from the runner's trusted loader results for this same
+    collection. It preserves source paths lost when resolved Systems are passed
+    into setup. Recompute exposure evidence with the frozen member and original
+    export path. This changes no registration, weights, memory or execution.
+    Unknown names or invalid reference strings raise before returning a change.
+    """
+    if set(references) - set(collection.opponent_names):
+        raise ValueError("Opponent references must name declared members")
+    records: list[dict[str, Any]] = []
+    for member, record in zip(
+        collection.opponent_systems, collection.opponent_records, strict=True
+    ):
+        reference = references.get(record["name"])
+        if reference is None:
+            records.append(record)
+            continue
+        if not isinstance(cast(object, reference), str) or not reference.strip():
+            raise ValueError("Opponent references must be nonempty strings")
+        export = Path(reference) if Path(reference).is_dir() else None
+        records.append(
+            {
+                **record,
+                "reference": reference,
+                "evidence": pinned_opponent_evidence(
+                    collection.binding, member, export=export
+                ),
+            }
+        )
+    return replace(collection, opponent_records=tuple(records))
+
+
+def _bind_partner_references(  # pyright: ignore[reportUnusedFunction]
+    collection: TrainingCollection, references: Mapping[str, str]
+) -> TrainingCollection:
+    """Attach trusted original partner references using the shared binding owner."""
+    rebound = _bind_opponent_references(
+        replace(
+            collection,
+            opponent_names=collection.partner_names,
+            opponent_records=collection.partner_records,
+            opponent_systems=collection.partner_systems,
+        ),
+        references,
+    )
+    return replace(collection, partner_records=rebound.opponent_records)
+
+
+def partner_selection_value(
+    collection: TrainingCollection, carry: TrainingCarry
+) -> object:
+    """Read the saved partner rule for checkpoint reconstruction; None disables it."""
+    if carry.partner_selection is None:
+        return None
+    value = _selection_declaration(collection.partner_names, carry.partner_selection[0])
+    if isinstance(value, Mapping):
+        return {
+            name: share for name, share in value.items() if name not in ("self", "past")
+        }
+    return value
+
+
+def update_partner_selection(
+    collection: TrainingCollection,
+    carry: TrainingCarry,
+    *,
+    selection: Mapping[str, float] | Sequence[str] | None = None,
+) -> tuple[TrainingCollection, TrainingCarry]:
+    """Change future partner shares/order on both teams, preserving living games.
+
+    Names must already be declared frozen members. None keeps the saved rule.
+    Both teams retain their own choices and memory. A changed list restarts at
+    its first entry on the next real game; unchanged lists keep their position.
+    Same-shaped changes keep the descriptor and compiled program reusable.
+    """
+    if carry.partner_selection is None:
+        if selection is not None:
+            raise ValueError("Partner selection requires a declared partner population")
+        return collection, carry
+    rule = (
+        partner_selection_value(collection, carry) if selection is None else selection
+    )
+    _partner_rule(collection.partner_names, rule)
+    settings = cast(
+        tuple[OpponentSelection, OpponentSelection],
+        tuple(
+            configure_opponent_selection(
+                collection.partner_names, carry.history, rule, previous=side
+            )
+            for side in carry.partner_selection
+        ),
+    )
+    changed = carry._replace(partner_selection=settings)
+    if carry.root_key.committed:
+        changed = jax.device_put(changed, carry.root_key.sharding)
+    if _schema(changed) == _schema(carry):
+        return collection, changed
+    return replace(collection, carry_spec=jax.eval_shape(_retain, changed)), changed
+
+
+def _partner_pool_memory(carry: TrainingCarry, side: int) -> Tree:
+    """Read a JAX partner pool's whole memory from its ordinary team composition."""
+    if side == 0:
+        return carry.memory.team_a.members[1]
+    native = (
+        carry.memory.team_b
+        if not len(carry.pinned_opponent)
+        else carry.memory.team_b.members[0]
+    )
+    return native.members[1]
+
+
+def _replace_partner_memories(
+    carry: TrainingCarry, memories: tuple[Tree, Tree]
+) -> TrainingCarry:
+    """Replace only partner pool trees; learner/external opponent memory stays put."""
+    a = carry.memory.team_a
+    a = a._replace(members=(a.members[0], memories[0]))
+    b = carry.memory.team_b
+    native = b if not len(carry.pinned_opponent) else b.members[0]
+    native = native._replace(members=(native.members[0], memories[1]))
+    b = (
+        native
+        if not len(carry.pinned_opponent)
+        else b._replace(members=(native, b.members[1]))
+    )
+    return carry._replace(memory=carry.memory._replace(team_a=a, team_b=b))
+
+
+def append_training_partners(
+    collection: TrainingCollection,
+    carry: TrainingCarry,
+    additions: Mapping[str, System | Policy | str],
+    *,
+    selection: Mapping[str, float] | Sequence[str] | None = None,
+) -> tuple[TrainingCollection, TrainingCarry]:
+    """Append frozen partner names at a child boundary without replacing live members.
+
+    Resource scopes must already be open. Existing weights, selected members and
+    full-batch memories stay exact. Only new members initialize with no valid
+    lanes. Host state keeps its existing holder clocks and reset hooks. New
+    structures may compile anew. Enable partner training when creating the run;
+    this helper does not change learner_slots or convert a full-learner run.
+    """
+    if carry.partner_selection is None or collection.learner_slots is None:
+        raise ValueError("Append partners to an existing partner-trained run")
+    if not additions:
+        return update_partner_selection(collection, carry, selection=selection)
+    if set(additions) & set(collection.partner_names):
+        raise ValueError(
+            "Added partner names must be new; old members cannot be rebound"
+        )
+    new_systems: list[System] = []
+    new_records: list[dict[str, Any]] = []
+    for name, member in additions.items():
+        system, record = _prepare_opponent_member(
+            name, member, collection.schedule, collection.binding, team_index=None
+        )
+        _check_partner_rosters(system, collection.schedule, collection.learner_slots)
+        new_systems.append(system)
+        new_records.append(record)
+    systems = (*collection.partner_systems, *new_systems)
+    names = (*collection.partner_names, *additions)
+    rule = (
+        partner_selection_value(collection, carry) if selection is None else selection
+    )
+    _partner_rule(names, rule)
+    settings = cast(
+        tuple[OpponentSelection, OpponentSelection],
+        tuple(
+            configure_opponent_selection(names, carry.history, rule, previous=side)
+            for side in carry.partner_selection
+        ),
+    )
+    combined = pool({member: 1.0 for member in systems})
+    _, fresh_values, template = prepare_evaluation_system(combined)
+    count = len(collection.partner_names)
+    old_holders = collection.host_partners
+    old_values = (
+        carry.partner_values[0] if old_holders is None else old_holders[0].variables
+    )
+    values = fresh_values._replace(
+        members=(*old_values.members, *fresh_values.members[count:]),
+        templates=(*old_values.templates, *fresh_values.templates[count:]),
+    )
+    memories: list[Tree] = []
+    holders: list[HostOpponent] = []
+    for side in range(2):
+        old_memory = (
+            _partner_pool_memory(carry, side)
+            if old_holders is None
+            else old_holders[side].memory
+        )
+        inputs = _partner_inputs(
+            carry.observations, carry.state, collection.learner_slots, side
+        )
+        idle = inputs._replace(
+            valid=jnp.zeros_like(inputs.valid),
+            controlled_mask=jnp.zeros_like(inputs.active_mask),
+        )
+        keys = _member_keys(
+            _initialization_keys(carry.memory.init_key, carry.state.episode_id, side), 1
+        )
+        extra = []
+        for index in range(count, len(systems)):
+            execution = _execution(systems[index])
+            extra.append(
+                _initial_memory(
+                    execution,
+                    values.members[index],
+                    values.templates[index],
+                    jax.device_get(idle) if execution.execution == "host" else idle,
+                    _member_keys(keys, index),
+                )
+            )
+        memory = _CompositionMemory(old_memory.choice, (*old_memory.members, *extra))
+        if combined.execution == "host":
+            holder = HostOpponent(
+                combined, collection.schedule.num_envs, external_selection=True
+            )
+            holder.variables = values._replace(choices=settings[side].choices)
+            holder.template, holder.memory = template, memory
+            if old_holders is not None:
+                old = old_holders[side]
+                holder.generations = old.generations.copy()
+                holder.next_round, holder.failure, holder.failed_round = (
+                    old.next_round,
+                    old.failure,
+                    old.failed_round,
+                )
+            else:
+                playing = np.ones(collection.schedule.num_envs, np.bool_)
+                if side == 1 and len(carry.pinned_opponent):
+                    playing &= np.asarray(carry.history.lane_snapshot) != -2
+                holder.generations = np.where(
+                    playing, np.asarray(carry.state.reset_generation), -1
+                ).astype(np.int64)
+            holders.append(holder)
+            memories.append(())
+        else:
+            memories.append(memory)
+    assert collection.learner_actor is not None
+    pinned = collection.pinned_system
+    actor, opponent = _training_teams(
+        replace(collection.learner_actor, variables=carry.history.current_variables),
+        HOST_ACTIONS_SYSTEM if holders else combined,
+        collection.learner_slots,
+        pinned,
+        vectorize_lanes=collection.vectorize_opponent_lanes,
+    )
+    changed = _replace_partner_memories(carry, cast(tuple[Tree, Tree], tuple(memories)))
+    zero = jnp.zeros((collection.schedule.num_envs, 5), jnp.int32)
+    idle_action = ActorAction(zero, zero, zero)
+    changed = changed._replace(
+        partner_values=() if holders else (values, template),
+        partner_actions=(idle_action, idle_action) if holders else None,
+        partner_selection=settings,
+        progress=carry.progress._replace(
+            partner_used=jnp.pad(
+                cast(Array, carry.progress.partner_used), ((0, len(additions)),)
+            )
+        ),
+        frozen_host_values=_frozen_host_values(
+            collection.host_opponent,
+            cast(tuple[HostOpponent, HostOpponent], tuple(holders))
+            if holders
+            else None,
+        ),
+    )
+    if carry.root_key.committed:
+        changed = jax.device_put(changed, carry.root_key.sharding)
+    updated = replace(
+        collection,
+        actor=replace(actor, components=collection.actor.components),
+        opponent=replace(opponent, components=collection.opponent.components),
+        partner_names=names,
+        partner_records=(*collection.partner_records, *new_records),
+        partner_systems=systems,
+        host_partners=cast(tuple[HostOpponent, HostOpponent], tuple(holders))
+        if holders
+        else None,
+        carry_spec=jax.eval_shape(_retain, changed),
+    )
+    return _opponent_component_table(updated, changed), changed
+
+
+def append_training_opponents(
+    collection: TrainingCollection,
+    carry: TrainingCarry,
+    additions: Mapping[str, System | Policy | str],
+    *,
+    selection: Mapping[str, float] | Sequence[str] | None = None,
+) -> tuple[TrainingCollection, TrainingCarry]:
+    """Append frozen named members at a child boundary without restarting games.
+
+    additions contains new aliases only. The caller opens their resource scopes
+    before this call and keeps them open through training. Existing member
+    values, full-batch memories, choices and host clocks remain unchanged. Only
+    new members receive invalid-lane placeholder initialization. New games use
+    selection, or retain the previous rule when None. A larger pool changes
+    static structure and may compile a new program. No action or game reset runs.
+    Legacy permanent-pin collections cannot use this route. Invalid names or
+    member contracts raise before a new collection is returned.
+    """
+    if collection.pinned_opponent_share:
+        raise ValueError("Append named opponents through the generic selection API")
+    if not additions:
+        return update_opponent_selection(collection, carry, selection=selection)
+    if set(additions) & set(collection.opponent_names):
+        raise ValueError(
+            "Added opponent names must be new; old members cannot be rebound"
+        )
+    new_systems: list[System] = []
+    new_records: list[dict[str, Any]] = []
+    for name, member in additions.items():
+        system, record = _prepare_opponent_member(
+            name, member, collection.schedule, collection.binding
+        )
+        new_systems.append(system)
+        new_records.append(record)
+    names = (*collection.opponent_names, *additions)
+    systems = (*collection.opponent_systems, *new_systems)
+    combined = pool({member: 1.0 for member in systems})
+    _, variables, template = prepare_evaluation_system(combined)
+    old_count = len(collection.opponent_names)
+    old_holder = collection.host_opponent
+    old_values = (
+        old_holder.variables
+        if old_holder is not None
+        else carry.pinned_opponent[0]
+        if old_count
+        else None
+    )
+    if carry.partner_selection is not None:
+        network_memory = (
+            carry.memory.team_b.members[0] if old_count else carry.memory.team_b
+        )
+        external_memory = carry.memory.team_b.members[1] if old_count else None
+    else:
+        network_memory = carry.memory.team_b[0] if old_count else carry.memory.team_b
+        external_memory = carry.memory.team_b[1] if old_count else None
+    old_pool_memory = old_holder.memory if old_holder is not None else external_memory
+    if old_values is not None:
+        variables = variables._replace(
+            members=(*old_values.members, *variables.members[old_count:]),
+            templates=(*old_values.templates, *variables.templates[old_count:]),
+        )
+    inputs = system_inputs(carry.observations, carry.state, team=1)
+    idle = inputs._replace(
+        valid=jnp.zeros_like(inputs.valid),
+        controlled_mask=jnp.zeros_like(inputs.active_mask),
+    )
+    keys = _initialization_keys(carry.memory.init_key, carry.state.episode_id, 1)
+    new_memories = []
+    for index in range(old_count, len(systems)):
+        execution = _execution(systems[index])
+        new_memories.append(
+            _initial_memory(
+                execution,
+                variables.members[index],
+                variables.templates[index],
+                jax.device_get(idle) if execution.execution == "host" else idle,
+                _member_keys(keys, index),
+            )
+        )
+    previous = carry.opponent_selection
+    if selection is None and previous is not None:
+        selection = _selection_value(collection, previous)
+    history = carry.history._replace(external_pin=jnp.bool_(True))
+    settings = configure_opponent_selection(
+        names, history, selection, previous=previous
+    )
+    if previous is None:
+        starts = (
+            jnp.sum(carry.state.reset_generation, dtype=jnp.int32)
+            + carry.state.episode_id.shape[0]
+        )
+        settings = settings._replace(game_starts=starts, order_start=starts)
+    variables = variables._replace(choices=settings.choices)
+    memory = _CompositionMemory(
+        settings.choices if old_pool_memory is None else old_pool_memory.choice,
+        (*(() if old_pool_memory is None else old_pool_memory.members), *new_memories),
+    )
+    holder = None
+    if combined.execution == "host":
+        holder = HostOpponent(
+            combined, collection.schedule.num_envs, external_selection=True
+        )
+        holder.variables, holder.template, holder.memory = variables, template, memory
+        if old_holder is not None:
+            holder.generations = old_holder.generations.copy()
+            holder.next_round = old_holder.next_round
+            holder.failure, holder.failed_round = (
+                old_holder.failure,
+                old_holder.failed_round,
+            )
+        elif old_count:
+            holder.generations = np.where(
+                np.asarray(history.lane_snapshot) == -2,
+                np.asarray(carry.state.reset_generation),
+                -1,
+            ).astype(np.int64)
+        zero = jnp.zeros((collection.schedule.num_envs, 5), jnp.int32)
+        pinned_values = (ActorAction(zero, zero, zero), ())
+        team_b = (network_memory, ())
+        pinned_system = HOST_ACTIONS_SYSTEM
+    else:
+        pinned_values = (variables, template)
+        team_b = (network_memory, memory)
+        pinned_system = combined
+    registration = normalize_system_registration(
+        combined, phase="validation", frozen=True
+    )[1]
+    pinned_record = {
+        "reference": None,
+        "name": combined.name,
+        "execution": combined.execution,
+        "registration_id": canonical_digest_sha256(registration),
+        "registration": registration,
+        "variables_digest": tree_digest(variables._replace(choices=None))
+        if combined.execution == "jax"
+        else None,
+        "evidence": pinned_opponent_evidence(collection.binding, combined),
+        "memory_rule": "saved in the carry"
+        if holder is None
+        else "host only, not saved",
+    }
+    progress = carry.progress._replace(
+        opponent_starts=jnp.pad(
+            carry.progress.opponent_starts, ((0, len(additions)), (0, 0))
+        ),
+        opponent_steps=jnp.pad(
+            carry.progress.opponent_steps, ((0, len(additions)), (0, 0))
+        ),
+    )
+    if carry.partner_selection is not None:
+        team_b = _CompositionMemory(
+            (history.lane_snapshot == -2).astype(jnp.int32), tuple(team_b)
+        )
+        assert (
+            collection.learner_actor is not None
+            and collection.learner_slots is not None
+        )
+        _, opponent = _training_teams(
+            replace(
+                collection.learner_actor, variables=carry.history.current_variables
+            ),
+            HOST_ACTIONS_SYSTEM
+            if collection.host_partners is not None
+            else pool({member: 1.0 for member in collection.partner_systems}),
+            collection.learner_slots,
+            pinned_system,
+            vectorize_lanes=collection.vectorize_opponent_lanes,
+        )
+    else:
+        opponent = make_opponent_system(
+            replace(collection.actor, variables=carry.history.current_variables),
+            pinned=pinned_system,
+            vectorize_lanes=collection.vectorize_opponent_lanes,
+        )
+    changed = carry._replace(
+        history=history,
+        progress=progress,
+        opponent_selection=settings,
+        pinned_opponent=pinned_values,
+        memory=carry.memory._replace(team_b=team_b),
+        frozen_host_values=_frozen_host_values(holder, collection.host_partners),
+    )
+    if carry.root_key.committed:
+        changed = jax.device_put(changed, carry.root_key.sharding)
+    updated = replace(
+        collection,
+        opponent=opponent,
+        pinned_system=pinned_system,
+        opponent_names=names,
+        opponent_records=(*collection.opponent_records, *new_records),
+        opponent_systems=systems,
+        pinned_opponent=pinned_record,
+        host_opponent=holder,
+        carry_spec=jax.eval_shape(_retain, changed),
+    )
+    updated = replace(
+        updated,
+        opponent=replace(updated.opponent, components=collection.opponent.components),
+    )
+    return _opponent_component_table(updated, changed), changed
+
+
+def update_opponent_selection(
+    collection: TrainingCollection,
+    carry: TrainingCarry,
+    *,
+    selection: Mapping[str, float] | Sequence[str] | None = None,
+    past: Mapping[int, float] | None = None,
+) -> tuple[TrainingCollection, TrainingCarry]:
+    """Change future opponent choices at a host update boundary.
+
+    selection uses the declared named members plus self/past. None retains the
+    current rule; on the legacy default path it starts the 80/20 rule. past gives
+    eligible capture IDs and relative weights; omitted IDs get zero, while
+    future new captures start with uniform weight. No live game, member values,
+    memory, replay row or random stream changes. Return a refreshed descriptor
+    only if shapes change (for example, a different order length).
+    Legacy pinned settings cannot be combined with this API. Invalid settings
+    raise before returning changed state. This helper starts no game.
+    """
+    if collection.pinned_opponent_share:
+        raise ValueError("Generic selection cannot change legacy pinned settings")
+    if selection is None and carry.opponent_selection is not None:
+        selection = _selection_value(collection, carry.opponent_selection)
+    settings = configure_opponent_selection(
+        collection.opponent_names,
+        carry.history,
+        selection,
+        previous=carry.opponent_selection,
+        past=past,
+    )
+    if carry.opponent_selection is None:
+        settings = settings._replace(
+            game_starts=jnp.sum(carry.state.reset_generation, dtype=jnp.int32)
+            + carry.state.episode_id.shape[0],
+            order_start=jnp.sum(carry.state.reset_generation, dtype=jnp.int32)
+            + carry.state.episode_id.shape[0],
+        )
+    changed = carry._replace(opponent_selection=settings)
+    if carry.root_key.committed:
+        changed = jax.device_put(changed, carry.root_key.sharding)
+    if _schema(changed) == _schema(carry):
+        return collection, changed
+    return replace(collection, carry_spec=jax.eval_shape(_retain, changed)), changed
+
+
+def opponent_member_records(
+    collection: TrainingCollection, carry: TrainingCarry
+) -> list[dict[str, Any]]:
+    """Return stable counter-row labels and exact named member registrations.
+
+    Rows are self, legacy pin, reserved stable capture IDs, then named members.
+    Past rows state whether the copy is resident and eligible for new games.
+    Resident captures include their actual step/update. Evicted copies retain
+    their ID; the run's append-only capture exports supply their original time
+    and actor identity. Empty reserved rows have no capture timing. This reads
+    only small host metadata, never weights or trajectories.
+    """
+    history = jax.device_get(
+        carry.history._replace(
+            current_variables=(),
+            historical_variables=(),
+            pinned_variables=None,
+        )
+    )
+    captures = {
+        int(i): (int(r), int(u), bool(e))
+        for i, r, u, e in zip(
+            np.asarray(history.captured_ids).tolist(),
+            np.asarray(history.captured_rounds).tolist(),
+            np.asarray(history.captured_updates).tolist(),
+            np.asarray(history.eligible).tolist(),
+            strict=True,
+        )
+        if i >= 0
+    }
+    result: list[dict[str, Any]] = [
+        {"snapshot": -1, "label": "current weights", "name": "self", "kind": "self"},
+        {
+            "snapshot": -2,
+            "name": "pin",
+            "label": "permanent first-update pin"
+            if collection.pinned_opponent is None
+            else f"pinned: {collection.pinned_opponent['name']}",
+            "kind": "pin",
+        },
+    ]
+    for identifier in range(int(history.capture_capacity)):
+        record: dict[str, Any] = {
+            "snapshot": identifier,
+            "capture_id": identifier,
+            "name": "past",
+            "label": f"capture {identifier}",
+            "kind": "past",
+            "resident": identifier in captures,
+            "eligible": captures.get(identifier, (0, 0, False))[2],
+        }
+        if identifier in captures:
+            rounds, update, _ = captures[identifier]
+            record.update(
+                env_steps=rounds * collection.schedule.num_envs, update=update
+            )
+        result.append(record)
+    for index, member in enumerate(collection.opponent_records):
+        result.append(
+            {"snapshot": -3 - index, "label": member["name"], "kind": "named", **member}
+        )
+    return result
+
+
 def training_summary(
     collection: TrainingCollection, carry: TrainingCarry
 ) -> dict[str, object]:
@@ -1695,9 +3490,8 @@ def training_summary(
     segment_env_steps and continuation name its new work and archived parent proof.
     exposure_by_score_threshold groups starts, env_steps and actor_decisions by
     the K actually used by each game, including games carried across stage ends.
-    With a named pinned opponent the result also holds its record and
-    opponent_rows, the meaning of each of the 21 opponent counts (row 1 is the
-    pinned System); without one those keys are absent, as before.
+    opponent_rows labels stable counts: current, permanent pin, then capture IDs.
+    A named pinned opponent also contributes its saved registration record.
     """
     _check_carry(carry)
     p = jax.device_get(carry.progress)
@@ -1744,6 +3538,18 @@ def training_summary(
         "stage_complete": np.asarray(p.stage_complete).tolist(),
         "completed_stage_counts": np.asarray(p.completed_stage_counts).tolist(),
         "score_thresholds_by_episode_stage": thresholds,
+        **(
+            {}
+            if carry.schedule.roster_class_ids is None
+            else {
+                "roster_class_ids_by_episode_stage": np.asarray(
+                    carry.schedule.roster_class_ids
+                )[:stages].tolist(),
+                "eligible_maps_by_episode_stage": np.asarray(
+                    carry.schedule.eligible_maps
+                )[:stages].tolist(),
+            }
+        ),
         "exposure_by_score_threshold": by_threshold,
         "starts_by_episode_stage": starts,
         "steps_by_episode_stage": steps,
@@ -1766,17 +3572,14 @@ def training_summary(
                 * collection.schedule.num_envs,
             }
         ),
+        "opponent_rows": [
+            record["label"] for record in opponent_member_records(collection, carry)
+        ],
+        "opponent_members": opponent_member_records(collection, carry),
         **(
             {}
             if collection.pinned_opponent is None
-            else {
-                "pinned_opponent": collection.pinned_opponent,
-                "opponent_rows": [
-                    "current weights",
-                    f"pinned: {collection.pinned_opponent['name']}",
-                    *(f"history slot {slot}" for slot in range(1, 20)),
-                ],
-            }
+            else {"pinned_opponent": collection.pinned_opponent}
         ),
     }
 
@@ -1813,15 +3616,27 @@ def _host_decision(collection: TrainingCollection, carry: TrainingCarry) -> Tree
         stream="action",
         decision_step=local_step,
     )
-    return (
+    result = (
         carry,
         system_inputs(carry.observations, state, team=1),
-        carry.history.lane_snapshot == 0,
+        carry.history.lane_snapshot == -2,
         _action_keys(roots, state.episode_id, 1),
         _initialization_keys(carry.memory.init_key, state.episode_id, 1),
         state.reset_generation,
         carry.progress.rounds,
         _failed(carry),
+    )
+
+    if collection.host_partners is None:
+        return result
+    return (
+        *result,
+        (
+            _partner_inputs(carry.observations, state, collection.learner_slots, 0),
+            _partner_inputs(carry.observations, state, collection.learner_slots, 1),
+            _action_keys(roots, state.episode_id, 0),
+            _initialization_keys(carry.memory.init_key, state.episode_id, 0),
+        ),
     )
 
 
@@ -1875,16 +3690,17 @@ def _collect_host_rollout(
     on the device; HostOpponent.act copies only what the method needs.
     Host-only and not jittable.
     """
-    holder = cast(HostOpponent, collection.host_opponent)
+    holder = collection.host_opponent
     initial = carry
     real = min(length, int(carry.schedule.total_rounds) - int(carry.progress.rounds))
     decide = _host_decision_compiled(collection)
     step = _host_step_compiled(collection)
     rows: list[TrainingTransition] = []
     for _ in range(real):
+        decision = decide(carry)
         carry, inputs, pinned, keys, init_keys, generations, rounds, failed = cast(
             tuple[TrainingCarry, Any, Array, Array, Array, Array, Array, Array],
-            decide(carry),
+            decision[:8],
         )
         if bool(failed):
             if writer is not None:
@@ -1896,17 +3712,48 @@ def _collect_host_rollout(
                 writer.record_failure(error)
                 raise error
             break
-        actions = holder.act(
-            int(rounds),
-            inputs,
-            np.asarray(pinned),
-            keys,
-            init_keys,
-            np.asarray(generations),
-        )
-        carry = carry._replace(
-            pinned_opponent=(ActorAction(*(jnp.asarray(head) for head in actions)), ())
-        )
+        if holder is not None:
+            if carry.opponent_selection is not None:
+                holder.variables = holder.variables._replace(
+                    choices=np.asarray(carry.opponent_selection.choices)
+                )
+            actions = holder.act(
+                int(rounds),
+                inputs,
+                np.asarray(pinned),
+                keys,
+                init_keys,
+                np.asarray(generations),
+            )
+            carry = carry._replace(
+                pinned_opponent=(
+                    ActorAction(*(jnp.asarray(head) for head in actions)),
+                    (),
+                )
+            )
+        if collection.host_partners is not None:
+            assert carry.partner_selection is not None
+            input_a, input_b, a_keys, a_init_keys = decision[8]
+            chosen: list[ActorAction] = []
+            for side, partner_holder in enumerate(collection.host_partners):
+                partner_holder.variables = partner_holder.variables._replace(
+                    choices=np.asarray(carry.partner_selection[side].choices)
+                )
+                playing = np.ones(collection.schedule.num_envs, np.bool_)
+                if side == 1 and len(carry.pinned_opponent):
+                    playing &= ~np.asarray(pinned)
+                actions = partner_holder.act(
+                    int(rounds),
+                    input_a if side == 0 else input_b,
+                    playing,
+                    _member_keys(a_keys if side == 0 else keys, 1),
+                    _member_keys(a_init_keys if side == 0 else init_keys, 1),
+                    np.asarray(generations),
+                )
+                chosen.append(ActorAction(*(jnp.asarray(head) for head in actions)))
+            carry = carry._replace(
+                partner_actions=cast(tuple[ActorAction, ActorAction], tuple(chosen))
+            )
         if writer is None:
             carry, (row, _, _) = cast(
                 tuple[TrainingCarry, tuple[TrainingTransition, Any, Any]], step(carry)

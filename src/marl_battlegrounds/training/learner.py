@@ -8,7 +8,7 @@ The numerical helpers support jit and write no files. Checkpoint validation is
 host-only; this module starts no training loop, validation run or recording.
 """
 
-from collections.abc import Callable
+from collections.abc import Callable, Mapping, Sequence
 from functools import lru_cache, partial
 from typing import Any, NamedTuple, cast
 
@@ -42,6 +42,7 @@ from marl_battlegrounds.baselines.ppo import (
     _check_value_norm,
     _critic_network_values,
     _denormalize_values,
+    _owned_ppo_batch,
     initialize_ppo,
     is_recurrent_method,
     make_ppo_system,
@@ -80,9 +81,15 @@ from marl_battlegrounds.training.collection import (
     _failed,
     _validate_training_continuation,
     init_training_collection,
+    learner_memory,
 )
 from marl_battlegrounds.training.curriculum import TrainingSchedule
-from marl_battlegrounds.training.opponents import SnapshotEvent, refresh_opponents
+from marl_battlegrounds.training.opponents import (
+    SnapshotEvent,
+    opponent_counter_row,
+    refresh_opponents,
+)
+from marl_battlegrounds.training.shaping import RewardFunction
 
 type Tree = Any
 
@@ -155,10 +162,10 @@ class UpdateSummary(NamedTuple):
     fills it for every nonempty block, including initial random chunks and
     rejected blocks, whose summary is kept for diagnosis.
 
-    task_reward_sum is float32 summed over valid active Team A rows;
+    task_reward_sum is float32 native reward summed over valid owned Team A rows;
     active_samples is its int32 denominator. shaping_reward_sum is float32
     summed once per valid game; real_transitions is its int32 denominator.
-    live_actor_decisions counts valid active living Team A rows once. These
+    live_actor_decisions counts valid owned living Team A rows once. These
     counts do not include repeated PPO epochs. These five fields are scalar.
     stage_completed is int32 (17,3) finished-game counts in Team A win/draw/loss
     order, grouped by the producing game's reset-time stage. stage_score_sums is
@@ -167,6 +174,14 @@ class UpdateSummary(NamedTuple):
     completed games where either team reached 20 points. Continuing games and
     padding contribute nothing to these four completion tables. Existing
     collection progress owns actual live decisions and exposure per stage.
+
+    per_member_completed is int32 (R,3) win/draw/loss counts and
+    per_member_score_sums is int32 (R,2) native final point totals, in collection
+    opponent-row order. Only real completed games count. Accumulate both on
+    the host so lifetime totals do not overflow device int32.
+
+    custom_reward_sum is a separate float32 sum over valid owned active slots,
+    or None when custom rewards are disabled. Native task rewards remain separate.
 
     Empty or rejected updates return zeros; UpdateResult.performed decides
     whether these are observations. Accumulate whole-run counts as host integers.
@@ -181,6 +196,9 @@ class UpdateSummary(NamedTuple):
     stage_score_sums: Array
     stage_length_sum: Array
     stage_k20_count: Array
+    per_member_completed: Array
+    per_member_score_sums: Array
+    custom_reward_sum: Array | None = None
 
 
 class UpdateResult(NamedTuple):
@@ -237,7 +255,7 @@ def _state_shapes(state: LearnerState, *, method: str = "mappo") -> int:
     """
     games = state.carry.state.episode_id.shape[0]
     for name, memory in (
-        ("Actor memory", state.carry.memory.team_a),
+        ("Actor memory", learner_memory(state.carry)),
         ("Critic memory", state.critic_memory),
     ):
         _memory_shape(memory, games, method, name)
@@ -294,8 +312,16 @@ def _rollout_shapes(
         _array(getattr(rows, name), (length, games, 5), jnp.bool_, name)
     for name in ("final_active", "final_alive"):
         _array(getattr(rollout, name), (games, 5), jnp.bool_, name)
+    if rollout.final_learner_active is not None:
+        _array(
+            rollout.final_learner_active, (games, 5), jnp.bool_, "final_learner_active"
+        )
     _array(rollout.final_ended, (games,), jnp.bool_, "final_ended")
     _array(rows.task_rewards, (length, games, 5), jnp.float32, "task_rewards")
+    if rows.learner_active is not None:
+        _array(rows.learner_active, (length, games, 5), jnp.bool_, "learner_active")
+    if rows.custom_rewards is not None:
+        _array(rows.custom_rewards, (length, games, 5), jnp.float32, "custom_rewards")
     _array(rows.shaping_reward, (length, games), jnp.float32, "shaping_reward")
     _array(
         rows.learning_outputs.action_indices, (length, games, 5), jnp.int32, "actions"
@@ -379,16 +405,28 @@ def init_learner(
     *,
     schedule: TrainingSchedule,
     seed: int = 42,
+    initial_actor: Tree | None = None,
     ppo: PPOConfig = DEFAULT_PPO_CONFIG,
     method: str = "mappo",
     prepared: PreparedTrainingContent | None = None,
     shaping: bool = False,
     shaping_coefficient: float = 0.01,
     shaping_mode: str = "potential",
+    reward: RewardFunction | None = None,
+    reward_identity: dict[str, object] | None = None,
     metrics: str = "priority",
     recording: bool = False,
     pinned_opponent_share: float = 0.0,
     pinned_opponent: System | Policy | str | None = None,
+    keep_past: int = 20,
+    history_capture_capacity: int = 20,
+    minimum_capture_rounds: int = 1,
+    capture_interval_rounds: int = 0,
+    opponent_population: Mapping[str, System | Policy | str] | None = None,
+    opponent_selection: Mapping[str, float] | Sequence[str] | None = None,
+    learner_slots: tuple[int, ...] | None = None,
+    partner_population: Mapping[str, System | Policy | str] | None = None,
+    partner_selection: Mapping[str, float] | Sequence[str] | None = None,
 ) -> tuple[TrainingCollection, LearnerState]:
     """Initialize one untrained PPO learner and its verified collection setup.
 
@@ -411,6 +449,12 @@ def init_learner(
         Static actor/critic choice. IPPO uses only local critic inputs and omits
         physical-state collection. Feedforward methods keep empty actor/critic
         memory and require T*B, rather than B, divisible by groups*minibatches.
+    initial_actor : numerical actor tree or None, default=None
+        Compatible actor weights copied into a fresh learner before history is
+        initialized. PPO takes actor parameters; QMIX takes online Q parameters
+        (also used for its targets); PQN takes parameters and running statistics.
+        Critic, mixer, optimizer, memory and counters start fresh. Initial
+        exploration and collection keep this method's normal rules.
     prepared : PreparedTrainingContent or None, default=None
         Existing verified content, or None to perform the collection preflight.
     shaping : bool, default=False
@@ -423,19 +467,40 @@ def init_learner(
         new points minus the enemy's new points (a Red Zone death gives 2
         points, any other death 1), including at a real ending, and changes
         that objective.
+    reward, reward_identity : callable and dict or None, defaults=None
+        Optional pure training reward and its saved identity. Forwarded to
+        init_training_collection; None skips callback work and extra storage.
     metrics : str, default="priority"
         Collection metrics mode: "priority" or "none".
     recording : bool, default=False
         Retain numerical recording starts for a later caller-owned writer.
     pinned_opponent_share : float, default=0.0
         Static probability, within [0, 0.8], that a reset lane meets the pinned
-        first-update actor in history slot 0. Zero keeps the existing 80/20
+        first-update actor outside rotating history. Zero keeps the existing 80/20
         self-play recipe. A positive share needs a schedule built with
         early_history_capture=True; the collection setup checks that pairing.
     pinned_opponent : System, Policy, str or None, default=None
         Named method that plays slot-0 lanes instead of the first-update actor;
         passed unchanged to init_training_collection, which documents the
         accepted forms. None keeps the self-play recipe above.
+
+    keep_past, history_capture_capacity : int, defaults=20, 20
+        Rolling copy count and maximum stable capture count. See
+        init_training_collection for storage and counter meanings.
+    minimum_capture_rounds, capture_interval_rounds : int, defaults=1, 0
+        Minimum actual capture gap and optional recurring gap. The public runner
+        checks the maximum game horizon and passes it as the minimum.
+
+    opponent_population, opponent_selection : mapping, sequence or None
+        Named frozen Systems and future-game shares or exact repeating order.
+        Forwarded to init_training_collection; None keeps the existing recipe.
+        Open member resources around setup and training, as public train does.
+
+    learner_slots : tuple[int, ...] or None, default=None
+        Physical Team A slots trained by this learner. None owns all slots.
+    partner_population, partner_selection : mapping, sequence or None
+        Frozen named partners and their future-game shares or repeating order.
+        Forwarded to init_training_collection with learner_slots.
 
     Returns
     -------
@@ -476,11 +541,20 @@ def init_learner(
     initialized = initialize_ppo(
         jax.random.fold_in(root, MODEL_INITIALIZATION_TAG), ppo, method=method
     )
+    if initial_actor is not None:
+        from marl_battlegrounds.training.checkpoints import initial_actor_variables
+
+        initialized = initialized._replace(
+            actor_params=initial_actor_variables(
+                initial_actor, initialized.actor_params
+            )
+        )
     actor = make_ppo_system(
         initialized.actor_params,
         method=method,
         input_scale=ppo.input_scale,
         spawn_frame=ppo.spawn_frame,
+        parameter_sharing=ppo.parameter_sharing,
     )
     collection, carry = init_training_collection(
         actor,
@@ -492,11 +566,23 @@ def init_learner(
         discount=ppo.gamma,
         coefficient=shaping_coefficient,
         shaping_mode=shaping_mode,
+        reward=reward,
+        reward_identity=reward_identity,
         collect_training_state=not uses_local_critic(method),
         metrics=metrics,
         recording=recording,
         pinned_opponent_share=pinned_opponent_share,
         pinned_opponent=pinned_opponent,
+        keep_past=keep_past,
+        history_capture_capacity=history_capture_capacity,
+        minimum_capture_rounds=minimum_capture_rounds,
+        capture_interval_rounds=capture_interval_rounds,
+        opponent_population=opponent_population,
+        opponent_selection=opponent_selection,
+        learner_slots=learner_slots,
+        partner_population=partner_population,
+        partner_selection=partner_selection,
+        vectorize_opponent_lanes=ppo.parameter_sharing == "all",
     )
     state = LearnerState(
         carry,
@@ -654,6 +740,16 @@ def build_ppo_batch(
     _check_value_norm(state.value_norm, ppo.value_normalization)
     rows = rollout.transitions
     physical = rows.training_state
+    owned = (
+        rows.active
+        if rows.learner_active is None
+        else rows.active & rows.learner_active
+    )
+    final_owned = (
+        rollout.final_active
+        if rollout.final_learner_active is None
+        else rollout.final_active & rollout.final_learner_active
+    )
     reset = (rows.valid[0] & rows.episode_start[0])[:, None, None]
     actor_memory = (
         jnp.where(reset, 0.0, rollout.initial_memory)
@@ -731,7 +827,7 @@ def build_ppo_batch(
                     continues[None],
                     input_scale=ppo.input_scale,
                 )
-            return jnp.where(continues[:, None] & rollout.final_active, final[0], 0.0)
+            return jnp.where(continues[:, None] & final_owned, final[0], 0.0)
 
         final = _cond(
             jnp.any(continues),
@@ -758,20 +854,24 @@ def build_ppo_batch(
             0.0,
         )
         final_values = jnp.where(
-            (rollout.real_steps > 0)
-            & ~rollout.final_ended[:, None]
-            & rollout.final_active,
+            (rollout.real_steps > 0) & ~rollout.final_ended[:, None] & final_owned,
             _denormalize_values(final_values, state.value_norm),
             0.0,
         )
-    return PPOBatch(
+    batch = PPOBatch(
         rows.observations,
         physical,
         rows.action_mask,
         rows.learning_outputs.action_indices,
         rows.learning_outputs.log_prob,
         old_values,
-        rows.task_rewards + jnp.where(rows.active, rows.shaping_reward[..., None], 0.0),
+        jnp.where(
+            owned,
+            rows.task_rewards
+            + rows.shaping_reward[..., None]
+            + (0.0 if rows.custom_rewards is None else rows.custom_rewards),
+            0.0,
+        ),
         rows.ended,
         rows.episode_start,
         rows.valid,
@@ -781,7 +881,9 @@ def build_ppo_batch(
         actor_memory,
         critic_memory,
         old_normalized_values,
-    ), memory
+        rows.learner_active,
+    )
+    return _owned_ppo_batch(batch), memory
 
 
 def _absent_result(state: LearnerState, ppo: PPOConfig) -> UpdateResult:
@@ -816,6 +918,7 @@ def _absent_result(state: LearnerState, ppo: PPOConfig) -> UpdateResult:
             jnp.int32(-1),
             jnp.int32(-1),
             jnp.zeros(20, jnp.bool_),
+            jnp.int32(-1),
         ),
         UpdateSummary(
             jnp.float32(0),
@@ -827,6 +930,9 @@ def _absent_result(state: LearnerState, ppo: PPOConfig) -> UpdateResult:
             jnp.zeros((17, 2), jnp.int32),
             jnp.zeros(17, jnp.int32),
             jnp.zeros(17, jnp.int32),
+            jnp.zeros((state.carry.progress.opponent_steps.shape[0], 3), jnp.int32),
+            jnp.zeros((state.carry.progress.opponent_steps.shape[0], 2), jnp.int32),
+            jnp.float32(0) if state.carry.env.training_facts else None,
         ),
     )
 
@@ -865,7 +971,7 @@ def _boundary_valid(
         & jnp.all(
             jnp.where(rows.valid, rows.learner_update == state.completed_updates, True)
         )
-        & jnp.all(rollout.initial_memory == prior.memory.team_a)
+        & jnp.all(rollout.initial_memory == learner_memory(prior))
         & jnp.all(rollout.final_ended == collected.state.done.done)
     )
 
@@ -875,24 +981,48 @@ def _behavior_valid(rollout: TrainingRollout) -> Array:
     rows = rollout.transitions
     actions = rows.learning_outputs.action_indices
     mask = categorical_action_mask(rows.action_mask)
-    selected = jnp.take_along_axis(mask, actions[..., None], axis=-1)[..., 0]
+    selected = jnp.take_along_axis(
+        mask, jnp.clip(actions, 0, NUM_ACTIONS - 1)[..., None], axis=-1
+    )[..., 0]
     native = ActorAction(*(head[..., :5] for head in rows.actions))
-    return (
-        jnp.all((actions >= 0) & (actions < NUM_ACTIONS))
-        & jnp.all(selected)
-        & jnp.all(actions == encode_actions(native))
-        & jnp.all(jnp.isfinite(rows.learning_outputs.log_prob))
+    if rows.learner_active is None:
+        return (
+            jnp.all((actions >= 0) & (actions < NUM_ACTIONS))
+            & jnp.all(selected)
+            & jnp.all(actions == encode_actions(native))
+            & jnp.all(jnp.isfinite(rows.learning_outputs.log_prob))
+        )
+    checked = rows.valid[..., None] & rows.active & rows.learner_active
+    return jnp.all(
+        jnp.where(
+            checked,
+            (actions >= 0)
+            & (actions < NUM_ACTIONS)
+            & selected
+            & (actions == encode_actions(native))
+            & jnp.isfinite(rows.learning_outputs.log_prob),
+            True,
+        )
     )
 
 
-def _summary(rollout: TrainingRollout) -> UpdateSummary:
+def _summary(
+    rollout: TrainingRollout,
+    opponent_rows: int = 22,
+    capture_capacity: int | Array = 20,
+) -> UpdateSummary:
     """Reduce only real transition rows to compact unrepeated learning-log facts.
 
     Shared by PPO updates, every accepted QMIX block (warmup included) and
     every nonempty PQN-VDN block (initial chunks and rejections included).
     """
     rows = rollout.transitions
-    active = rows.valid[..., None] & rows.active
+    owned = (
+        rows.active
+        if rows.learner_active is None
+        else rows.active & rows.learner_active
+    )
+    active = rows.valid[..., None] & owned
     completed = rows.valid & rows.ended
     stages = jnp.where(completed, rows.episode_stage, 0).reshape(-1)
 
@@ -914,6 +1044,19 @@ def _summary(rollout: TrainingRollout) -> UpdateSummary:
         ),
         axis=-1,
     ).astype(jnp.int32)
+    member_rows = opponent_counter_row(
+        rows.opponent_snapshot, capture_capacity
+    ).reshape(-1)
+
+    def member_sum(value: Array) -> Array:
+        """Group completed game facts by their producing opponent identity."""
+        tail = value.shape[2:]
+        return (
+            jnp.zeros((opponent_rows, *tail), jnp.int32)
+            .at[member_rows]
+            .add(value.reshape((-1, *tail)))
+        )
+
     return UpdateSummary(
         jnp.sum(jnp.where(active, rows.task_rewards, 0.0)),
         jnp.sum(jnp.where(rows.valid, rows.shaping_reward, 0.0)),
@@ -926,6 +1069,11 @@ def _summary(rollout: TrainingRollout) -> UpdateSummary:
         stage_sum(
             (completed & jnp.any(rows.final_scores >= 20, axis=-1)).astype(jnp.int32)
         ),
+        member_sum(outcomes),
+        member_sum(jnp.where(completed[..., None], rows.final_scores, 0)),
+        None
+        if rows.custom_rewards is None
+        else jnp.sum(jnp.where(active, rows.custom_rewards, 0.0)),
     )
 
 
@@ -1051,7 +1199,11 @@ def update_learner(
                     successor.failed,
                     successor.failure_reason,
                     event,
-                    _summary(rollout),
+                    _summary(
+                        rollout,
+                        collected.progress.opponent_steps.shape[0],
+                        collected.history.capture_capacity,
+                    ),
                 )
                 return _cond(
                     history.error,

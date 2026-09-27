@@ -154,6 +154,10 @@ def blocks(prepared: PreparedTrainingContent) -> _Blocks:
         ),
         captured_updates=carry.history.captured_updates.at[0].set(0),
         captured_rounds=carry.history.captured_rounds.at[0].set(0),
+        captured_ids=carry.history.captured_ids.at[0].set(0),
+        eligible=carry.history.eligible.at[0].set(True),
+        next_capture_id=jnp.int32(1),
+        last_capture_rounds=jnp.int32(0),
         lane_snapshot=jnp.asarray((-1, 0, -1, 0), jnp.int32),
     )
     carry = carry._replace(history=history)
@@ -450,13 +454,7 @@ def test_a_pqn_learner_pinned_against_a_qmix_export_collects_pqn_rows(
     assert collection.pinned_opponent is not None
     carry = state.carry
     history = carry.history._replace(
-        count=jnp.int32(1),
-        historical_variables=jax.tree.map(
-            _fill_slot_zero,
-            carry.history.historical_variables,
-            carry.history.current_variables,
-        ),
-        lane_snapshot=jnp.asarray((-1, 0, -1, 0), jnp.int32),
+        lane_snapshot=jnp.asarray((-1, -2, -1, -2), jnp.int32),
     )
     carry, rollout = _scan(collection, 4)(carry._replace(history=history))
     rows = rollout.transitions
@@ -465,8 +463,8 @@ def test_a_pqn_learner_pinned_against_a_qmix_export_collects_pqn_rows(
     widths = {leaf.shape[-1] for leaf in jax.tree.leaves(carry.memory.team_b)}
     assert {512, qmix.QMIX_HIDDEN_SIZE} <= widths
     snapshot = np.asarray(rows.opponent_snapshot)
-    np.testing.assert_array_equal(snapshot, np.tile((-1, 0, -1, 0), (4, 1)))
-    np.testing.assert_array_equal(np.asarray(rows.opponent_update)[snapshot == 0], -2)
+    np.testing.assert_array_equal(snapshot, np.tile((-1, -2, -1, -2), (4, 1)))
+    np.testing.assert_array_equal(np.asarray(rows.opponent_update)[snapshot == -2], -2)
     compact, memory = learner._pqn_rows(rows)
     assert bool(learner._behavior_valid(rollout))
     assert compact.valid.shape == (4, 4) and memory.shape == (4, 4, 5, 512)
@@ -576,13 +574,7 @@ def _pinned(
     )
     carry = state.carry
     history = carry.history._replace(
-        count=jnp.int32(1),
-        historical_variables=jax.tree.map(
-            _fill_slot_zero,
-            carry.history.historical_variables,
-            carry.history.current_variables,
-        ),
-        lane_snapshot=jnp.asarray((-1, 0, -1, 0), jnp.int32),
+        lane_snapshot=jnp.asarray((-1, -2, -1, -2), jnp.int32),
     )
     return collection, carry._replace(history=history)
 
@@ -606,7 +598,7 @@ def test_the_host_route_returns_the_same_pqn_outputs_as_its_jax_twin(
         assert isinstance(outputs, pqn.PQNLearningOutputs)
         _equal(outputs, jax_rollout.transitions.learning_outputs)
         _equal(host_rollout.transitions.actions, jax_rollout.transitions.actions)
-        pinned = np.asarray(host_rollout.transitions.opponent_snapshot) == 0
+        pinned = np.asarray(host_rollout.transitions.opponent_snapshot) == -2
         assert pinned.any()
 
 

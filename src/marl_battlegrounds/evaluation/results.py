@@ -2,8 +2,10 @@
 
 Results keep the older convenience fields and add bounded NumPy table access.
 Saved views use one committed manifest snapshot. They never recover a writer,
-load JAX, recompute old measurements or fit tournament ratings. Whole-table
-allocation is explicit through ``table``; ``iter_table`` bounds raw row batches.
+load JAX, reconstruct optional measurements or fit tournament ratings.
+Head-to-head views count saved outcomes and points; their matrix is a plain pivot.
+Whole-table allocation is explicit through ``table``; ``iter_table`` bounds raw
+row batches.
 Each saved run reads with the full-report header of its own recorded scalar
 schema (14 before the Red Zone columns, 15 now).
 """
@@ -69,6 +71,9 @@ _TEXT = frozenset(
         "bootstrap_group",
         "system_id",
         "system_name",
+        "opponent_id",
+        "opponent_name",
+        "spawn_end",
         "policy",
         "opponent",
         "determinism",
@@ -90,6 +95,7 @@ _INTS = frozenset(
         "completed_games",
         "supported_independent_sampling_units",
         "games_played",
+        "games",
         "completed_pairs",
         "total_steps_played",
         "episode_length_min",
@@ -875,6 +881,181 @@ class _View:
                 )
                 yield result
 
+    def _match_context(
+        self, row: Mapping[str, Any]
+    ) -> tuple[str, str, str, str, object]:
+        """Return recorded Team A/B identities, display names and spawn choice.
+
+        row keeps its complete original ownership. Missing historical System
+        identities raise ValueError; display names never replace identity.
+        Spawn choice is 0, 1 or an unavailable value from the episode declaration.
+        """
+        entry = self._entry(row)
+        ids = _mapping(entry.get("system_ids"))
+        a, b = ids.get("team_a"), ids.get("team_b")
+        if not isinstance(a, str) or not a or not isinstance(b, str) or not b:
+            raise ValueError(
+                "Head-to-head unavailable: original System IDs were not saved"
+            )
+        declaration = _mapping(
+            _mapping(entry.get("episodes")).get(str(row["episode_id"]))
+        )
+        return (
+            a,
+            b,
+            str(row.get("team_a_policy") or a),
+            str(row.get("team_b_policy") or b),
+            declaration.get("spawn_locations"),
+        )
+
+    def participant_names(self) -> dict[str, str]:
+        """List exact selected System IDs, including declared games not yet played."""
+        names: dict[str, str] = {}
+        for entry in self.selected.values():
+            ids = _mapping(entry.get("system_ids"))
+            policies = _mapping(entry.get("policies"))
+            for team, identifier in ids.items():
+                if isinstance(identifier, str) and identifier:
+                    names[identifier] = str(
+                        _mapping(policies.get(team)).get("name") or identifier
+                    )
+        return names
+
+    def head_to_head(self, by: str) -> list[Row]:
+        """Reduce narrow saved outcomes once into directed descriptive matchup rows.
+
+        by is checked by the public accessor. Counts and point means weight each
+        completed game equally. No metric report or statistical fitter is read.
+        Full tournament matchup intervals are copied only for an exact overall
+        name/count match with one exact identity pair; all other bounds remain
+        unavailable.
+        """
+        groups: dict[tuple[str, str, object], Row] = {}
+        for row in self.iter_rows("episodes", 128):
+            a, b, name_a, name_b, spawn = self._match_context(row)
+            if by == "spawn" and (type(spawn) is not int or spawn not in (0, 1)):
+                raise ValueError(
+                    "Spawn head-to-head unavailable: a game's spawn end was not saved"
+                )
+            map_id = row.get("map_id")
+            condition = (map_id, row.get("config_id") if map_id is None else None)
+            for reverse in (False, True) if a != b else (False,):
+                system, opponent = (b, a) if reverse else (a, b)
+                names = (name_b, name_a) if reverse else (name_a, name_b)
+                end = (
+                    ("team_b" if bool(spawn) != reverse else "team_a")
+                    if by == "spawn"
+                    else None
+                )
+                key = (system, opponent, condition if by == "map" else end)
+                if key not in groups:
+                    groups[key] = {
+                        "system_id": system,
+                        "system_name": names[0],
+                        "opponent_id": opponent,
+                        "opponent_name": names[1],
+                        **(
+                            {"map_id": map_id, "config_id": condition[1]}
+                            if by == "map"
+                            else {}
+                        ),
+                        **({"spawn_end": end} if by == "spawn" else {}),
+                        "games": 0,
+                        "wins": 0,
+                        "draws": 0,
+                        "losses": 0,
+                        "_outcomes": True,
+                        "_points_for": 0,
+                        "_points_against": 0,
+                        "expected_score_ci_low": None,
+                        "expected_score_ci_high": None,
+                        "expected_score_interval_status": "unavailable",
+                    }
+                value = groups[key]
+                value["games"] += 1
+                outcome = row.get("outcome")
+                if outcome in (1, 2, 3):
+                    field = (
+                        "draws"
+                        if outcome == 3
+                        else "wins"
+                        if outcome == (2 if reverse else 1)
+                        else "losses"
+                    )
+                    value[field] += 1
+                else:
+                    value["_outcomes"] = False
+                for field, team in (
+                    ("_points_for", "b" if reverse else "a"),
+                    ("_points_against", "a" if reverse else "b"),
+                ):
+                    score = row.get(f"team_{team}_score")
+                    if value[field] is not None:
+                        value[field] = (
+                            value[field] + score
+                            if isinstance(score, (int, float))
+                            and not isinstance(score, bool)
+                            and np.isfinite(score)
+                            else None
+                        )
+        result: list[Row] = []
+        for key in sorted(
+            groups, key=lambda value: (value[0], value[1], repr(value[2]))
+        ):
+            value = groups[key]
+            games = value["games"]
+            outcomes = value.pop("_outcomes")
+            for field in ("wins", "draws", "losses"):
+                if not outcomes:
+                    value[field] = None
+                value[
+                    {"wins": "win_rate", "draws": "draw_rate", "losses": "loss_rate"}[
+                        field
+                    ]
+                ] = value[field] / games if outcomes else np.nan
+            value["expected_score"] = (
+                (value["wins"] + 0.5 * value["draws"]) / games if outcomes else np.nan
+            )
+            points_for, points_against = (
+                value.pop("_points_for"),
+                value.pop("_points_against"),
+            )
+            value["mean_points_for"] = (
+                points_for / games if points_for is not None else np.nan
+            )
+            value["mean_points_against"] = (
+                points_against / games if points_against is not None else np.nan
+            )
+            value["mean_point_margin"] = (
+                (points_for - points_against) / games
+                if points_for is not None and points_against is not None
+                else np.nan
+            )
+            result.append(value)
+        if (
+            by == "overall"
+            and self.metadata["tables"]["matchup_results"]["availability"]
+            == "available"
+        ):
+            by_names: dict[tuple[str, str], list[Row]] = {}
+            for value in result:
+                by_names.setdefault(
+                    (value["system_name"], value["opponent_name"]), []
+                ).append(value)
+            for saved in self.iter_rows("matchup_results", 128):
+                policy, opponent = saved.get("policy"), saved.get("opponent")
+                if not isinstance(policy, str) or not isinstance(opponent, str):
+                    continue
+                matches = by_names.get((policy, opponent), [])
+                if len(matches) == 1 and matches[0]["games"] == saved.get("matches"):
+                    for name in (
+                        "expected_score_ci_low",
+                        "expected_score_ci_high",
+                        "expected_score_interval_status",
+                    ):
+                        matches[0][name] = saved.get(name)
+        return result
+
     def _rankings(self, rows: int) -> Iterator[Row]:
         """Add exact competition ranks from saved unrounded Elo, without fitting."""
         values = list(self._raw("tournament_results.csv", rows))
@@ -1215,6 +1396,119 @@ class _ResultAccess:
         return {
             name: np.concatenate([batch[name] for batch in batches])
             for name in batches[0]
+        }
+
+    def head_to_head(self, by: str = "overall") -> Columns:
+        """Summarize completed games against each opponent using exact identities.
+
+        Parameters
+        ----------
+        by : {"overall", "map", "spawn"}, default="overall"
+            Keep one directed row per System/opponent, or split it by map or
+            the focal System's physical spawn bank. spawn_end is team_a for
+            the map's original Team A bank and team_b for its original Team B
+            bank. Exchanging ends never exchanges the recorded teams. Custom
+            maps without map_id stay separated by their saved config_id.
+
+        Returns
+        -------
+        dict[str, numpy.ndarray]
+            NumPy columns with exact IDs, display names, games, W/D/L, rates,
+            mean_points_for, mean_points_against and mean_point_margin. Each
+            completed game has equal weight. Both directions appear; identical
+            System self-play appears once from recorded Team A's view. Counts
+            remain exact integers. Missing points/rates are NaN; unavailable
+            bounds are NaN with an explicit status. A complete tournament
+            matchup can reuse its saved expected-score interval. Point-margin intervals
+            are not estimated. Empty completed scope returns {}.
+
+        Raises
+        ------
+        ValueError
+            by is unknown, original System identities are missing, a requested
+            spawn end is missing, or the saved snapshot fails its normal checks.
+
+        Notes
+        -----
+        Available with metrics="none": required outcomes and native points
+        are always recorded. Optional combat metrics are never reconstructed.
+        Host-only; reads narrow outcomes once per call, without JAX, rating fits
+        or saved-file changes. Canonical results retain declared entrant IDs;
+        other results retain recorded System registration IDs. Existing raw
+        tables preserve every game's original run/pass/episode ownership. A
+        reused expected-score interval keeps its saved scope and assumptions;
+        read matchup_results for those original sampling facts. It supplies no
+        uncertainty estimate for point margin.
+        """
+        if by not in ("overall", "map", "spawn"):
+            raise ValueError("by must be overall, map or spawn")
+        return _columns(
+            self._view.head_to_head(by), table="head_to_head", current=False
+        )
+
+    def opponent_matrix(self, metric: str = "mean_point_margin") -> dict[str, Any]:
+        """Pivot overall head-to-head values with exact IDs on both axes.
+
+        Parameters
+        ----------
+        metric : str, default="mean_point_margin"
+            games, wins, draws, losses, win_rate, draw_rate, loss_rate,
+            expected_score, mean_points_for, mean_points_against or
+            mean_point_margin. It names a head_to_head column, not a new metric.
+
+        Returns
+        -------
+        dict
+            system_ids and system_names are ordered tuples; values is a
+            float64 (N,N) NumPy array, row System against column opponent.
+            metric records the chosen column. Unplayed cells, including an
+            unplayed diagonal, are NaN, never zero. Recorded self-play remains
+            present. Display names can repeat without merging identities.
+            Float conversion applies to this display matrix only; exact counts
+            remain in head_to_head. A scope without known Systems gives (0,0).
+
+        Raises
+        ------
+        ValueError
+            The metric is unsupported or head_to_head cannot read the evidence.
+
+        Notes
+        -----
+        Uses the same narrow reduction as head_to_head. No rating or confidence
+        interval is fitted, no optional report is loaded, and no file changes.
+        """
+        if metric not in {
+            "games",
+            "wins",
+            "draws",
+            "losses",
+            "win_rate",
+            "draw_rate",
+            "loss_rate",
+            "expected_score",
+            "mean_points_for",
+            "mean_points_against",
+            "mean_point_margin",
+        }:
+            raise ValueError("Unsupported opponent matrix metric")
+        rows = self._view.head_to_head("overall")
+        names = self._view.participant_names()
+        for row in rows:
+            names[row["system_id"]] = row["system_name"]
+            names[row["opponent_id"]] = row["opponent_name"]
+        ids = tuple(sorted(names))
+        positions = {identifier: index for index, identifier in enumerate(ids)}
+        values = np.full((len(ids), len(ids)), np.nan, np.float64)
+        for row in rows:
+            value = row[metric]
+            values[positions[row["system_id"]], positions[row["opponent_id"]]] = (
+                np.nan if value is None else value
+            )
+        return {
+            "system_ids": ids,
+            "system_names": tuple(names[key] for key in ids),
+            "metric": metric,
+            "values": values,
         }
 
 

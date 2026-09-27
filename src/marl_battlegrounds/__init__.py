@@ -19,7 +19,12 @@ from typing import TYPE_CHECKING
 if TYPE_CHECKING:
     from marl_battlegrounds.autoreset import AutoReset
     from marl_battlegrounds.collection import collect_rollout
-    from marl_battlegrounds.environment import Environment, EnvironmentState, make
+    from marl_battlegrounds.environment import (
+        Environment,
+        EnvironmentState,
+        TrainingFacts,
+        make,
+    )
     from marl_battlegrounds.episode_tracking import (
         EpisodeTrackingState,
         init_episode_tracking,
@@ -42,8 +47,10 @@ if TYPE_CHECKING:
         independent_policies,
         init_systems,
         policy,
+        pool,
         shared_policy,
         system_step_data,
+        team,
     )
     from marl_battlegrounds.evaluation.population_selection import (
         select_initial_population,
@@ -82,6 +89,7 @@ __all__ = [
     "SystemState",
     "SystemStepData",
     "TournamentResult",
+    "TrainingFacts",
     "apply_systems",
     "balanced_spawn_configs",
     "canonical_tournament_rosters",
@@ -97,11 +105,13 @@ __all__ = [
     "load_tdm_scenario",
     "make",
     "policy",
+    "pool",
     "run_canonical_tournament",
     "run_tournament",
     "select_initial_population",
     "shared_policy",
     "system_step_data",
+    "team",
     "track_episode_step",
 ]
 
@@ -113,6 +123,7 @@ _MODULES = {
     "track_episode_step": "episode_tracking",
     "Environment": "environment",
     "EnvironmentState": "environment",
+    "TrainingFacts": "environment",
     "make": "environment",
     "EvaluationResult": "evaluation.results",
     "CanonicalTournamentResult": "evaluation.results",
@@ -129,6 +140,8 @@ _MODULES = {
     "SystemStepData": "evaluation.policy_execution",
     "apply_systems": "evaluation.policy_execution",
     "independent_policies": "evaluation.policy_execution",
+    "pool": "evaluation.policy_execution",
+    "team": "evaluation.policy_execution",
     "init_systems": "evaluation.policy_execution",
     "shared_policy": "evaluation.policy_execution",
     "system_step_data": "evaluation.policy_execution",

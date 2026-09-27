@@ -394,6 +394,7 @@ def prepare_tournament_inputs(
     names: list[str] = []
     scalar_policies: dict[str, bool] = {}
     execution: dict[str, _SystemExecution] = {}
+    variables: dict[str, Any] = {}
     sampling: dict[str, dict[str, Any]] = {}
     bindings: dict[str, System | Policy] = {}
     for item, reference in zip(entrants, references, strict=True):
@@ -404,7 +405,9 @@ def prepare_tournament_inputs(
         participants.append(participant)
         names.append(method.name)
         scalar_policies[method.name] = isinstance(method, Policy)
-        execution[method.name] = prepare_evaluation_system(method)[0]
+        execution[method.name], variables[method.name], _ = prepare_evaluation_system(
+            method
+        )
         sampling[method.name] = method_sampling_fact(method)
         if reference is None or _retain_references:
             bindings[participant["entrant_id"]] = method
@@ -437,7 +440,13 @@ def prepare_tournament_inputs(
         source = spec.env_config
         _validate_config_choices(source, batched=False, both_spawn_choices=True)
         for first, second in {(row.team_a, row.team_b) for row in schedule}:
-            validate_evaluation_rosters(execution[first], execution[second], source)
+            validate_evaluation_rosters(
+                execution[first],
+                execution[second],
+                source,
+                variables_a=variables[first],
+                variables_b=variables[second],
+            )
         source_id, content = config_record(source)
         swapped_id, swapped = config_record(_swap_spawn_banks(source))
         configurations.update({source_id: content, swapped_id: swapped})

@@ -1,9 +1,7 @@
 /**
- * @file Check eight nonempty browser profiles, exact disjoint test coverage and safe
- * deterministic profile environments. The pinned layout keeps profile 4 as the
- * DevClient authoring and Red Zone metrics specs, profile 5 as the recording,
- * renderer, resize and TDM-GAMMA specs, and profile 6 as twelve selected Replay
- * Viewer tests.
+ * @file Check one whole-file browser profile, exact test coverage and safe
+ * deterministic profile environments. Every spec runs once with normal setup;
+ * the profile does not filter test titles or enable an isolated test slice.
  */
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
@@ -79,42 +77,29 @@ function collectedPlaywrightIds(arguments_, environment = {}) {
   return ids.sort();
 }
 
-test("CI browser manifest is nonempty, exact, and eight-way", () => {
+test("CI browser manifest runs every file whole in one profile", () => {
   const manifest = validatedCiManifest();
-  assert.equal(manifest.shards.length, 8);
-  assert.ok(manifest.shards.every((shard) => shard.files.length > 0));
+  assert.equal(manifest.shards.length, 1);
+  assert.ok(manifest.shards[0].files.length > 0);
+  assert.deepEqual(Object.keys(manifest.shards[0]), ["files"]);
   assert.deepEqual(
-    manifest.shards.slice(0, 2).map((shard) => shard.test_titles?.length),
-    [8, 16],
-  );
-  assert.deepEqual(manifest.shards[2], {
-    files: ["authorized-presentation-install.spec.js"],
-    test_titles: [
-      "recovery, death, and SharedObs trajectories preserve public causality and hidden-root privacy",
-    ],
-    env: { MARL_CP5_SLICE_5_ONLY: "1" },
-  });
-  assert.deepEqual(manifest.shards[3].files, [
-    "dev-client-authoring.spec.js",
-    "red-zone-metrics.spec.js",
-  ]);
-  assert.deepEqual(manifest.shards[4].files, [
-    "recording-handoff.spec.js",
-    "authorized-presentation-renderer.spec.js",
-    "resize.spec.js",
-    "tdm-gamma.spec.js",
-  ]);
-  assert.deepEqual(
-    manifest.shards.slice(5).map((shard) => shard.test_titles?.length),
-    [12, 4, 11],
+    playwrightArgumentsForShard(manifest.shards[0]),
+    manifest.shards[0].files.map((filename) => `e2e/${filename}`),
   );
 });
 
 test("CI browser profile environment is additive", () => {
-  const manifest = validatedCiManifest();
+  const shard = {
+    files: ["authorized-presentation-install.spec.js"],
+    env: { MARL_CP5_SLICE_5_ONLY: "1" },
+  };
+  assert.deepEqual(playwrightEnvironmentForShard(shard, { PATH: "/bin" }), {
+    PATH: "/bin",
+    MARL_CP5_SLICE_5_ONLY: "1",
+  });
   assert.deepEqual(
-    playwrightEnvironmentForShard(manifest.shards[2], { PATH: "/bin" }),
-    { PATH: "/bin", MARL_CP5_SLICE_5_ONLY: "1" },
+    playwrightEnvironmentForShard(validatedCiManifest().shards[0], { PATH: "/bin" }),
+    { PATH: "/bin" },
   );
 });
 

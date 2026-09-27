@@ -5,7 +5,9 @@ environment/tracker loops prove stage crossings, reset-time labels, terminal
 timing, live-game preservation, fixed-lane counts and stopped failure paths.
 Early history capture moves only the first self-play threshold to round one and
 drops the 100% capture; the default threshold list and report stay unchanged.
-These tiny schedules test execution; they do not establish useful learning.
+Custom stages also preserve explicit rosters, exact budgets and historical
+stage IDs when a child appends a new schedule. These tiny schedules test
+execution; they do not establish useful learning.
 """
 
 import json
@@ -39,7 +41,11 @@ from marl_battlegrounds.training.curriculum import (
     TrainingProgress,
     TrainingSchedule,
     _advance_training_schedule,  # pyright: ignore[reportPrivateUsage]
+    _build_continuation_schedule,  # pyright: ignore[reportPrivateUsage]
+    _check_training_schedule,  # pyright: ignore[reportPrivateUsage]
+    _continuation_details,  # pyright: ignore[reportPrivateUsage]
     _init_training_progress,  # pyright: ignore[reportPrivateUsage]
+    _make_continuation_schedule,  # pyright: ignore[reportPrivateUsage]
     make_training_schedule,
 )
 
@@ -511,3 +517,180 @@ def test_compiled_final_stage_keeps_large_totals_without_whole_batch_overflow() 
         == maximum * 4
     )
     assert tracking.stage_summary(result[1])["env_steps"] == maximum * 4
+
+
+def test_custom_stages_keep_exact_budgets_rosters_and_immutable_declarations() -> None:
+    stages = [
+        {"share": 0.3, "maps": [0, 3], "team_size": 2, "score_threshold": 4},
+        {
+            "share": 0.7,
+            "maps": [20],
+            "rosters": {"system": ["mage", "mage"], "opponent": ["warrior"]},
+            "score_threshold": 12,
+        },
+    ]
+    schedule = make_training_schedule(
+        total_env_steps=22, num_envs=2, curriculum=cast(list[dict[str, object]], stages)
+    )
+    np.testing.assert_array_equal(schedule.arrays.round_budgets[:2], [3, 8])
+    np.testing.assert_array_equal(schedule.arrays.round_ends[:2], [3, 11])
+    assert schedule.score_thresholds == (4, 12)
+    assert schedule.arrays.roster_class_ids is not None
+    np.testing.assert_array_equal(schedule.arrays.roster_class_ids[0], 0)
+    explicit = np.asarray(schedule.arrays.roster_class_ids[1]).reshape(2, 5)
+    assert explicit[0, 0] == explicit[0, 1] != 0
+    np.testing.assert_array_equal((explicit > 0).sum(axis=1), [2, 1])
+    stages[0]["maps"] = [41]
+    np.testing.assert_array_equal(
+        np.flatnonzero(schedule.arrays.eligible_maps[0]), [0, 3]
+    )
+    _check_training_schedule(schedule)
+    report = json.loads(json.dumps(dict(schedule.rounding_report)))
+    assert report["stage_maps"] == [[0, 3], [20]]
+    assert report["score_thresholds"] == [4, 12]
+
+
+@pytest.mark.parametrize(
+    "stages",
+    [
+        [],
+        [{"share": 1 / 18, "maps": [0], "team_size": 1}] * 18,
+        [{"share": 0.9, "maps": [0], "team_size": 1}],
+        [{"share": True, "maps": [0], "team_size": 1}],
+        [{"share": float("nan"), "maps": [0], "team_size": 1}],
+        [{"share": 1, "maps": [], "team_size": 1}],
+        [{"share": 1, "maps": [0, 0], "team_size": 1}],
+        [{"share": 1, "maps": [42], "team_size": 1}],
+        [{"share": 1, "maps": [True], "team_size": 1}],
+        [{"share": 1, "maps": [0], "team_size": 0}],
+        [{"share": 1, "maps": [0], "rosters": {"system": [], "opponent": ["mage"]}}],
+        [
+            {
+                "share": 1,
+                "maps": [0],
+                "rosters": {"system": ["other"], "opponent": ["mage"]},
+            }
+        ],
+        [{"share": 1, "maps": [0], "team_size": 1, "rosters": {}}],
+        [{"share": 1, "maps": [0], "team_size": 1, "score_threshold": 0}],
+        [{"share": 1, "maps": [0], "team_size": 1, "unknown": 2}],
+    ],
+)
+def test_custom_stage_validation_rejects_invalid_declarations(stages: object) -> None:
+    with pytest.raises((ValueError, TypeError)):
+        make_training_schedule(
+            total_env_steps=200,
+            num_envs=2,
+            curriculum=cast(list[dict[str, object]], stages),
+        )
+
+
+def test_custom_stages_cannot_mix_with_legacy_score_curriculum() -> None:
+    with pytest.raises(ValueError, match="curriculum"):
+        make_training_schedule(
+            total_env_steps=200,
+            num_envs=2,
+            curriculum=[{"share": 1, "maps": [0], "team_size": 3}],
+            score_threshold_curriculum=True,
+        )
+
+
+def test_changed_child_stages_append_distribution_ids_and_round_trip() -> None:
+    parent = make_training_schedule(
+        total_env_steps=20,
+        num_envs=2,
+        curriculum=[{"share": 1, "maps": [0], "team_size": 2}],
+    )
+    child = _make_continuation_schedule(
+        parent,
+        completed_rounds=7,
+        additional_env_steps=20,
+        curriculum=[
+            {"share": 0.4, "maps": [1], "team_size": 3},
+            {"share": 0.6, "maps": [2], "team_size": 4, "score_threshold": 5},
+        ],
+    )
+    assert child.arrays.distribution_offset is not None
+    assert child.arrays.distribution_count is not None
+    assert int(child.arrays.distribution_offset) == 1
+    assert int(child.arrays.distribution_count) == 3
+    np.testing.assert_array_equal(child.arrays.team_sizes[:3], [2, 3, 4])
+    np.testing.assert_array_equal(child.arrays.round_budgets[:2], [4, 6])
+    np.testing.assert_array_equal(child.arrays.round_ends[:2], [11, 17])
+    np.testing.assert_array_equal(
+        child.arrays.eligible_maps[0], parent.arrays.eligible_maps[0]
+    )
+    assert child.score_thresholds == (20, 5)
+    declaration = _continuation_details(child)
+    assert declaration is not None and declaration["schema_version"] == 2
+    restored = _build_continuation_schedule(
+        json.loads(json.dumps(declaration)), require_parent_proof=False
+    )
+    for actual, expected in zip(
+        jax.tree.leaves(restored.arrays), jax.tree.leaves(child.arrays), strict=True
+    ):
+        np.testing.assert_array_equal(actual, expected)
+    declaration["curriculum_changes"][0]["round_offset"] += 1
+    with pytest.raises(ValueError, match=r"boundary|budget"):
+        _build_continuation_schedule(declaration, require_parent_proof=False)
+
+
+def test_changed_child_rejects_more_than_seventeen_lineage_distributions() -> None:
+    parent = make_training_schedule(total_env_steps=200, num_envs=2, curriculum=True)
+    with pytest.raises(ValueError, match="17 distribution IDs"):
+        _make_continuation_schedule(
+            parent,
+            completed_rounds=100,
+            additional_env_steps=20,
+            curriculum=[{"share": 1, "maps": [0], "team_size": 5}],
+        )
+
+
+@pytest.mark.parametrize("points", [(), (2, 6), tuple(range(1, 21))])
+def test_explicit_capture_targets_reconstruct_without_changing_stages(
+    points: tuple[int, ...],
+) -> None:
+    from marl_battlegrounds.training.curriculum import (
+        _check_training_schedule,  # pyright: ignore[reportPrivateUsage]
+        _with_history_capture_rounds,  # pyright: ignore[reportPrivateUsage]
+    )
+
+    original = make_training_schedule(total_env_steps=80, num_envs=2)
+    changed = _with_history_capture_rounds(original, points)
+    _check_training_schedule(changed)
+    assert changed.history_capture_rounds == points
+    assert changed.arrays.history_threshold_count is not None
+    assert int(changed.arrays.history_threshold_count) == len(points)
+    np.testing.assert_array_equal(
+        changed.arrays.history_threshold_rounds[: len(points)], points
+    )
+    np.testing.assert_array_equal(
+        changed.arrays.round_budgets, original.arrays.round_budgets
+    )
+    with pytest.raises(ValueError, match="increasing"):
+        _with_history_capture_rounds(original, (3, 2))
+
+
+@pytest.mark.parametrize("points", [(), (2, 6)])
+def test_explicit_capture_root_survives_child_reconstruction(
+    points: tuple[int, ...],
+) -> None:
+    from marl_battlegrounds.training.curriculum import (
+        _build_continuation_schedule,  # pyright: ignore[reportPrivateUsage]
+        _continuation_details,  # pyright: ignore[reportPrivateUsage]
+        _with_history_capture_rounds,  # pyright: ignore[reportPrivateUsage]
+    )
+
+    root = _with_history_capture_rounds(
+        make_training_schedule(total_env_steps=80, num_envs=2), points
+    )
+    child = _make_continuation_schedule(
+        root, completed_rounds=40, additional_env_steps=20
+    )
+    declaration = _continuation_details(child)
+    assert declaration is not None
+    restored = _build_continuation_schedule(declaration, require_parent_proof=False)
+    assert restored.rounding_report == child.rounding_report
+    np.testing.assert_array_equal(
+        restored.arrays.history_threshold_rounds, child.arrays.history_threshold_rounds
+    )

@@ -1,4 +1,4 @@
-"""Check that Red Zone changed older methods' saved contracts only as planned.
+"""Check approved Red Zone and M11.5 changes against frozen method contracts.
 
 The fixture ``tests/fixtures/method_contracts.json`` was captured on CPU before
 PQN-VDN existed, for MAPPO, IPPO, feedforward MAPPO, feedforward IPPO and QMIX,
@@ -16,14 +16,19 @@ and FF-IPPO none), every context_features leaf's last axis goes from 19 to 20
 (2 each for the PPO methods, 3 for QMIX), and exactly three float32
 team_deathmatch_red_zone_depth leaves appear, each right after its
 team_deathmatch_score_threshold leaf (the env default config (4,), the state
-config (4,) and the tracked source configs (42,)), so leaf counts go 336 to
-339 (MAPPO, IPPO), 263 to 266 (FF) and 415 to 418 (QMIX); in the collection
-details only content_binding may differ; in the checkpoint schema dictionary
+config (4,) and the tracked source configs (42,)). M11.5 adds exactly the nine
+listed rolling-history fields, one spare history slot (20 to 21), and one
+permanent-pin counter row (21 to 22). Final leaf counts are 348 (MAPPO, IPPO),
+275 (FF) and 427 (QMIX). Collection details add history_capture_capacity=20 and
+opponent_rows=22; only the existing content_binding may differ. In the schema
+dictionary
 only actor_input and training_state go from 1 to 2, and the frozen
 pre-Red-Zone dictionary equals the recorded one. The schema-1 actor template
-equals the old actor layout exactly. The default ``config_to_dict`` equals the
-recorded one plus exactly "red_zone_depth": 5.0, placed right after
-score_threshold_curriculum. Unchanged exactly: the dependency names
+equals the old actor layout exactly. Historical method settings gain only
+explicit parameter_sharing="all". The default ``config_to_dict`` equals the
+recorded one plus the explicitly listed M11.5 defaults and "red_zone_depth": 5.0,
+placed right after score_threshold_curriculum. Older settings remain exact.
+Unchanged exactly: the dependency names
 (Flashbax for QMIX only), the inference identity of one fixed synthetic actor
 description in the left frame, the System registration IDs of all-ones
 schema-1-shaped actors with the default hooks at scale 1.0 in the world frame
@@ -81,11 +86,22 @@ _STATE_CHANGES = {
     "ff_ippo": {"actor": 7, "training_state": 0, "context": 2, "depth": 3},
     "qmix": {"actor": 5, "training_state": 25, "context": 3, "depth": 3},
 }
-_LEAF_COUNTS = {"mappo": 339, "ippo": 339, "ff_mappo": 266, "ff_ippo": 266, "qmix": 418}
+_LEAF_COUNTS = {"mappo": 348, "ippo": 348, "ff_mappo": 275, "ff_ippo": 275, "qmix": 427}
 _DEPTH_LEAVES = (
     ("carry/env/_default_config/team_deathmatch_red_zone_depth", [4]),
     ("carry/state/config/team_deathmatch_red_zone_depth", [4]),
     ("carry/tracking/source_configs/team_deathmatch_red_zone_depth", [42]),
+)
+_HISTORY_LEAVES: tuple[tuple[str, list[int], str], ...] = (
+    ("eligible", [21], "bool"),
+    ("captured_ids", [21], "int32"),
+    ("next_capture_id", [], "int32"),
+    ("last_capture_rounds", [], "int32"),
+    ("minimum_capture_rounds", [], "int32"),
+    ("capture_interval_rounds", [], "int32"),
+    ("pinned_update", [], "int32"),
+    ("external_pin", [], "bool"),
+    ("capture_capacity", [], "int32"),
 )
 
 
@@ -123,8 +139,30 @@ def _expected_state(rows: list[Row]) -> tuple[list[Row], dict[str, int], list[Ro
         elif shape[-1:] == [19] and _path(row).endswith("/context_features"):
             row = {**row, "shape": [*shape[:-1], 20]}
             counts["context"] += 1
+        name = _path(row)
+        if name.startswith("carry/history/historical_variables/") or name in (
+            "carry/history/captured_rounds",
+            "carry/history/captured_updates",
+        ):
+            assert row["shape"][0] == 20
+            row = {**row, "shape": [21, *row["shape"][1:]]}
+        elif name in (
+            "carry/progress/opponent_starts",
+            "carry/progress/opponent_steps",
+        ):
+            assert row["shape"] == [21, 4]
+            row = {**row, "shape": [22, 4]}
         expected.append(row)
-        if _path(row).endswith("/team_deathmatch_score_threshold"):
+        if name == "carry/history/error":
+            expected.extend(
+                {
+                    "path": [*row["path"][:-1], {"field": field}],
+                    "shape": shape,
+                    "dtype": dtype,
+                }
+                for field, shape, dtype in _HISTORY_LEAVES
+            )
+        if name.endswith("/team_deathmatch_score_threshold"):
             depth = {
                 "path": [
                     *row["path"][:-1],
@@ -212,8 +250,14 @@ def test_the_capture_settings_are_the_recorded_ones() -> None:
     assert set(fixture["methods"]) == set(_METHODS)
     assert fixture["launch_probe"] == _launch._PROBE
     settings = fixture["settings"]
-    assert asdict(PPOConfig(**settings["ppo"])) == settings["ppo"]
-    assert asdict(QMIXConfig(**settings["qmix"])) == settings["qmix"]
+    assert asdict(PPOConfig(**settings["ppo"])) == {
+        **settings["ppo"],
+        "parameter_sharing": "all",
+    }
+    assert asdict(QMIXConfig(**settings["qmix"])) == {
+        **settings["qmix"],
+        "parameter_sharing": "all",
+    }
 
 
 def _same(value: Tree) -> Tree:
@@ -239,8 +283,27 @@ def test_an_older_method_keeps_its_saved_contracts(method: TrainingMethod) -> No
     expected = _fixture()["methods"][method]
     old = _raw()["methods"][method]
     config = config_to_dict(TrainConfig(method=method))
-    # The one allowed config change: every new config states its depth.
-    assert config == {**expected["default_config_to_dict"], "red_zone_depth": 5.0}
+    # Admit only these explicit new defaults; every older setting stays exact.
+    expected_config: dict[str, Any] = {
+        **expected["default_config_to_dict"],
+        "red_zone_depth": 5.0,
+        "reward": None,
+        "opponents": None,
+        "learner_slots": None,
+        "partners": None,
+        "validation_partners": None,
+        "validation_partner_labels": None,
+        "keep_past": 20,
+        "past_capture_interval": None,
+        "history_capture_env_steps": None,
+        "initial_actor": None,
+    }
+    settings_field = "qmix" if method == "qmix" else "ppo"
+    expected_config[settings_field] = {
+        **expected_config[settings_field],
+        "parameter_sharing": "all",
+    }
+    assert config == expected_config
     assert list(config).index("red_zone_depth") == (
         list(config).index("score_threshold_curriculum") + 1
     )
@@ -267,10 +330,15 @@ def test_an_older_method_keeps_its_saved_contracts(method: TrainingMethod) -> No
     widened, counts, added = _expected_state(old["state_layout"])
     assert counts == _STATE_CHANGES[method]
     assert [(_path(row), row["shape"]) for row in added] == list(_DEPTH_LEAVES)
-    assert len(old["state_layout"]) + 3 == len(layout) == _LEAF_COUNTS[method]
+    assert len(old["state_layout"]) + 12 == len(layout) == _LEAF_COUNTS[method]
     assert layout == widened
     details = checkpoints._collection_details(collection)
-    assert details.keys() == old["collection_details"].keys()
+    expected_details = {
+        **old["collection_details"],
+        "history_capture_capacity": 20,
+        "opponent_rows": 22,
+    }
+    assert details.keys() == expected_details.keys()
     for key, value in details.items():
         if key != "content_binding":
-            assert value == old["collection_details"][key], key
+            assert value == expected_details[key], key

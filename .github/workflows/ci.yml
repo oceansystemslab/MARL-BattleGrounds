@@ -1,6 +1,6 @@
 # Run the full contributor correctness inventory on hosted CPU runners.
 # The Python shard plugin and browser profile manifest own test membership.
-# Keep twelve Python shards, eight browser profiles and stable aggregate names.
+# Keep nineteen Python shards, one browser profile and stable aggregate names.
 # Local GPU qualification is separate; see docs/dev/quality_gates.md.
 name: CI
 
@@ -14,13 +14,13 @@ concurrency:
 
 jobs:
   python-test-gates:
-    name: Python tests (${{ matrix.shard }}/12)
+    name: Python tests (${{ matrix.shard }}/19)
     runs-on: ubuntu-latest
     strategy:
       fail-fast: true
-      max-parallel: 12
+      max-parallel: 19
       matrix:
-        shard: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12]
+        shard: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19]
 
     steps:
       - name: Check out repository
@@ -39,22 +39,22 @@ jobs:
         run: uv sync --locked --extra dev --extra viz --extra training
 
       - name: Check formatting
-        if: matrix.shard == 10
+        if: matrix.shard == 17
         run: uv run --no-sync ruff format --check .
 
       - name: Run linter
-        if: matrix.shard == 11
+        if: matrix.shard == 18
         run: uv run --no-sync ruff check .
 
       - name: Run type checker
-        if: matrix.shard == 12
+        if: matrix.shard == 19
         run: uv run --no-sync pyright
 
       - name: Run Python test shard
         run: >-
           uv run --no-sync pytest
           -p scripts.dev.pytest_shard
-          --ci-shard=${{ matrix.shard }}/12
+          --ci-shard=${{ matrix.shard }}/19
           --maxfail=1
 
   quality-gates:
@@ -75,13 +75,13 @@ jobs:
           fi
 
   frontend-browser-gates:
-    name: Browser gates (${{ matrix.shard }}/8)
+    name: Browser gates (${{ matrix.shard }}/1)
     runs-on: ubuntu-24.04
     strategy:
       fail-fast: true
-      max-parallel: 8
+      max-parallel: 1
       matrix:
-        shard: [1, 2, 3, 4, 5, 6, 7, 8]
+        shard: [1]
 
     steps:
       - name: Check out repository
@@ -111,7 +111,7 @@ jobs:
         run: npm ci
 
       - name: Run frontend static gates
-        if: matrix.shard == 3
+        if: matrix.shard == 1
         run: scripts/dev/check_frontend.sh --static-only
 
       - name: Install Chromium
@@ -121,14 +121,14 @@ jobs:
       - name: Run browser shard
         run: >-
           scripts/dev/check_frontend.sh
-          --e2e-shard ${{ matrix.shard }}/8
+          --e2e-shard ${{ matrix.shard }}/1
           --max-failures=1
 
       - name: Upload browser failure artifacts
         if: failure()
         uses: actions/upload-artifact@v4
         with:
-          name: visual-debugger-browser-failures-${{ matrix.shard }}-of-8
+          name: visual-debugger-browser-failures-${{ matrix.shard }}-of-1
           path: web/visual_debugger/test-results
           if-no-files-found: ignore
           retention-days: 7

@@ -400,7 +400,9 @@ def build_recording_context(
         Pass metadata, including policy descriptors, optional system_ids and
         systems registration tables, seed/RNG protocol, and captured
         code_revision/runtime_provenance. Missing source
-        or runtime data triggers one discovery call for this context.
+        or runtime data triggers one discovery call for this context. Registered
+        display names are retained as JSON strings in system_name aggregation keys
+        so Unicode names fit the existing ASCII metadata contract; IDs stay separate.
 
     Returns
     -------
@@ -553,6 +555,15 @@ def build_recording_context(
                 (
                     AggregationKeyV1(
                         name=f"marl_bgs.system_id.{team_name}", value=system_id
+                    ),
+                    AggregationKeyV1(
+                        name=f"marl_bgs.system_name.{team_name}",
+                        value=json.dumps(
+                            registration.get(
+                                "name", policies.get(team_name, "Unknown system")
+                            ),
+                            ensure_ascii=True,
+                        ),
                     ),
                     AggregationKeyV1(
                         name=f"marl_bgs.parameter_status.{team_name}",

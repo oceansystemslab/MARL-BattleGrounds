@@ -213,8 +213,8 @@ def _actor(root: Path, identifier: str, run: Record, snapshot: _Snapshot) -> Rec
     from marl_battlegrounds.training import checkpoints
 
     checkpoints._digest(identifier, "Selection checkpoint ID")
-    actor_path = root / "actors" / identifier
-    parent_path = root / "checkpoints" / identifier
+    actor_path = checkpoints.artifact_directory(root, "actors", identifier)
+    parent_path = checkpoints.artifact_directory(root, "checkpoints", identifier)
     snapshot.track(parent_path / "checkpoint_details.json")
     parent = checkpoints.read_checkpoint_description(parent_path)
     snapshot.track(actor_path / "actor_details.json")
@@ -250,6 +250,7 @@ def _actor(root: Path, identifier: str, run: Record, snapshot: _Snapshot) -> Rec
                 "execution",
                 "continuation",
                 "validation_declaration",
+                "validation_deployment",
             )
         )
         or (
@@ -293,8 +294,9 @@ def _pass_rows(
     manifest = _object(snapshot.read(path / "run_details.json"), "M8 run")
     for name in manifest.get("tables", {}):
         snapshot.track(path / name)
-    member = panel.members[index]
-    pass_id = validation.validation_pass_id(task["task_id"], member.name)
+    cell = task["members"][index]
+    member = panel.members[cast(int, cell.get("opponent_index", index))]
+    pass_id = validation.validation_pass_id(task["task_id"], cell["name"])
     saved = load_results(path, phase="validation", pass_id=pass_id)
     if saved.status != "complete" or len(saved.metadata["passes"]) != 1:
         raise ValueError("Selection validation pass is incomplete or ambiguous")
@@ -303,10 +305,28 @@ def _pass_rows(
     contract = details.get("evaluation_contract", {})
     policies = entry["policies"]
     focal, opponent = policies["team_a"], policies["team_b"]
-    if (
-        focal.get("checkpoint") != actor["actor_digest"]
-        or focal.get("variables_frozen") is not True
-    ):
+    if "partners" in task:
+        # This binds the recorded assembly, not unavailable constituent weights.
+        # Runtime reuse separately verifies the actual composed System in M8.
+        evidence = _object(
+            snapshot.read(path.parent / "sampling_facts.json"), "Deployment evidence"
+        )
+        if (
+            evidence.get("deployment") != validation._deployment_cell(task, index)
+            or evidence.get("task_id") != task["task_id"]
+            or evidence.get("pass_id") != pass_id
+            or evidence.get("system_ids") != entry.get("system_ids")
+            or not any(
+                component.get("checkpoint") == actor["actor_digest"]
+                for component in focal.get("components", [])
+            )
+        ):
+            raise ValueError(
+                "Validation deployed team differs from its frozen constituents"
+            )
+    elif focal.get("checkpoint") != actor["actor_digest"]:
+        raise ValueError("Validation Team A is not the declared frozen actor")
+    if focal.get("variables_frozen") is not True:
         raise ValueError("Validation Team A is not the declared frozen actor")
     for team, description in policies.items():
         identifier, _ = normalize_system_registration(description, phase="validation")
@@ -328,8 +348,8 @@ def _pass_rows(
         "max_steps": 300,
         "metrics": "priority",
         "save_replays": 0,
-        "system_roster": None,
-        "opponent_roster": None,
+        "system_roster": task.get("system_roster"),
+        "opponent_roster": task.get("opponent_roster"),
         "full_metrics_episodes": [],
         "replay_episodes": [],
     }
@@ -358,6 +378,17 @@ def _pass_rows(
         choice["map_id"]: choice["source_config_id"]
         for choice in contract["source_choices"]
     }
+    from marl_battlegrounds.tasks import _roster_ids, canonical_tournament_rosters
+
+    default_a, default_b = canonical_tournament_rosters()
+    roster_a = task.get("system_roster", default_a)
+    roster_b = task.get("opponent_roster", default_b)
+    classes = list(
+        _roster_ids(roster_a, name="Team A") + _roster_ids(roster_b, name="Team B")
+    )
+    active = [slot < len(roster_a) for slot in range(5)] + [
+        slot < len(roster_b) for slot in range(5)
+    ]
     episodes = _object(entry.get("episodes"), "Validation schedule")
     if set(episodes) != {str(value) for value in range(1, games + 1)}:
         raise ValueError("Saved validation schedule has missing or extra games")
@@ -394,12 +425,12 @@ def _pass_rows(
             or source.get("team_deathmatch_score_threshold") != 20
             or source.get("max_steps") != 300
             or source.get("task_mode") != 1
-            or source["agent_profile"]["class_ids"] != [1, 2, 3, 4, 5] * 2
-            or source["agent_profile"]["active_mask"] != [True] * 10
+            or source["agent_profile"]["class_ids"] != classes
+            or source["agent_profile"]["active_mask"] != active
         ):
             raise ValueError("Saved validation configuration or spawn pair differs")
     rows = validation._rows(
-        path, pass_id=pass_id, opponent=member.name, kills="red_zone_depth" in task
+        path, pass_id=pass_id, opponent=cell["name"], kills="red_zone_depth" in task
     )
     if len(rows) != games or len({row["episode_id"] for row in rows}) != games:
         raise ValueError("Saved validation rows have missing or extra games")
@@ -411,6 +442,82 @@ def _pass_rows(
         ):
             raise ValueError("Saved validation row differs from its generated schedule")
     return rows
+
+
+def _panel_evidence(
+    path: Path,
+    saved: Record,
+    task: Record,
+    actor: Record,
+    panel: validation.FrozenPanel,
+    snapshot: _Snapshot,
+) -> tuple[Record, list[Record]]:
+    """Verify saved panel passes and recompute one summary with the shared owner.
+
+    All task and actor facts have already been checked. This route also serves
+    deployed-team Random diagnostics. It reads exact records, not hidden method
+    weights, and invokes no model, writer or environment.
+    """
+    paths = _list(saved.get("pass_paths"), "Validation pass paths")
+    if len(paths) != len(task["members"]):
+        raise ValueError("Validation needs one saved pass per declared matchup")
+    rows: list[Record] = []
+    facts: dict[str, Record] = {}
+    for index, value in enumerate(paths):
+        pass_path = Path(value)
+        if pass_path.parent != validation._cell_directory(path.parent, task, index):
+            raise ValueError("Saved validation pass is outside its task")
+        rows.extend(_pass_rows(pass_path, task, actor, panel, index, snapshot))
+        sampling_path = pass_path.parent / "sampling_facts.json"
+        if sampling_path.exists():
+            snapshot.read(sampling_path)
+        member = task["members"][index]
+        facts[member["name"]] = validation._read_pass_sampling(
+            pass_path,
+            task_id=task["task_id"],
+            pass_id=validation.validation_pass_id(task["task_id"], member["name"]),
+        )
+    sampling = None
+    if "sampling_evidence" in saved:
+        sampling = validation.validation_sampling_evidence(
+            rows,
+            facts=facts,
+            scheduled_games=len(task["maps"])
+            * task["seed_pairs"]
+            * 2
+            * len(task["members"]),
+            independent_opponents=panel.schema_version == 2 and "partners" not in task,
+        )
+        if sampling != saved["sampling_evidence"]:
+            raise ValueError("Saved sampling evidence differs from its pass facts")
+    reduced = (
+        validation._summarize_panel_rows(
+            rows,
+            task=task,
+            facts=facts,
+            sampling=sampling,
+            bootstrap_draws=saved["bootstrap_draws"],
+            bootstrap_seed=saved["bootstrap_seed"],
+        )
+        if panel.schema_version == 2
+        else summarize_validation(
+            rows,
+            maps=task["maps"],
+            opponents=[member.name for member in panel.members],
+            seed_pairs=task["seed_pairs"],
+            actual_kills="red_zone_depth" in task,
+            bootstrap_draws=saved["bootstrap_draws"],
+            bootstrap_seed=saved["bootstrap_seed"],
+            sampling_evidence=sampling,
+        )
+    )
+    expected_summary = {
+        **task,
+        **reduced,
+        "pass_paths": paths,
+        **validation._method_fields(actor),
+    }
+    return expected_summary, rows
 
 
 def _record(
@@ -510,52 +617,7 @@ def _record(
         saved.get(key) != value for key, value in expected.items()
     ):
         raise ValueError("Saved validation task differs from its declared identity")
-    paths = _list(saved.get("pass_paths"), "Validation pass paths")
-    if len(paths) != len(panel.members):
-        raise ValueError("Validation needs one saved pass per opponent")
-    rows: list[Record] = []
-    facts: dict[str, Record] = {}
-    for index, value in enumerate(paths):
-        pass_path = Path(value)
-        if pass_path.parent != path.parent / f"opponent-{index}":
-            raise ValueError("Saved validation pass is outside its task")
-        rows.extend(_pass_rows(pass_path, task, actor, panel, index, snapshot))
-        sampling_path = pass_path.parent / "sampling_facts.json"
-        if sampling_path.exists():
-            snapshot.read(sampling_path)
-        member = panel.members[index]
-        facts[member.name] = validation._read_pass_sampling(
-            pass_path,
-            task_id=task["task_id"],
-            pass_id=validation.validation_pass_id(task["task_id"], member.name),
-        )
-    sampling = None
-    if "sampling_evidence" in saved:
-        sampling = validation.validation_sampling_evidence(
-            rows,
-            facts=facts,
-            scheduled_games=len(task["maps"]) * pairs * 2 * len(panel.members),
-            independent_opponents=panel.schema_version == 2,
-        )
-        if sampling != saved["sampling_evidence"]:
-            raise ValueError("Saved sampling evidence differs from its pass facts")
-    reduced = summarize_validation(
-        rows,
-        maps=task["maps"],
-        opponents=[member.name for member in panel.members],
-        seed_pairs=pairs,
-        independent_opponents=panel.schema_version == 2,
-        actual_kills="red_zone_depth" in task,
-        bootstrap_draws=saved["bootstrap_draws"],
-        bootstrap_seed=saved["bootstrap_seed"],
-        sampling_evidence=sampling,
-    )
-    expected_summary = {
-        **task,
-        **reduced,
-        "pass_paths": paths,
-        **validation._method_fields(actor),
-    }
+    expected_summary, rows = _panel_evidence(path, saved, task, actor, panel, snapshot)
     if expected_summary != saved:
         raise ValueError("Validation summary differs from its saved games")
     result = {**(saved if original is None else original), "result_source": str(path)}
@@ -608,7 +670,13 @@ def _reference_context(
     run = _object(snapshot.read(root / "run_details.json"), "Parent training run")
     snapshot.track(checkpoint / "checkpoint_details.json")
     boundary = checkpoints.read_checkpoint_description(checkpoint)
-    if boundary["checkpoint_id"] != checkpoint.name or boundary["kind"] != "learner":
+    if (
+        boundary["kind"] != "learner"
+        or checkpoints.artifact_directory(
+            root, "checkpoints", boundary["checkpoint_id"]
+        )
+        != checkpoint
+    ):
         raise ValueError("Inherited boundary identity differs")
     for field in (
         "run_id",
@@ -623,7 +691,10 @@ def _reference_context(
             raise ValueError("Inherited boundary differs from its original run")
     ancestry = checkpoint_ancestry(root, boundary)
     for identifier in ancestry:
-        snapshot.track(root / "checkpoints" / identifier / "checkpoint_details.json")
+        snapshot.track(
+            checkpoints.artifact_directory(root, "checkpoints", identifier)
+            / "checkpoint_details.json"
+        )
     path = _panel_path(root, run)
     panel = _panel(path, snapshot) if path.exists() else None
     if run.get("panel_digest") != (None if panel is None else panel.digest):
@@ -646,6 +717,8 @@ def freeze_inherited_candidates(
     host state still marked validation pending. Descendants and abandoned branches
     cannot enter. All original task and actor checks remain with their owners.
     """
+    from marl_battlegrounds.training import checkpoints
+
     snapshot = _Snapshot()
     checkpoint = checkpoint.absolute()
     root, run, boundary, ancestry, panel = _reference_context(checkpoint, snapshot)
@@ -689,7 +762,10 @@ def freeze_inherited_candidates(
         ):
             continue
         path = (
-            root / "validation" / f"{purpose}-{identifier}" / "validation_summary.json"
+            checkpoints.validation_directory(
+                root, cast(str, purpose), cast(str, identifier)
+            )
+            / "validation_summary.json"
         )
         if not path.exists():
             # An unfinished original task is not candidate evidence.
@@ -745,6 +821,8 @@ def read_inherited_candidates(
     Missing or changed pinned files, ambiguous IDs and an unpermitted comparison
     of different routine roots raise ValueError or the original I/O error.
     """
+    from marl_battlegrounds.training import checkpoints
+
     verified = {} if _verified is None else _verified
     cache_key = validation._digest([references, declaration])
     cached = verified.get(cache_key)
@@ -833,9 +911,9 @@ def read_inherited_candidates(
                 )
             path = Path(task["summary_path"])
             expected = (
-                root
-                / "validation"
-                / f"{task.get('purpose')}-{identifier}"
+                checkpoints.validation_directory(
+                    root, str(task.get("purpose")), identifier
+                )
                 / "validation_summary.json"
             )
             if path != expected:
@@ -848,13 +926,34 @@ def read_inherited_candidates(
                 raise ValueError("Inherited task identity differs")
             if row["purpose"] in ("routine", "initialization"):
                 used_roots.add(row["root"])
+            from marl_battlegrounds.tasks import canonical_tournament_rosters
+
+            defaults = dict(
+                zip(
+                    ("system_roster", "opponent_roster"),
+                    canonical_tournament_rosters(),
+                    strict=True,
+                )
+            )
             compatible = (
                 declaration.get("inherit_parent_candidates", True)
                 and row["panel_digest"] == declaration["panel_digest"]
                 and row.get("red_zone_depth") == declaration.get("red_zone_depth")
                 and row.get("selection_schema_version", 1)
                 == (2 if declaration.get("panel_schema_version") == 2 else 1)
-                and row["maps"] == list(validation.VALIDATION_MAPS)
+                and row["maps"]
+                == declaration.get("deployment", {}).get(
+                    "maps", list(validation.VALIDATION_MAPS)
+                )
+                and row.get("partners")
+                == declaration.get("deployment", {}).get("partners")
+                and row.get("learner_slots")
+                == declaration.get("deployment", {}).get("learner_slots")
+                and all(
+                    tuple(row.get(key, defaults[key]))
+                    == tuple(declaration.get("deployment", {}).get(key, defaults[key]))
+                    for key in defaults
+                )
             )
             if not compatible:
                 continue
@@ -951,6 +1050,8 @@ def read_run_evidence(
     payloads are not needed.
     This verifies saved evidence, not learning quality or independent training seeds.
     """
+    from marl_battlegrounds.training import checkpoints
+
     if confirmation_seed_pairs is not None and (
         type(confirmation_seed_pairs) is not int or confirmation_seed_pairs < 1
     ):
@@ -1048,7 +1149,9 @@ def read_run_evidence(
                 raise ValueError("Supplied confirmation has an invalid task")
             if (
                 supplied.get("checkpoint_id") not in inherited["actors"]
-                and not (root / "actors" / str(supplied.get("checkpoint_id"))).exists()
+                and not checkpoints.artifact_directory(
+                    root, "actors", str(supplied.get("checkpoint_id"))
+                ).exists()
             ):
                 # The caller checks that another supplied run consumes this path.
                 continue
@@ -1056,9 +1159,9 @@ def read_run_evidence(
         else:
             row = _object(original, "Validation record")
             path = (
-                root
-                / "validation"
-                / f"{row['purpose']}-{row['checkpoint_id']}"
+                checkpoints.validation_directory(
+                    root, row["purpose"], row["checkpoint_id"]
+                )
                 / "validation_summary.json"
             )
         if not path.exists() and not external and result["status"] != "complete":
@@ -1089,7 +1192,10 @@ def read_run_evidence(
         final = state.get("final_actor")
         if not isinstance(final, str) or Path(final).parent != root / "actors":
             raise ValueError("Completed training has no exact final actor")
-        identifier = Path(final).name
+        actor_description = checkpoints.read_checkpoint_description(Path(final))
+        identifier = actor_description["metadata"]["checkpoint_id"]
+        if checkpoints.artifact_directory(root, "actors", identifier) != Path(final):
+            raise ValueError("Final actor path differs from its exact checkpoint")
         if identifier not in result["actors"]:
             result["actors"][identifier] = _actor(root, identifier, run, snapshot)
         if result["actors"][identifier]["env_steps"] != config["total_env_steps"]:

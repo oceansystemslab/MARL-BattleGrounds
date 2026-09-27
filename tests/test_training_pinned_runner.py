@@ -32,6 +32,7 @@ from marl_battlegrounds.training.runner import TrainConfig, TrainResult
 
 def _config() -> TrainConfig:
     return TrainConfig(
+        keep_past=0,
         num_envs=4,
         total_env_steps=16,
         seed=731,
@@ -87,7 +88,7 @@ def test_the_pinned_reference_and_record_reach_every_saved_record(
     exposure = json.loads((run / "exposure.json").read_text())
     assert exposure["pinned_opponent"] == record
     assert exposure["opponent_rows"][:2] == ["current weights", "pinned: tdm-alpha"]
-    assert len(exposure["opponent_rows"]) == len(exposure["starts_by_opponent"]) == 21
+    assert len(exposure["opponent_rows"]) == len(exposure["starts_by_opponent"]) == 2
     export = baseline.final_actor
     metadata = checkpoints.read_checkpoint_description(export)["metadata"]
     assert metadata["pinned_opponent"] == record
@@ -109,7 +110,9 @@ def test_exports_are_verified_only_when_linked_to_their_own_checkpoint(
     assert verified["controllers"] == direct["controllers"]
     first = _checkpoint(baseline.run_dir, 1)
     metadata = dict(checkpoints.read_checkpoint_description(export)["metadata"])
-    metadata["checkpoint_id"] = first.name
+    metadata["checkpoint_id"] = checkpoints.read_checkpoint_description(first)[
+        "checkpoint_id"
+    ]
     metadata["env_steps"] = checkpoints.read_checkpoint_description(first)["counters"][
         "env_steps"
     ]
@@ -126,7 +129,7 @@ def test_exports_are_verified_only_when_linked_to_their_own_checkpoint(
     assert unlinked["exposure"] == "unknown"
 
 
-def test_complete_checkpoint_has_truthful_unknown_exposure(
+def test_complete_checkpoint_keeps_the_same_known_exposure_as_its_export(
     baseline: TrainResult,
 ) -> None:
     from marl_battlegrounds._method_loading import load_method
@@ -136,6 +139,13 @@ def test_complete_checkpoint_has_truthful_unknown_exposure(
     evidence = pinned_opponent_evidence(
         prepare_training_content().binding, method, export=path
     )
-    assert evidence["source"] == "declared checkpoint"
-    assert evidence["exposure"] == "unknown"
+    assert evidence["source"] == "verified checkpoint"
+    assert evidence["exposure"] == "known"
+    actor = pinned_opponent_evidence(
+        prepare_training_content().binding,
+        checkpoints.load_system(baseline.final_actor),
+        export=baseline.final_actor,
+    )
+    assert evidence["controllers"] == actor["controllers"]
+    assert evidence["exposure"] == actor["exposure"]
     assert evidence["familiar_scenarios"] == list(range(1, 9))

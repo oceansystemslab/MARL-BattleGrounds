@@ -654,7 +654,9 @@ def test_greedy_export_matches_the_q_network_and_its_learner(tmp_path: Path) -> 
         "run_id": "qmix-checkpoint-test",
         "seed": _SEED,
         "env_steps": int(state.carry.progress.rounds) * _GAMES,
-        "checkpoint_id": learner_path.name,
+        "checkpoint_id": checkpoints.read_checkpoint_description(learner_path)[
+            "checkpoint_id"
+        ],
         "optimizer_steps": int(state.completed_updates),
     }
     with pytest.raises(ValueError, match="optimizer_steps"):

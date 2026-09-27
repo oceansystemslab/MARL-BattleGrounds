@@ -8,7 +8,8 @@ challenger references reach the tournament API unchanged; factories never run
 while parsing. Evaluation and tournaments default to 128 environments; explicit
 capacities pass through unchanged. Fresh-execution flags preserve explicit true
 and false values; omission inherits saved settings. Canonical conditions remain
-owned by its released field.
+owned by its released field. The head-to-head preview prints the shared
+accessor's counts and points, with exact IDs beside possibly repeated names.
 """
 
 from __future__ import annotations
@@ -579,12 +580,27 @@ def test_preview_reads_one_chunk_and_closes_iterator(
         replays=(),
         replay_paths=(),
         iter_table=rows,
+        head_to_head=lambda: {
+            "system_id": ["a"],
+            "system_name": ["Same"],
+            "opponent_id": ["b"],
+            "opponent_name": ["Same"],
+            "games": [3],
+            "wins": [1],
+            "draws": [1],
+            "losses": [1],
+            "mean_points_for": [5.0],
+            "mean_points_against": [2.0],
+            "mean_point_margin": [3.0],
+        },
     )
     _cli._print_result(cast(EvaluationResult, fake), tournament=False)
     assert state == ["read", "closed"]
     output = capsys.readouterr().out
     assert "Results Were Not Saved" in output
     assert "Unavailable" in output and "Up To 32 Rows" in output
+    assert "Head To Head — Up To 32 Rows" in output
+    assert "a\tSame\tb\tSame\t3\t1\t1\t1\t5.0\t2.0\t3.0" in output
 
 
 def test_cpu_evaluation_matches_python_and_preserves_replays(

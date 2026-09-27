@@ -22,7 +22,7 @@ from dataclasses import dataclass
 from importlib.resources import files
 from math import isfinite
 from pathlib import Path
-from typing import Annotated, Literal, Self, cast
+from typing import Annotated, Any, Literal, Self, cast
 
 import jax
 import jax.numpy as jnp
@@ -811,12 +811,15 @@ def _export_origin(
         when every linking field agrees and the learner's protected scenario
         closure matches today's; otherwise ("declared", None). A pinned record
         of None means the source run played self-play only. A full learner
-        folder returns ("checkpoint", None); its exposure stays unknown.
+        folder uses its own checked description and matching protected closure
+        and returns ("verified checkpoint", the inherited exposure record).
 
     Notes
     -----
-    Reads the export's description and its sibling learner description
-    ``<run>/checkpoints/<checkpoint_id>/`` without payloads; each description's
+    Capture-only exports carry their content binding and inherited exposure;
+    they need no sibling learner checkpoint. Other actor exports read their
+    sibling learner description in the saved checkpoint directory without payloads.
+    Each description's
     own hash is verified. Writes nothing. The learner's saved binding may be
     any version (1, 2 or 3): it is only read as a record, never rebuilt. A
     binding that no longer validates, or one saved under a different
@@ -826,36 +829,61 @@ def _export_origin(
     from marl_battlegrounds.training import checkpoints
 
     details = checkpoints.read_checkpoint_description(export)
-    if details["kind"] == "learner":
-        # Loading weights does not establish the training exposure of their source.
-        return "checkpoint", None
+    full_checkpoint = details["kind"] == "learner"
     metadata = cast(dict[str, object], details.get("metadata", {}))
-    identifier = metadata.get("checkpoint_id")
-    if not isinstance(identifier, str):
-        return "declared", None
-    source = export.resolve().parent.parent / "checkpoints" / identifier
-    try:
-        learner = checkpoints.read_checkpoint_description(source)
-    except OSError, ValueError:
-        return "declared", None
-    saved = cast(dict[str, object], learner.get("metadata", {}))
-    config = cast(dict[str, object], saved.get("config", {}))
-    counters = cast(dict[str, object], learner.get("counters", {}))
-    collection = cast(dict[str, object], learner.get("collection", {}))
-    linked = (
-        learner.get("checkpoint_id") == identifier
-        and learner.get("actor_digest") == details.get("actor_digest")
-        and saved.get("run_id") == metadata.get("run_id")
-        and config.get("seed") == metadata.get("seed")
-        and counters.get("env_steps") == metadata.get("env_steps")
-        and checkpoints._config_input_scale(config)  # pyright: ignore[reportPrivateUsage]
-        == checkpoints._actor_input_scale(details)  # pyright: ignore[reportPrivateUsage]
-        and checkpoints._config_spawn_frame(config)  # pyright: ignore[reportPrivateUsage]
-        == checkpoints._actor_spawn_frame(details)  # pyright: ignore[reportPrivateUsage]
-        and collection.get("pinned_opponent") == metadata.get("pinned_opponent")
-    )
-    if not linked:
-        return "declared", None
+    capture = metadata.get("capture_origin")
+    status = "verified checkpoint" if full_checkpoint else "verified"
+    if full_checkpoint:
+        learner = details
+        saved = metadata
+        collection = cast(dict[str, object], learner.get("collection", {}))
+    elif isinstance(capture, dict):
+        # Capture exports carry their own binding and need no recovery payload.
+        saved = metadata
+        collection = {
+            "content_binding": cast(dict[str, object], capture).get("content_binding"),
+            "pinned_opponent": metadata.get("pinned_opponent"),
+        }
+        status = "verified capture"
+    else:
+        identifier = metadata.get("checkpoint_id")
+        if not isinstance(identifier, str):
+            return "declared", None
+        try:
+            source = checkpoints.artifact_directory(
+                export.resolve().parent.parent, "checkpoints", identifier
+            )
+            learner = checkpoints.read_checkpoint_description(source)
+        except OSError, ValueError:
+            return "declared", None
+        saved = cast(dict[str, object], learner.get("metadata", {}))
+        config = cast(dict[str, object], saved.get("config", {}))
+        counters = cast(dict[str, object], learner.get("counters", {}))
+        collection = cast(dict[str, object], learner.get("collection", {}))
+        linked = (
+            learner.get("checkpoint_id") == identifier
+            and learner.get("actor_digest") == details.get("actor_digest")
+            and saved.get("run_id") == metadata.get("run_id")
+            and config.get("seed") == metadata.get("seed")
+            and counters.get("env_steps") == metadata.get("env_steps")
+            and checkpoints._config_input_scale(config)  # pyright: ignore[reportPrivateUsage]
+            == checkpoints._actor_input_scale(details)  # pyright: ignore[reportPrivateUsage]
+            and checkpoints._config_spawn_frame(config)  # pyright: ignore[reportPrivateUsage]
+            == checkpoints._actor_spawn_frame(details)  # pyright: ignore[reportPrivateUsage]
+            and (
+                None
+                if collection.get("opponent_members")
+                else collection.get("pinned_opponent")
+            )
+            == metadata.get("pinned_opponent")
+            and saved.get("initial_actor") == metadata.get("initial_actor")
+            and saved.get("used_opponent_members", [])
+            == metadata.get("opponent_members", [])
+            and saved.get("used_partner_members", [])
+            == metadata.get("partner_members", [])
+        )
+        if not linked:
+            return "declared", None
     try:
         # The same JSON route prepare_training_content uses for saved bindings.
         source_binding = TrainingContentBinding.model_validate_json(
@@ -867,7 +895,48 @@ def _export_origin(
         return "declared", None
     if _leakage_projection(source_binding) != _leakage_projection(binding):
         return "declared", None
-    return "verified", cast(dict[str, object] | None, collection.get("pinned_opponent"))
+    used_members = saved.get(
+        "used_opponent_members"
+        if full_checkpoint or capture is None
+        else "opponent_members",
+        [],
+    )
+    used_partners = saved.get(
+        "used_partner_members"
+        if full_checkpoint or capture is None
+        else "partner_members",
+        [],
+    )
+    origins = [
+        value
+        for value in (
+            None
+            if collection.get("opponent_members")
+            else collection.get("pinned_opponent"),
+            saved.get("initial_actor"),
+            *cast(list[object], used_members),
+            *cast(list[object], used_partners),
+        )
+        if value is not None
+    ]
+    if not origins:
+        return status, None
+    evidence = [cast(dict[str, Any], item).get("evidence", {}) for item in origins]
+    exposure = (
+        "known"
+        if any(item.get("exposure") == "known" for item in evidence)
+        else "none"
+        if all(item.get("exposure") == "none" for item in evidence)
+        else "unknown"
+    )
+    return status, {
+        "evidence": {
+            "exposure": exposure,
+            "controllers": sorted(
+                {name for item in evidence for name in item.get("controllers", [])}
+            ),
+        }
+    }
 
 
 def pinned_opponent_evidence(
@@ -889,7 +958,8 @@ def pinned_opponent_evidence(
     dict
         JSON-ready. ``source`` is "installed" (a built-in Policy), "verified
         export", "declared export", "declared checkpoint" or "researcher method".
-        Full checkpoints retain unknown exposure. ``exposure`` is
+        Full checkpoints use their checked provenance and protected closure.
+        ``exposure`` is
         "none", "known" or "unknown": whether the method, or anything it was
         trained against through a verified chain, is one of the protected
         scenario pressure controllers. ``controllers`` names the known ones by
@@ -978,8 +1048,12 @@ def pinned_opponent_evidence(
         return base
     if export is not None:
         status, inherited = _export_origin(binding, export)
-        if status == "verified":
-            record: dict[str, object] = {"source": "verified export"}
+        if status in ("verified", "verified checkpoint", "verified capture"):
+            record: dict[str, object] = {
+                "source": status
+                if status in ("verified checkpoint", "verified capture")
+                else "verified export"
+            }
             if inherited is None:
                 record.update(
                     {"exposure": "none", "controllers": [], "familiar_scenarios": []}

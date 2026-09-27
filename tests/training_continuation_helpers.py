@@ -150,3 +150,11 @@ def compare_direct_child(
         real_rounds += int(rollout.real_steps)
     assert real_rounds == int(expected.carry.progress.rounds) - context.start_rounds
     equal(ends[child_root], expected)
+
+
+def reward_one(*_args: object) -> jax.Array:
+    return jax.numpy.ones((10,), jax.numpy.float32)
+
+
+def reward_seven(*_args: object) -> jax.Array:
+    return jax.numpy.full((10,), 7.0, jax.numpy.float32)

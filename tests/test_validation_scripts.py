@@ -33,6 +33,10 @@ def test_hosted_ci_preserves_main_runs_without_explicit_job_timeouts() -> None:
     assert "cancel-in-progress: true" in workflow
     assert workflow.count("fail-fast: true") == 2
     assert "timeout-minutes:" not in workflow
+    assert "max-parallel: 19" in workflow
+    assert "shard: [1]" in workflow
+    assert "--ci-shard=${{ matrix.shard }}/19" in workflow
+    assert "--e2e-shard ${{ matrix.shard }}/1" in workflow
 
 
 def _run(
@@ -150,7 +154,7 @@ def _outside_directory(tmp_path: Path) -> Path:
     return outside
 
 
-@pytest.mark.parametrize("jobs", ["12", "3"])
+@pytest.mark.parametrize("jobs", ["19", "3"])
 def test_python_gate_is_root_independent_cpu_only_and_exactly_sharded(
     tmp_path: Path,
     jobs: str,
@@ -168,7 +172,7 @@ def test_python_gate_is_root_independent_cpu_only_and_exactly_sharded(
         ("PYTEST_ADDOPTS", "--ignore=tests"),
         ("JAX_DISABLE_JIT", "1"),
         ("MARL_PYTHON_GATE_JOBS", "0"),
-        ("MARL_PYTHON_GATE_JOBS", "13"),
+        ("MARL_PYTHON_GATE_JOBS", "20"),
         ("MARL_PYTHON_GATE_JOBS", "many"),
         ("MARL_PYTHON_GATE_JOBS", ""),
     ):
@@ -202,7 +206,7 @@ def test_python_gate_is_root_independent_cpu_only_and_exactly_sharded(
     assert 1 <= peak <= int(jobs)
     records = _log_records(log_path)
     uv_records = [record for record in records if record[1] == "uv"]
-    assert len(uv_records) == 15
+    assert len(uv_records) == 22
     assert {record[2] for record in uv_records} == {str(repository)}
     assert {record[3] for record in uv_records} == {"cpu"}
 
@@ -210,10 +214,10 @@ def test_python_gate_is_root_independent_cpu_only_and_exactly_sharded(
     shard_selectors = {
         match.group(1)
         for invocation in invocations
-        if (match := re.search(r"--ci-shard(?:=|\s+)(\d+/12)(?:\s|$)", invocation))
+        if (match := re.search(r"--ci-shard(?:=|\s+)(\d+/19)(?:\s|$)", invocation))
         is not None
     }
-    assert shard_selectors == {f"{index}/12" for index in range(1, 13)}
+    assert shard_selectors == {f"{index}/19" for index in range(1, 20)}
     assert sum("ruff format --check ." in invocation for invocation in invocations) == 1
     assert not any("--junitxml" in invocation for invocation in invocations)
     assert sum("ruff check ." in invocation for invocation in invocations) == 1
@@ -267,7 +271,7 @@ def test_frontend_gate_is_root_independent_and_isolates_browser_outputs(
     npm_invocations = [record[5] for record in records if record[1] == "npm"]
     node_records = [record for record in records if record[1] == "node"]
     assert len(npm_invocations) == 4
-    assert len(node_records) == 8
+    assert len(node_records) == 1
     frontend_root = repository / "web" / "visual_debugger"
     assert all(
         f"--prefix {frontend_root}" in invocation for invocation in npm_invocations
@@ -284,10 +288,10 @@ def test_frontend_gate_is_root_independent_and_isolates_browser_outputs(
     shard_selectors = {
         match.group(1)
         for record in node_records
-        if (match := re.search(r"run-ci-shard\.js\s+(\d+/8)(?:\s|$)", record[5]))
+        if (match := re.search(r"run-ci-shard\.js\s+(\d+/1)(?:\s|$)", record[5]))
         is not None
     }
-    assert shard_selectors == {f"{index}/8" for index in range(1, 9)}
+    assert shard_selectors == {f"{index}/1" for index in range(1, 2)}
 
     output_directories: set[str] = set()
     for record in node_records:
@@ -299,7 +303,7 @@ def test_frontend_gate_is_root_independent_and_isolates_browser_outputs(
             )
             output_directory = match.group(1)
         output_directories.add(output_directory)
-    assert len(output_directories) == 8
+    assert len(output_directories) == 1
 
     failure_log = tmp_path / "frontend-early-failure.log"
     failed = _run(
@@ -313,7 +317,7 @@ def test_frontend_gate_is_root_independent_and_isolates_browser_outputs(
     )
     assert failed.returncode != 0
     failure_records = _log_records(failure_log)
-    assert len([record for record in failure_records if record[1] == "node"]) == 8
+    assert len([record for record in failure_records if record[1] == "node"]) == 1
     failure_npm_invocations = [
         record[5] for record in failure_records if record[1] == "npm"
     ]
@@ -348,20 +352,20 @@ def test_python_gate_timings_save_one_junit_file_per_shard(tmp_path: Path) -> No
     timings = (outside / "timings").resolve()
     assert timings.is_dir()
     uv_records = [record for record in _log_records(log_path) if record[1] == "uv"]
-    assert len(uv_records) == 15
+    assert len(uv_records) == 22
     assert {record[3] for record in uv_records} == {"cpu"}
     junit_by_shard = {
         match.group(1): match.group(2)
         for record in uv_records
         if (
             match := re.search(
-                r"--ci-shard=(\d+)/12 .*--junitxml=(\S+)(?:\s|$)", record[5]
+                r"--ci-shard=(\d+)/19 .*--junitxml=(\S+)(?:\s|$)", record[5]
             )
         )
         is not None
     }
     assert junit_by_shard == {
-        str(index): str(timings / f"python-shard-{index}.xml") for index in range(1, 13)
+        str(index): str(timings / f"python-shard-{index}.xml") for index in range(1, 20)
     }
     static = [record[5] for record in uv_records if "--ci-shard" not in record[5]]
     assert len(static) == 3
@@ -391,16 +395,16 @@ def test_frontend_gate_timings_save_one_json_report_per_profile(
     records = _log_records(log_path)
     assert len([record for record in records if record[1] == "npm"]) == 4
     node_records = [record for record in records if record[1] == "node"]
-    assert len(node_records) == 8
+    assert len(node_records) == 1
     reports = {
         match.group(1): record[7]
         for record in node_records
-        if (match := re.search(r"run-ci-shard\.js\s+(\d+)/8(?:\s|$)", record[5]))
+        if (match := re.search(r"run-ci-shard\.js\s+(\d+)/1(?:\s|$)", record[5]))
         is not None
     }
     assert reports == {
         str(index): str(timings / f"browser-profile-{index}.json")
-        for index in range(1, 9)
+        for index in range(1, 2)
     }
     assert all("--reporter=line,json" in record[5] for record in node_records)
     assert all("--max-failures=1" in record[5] for record in node_records)
@@ -422,17 +426,17 @@ def test_python_gate_waits_for_all_workers_before_reporting_failure(
         env=_environment(
             fake_bin,
             log_path,
-            FAKE_FAIL_MATCH="--ci-shard=1/12 ",
-            FAKE_SLEEP_MATCH="--ci-shard=12/12 ",
+            FAKE_FAIL_MATCH="--ci-shard=1/19 ",
+            FAKE_SLEEP_MATCH="--ci-shard=19/19 ",
             FAKE_SLEEP_SECONDS="0.3",
         ),
     )
 
     assert result.returncode != 0
     starts = _log_records(log_path)
-    assert len([record for record in starts if record[1] == "uv"]) == 15
+    assert len([record for record in starts if record[1] == "uv"]) == 22
     finishes = _log_records(log_path, "finish")
-    assert any("12/12" in record[2] for record in finishes)
+    assert any("19/19" in record[2] for record in finishes)
 
 
 def test_precommit_gate_rejects_index_mutation_during_validation(
@@ -495,6 +499,8 @@ def test_precommit_gate_keeps_copied_index_out_of_child_checks(
         set -eu
         name="$(basename -- "$0")"
         printf '%s\t%s\n' "$name" "${GIT_INDEX_FILE-unset}" >> "$FAKE_TOOL_LOG"
+        [[ "$#" == 2 && "$1" == --timings && "$2" == "$FAKE_TIMINGS" ]]
+        [[ -d "$2" ]]
         child="$FAKE_CHILD_REPOSITORIES/$name"
         git init --quiet "$child"
         printf 'child source\n' > "$child/child.txt"
@@ -526,13 +532,18 @@ def test_precommit_gate_keeps_copied_index_out_of_child_checks(
         FAKE_CHILD_REPOSITORIES=str(tmp_path / "child-repositories"),
         FAKE_TOOL_LOG=str(log_path),
         FAKE_BEHAVIOR=behavior,
+        FAKE_TIMINGS=str(tmp_path / "outside" / "timing reports"),
     )
     _run(["git", "add", "candidate.txt"], cwd=repository, env=env, check=True)
     before = _run(["git", "write-tree"], cwd=repository, env=env, check=True).stdout
     real_before = real_index.read_bytes()
 
     result = _run(
-        [str(repository / "scripts/dev/check_before_commit.sh")],
+        [
+            str(repository / "scripts/dev/check_before_commit.sh"),
+            "--timings",
+            "timing reports",
+        ],
         cwd=_outside_directory(tmp_path),
         env=env,
     )

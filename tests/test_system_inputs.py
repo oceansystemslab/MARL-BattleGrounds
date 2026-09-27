@@ -217,6 +217,7 @@ def test_public_inputs_match_scalar_reference_under_jit_and_native_batches(
         "active_mask",
         "episode_start",
         "valid",
+        "controlled_mask",
     )
     batch = 1 if num_envs is None else num_envs
     for team in (0, 1):

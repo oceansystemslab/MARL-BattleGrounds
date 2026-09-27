@@ -97,7 +97,7 @@ from marl_battlegrounds.baselines.inputs import (
     spawn_frame_flag,
     team_obstacle_partners,
 )
-from marl_battlegrounds.core.types import ActionMask
+from marl_battlegrounds.core.types import AGENT_FEATURE_CLASS_ID, ActionMask
 from marl_battlegrounds.evaluation.policy_execution import (
     System,
     SystemInput,
@@ -299,6 +299,148 @@ def _actor_input_schema(value: object) -> int:
     return value
 
 
+_PARAMETER_SHARING = ("all", "class", "none")
+
+
+def _parameter_sharing(value: str) -> str:
+    """Check the fixed actor weight rule: all actors, own class or physical slot."""
+    if value not in _PARAMETER_SHARING:
+        raise ValueError("parameter_sharing must be all, class or none")
+    return value
+
+
+def _actor_groups(actors: ActorInput, sharing: str) -> Array:
+    """Read int32 (...,5) group IDs from each actor's own class or physical slot.
+
+    Class IDs 1..5 become groups 0..4. Unused rows use group zero and remain
+    subject to the caller's physical and learner masks. No encoded feature or
+    other actor's private row is read. all is not a grouped application.
+    """
+    shape = actors.observation.self_features.shape[:-1]
+    if sharing == "none":
+        return jnp.broadcast_to(jnp.arange(5, dtype=jnp.int32), shape)
+    if sharing != "class":
+        raise ValueError("Grouped actors require class or none parameter sharing")
+    return jnp.clip(
+        actors.observation.self_features[..., AGENT_FEATURE_CLASS_ID].astype(jnp.int32)
+        - 1,
+        0,
+        4,
+    )
+
+
+def _group_order(groups: Array) -> tuple[Array, Array, Array]:
+    """Sort row indices by five group IDs and count rows, keeping shapes fixed.
+
+    groups is int32 with arbitrary row axes and values 0..4. Returns flat row
+    order, sorted group IDs and five int32 counts. Features and weights stay
+    separate: no parameter tree is copied for each actor.
+    """
+    flat = groups.reshape(-1)
+    order = jnp.argsort(flat, stable=True)
+    sorted_groups = flat[order]
+    sizes = jnp.bincount(flat, length=5).astype(jnp.int32)
+    return order, sorted_groups, sizes
+
+
+def _group_dense(values: Array, params: Tree, groups: Array, sizes: Array) -> Array:
+    """Apply five Dense kernels to their sorted rows with one ragged dot.
+
+    values is float32 (N,F), params has kernel (5,F,H) and optional bias
+    (5,H), groups is sorted int32 (N,), and sizes is its five row counts.
+    Returns (N,H) in the same sorted order. Uses JAX's existing contraction;
+    its CPU fallback can expand groups, so CPU tests establish correctness,
+    not GPU cost. No full parameter tree is gathered per actor.
+    """
+    result = jax.lax.ragged_dot(values, params["kernel"], sizes)
+    if "bias" in params:
+        result = result + params["bias"][groups]
+    return result
+
+
+def _restore_group_rows(values: Array, order: Array, shape: tuple[int, ...]) -> Array:
+    """Return sorted (N,H) values to their original row axes plus width H."""
+    return (
+        jnp.zeros_like(values).at[order].set(values).reshape(*shape, values.shape[-1])
+    )
+
+
+def _group_gru(
+    params: Tree,
+    memory: Array,
+    features: Array,
+    starts: Array,
+    valid: Array,
+    groups: Array,
+    active: Array | None = None,
+) -> tuple[Array, Array]:
+    """Scan Flax's GRU gates with selected weights and physical actor memory.
+
+    memory is (B,5,H); features is (T,B,5,H); starts, valid and groups are
+    (T,B,5). Group IDs may change at episode resets. Each time row is sorted
+    independently and restored before carrying memory to the next row.
+    Optional active uses PQN's rule: a valid inactive actor clears memory;
+    invalid rows always preserve it. Without active, invalid outputs are zero.
+    The six gate parameter paths and equations are Flax GRUCell's defaults.
+    """
+
+    def step(carry: Array, row: tuple[Array, ...]) -> tuple[Array, Array]:
+        """Apply one current group assignment, then restore physical slot order."""
+        x, reset, keep, group, present = row
+        before = jnp.where((reset & keep)[..., None], 0.0, carry)
+        order, selected, sizes = _group_order(group)
+        x = x.reshape(-1, x.shape[-1])[order]
+        h = before.reshape(-1, before.shape[-1])[order]
+        r = nn.sigmoid(
+            _group_dense(x, params["ir"], selected, sizes)
+            + _group_dense(h, params["hr"], selected, sizes)
+        )
+        z = nn.sigmoid(
+            _group_dense(x, params["iz"], selected, sizes)
+            + _group_dense(h, params["hz"], selected, sizes)
+        )
+        n = jnp.tanh(
+            _group_dense(x, params["in"], selected, sizes)
+            + r * _group_dense(h, params["hn"], selected, sizes)
+        )
+        output = _restore_group_rows((1.0 - z) * n + z * h, order, carry.shape[:-1])
+        moved = jnp.where(present[..., None], output, 0.0)
+        next_memory = jnp.where(keep[..., None], moved, carry)
+        if active is None:
+            output = jnp.where(keep[..., None], output, 0.0)
+        return next_memory, output
+
+    present = jnp.ones_like(valid) if active is None else active
+    return jax.lax.scan(step, memory, (features, starts, valid, groups, present))
+
+
+def _grouped_actor_inputs(
+    inputs: SystemInput, sharing: str, spawn_frame_index: int
+) -> tuple[Array, Array, Array, Array | None]:
+    """Prepare permitted features, categorical masks and groups for new actors.
+
+    Input projection follows the existing actor hooks. Return features (B,5,F),
+    bool masks (B,5,198), int32 groups (B,5) and the optional lane reflection
+    flags. Group identity comes from raw self class before encoding. This
+    helper is used only by grouped hooks; shared hooks remain unchanged.
+    """
+    actors, frame_mask = inputs.actors, inputs.action_mask
+    groups = _actor_groups(actors, sharing)
+    flag = None
+    frame = SPAWN_FRAMES[spawn_frame_index]
+    if frame != "world":
+        flag = spawn_frame_flag(actors, frame)
+        actors, frame_mask = mirror_team_view(
+            actors, frame_mask, flag, obstacle_partners=team_obstacle_partners(actors)
+        )
+    return (
+        encode_actor_inputs(actors),
+        categorical_action_mask(frame_mask),
+        groups,
+        flag,
+    )
+
+
 @dataclass(frozen=True)
 class PPOConfig:
     """Hold static donor update settings, with separate actor/critic optimizers.
@@ -341,6 +483,10 @@ class PPOConfig:
         before the first Dense layer. One preserves the donor's raw inputs.
         Use the same setting for collection, learning and loaded inference.
         No feature is removed and no running statistics are collected.
+    parameter_sharing : {"all", "class", "none"}, default="all"
+        Share actor weights across everyone, within each class, or not between
+        physical slots. Grouped modes have five parameter groups. Actor memory
+        remains separate per physical slot; the critic keeps its existing rule.
     value_normalization : bool, default=True
         Train the critic on normalized reward targets using one learner-owned
         moving average. GAE still uses reward units; actor inputs and exports
@@ -393,11 +539,13 @@ class PPOConfig:
     input_scale: float = 1.0
     spawn_frame: str = "left"
     value_normalization: bool = True
+    parameter_sharing: str = "all"
 
     def __post_init__(self) -> None:
         """Reject invalid static update counts and numerical settings on the host."""
         _input_scale(self.input_scale)
         _spawn_frame(self.spawn_frame)
+        _parameter_sharing(self.parameter_sharing)
         if type(self.value_normalization) is not bool:
             raise ValueError("value_normalization must be a Python bool")
         for name in ("rollout_length", "epochs", "minibatches", "groups"):
@@ -434,16 +582,20 @@ class PPOTrainState(NamedTuple):
     ----------
     actor_params, critic_params : PyTree
         Separate Flax variable trees, including their params collection.
+        Class and slot sharing add a leading axis of five to actor leaves only.
     actor_opt_state, critic_opt_state : PyTree
-        Separate Optax states for their matching network parameters.
+        Separate Optax states for their matching network parameters. Class and
+        slot actors have five independent states, including Adam counts.
     value_norm : ValueNormState or None
         Shared critic statistics when enabled. None is the disabled historical
         layout and contributes no serialized array leaves.
 
     Notes
     -----
-    Arrays are dynamic JAX leaves; groups never duplicate these states. Recurrent
-    memory, random keys and environment state belong to the caller. This is a
+    Arrays are dynamic JAX leaves. PPO gradient groups average gradients into
+    these states; they do not duplicate them. Actor parameter groups are separate
+    networks with separate optimizers. Recurrent memory, random keys and
+    environment state belong to the caller. This is a
     numerical update record, not a complete resumable learner checkpoint.
     """
 
@@ -520,6 +672,10 @@ class PPOBatch(NamedTuple):
         Exact float32 (T,B,5) pre-update network predictions when normalization
         is enabled. These fixed clipping anchors are required in that mode;
         disabled batches use None. Do not reconstruct them using new statistics.
+    learner_active : Array or None, default=None
+        Bool (T,B,5) slots owned by this learner. None uses physical active.
+        Partner slots keep their physical inputs but do not enter GAE, losses
+        or value statistics.
 
     Notes
     -----
@@ -545,10 +701,45 @@ class PPOBatch(NamedTuple):
     actor_memory: Tree
     critic_memory: Tree
     old_normalized_values: Array | None = None
+    learner_active: Array | None = None
+
+
+def _owned_ppo_batch(batch: PPOBatch) -> PPOBatch:
+    """Neutralize discarded partner outputs before finite checks or arithmetic.
+
+    batch retains physical observations, activity and memories. With an owned
+    mask, replace unowned actions, probabilities, rewards and value anchors with
+    finite zeros. Mask final values using the last real row in each game, so a
+    padded suffix does not remove a continuing learner's bootstrap. None keeps
+    the original batch unchanged. Static ownership shape/dtype errors raise
+    ValueError. Pure JAX; inputs are unchanged.
+    """
+    if batch.learner_active is None:
+        return batch
+    if (
+        batch.learner_active.shape != batch.active.shape
+        or batch.learner_active.dtype != jnp.bool_
+    ):
+        raise ValueError("learner_active must match Boolean active rows")
+    owned = batch.active & batch.learner_active
+    last = jnp.max(
+        jnp.where(batch.valid, jnp.arange(batch.valid.shape[0])[:, None], 0), axis=0
+    )
+    final_owned = owned[last, jnp.arange(batch.valid.shape[1])]
+    return batch._replace(
+        actions=jnp.where(owned, batch.actions, 0),
+        old_log_prob=jnp.where(owned, batch.old_log_prob, 0.0),
+        old_values=jnp.where(owned, batch.old_values, 0.0),
+        rewards=jnp.where(owned, batch.rewards, 0.0),
+        final_values=jnp.where(final_owned, batch.final_values, 0.0),
+        old_normalized_values=None
+        if batch.old_normalized_values is None
+        else jnp.where(owned, batch.old_normalized_values, 0.0),
+    )
 
 
 class PPOMinibatch(NamedTuple):
-    """Hold temporary encoded groups for one shared optimizer application.
+    """Hold temporary encoded gradient groups for one optimizer application.
 
     Attributes
     ----------
@@ -580,6 +771,11 @@ class PPOMinibatch(NamedTuple):
         Separate float32 (G,E,5,128) carries immediately before each sequence.
         Feedforward methods use empty tuples, with no dummy array or time axis.
 
+    actor_group : Array or None, default=None
+        Optional int32 with actions.shape, using group IDs 0..4 from raw
+        self classes or physical slots. This is actor weight ownership,
+        distinct from the leading G gradient groups. Class mode requires it.
+
     Notes
     -----
     Expanded inputs are temporary and are not the stored rollout format.
@@ -602,6 +798,7 @@ class PPOMinibatch(NamedTuple):
     critic_samples: Array
     actor_memory: Tree
     critic_memory: Tree
+    actor_group: Array | None = None
 
 
 class PPOMetrics(NamedTuple):
@@ -784,7 +981,13 @@ class RecurrentActor(nn.Module):
 
     @nn.compact
     def __call__(
-        self, carry: Array, features: Array, resets: Array, valid: Array
+        self,
+        carry: Array,
+        features: Array,
+        resets: Array,
+        valid: Array,
+        *,
+        actor_group: Array | None = None,
     ) -> tuple[Array, Array]:
         """Read permitted feature sequences with independent actor memory.
 
@@ -799,6 +1002,11 @@ class RecurrentActor(nn.Module):
             Boolean (T,E,5) true only when a new episode starts before a decision.
         valid : Array
             Boolean (T,E,5) valid decisions. Invalid rows retain prior memory.
+
+        actor_group : Array or None, default=None
+            Optional int32 (T,E,5) group IDs 0..4. Variables then have a
+            leading axis of five independent actor groups. None preserves
+            the shared network. Initialize groups by mapping the shared init.
 
         Returns
         -------
@@ -816,6 +1024,24 @@ class RecurrentActor(nn.Module):
         scale = _input_scale(self.input_scale)
         if scale != 1.0:
             features = features * scale
+        if actor_group is not None:
+            params = self.variables["params"]
+            order, groups, sizes = _group_order(actor_group)
+            x = features.reshape(-1, features.shape[-1])[order]
+            x = nn.relu(_group_dense(x, params["pre_torso"]["Dense_0"], groups, sizes))
+            embedding = _restore_group_rows(x, order, features.shape[:-1])
+            carry, embedding = _group_gru(
+                params["ScannedRNN_0"]["GRUCell_1"],
+                carry,
+                embedding,
+                resets,
+                valid,
+                actor_group,
+            )
+            x = embedding.reshape(-1, embedding.shape[-1])[order]
+            x = nn.relu(_group_dense(x, params["post_torso"]["Dense_0"], groups, sizes))
+            x = _group_dense(x, params["action_head"]["Dense_0"], groups, sizes)
+            return carry, _restore_group_rows(x, order, features.shape[:-1])
         embedding = MLPTorso(name="pre_torso")(features)
         carry, embedding = ScannedRNN()(carry, (embedding, resets, valid))
         embedding = MLPTorso(name="post_torso")(embedding)
@@ -887,9 +1113,11 @@ class FeedForwardActor(nn.Module):
     input_scale: float = 1.0
 
     @nn.compact
-    def __call__(self, features: Array) -> Array:
+    def __call__(self, features: Array, *, actor_group: Array | None = None) -> Array:
         """Return float32 (...,198) logits for float32 (...,F) permitted inputs.
 
+        actor_group is optional int32 features.shape[:-1] with IDs 0..4;
+        grouped variables have a leading axis of five. None keeps shared weights.
         F must match the initialized width. No time or memory axis is required.
         No actions are sampled and inputs stay unchanged. Invalid input_scale
         raises ValueError; the pure Flax application supports jit and vmap.
@@ -897,6 +1125,16 @@ class FeedForwardActor(nn.Module):
         scale = _input_scale(self.input_scale)
         if scale != 1.0:
             features = features * scale
+        if actor_group is not None:
+            params = self.variables["params"]
+            order, groups, sizes = _group_order(actor_group)
+            x = features.reshape(-1, features.shape[-1])[order]
+            for index in range(2):
+                x = nn.relu(
+                    _group_dense(x, params["torso"][f"Dense_{index}"], groups, sizes)
+                )
+            x = _group_dense(x, params["action_head"]["Dense_0"], groups, sizes)
+            return _restore_group_rows(x, order, features.shape[:-1])
         embedding = MLPTorso((HIDDEN_SIZE, HIDDEN_SIZE), name="torso")(features)
         return DiscreteActionHead(name="action_head")(embedding)
 
@@ -926,6 +1164,70 @@ class FeedForwardValueNet(nn.Module):
         return nn.Dense(1, kernel_init=nn.initializers.orthogonal(1.0))(embedding)[
             ..., 0
         ]
+
+
+def _batch_actor_groups(
+    sharing: str, groups: Array | None, shape: tuple[int, ...]
+) -> Array | None:
+    """Resolve optional encoded-batch ownership without reading encoded features.
+
+    all returns None, preserving the shared path. none can derive physical slots;
+    class requires caller-supplied raw class groups. Supplied groups must be
+    int32 with the actor-row shape and values 0..4 (values are a precondition).
+    """
+    if sharing == "all":
+        return None
+    if groups is None:
+        if sharing == "class":
+            raise ValueError("Class sharing requires actor_group from raw actor inputs")
+        return jnp.broadcast_to(jnp.arange(5, dtype=jnp.int32), shape)
+    if groups.shape != shape or groups.dtype != jnp.int32:
+        raise ValueError("actor_group must be int32 with the actor row shape")
+    return groups
+
+
+def _actor_group_presence(groups: Array, eligible: Array) -> Array:
+    """Return five bool flags for parameter groups with at least one loss term."""
+    return (
+        jax.ops.segment_sum(
+            eligible.reshape(-1).astype(jnp.int32), groups.reshape(-1), num_segments=5
+        )
+        > 0
+    )
+
+
+def _update_actor_groups(
+    params: Tree,
+    state: Tree,
+    grads: Tree,
+    present: Array,
+    optimizer: optax.GradientTransformation,
+) -> tuple[Tree, Tree]:
+    """Apply independent complete optimizers only to eligible actor groups.
+
+    Parameter, gradient and optimizer leaves carry a leading axis of five;
+    present is bool (5,). The optimizer owns each group's clipping, moments and
+    counts. An absent group retains every leaf exactly. This function does not
+    change a joint loss, its normalization, or any run-wide clock.
+    """
+
+    def one(
+        parameters: Tree, previous: Tree, gradient: Tree, eligible: Array
+    ) -> tuple[Tree, Tree]:
+        """Keep the full old group state when this batch supplies no loss term."""
+
+        def update(_: None) -> tuple[Tree, Tree]:
+            """Apply one group's already computed gradient with its own state."""
+            delta, next_state = optimizer.update(gradient, previous, parameters)
+            return optax.apply_updates(parameters, delta), next_state
+
+        def keep(_: None) -> tuple[Tree, Tree]:
+            """Return every old leaf without advancing the group's optimizer."""
+            return parameters, previous
+
+        return cast(tuple[Tree, Tree], jax.lax.cond(eligible, update, keep, None))
+
+    return jax.vmap(one)(params, state, grads, present)
 
 
 def _optimizers(
@@ -969,7 +1271,9 @@ def initialize_ppo(
     -------
     PPOTrainState
         Independent actor/critic variable trees and separate initialized Adam
-        states. Widths match the actor encoder and selected critic input view.
+        states. Class and slot modes give actor parameters and every actor
+        optimizer leaf a leading axis of five. The critic is unchanged.
+        Widths match the actor encoder and selected critic input view.
 
     Raises
     ------
@@ -994,15 +1298,30 @@ def initialize_ppo(
         memory = jnp.zeros((1, 5, HIDDEN_SIZE), jnp.float32)
         starts = jnp.zeros((1, 1, 5), jnp.bool_)
         valid = jnp.ones_like(starts)
-        actor = RecurrentActor(input_scale=config.input_scale).init(
-            actor_key, memory, jnp.zeros((1, 1, 5, ACTOR_FEATURE_SIZE)), starts, valid
+        actor_init = functools.partial(
+            RecurrentActor(input_scale=config.input_scale).init,
+            carry=memory,
+            features=jnp.zeros((1, 1, 5, ACTOR_FEATURE_SIZE)),
+            resets=starts,
+            valid=valid,
+        )
+        actor = (
+            actor_init(actor_key)
+            if config.parameter_sharing == "all"
+            else jax.vmap(actor_init)(jax.random.split(actor_key, 5))
         )
         critic = RecurrentValueNet(input_scale=config.input_scale).init(
             critic_key, memory, jnp.zeros((1, 1, 5, critic_width)), starts, valid
         )
     else:
-        actor = FeedForwardActor(input_scale=config.input_scale).init(
-            actor_key, jnp.zeros((1, 5, ACTOR_FEATURE_SIZE))
+        actor_init = functools.partial(
+            FeedForwardActor(input_scale=config.input_scale).init,
+            features=jnp.zeros((1, 5, ACTOR_FEATURE_SIZE)),
+        )
+        actor = (
+            actor_init(actor_key)
+            if config.parameter_sharing == "all"
+            else jax.vmap(actor_init)(jax.random.split(actor_key, 5))
         )
         critic = FeedForwardValueNet(input_scale=config.input_scale).init(
             critic_key, jnp.zeros((1, 5, critic_width))
@@ -1011,7 +1330,9 @@ def initialize_ppo(
     return PPOTrainState(
         actor,
         critic,
-        actor_opt.init(actor),
+        actor_opt.init(actor)
+        if config.parameter_sharing == "all"
+        else jax.vmap(actor_opt.init)(actor),
         critic_opt.init(critic),
         _initial_value_norm() if config.value_normalization else None,
     )
@@ -1237,6 +1558,70 @@ def _schema_1_actor_apply(
     return apply
 
 
+@functools.lru_cache(maxsize=32)
+def _grouped_ppo_actor_apply(
+    scale: float, frame: str, sharing: str, recurrent: bool
+) -> Callable[[Tree, Tree, SystemInput, Array], SystemOutput]:
+    """Bind grouped actor settings without changing historical shared hooks.
+
+    scale/frame/sharing are checked factory settings. recurrent picks the
+    existing recurrent or feedforward network. Numeric keyword defaults keep
+    all inference choices in recorded hook identity. Weights remain dynamic.
+    """
+
+    def apply(
+        variables: Tree,
+        memory: Tree,
+        inputs: SystemInput,
+        keys: Array,
+        *,
+        input_scale: float = scale,
+        spawn_frame_index: int = SPAWN_FRAMES.index(frame),
+        parameter_sharing_index: int = _PARAMETER_SHARING.index(sharing),
+        recurrent_actor: bool = recurrent,
+    ) -> SystemOutput:
+        """Apply one grouped PPO actor call with ordinary System inputs and keys."""
+        features, mask, groups, flag = _grouped_actor_inputs(
+            inputs, _PARAMETER_SHARING[parameter_sharing_index], spawn_frame_index
+        )
+        if recurrent_actor:
+            valid = jnp.broadcast_to(inputs.valid[:, None], inputs.active_mask.shape)
+            starts = jnp.broadcast_to(
+                inputs.episode_start[:, None], inputs.active_mask.shape
+            )
+            memory, logits = cast(
+                tuple[Array, Array],
+                RecurrentActor(input_scale=input_scale).apply(
+                    variables,
+                    memory,
+                    features[None],
+                    starts[None],
+                    valid[None],
+                    actor_group=groups[None],
+                ),
+            )
+            logits = logits[0]
+        else:
+            logits = cast(
+                Array,
+                FeedForwardActor(input_scale=input_scale).apply(
+                    variables, features, actor_group=groups
+                ),
+            )
+        actor_keys = jax.vmap(functools.partial(jax.random.split, num=5))(keys)
+        indices = sample_actions(logits, mask, actor_keys)
+        log_prob = action_log_prob(logits, mask, indices)
+        if flag is not None:
+            indices = mirror_action_indices(indices, flag)
+        return SystemOutput(
+            decode_actions(indices),
+            memory,
+            learning_outputs=PPOLearningOutputs(indices, log_prob),
+        )
+
+    return apply
+
+
 def make_recurrent_mappo_system(
     actor_params: Tree,
     *,
@@ -1245,6 +1630,7 @@ def make_recurrent_mappo_system(
     name: str = "Recurrent MAPPO",
     checkpoint: str | None = None,
     actor_input_schema: int = ACTOR_INPUT_SCHEMA_VERSION,
+    parameter_sharing: str = "all",
 ) -> System:
     """Wrap actor parameters as an existing M8 JAX System, with sampled actions.
 
@@ -1265,6 +1651,10 @@ def make_recurrent_mappo_system(
         "world"; pass spawn_frame="world" for them, or they will play
         mirrored. The apply hook records the frame in System identity; equal
         weights with different frames describe different inference.
+    parameter_sharing : {"all", "class", "none"}, default="all"
+        Actor weight ownership used during training. Grouped variables carry
+        five groups; memory stays per physical actor. Historical schema 1
+        supports all only. Group mode is part of the System identity.
     name : str, default="Recurrent MAPPO"
         Nonempty display name. It does not establish a trained model's identity.
     checkpoint : str or None, default=None
@@ -1304,7 +1694,15 @@ def make_recurrent_mappo_system(
     """
     scale = _input_scale(input_scale)
     frame = _spawn_frame(spawn_frame)
-    if _actor_input_schema(actor_input_schema) == 1:
+    sharing = _parameter_sharing(parameter_sharing)
+    if (
+        sharing != "all"
+        and _actor_input_schema(actor_input_schema) != ACTOR_INPUT_SCHEMA_VERSION
+    ):
+        raise ValueError("Grouped actors require the current actor input schema")
+    if sharing != "all":
+        apply = _grouped_ppo_actor_apply(scale, frame, sharing, True)
+    elif _actor_input_schema(actor_input_schema) == 1:
         apply = _schema_1_actor_apply(scale, frame)
     elif scale == 1.0 and frame == "world":
         apply = _apply_actor
@@ -1472,6 +1870,7 @@ def make_ppo_system(
     name: str | None = None,
     checkpoint: str | None = None,
     actor_input_schema: int = ACTOR_INPUT_SCHEMA_VERSION,
+    parameter_sharing: str = "all",
 ) -> System:
     """Wrap one PPO actor as the existing sampled-action M8 System.
 
@@ -1486,6 +1885,10 @@ def make_ppo_system(
         Positive finite feature multiplier used during training.
     spawn_frame : {"world", "left"}, default="left"
         Saved actor frame. Historical frame-free actors require world.
+    parameter_sharing : {"all", "class", "none"}, default="all"
+        Actor weight ownership used during training. Grouped variables carry
+        five groups; memory stays per physical actor. Historical schema 1
+        supports all only. Group mode is part of the System identity.
     name : str or None, default=None
         Display name. None uses the method's name; empty names are rejected.
     checkpoint : str or None, default=None
@@ -1515,6 +1918,7 @@ def make_ppo_system(
     Parameter shapes are checked by the network when called, not by this factory.
     """
     method = validate_ppo_method(method)
+    sharing = _parameter_sharing(parameter_sharing)
     label = _METHODS[method][2] if name is None else name
     if is_recurrent_method(method):
         return make_recurrent_mappo_system(
@@ -1524,6 +1928,7 @@ def make_ppo_system(
             name=label,
             checkpoint=checkpoint,
             actor_input_schema=actor_input_schema,
+            parameter_sharing=sharing,
         )
     scale = _input_scale(input_scale)
     frame = _spawn_frame(spawn_frame)
@@ -1532,9 +1937,16 @@ def make_ppo_system(
         if _actor_input_schema(actor_input_schema) == 1
         else _feedforward_actor_apply
     )
+    if sharing != "all" and actor_input_schema != ACTOR_INPUT_SCHEMA_VERSION:
+        raise ValueError("Grouped actors require the current actor input schema")
+    apply = (
+        hook(scale, frame)
+        if sharing == "all"
+        else _grouped_ppo_actor_apply(scale, frame, sharing, False)
+    )
     return System(
         label,
-        hook(scale, frame),
+        apply,
         variables=actor_params,
         checkpoint=checkpoint,
     )
@@ -1745,7 +2157,8 @@ def _actor_loss_with_metrics(
 ) -> tuple[Array, tuple[Array, Array, Array]]:
     """Return one group's masked actor loss and unscaled policy entropy.
 
-    params is the shared actor variable tree. batch is one PPOMinibatch group,
+    params is the actor variable tree for the selected sharing mode. batch is
+    one PPOMinibatch gradient group,
     with no leading G axis. config fixes clipping and the
     entropy weight. Standardize only that group's eligible advantages with the
     donor epsilon. Return two float32 scalars; the loss includes entropy's
@@ -1754,6 +2167,9 @@ def _actor_loss_with_metrics(
     mappo and selects a recurrent (T,E,5) or feedforward (Q,5) sample layout.
     The actor call samples no actions and changes no parameters or input arrays.
     """
+    groups = _batch_actor_groups(
+        config.parameter_sharing, batch.actor_group, batch.actions.shape
+    )
     if is_recurrent_method(method):
         _, logits = cast(
             tuple[Array, Array],
@@ -1763,13 +2179,14 @@ def _actor_loss_with_metrics(
                 batch.actor_features,
                 batch.episode_start,
                 batch.valid,
+                actor_group=groups,
             ),
         )
     else:
         logits = cast(
             Array,
             FeedForwardActor(input_scale=config.input_scale).apply(
-                params, batch.actor_features
+                params, batch.actor_features, actor_group=groups
             ),
         )
     logp = action_log_prob(logits, batch.action_mask, batch.actions)
@@ -1874,7 +2291,8 @@ def update_minibatch(
     Parameters
     ----------
     state : PPOTrainState
-        One parameter/optimizer pair per network, shared across all groups.
+        Actor parameters and complete optimizers for the selected sharing mode,
+        plus one critic. PPO gradient groups do not duplicate these states.
     batch : PPOMinibatch
         Temporary grouped inputs. Its G axis must equal config.groups. Every
         field must follow the record's shape, epoch and sample-mask contracts.
@@ -1903,8 +2321,12 @@ def update_minibatch(
     Advantages, targets and old behavior values are fixed learner data; gradients
     do not flow into batch. Each group standardizes its own eligible advantages.
     Nonempty groups have equal gradient weight even when sample counts differ;
-    empty groups do not dilute that average. The all-empty actor and critic
-    branches separately skip their network/gradient work and optimizer update.
+    empty groups do not dilute that average. These PPO gradient groups are
+    separate from actor parameter groups. Class and slot modes preserve this
+    loss and averaging, then clip and apply each parameter group's independent
+    optimizer. A parameter group with no eligible actor sample stays unchanged.
+    The all-empty actor and critic branches separately skip their network and
+    optimizer work.
 
     Finite data, compatible parameter shapes and legal recorded actions are
     caller preconditions. Inputs remain unchanged. This supports jit with static
@@ -1945,13 +2367,21 @@ def update_minibatch(
 
     def actor_gradients(_: None) -> Tree:
         """Run the actor only when at least one group has policy samples."""
-        return jax.vmap(
-            jax.value_and_grad(
-                functools.partial(_actor_loss_with_metrics, method=method),
-                has_aux=True,
-            ),
-            in_axes=(None, 0, None),
-        )(state.actor_params, batch, config)
+        gradient = jax.value_and_grad(
+            functools.partial(_actor_loss_with_metrics, method=method),
+            has_aux=True,
+        )
+        if config.parameter_sharing == "all":
+            return jax.vmap(gradient, in_axes=(None, 0, None))(
+                state.actor_params, batch, config
+            )
+
+        def one(group: PPOMinibatch) -> Tree:
+            """Keep the original gradient-group objective and normalization."""
+            return gradient(state.actor_params, group, config)
+
+        # ragged_dot does not support this extra mapped batch axis.
+        return cast(Tree, jax.lax.map(one, batch))
 
     def empty_actor(_: None) -> Tree:
         """Supply zero metrics and gradients for an entirely absent actor loss."""
@@ -2030,9 +2460,22 @@ def update_minibatch(
             tuple[Tree, Tree], jax.lax.cond(jnp.any(counts > 0), apply, keep, None)
         )
 
-    actor, actor_state = update(
-        state.actor_params, state.actor_opt_state, actor_grads, actor_count, actor_opt
+    groups = _batch_actor_groups(
+        config.parameter_sharing, batch.actor_group, batch.actions.shape
     )
+    if groups is None:
+        actor, actor_state = update(
+            state.actor_params,
+            state.actor_opt_state,
+            actor_grads,
+            actor_count,
+            actor_opt,
+        )
+    else:
+        present = _actor_group_presence(groups, batch.actor_samples)
+        actor, actor_state = _update_actor_groups(
+            state.actor_params, state.actor_opt_state, actor_grads, present, actor_opt
+        )
     critic, critic_state = update(
         state.critic_params,
         state.critic_opt_state,
@@ -2140,7 +2583,8 @@ def update_recurrent_ppo(
     -----
     GAE is computed once from the supplied old values. Each epoch shuffles whole
     game sequences within each group, preserving time and actor order. Only
-    the selected minibatch is encoded. Groups share one optimizer per network.
+    the selected minibatch is encoded. PPO gradient groups share the selected
+    actor and critic optimizers; actor parameter groups keep separate states.
     Death excludes policy samples while preserving value learning; inactive or
     padded rows are absent from both losses. Empty networks skip their update as
     documented by update_minibatch. When config.spawn_frame is "left", each
@@ -2189,7 +2633,8 @@ def update_ppo(
     Parameters
     ----------
     state : PPOTrainState
-        Shared actor/critic parameters and separate optimizer/ValueNorm states.
+        Actor parameters for the selected sharing mode, critic parameters,
+        and their optimizer/ValueNorm states.
     batch : PPOBatch
         Paired compact data with actions (T,B,5). T equals rollout_length.
         MAPPO requires physical training features; IPPO requires None instead.
@@ -2241,7 +2686,13 @@ def update_ppo(
         for memory in (batch.actor_memory, batch.critic_memory)
     ):
         raise ValueError("Feedforward PPO batches require empty memory tuples")
-    samples = batch.valid[..., None] & batch.active
+    batch = _owned_ppo_batch(batch)
+    owned = (
+        batch.active
+        if batch.learner_active is None
+        else batch.active & batch.learner_active
+    )
+    samples = batch.valid[..., None] & owned
     _check_value_norm(state.value_norm, config.value_normalization)
     if config.value_normalization:
         if batch.old_normalized_values is None:
@@ -2333,7 +2784,7 @@ def update_ppo(
             lane_shape = features.shape[:-1]
             valid = jnp.broadcast_to(take(batch.valid)[..., None], lane_shape)
             starts = jnp.broadcast_to(take(batch.episode_start)[..., None], lane_shape)
-            member = take(batch.active)
+            member = take(owned)
             if canonical is None:
                 mask = categorical_action_mask(jax.tree.map(take, batch.action_mask))
                 actions = take(batch.actions)
@@ -2358,6 +2809,9 @@ def update_ppo(
                 valid & member,
                 batch.actor_memory[selected] if recurrent else (),
                 batch.critic_memory[selected] if recurrent else (),
+                None
+                if config.parameter_sharing == "all"
+                else _actor_groups(actor_inputs, config.parameter_sharing),
             )
             return update_minibatch(current, encoded, config, method=method)
 

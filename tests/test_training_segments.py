@@ -4,8 +4,10 @@ CPU collection with a counter System proves the complete 17-stage parent,
 repeated child budgets, preserved unfinished games, original distribution IDs,
 exact parent/local proofs and unchanged random/history/memory state at each
 fork. Host checks cover early stops, schedule reconstruction, corruption and
-history capacity. A tiny PPO child also checks that the first and second native
-collection/update calls reuse their compiled code after device-committed restore.
+pending capture requests. A tiny PPO child also checks that its first and second
+native collection/update calls reuse compiled code after device-committed restore.
+Custom child stages append their map/roster/score controls while an old game
+finishes unchanged; new games then use the new stage and stable source rows.
 These checks make no learning or GPU-speed claim.
 """
 
@@ -17,6 +19,7 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 import pytest
+from jax import Array
 from tests.test_training_collection import _actor, _equal
 
 from marl_battlegrounds.baselines.ppo import PPOConfig
@@ -285,17 +288,40 @@ def test_history_threshold_changes_keep_frozen_slots_and_old_request_proof(
     np.testing.assert_array_equal(
         details["parent_stage_proof"]["history_threshold_to_snapshot"], old_mapping
     )
-    bad = _make_continuation_schedule(
+    future_schedule = _make_continuation_schedule(
         collection.schedule,
         completed_rounds=55,
         additional_env_steps=4,
         history_threshold_rounds=(57,),
     )
-    with pytest.raises(ValueError, match="retain every saved snapshot"):
-        _begin_training_segment(collection, parent, schedule=bad)
+    future_collection, future_child = _begin_training_segment(
+        collection, parent, schedule=future_schedule
+    )
+    assert future_child.schedule.history_threshold_count is not None
+    assert int(future_child.schedule.history_threshold_count) == 1
+    np.testing.assert_array_equal(future_child.history.threshold_to_snapshot, -1)
+    _equal(
+        future_child.history._replace(
+            threshold_to_snapshot=history.threshold_to_snapshot
+        ),
+        history,
+    )
+    _unchanged_boundary(parent, future_child._replace(history=history))
+    future_details = _details(future_collection.schedule)
+    assert future_details["parent_stage_proof"] == details["parent_stage_proof"]
+    _equal(_restore_continuation_schedule(future_details).arrays, future_child.schedule)
+
+    pending_drop = _make_continuation_schedule(
+        child_collection.schedule,
+        completed_rounds=55,
+        additional_env_steps=4,
+        history_threshold_rounds=(55,),
+    )
+    with pytest.raises(ValueError, match="retain pending parent captures"):
+        _begin_training_segment(child_collection, child, schedule=pending_drop)
 
 
-def test_full_history_preserves_all_slots_and_refuses_an_extra_capture(
+def test_full_history_preserves_all_slots_and_bounds_only_pending_requests(
     completed: Tree,
 ) -> None:
     collection, _, parent = completed
@@ -313,9 +339,10 @@ def test_full_history_preserves_all_slots_and_refuses_an_extra_capture(
         assert bool(event.created)
     parent = parent._replace(history=history)
     assert int(history.count) == 20
-    assert len(_continuation_history_thresholds(parent, future_rounds=())) == 20
-    with pytest.raises(ValueError, match="20 history"):
-        _continuation_history_thresholds(parent, future_rounds=(57,))
+    assert _continuation_history_thresholds(parent, future_rounds=()) == ()
+    assert _continuation_history_thresholds(parent, future_rounds=(57,)) == (57,)
+    with pytest.raises(ValueError, match="20 explicit pending requests"):
+        _continuation_history_thresholds(parent, future_rounds=tuple(range(57, 78)))
     schedule = _make_continuation_schedule(
         collection.schedule, completed_rounds=55, additional_env_steps=4
     )
@@ -445,3 +472,95 @@ def test_committed_child_reuses_native_collection_and_ppo_update() -> None:
         assert _placement_signature(state) == initial_signature
         assert scan._cache_size() == 1
         assert update._cache_size() == 1
+
+
+def test_changed_curriculum_preserves_live_games_then_applies_new_source_rosters() -> (
+    None
+):
+    actor = _actor()
+    collection, initial = init_training_collection(
+        actor,
+        actor.variables,
+        schedule=make_training_schedule(
+            total_env_steps=8,
+            num_envs=2,
+            curriculum=[{"share": 1, "maps": [0], "team_size": 2}],
+        ),
+        metrics="none",
+    )
+    parent, _ = collect_training_rollout(collection, initial, length=2)
+    previous_bank = parent.tracking.source_configs
+    child_schedule = _make_continuation_schedule(
+        collection.schedule,
+        completed_rounds=2,
+        additional_env_steps=608,
+        curriculum=[
+            {
+                "share": 0.01,
+                "maps": [1],
+                "score_threshold": 7,
+                "rosters": {
+                    "system": ["mage", "mage", "priest"],
+                    "opponent": ["warrior"],
+                },
+            },
+            {
+                "share": 0.99,
+                "maps": [2],
+                "score_threshold": 9,
+                "rosters": {"system": ["hunter"], "opponent": ["rogue", "rogue"]},
+            },
+        ],
+    )
+    child_collection, child = _begin_training_segment(
+        collection, parent, schedule=child_schedule
+    )
+    _equal(child.state, parent.state)
+    _equal(child.observations, parent.observations)
+    _equal(child.memory, parent.memory)
+    _equal(child.source_indices, parent.source_indices)
+    _equal(child.source_class_ids, parent.source_class_ids)
+    assert child_collection.binding.score_thresholds == (20, 7, 9)
+    assert previous_bank is not None and child.tracking.source_configs is not None
+    for previous, enlarged in zip(
+        jax.tree.leaves(previous_bank),
+        jax.tree.leaves(child.tracking.source_configs),
+        strict=True,
+    ):
+        np.testing.assert_array_equal(previous, enlarged[:42])
+    final, rollout = collect_training_rollout(child_collection, child, length=299)
+    np.testing.assert_array_equal(rollout.transitions.episode_stage[:-1], 0)
+    np.testing.assert_array_equal(rollout.transitions.episode_stage[-1], 2)
+    np.testing.assert_array_equal(final.source_indices, 2 * 42 + 2)
+    np.testing.assert_array_equal(final.state.config.team_deathmatch_score_threshold, 9)
+    np.testing.assert_array_equal(
+        np.asarray(final.state.config.agent_profile.active_mask)
+        .reshape(2, 2, 5)
+        .sum(-1),
+        [[1, 2], [1, 2]],
+    )
+    assert child.schedule.roster_class_ids is not None
+    np.testing.assert_array_equal(
+        final.source_class_ids,
+        np.broadcast_to(child.schedule.roster_class_ids[2], (2, 10)),
+    )
+    _validate_training_continuation(child_collection, final)
+    summary = training_summary(child_collection, final)
+    assert summary["steps_by_episode_stage"] == [600, 0, 2, *([0] * 14)]
+    restored = _restore_continuation_schedule(_details(child_collection.schedule))
+    _equal(restored.arrays, child.schedule)
+    next_schedule = _make_continuation_schedule(
+        restored,
+        completed_rounds=301,
+        additional_env_steps=20,
+        curriculum=[{"share": 1, "maps": [3], "team_size": 4}],
+    )
+    next_collection, next_carry = _begin_training_segment(
+        child_collection, final, schedule=next_schedule
+    )
+    assert int(cast(Array, next_carry.schedule.distribution_count)) == 4
+    assert int(cast(Array, next_carry.schedule.distribution_offset)) == 3
+    assert next_collection.binding == child_collection.binding
+    _equal(next_carry.state, final.state)
+    resumed = _restore_continuation_schedule(_details(next_collection.schedule))
+    _equal(resumed.arrays, next_carry.schedule)

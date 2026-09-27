@@ -15,10 +15,10 @@ from pathlib import Path
 from typing import Any, cast
 
 Record = dict[str, Any]
-_RULES = ("saved", "score_then_kills", "score_then_step")
+_HISTORICAL_RULES = ("saved", "score_then_kills", "score_then_step")
 _DEFAULTS: Record = {
     "schema_version": 1,
-    "rule": "saved",
+    "rule": "point_margin",
     "shortlist_size": 2,
     "across_runs": False,
     "seed_order": None,
@@ -56,8 +56,10 @@ def _integer(value: object, name: str, *, minimum: int = 0) -> int:
     return value
 
 
-def _declaration(value: str | Path | Mapping[str, Any]) -> Record:
-    """Resolve the small named rule and file-relative paths without opening games."""
+def _declaration(
+    value: str | Path | Mapping[str, Any], *, allow_historical: bool = False
+) -> Record:
+    """Resolve paths and point-margin choices; admit old rules only when reading."""
     base = Path.cwd()
     if isinstance(value, (str, Path)):
         path = Path(value).resolve()
@@ -74,8 +76,12 @@ def _declaration(value: str | Path | Mapping[str, Any]) -> Record:
         raise ValueError("Checkpoint selection needs declaration schema_version=1")
     if not isinstance(result.get("name"), str) or not result["name"].strip():
         raise ValueError("Give this separate selection decision a nonempty name")
-    if result["rule"] not in _RULES:
-        raise ValueError(f"Selection rule must be one of {_RULES}")
+    rules = ("point_margin",) + (_HISTORICAL_RULES if allow_historical else ())
+    if result["rule"] not in rules:
+        raise ValueError(
+            "New selection decisions require rule='point_margin'; "
+            "historical rules remain readable"
+        )
     _integer(result["shortlist_size"], "shortlist_size", minimum=1)
     for name in ("across_runs", "allow_different_roots"):
         if type(result[name]) is not bool:
@@ -117,13 +123,13 @@ def _declaration(value: str | Path | Mapping[str, Any]) -> Record:
 
 
 def _key(row: Mapping[str, Any], rule: str) -> tuple[float, float, int, str]:
-    """Apply a declared score, kill-difference, earlier-step, then identity order."""
+    """Apply point margin for new decisions, or the exact saved historical rule."""
     from marl_battlegrounds.training.analysis import (
         _selection_key,  # pyright: ignore[reportPrivateUsage]
     )
 
-    if rule == "saved":
-        return _selection_key(row)
+    if rule in ("point_margin", "saved"):
+        return _selection_key(row, rule=rule)
     difference = 0.0
     if rule == "score_then_kills":
         raw = row.get("mean_kill_difference")
@@ -268,7 +274,10 @@ def _run_decision(evidence: Record, declaration: Record, destination: Path) -> R
         )
         return result
     try:
-        candidates = _candidates(routine)
+        candidates = _candidates(
+            routine,
+            rule="point_margin" if declaration["rule"] == "point_margin" else "saved",
+        )
     except ValueError as error:
         if evidence.get("validation_declaration") and error.args == (
             "No eligible trained checkpoint is available",
@@ -344,7 +353,8 @@ def _run_decision(evidence: Record, declaration: Record, destination: Path) -> R
     _conditions(compared)
     result["confirmation_comparison"] = _roots(compared, declaration)
     eligible = _candidates(
-        [{**row, "red_zone_depth": row.get("red_zone_depth", 0.0)} for row in compared]
+        [{**row, "red_zone_depth": row.get("red_zone_depth", 0.0)} for row in compared],
+        rule="point_margin" if declaration["rule"] == "point_margin" else "saved",
     )
     winner = dict(
         min(
@@ -389,7 +399,7 @@ def read_selection_decision(
                 "Incomplete selection cannot supply completed selection evidence; "
                 "omit selection to report ordinary progress"
             )
-        declared = _declaration(result["declaration"])
+        declared = _declaration(result["declaration"], allow_historical=True)
         previous = (
             read_selection_decision(declared["previous_decision"])
             if declared["previous_decision"]
@@ -524,9 +534,13 @@ def _build_selection(
         best = min(
             runs,
             key=lambda run: (
-                *_key(run["winner"], declared["rule"])[:2],
-                order[run["seed"]],
-                *_key(run["winner"], declared["rule"])[2:],
+                (*_key(run["winner"], declared["rule"]), order[run["seed"]])
+                if declared["rule"] == "point_margin"
+                else (
+                    *_key(run["winner"], declared["rule"])[:2],
+                    order[run["seed"]],
+                    *_key(run["winner"], declared["rule"])[2:],
+                )
             ),
         )
         across = {
@@ -576,10 +590,12 @@ def reselect_checkpoint(
         Missing, failed or unfinished runs remain visible and prevent an
         across-run winner. A missing seed leaves its declared order unverified.
     declaration : str, Path or mapping
-        Schema 1 JSON with a required name. rule is saved (default),
-        score_then_kills or score_then_step. shortlist_size defaults to two;
-        the final checkpoint is always included. across_runs defaults to False;
-        True requires the exact seed_order for ties between run finalists.
+        Schema 1 JSON with a required name. rule is point_margin (the only new
+        rule): mean Team A minus Team B points, then earlier steps and checkpoint
+        ID. Every saved validation cell must contain finite points for both
+        teams. Wins and kills remain descriptive. shortlist_size defaults to
+        two; the final checkpoint is always included. across_runs defaults to
+        False; True requires seed_order for remaining exact ties between runs.
         allow_different_roots defaults to False. confirmation_root and
         confirmation_seed_pairs optionally declare fresh confirmation tasks.
         A child run defaults to its saved effective confirmation root and pair
@@ -619,7 +635,9 @@ def reselect_checkpoint(
     Restores no actor or learner, calls no provider and runs no game. Original
     selections and run folders stay unchanged. This is a new analysis rule, not
     retrospective proof that it was the original study rule. Final actors remain
-    explicitly named.
+    explicitly named. Existing decisions keep their saved rules when read or
+    checked again. A new choice from an old run needs its saved point cells;
+    missing points cannot be replaced by wins or kills.
     """
     if isinstance(run_dirs, (str, Path)) or not run_dirs:
         raise ValueError("run_dirs must be a nonempty sequence of run directories")

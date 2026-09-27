@@ -823,7 +823,7 @@ def test_repeated_lineage_reuses_only_completed_call_local_verification(
     all_sources: dict[Path, str] = {}
     for index in range(5):
         root = tmp_path / str(index)
-        identifier = f"actor-{index}"
+        identifier = f"{index:064x}"
         checkpoint = root / "checkpoints" / f"boundary-{index}"
         metadata = root / "run_details.json"
         path = root / "validation" / f"routine-{identifier}" / "validation_summary.json"

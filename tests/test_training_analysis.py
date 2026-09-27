@@ -4,7 +4,8 @@ Known outcome tables establish expected scores without the production reducer.
 Reports keep training/validation Red Zone labels and separate depth curves.
 Missing depths stay unknown, distinct from zero. They keep reward sources and
 panels separate, preserve incomplete states
-and leave original records untouched. No learner or environment runs here.
+and leave original records untouched. New choices use only mean point margins;
+historical choices keep their saved rules. No learner or environment runs here.
 Reports name saved artifacts and sum only phase-owner timing records. An open
 checkpoint recovery must hide stale completion and results until recovery ends.
 Selection keeps compatible PPO and QMIX rows together, drops QMIX warmup actors
@@ -59,6 +60,7 @@ def _result(identifier: str, steps: int, score: float, **values: Any) -> dict[st
         "complete": True,
         "panel_digest": "panel",
         "purpose": "routine",
+        "cells": [{"mean_team_a_score": 10 * score, "mean_team_b_score": 0.0}],
         **values,
     }
 
@@ -654,3 +656,117 @@ def test_reports_keep_training_and_validation_red_zone_depths_separate(
         assert {row["red_zone_depth"] for row in rows} == {"", "0.0", "5.0", "6.0"}
         assert {row["training_red_zone_depth"] for row in rows} == {"", "0.0", "5.0"}
     assert {path: path.read_bytes() for path in before} == before
+
+
+def test_point_margin_alone_selects_and_keeps_stable_step_and_identity_ties() -> None:
+    point_winner = _result(
+        "points",
+        20,
+        0.1,
+        selection_schema_version=2,
+        mean_kill_difference=-20,
+        cells=[
+            {"mean_team_a_score": 7, "mean_team_b_score": 3},
+            {"mean_team_a_score": 11, "mean_team_b_score": 3},
+        ],
+    )
+    more_wins = _result(
+        "wins",
+        4,
+        1.0,
+        selection_schema_version=2,
+        mean_kill_difference=100,
+        cells=[{"mean_team_a_score": 8, "mean_team_b_score": 3}],
+    )
+    final = _result(
+        "final",
+        24,
+        0.9,
+        selection_schema_version=2,
+        mean_kill_difference=50,
+        cells=[{"mean_team_a_score": 1, "mean_team_b_score": 3}],
+    )
+    rows = [final, more_wins, point_winner]
+    assert confirmation_candidates(rows, final_checkpoint_id="final") == (
+        "points",
+        "wins",
+        "final",
+    )
+    confirmed = [{**row, "purpose": "confirmation"} for row in rows]
+    assert select_checkpoint(confirmed)["checkpoint_id"] == "points"
+    assert select_checkpoint(confirmed, rule="saved")["checkpoint_id"] == "wins"
+    early = {**confirmed[-1], "checkpoint_id": "early", "env_steps": 8}
+    other_id = {
+        **early,
+        "checkpoint_id": "aaa",
+        "score": 0.0,
+        "mean_kill_difference": -1000,
+    }
+    for ordered in ([early, other_id, confirmed[-1]], [confirmed[-1], other_id, early]):
+        assert select_checkpoint(ordered)["checkpoint_id"] == "aaa"
+
+
+@pytest.mark.parametrize("points", [None, True, "3", float("nan"), float("inf")])
+def test_point_selection_requires_finite_saved_points(points: object) -> None:
+    row = _result(
+        "actor",
+        4,
+        1.0,
+        purpose="confirmation",
+        cells=[{"mean_team_a_score": points, "mean_team_b_score": 0}],
+    )
+    with pytest.raises(ValueError, match="finite saved points"):
+        select_checkpoint([row])
+    assert select_checkpoint([row], rule="saved")["checkpoint_id"] == "actor"
+
+
+@pytest.mark.parametrize("cells", [None, [], [{}], [None]])
+def test_point_selection_does_not_substitute_wins_or_kills(cells: object) -> None:
+    row = _result(
+        "actor", 4, 1.0, purpose="confirmation", cells=cells, mean_kill_difference=100
+    )
+    with pytest.raises(ValueError, match="saved points"):
+        select_checkpoint([row])
+
+
+def test_point_selection_can_use_historical_point_cells_without_kill_fields() -> None:
+    row = _result("actor", 4, 1.0, purpose="confirmation", selection_schema_version=2)
+    assert select_checkpoint([row]) == row
+    with pytest.raises(ValueError, match="kill difference"):
+        select_checkpoint([row], rule="saved")
+    with pytest.raises(ValueError, match="Selection rule"):
+        select_checkpoint([row], rule="other")
+
+
+@pytest.mark.parametrize(
+    "changed",
+    (
+        {"maps": [43]},
+        {"system_roster": ["mage", "mage"]},
+        {"opponent_roster": ["warrior"]},
+    ),
+)
+def test_selection_refuses_changed_validation_maps_and_rosters(
+    changed: dict[str, Any],
+) -> None:
+    first = _result("first", 4, 0.5, maps=[42])
+    second = _result("second", 8, 0.5, maps=[42])
+    second.update(changed)
+    with pytest.raises(ValueError, match="maps or team rosters"):
+        confirmation_candidates([first, second], final_checkpoint_id="second")
+    first["purpose"] = second["purpose"] = "confirmation"
+    with pytest.raises(ValueError, match="maps or team rosters"):
+        select_checkpoint([first, second])
+
+
+def test_selection_accepts_explicit_canonical_rosters_with_historical_defaults() -> (
+    None
+):
+    from marl_battlegrounds.tasks import canonical_tournament_rosters
+
+    first = _result("first", 4, 0.5, maps=[42])
+    second = _result("second", 8, 0.5, maps=[42])
+    a, b = canonical_tournament_rosters()
+    second.update(system_roster=list(a), opponent_roster=list(b))
+    first["purpose"] = second["purpose"] = "confirmation"
+    assert select_checkpoint([first, second])["checkpoint_id"] == "first"

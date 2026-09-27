@@ -38,8 +38,8 @@ sticky reason, and the rejected result keeps its summary and attempted step
 flags. The updater's own publication check accepts and refuses exactly the
 cases the shared ``refresh_opponents`` does (an ordinary publication; rounds
 above the total or not above the last refresh; a wrong version or one at the
-int32 maximum; a sticky error; an out-of-range lane snapshot; a full bank with
-a due capture). An empty block changes nothing. The collection never changes
+int32 maximum; a sticky error; an out-of-range lane snapshot; exhausted capture
+IDs with a due copy). An empty block changes nothing. The collection never changes
 current or frozen statistics or rates within a block, on a run whose games
 really play both frozen and current opponents. A device round trip of a
 boundary repeats the next block exactly. Setup rejects budgets without a
@@ -47,12 +47,14 @@ learning block before any network is built. The compiled updater holds under
 half an opponent bank of temporaries, while a control that passes the bank
 through two nested conditionals shows at least one bank. These checks prove
 software contracts, not learning or GPU cost.
+Warm starts load saved actors, match greedy inference and keep fresh learner state.
 """
 
 # pyright: reportPrivateUsage=false, reportUnknownLambdaType=false
 from collections.abc import Callable
 from dataclasses import dataclass, replace
 from functools import lru_cache, partial
+from pathlib import Path
 from typing import Any, NamedTuple, cast
 
 import jax
@@ -477,7 +479,19 @@ def test_used_counts_and_exposure_equal_an_independent_recount(
         for label, bins, size in (
             (history.episode_stage, used.exposure_by_stage, 17),
             (history.source_index, used.exposure_by_source, bank),
-            (np.asarray(history.opponent_snapshot) + 1, used.exposure_by_opponent, 21),
+            (
+                np.where(
+                    np.asarray(history.opponent_snapshot) == -1,
+                    0,
+                    np.where(
+                        np.asarray(history.opponent_snapshot) == -2,
+                        1,
+                        np.asarray(history.opponent_snapshot) + 2,
+                    ),
+                ),
+                used.exposure_by_opponent,
+                used.exposure_by_opponent.shape[0],
+            ),
         ):
             expected = np.bincount(np.asarray(label)[left].ravel(), minlength=size)
             np.testing.assert_array_equal(np.asarray(bins), expected)
@@ -653,7 +667,9 @@ def test_rejections_keep_the_previous_boundary_with_a_sticky_reason(
     ]
     structure = cast(Any, jax.tree.structure(radam))
     nu_nan: Tree = jax.tree.unflatten(structure, poisoned)
-    full = collected.history._replace(count=jnp.int32(20))
+    exhausted = collected.history._replace(
+        capture_capacity=collected.history.next_capture_id
+    )
     cases: list[tuple[int, learner.PQNLearnerState, TrainingCarry, TrainingRollout]] = [
         (
             1,
@@ -730,7 +746,7 @@ def test_rejections_keep_the_previous_boundary_with_a_sticky_reason(
             rollout,
         ),
         (5, prior._replace(opt_state=nu_nan), collected, rollout),
-        (6, prior, collected._replace(history=full), rollout),
+        (6, prior, collected._replace(history=exhausted), rollout),
     ]
     for reason, start, carry, block in cases:
         state, result = update(start, carry, block)
@@ -910,9 +926,9 @@ def test_the_publication_check_agrees_with_the_shared_history(plain: _Run) -> No
         ),
         "sticky_error": (history._replace(error=jnp.bool_(True)), rounds, index),
         "bad_lane": (history._replace(lane_snapshot=last_lane), rounds, index),
-        "full_bank_due": (
+        "capture_ids_exhausted": (
             history._replace(
-                count=jnp.int32(20),
+                capture_capacity=history.next_capture_id,
                 threshold_to_snapshot=jnp.full_like(history.threshold_to_snapshot, -1),
             ),
             schedule.total_rounds,
@@ -921,10 +937,11 @@ def test_the_publication_check_agrees_with_the_shared_history(plain: _Run) -> No
     }
     outcomes: dict[str, bool] = {}
     for name, (case, at, version) in cases.items():
-        due = (case.threshold_to_snapshot == -1) & (
-            at >= schedule.history_threshold_rounds
+        mine = bool(
+            learner.publication_valid(
+                case, completed_rounds=at, update_index=version, schedule=schedule
+            )
         )
-        mine = bool(learner._publishable(case, at, version, schedule.total_rounds, due))
         shared, _ = refresh_opponents(
             case, actor, completed_rounds=at, update_index=version, schedule=schedule
         )
@@ -1044,3 +1061,195 @@ def test_the_updater_holds_under_half_a_bank_of_temporaries(plain: _Run) -> None
     )
     assert checked is not None
     assert checked.temp_size_in_bytes >= bank
+
+
+def test_warm_start_copies_network_statistics_and_keeps_fresh_recent_rows(
+    prepared: PreparedTrainingContent,
+    tmp_path: Path,
+) -> None:
+    schedule = make_training_schedule(total_env_steps=64, num_envs=4)
+    _, fresh = learner.init_pqn_learner(
+        schedule=schedule, pqn=_CONFIG, seed=23, prepared=prepared, metrics="none"
+    )
+    imported = jax.tree.map(
+        partial(jnp.add, jnp.float32(0.125)),
+        fresh.carry.history.current_variables.network,
+    )
+    invalid = imported._replace(
+        batch_stats=jax.tree.map(
+            partial(jnp.full_like, fill_value=-1), imported.batch_stats
+        )
+    )
+    with pytest.raises(ValueError, match="Initial actor running variance"):
+        learner.init_pqn_learner(
+            schedule=schedule,
+            pqn=_CONFIG,
+            seed=23,
+            prepared=prepared,
+            metrics="none",
+            initial_actor=invalid,
+        )
+    from marl_battlegrounds.evaluation.policy_execution import (
+        apply_systems,
+        init_systems,
+    )
+    from marl_battlegrounds.training import checkpoints
+
+    artifact = checkpoints.export_system(
+        imported,
+        tmp_path / "actor",
+        method="pqn_vdn",
+        input_scale=_CONFIG.input_scale,
+        spawn_frame=_CONFIG.spawn_frame,
+        metadata={
+            "run_id": "Warm Start Test",
+            "seed": 23,
+            "env_steps": 0,
+            "checkpoint_id": "a" * 64,
+            "optimizer_steps": 0,
+        },
+    )
+    loaded, _ = checkpoints.load_initial_actor(
+        artifact,
+        method="pqn_vdn",
+        input_scale=_CONFIG.input_scale,
+        spawn_frame=_CONFIG.spawn_frame,
+    )
+    collection, warm = learner.init_pqn_learner(
+        schedule=schedule,
+        pqn=_CONFIG,
+        seed=23,
+        prepared=prepared,
+        metrics="none",
+        initial_actor=loaded.variables.network,
+    )
+    _equal(warm.carry.history.current_variables.network, imported)
+    _equal(warm.opt_state, fresh.opt_state)
+    _equal(warm.recent, fresh.recent)
+    assert float(warm.carry.history.current_variables.epsilon) == 1.0
+    assert int(warm.completed_updates) == int(warm.carry.history.count) == 0
+    variables = warm.carry.history.current_variables
+    # Compare greedy inference separately from the learner's fresh exploration.
+    variables = variables._replace(epsilon=jnp.float32(0))
+    observations, state = warm.carry.observations, warm.carry.state
+    memory = init_systems(loaded, loaded, observations, state, jax.random.key(71))
+    expected = apply_systems(
+        loaded, loaded, memory, observations, state, jax.random.key(72)
+    )
+    actual = apply_systems(
+        collection.actor,
+        loaded,
+        memory,
+        observations,
+        state,
+        jax.random.key(72),
+        variables_a=variables,
+    )
+    _equal(actual, expected)
+
+
+def test_named_opponent_keeps_identity_through_pqn_recent_and_learning(
+    prepared: PreparedTrainingContent,
+) -> None:
+    from tests.test_training_collection import _actor
+
+    collection, state = learner.init_pqn_learner(
+        schedule=make_training_schedule(total_env_steps=16, num_envs=2),
+        prepared=prepared,
+        metrics="none",
+        pqn=_CONFIG,
+        keep_past=0,
+        history_capture_capacity=0,
+        opponent_population={"fixed": _actor()},
+        opponent_selection={"fixed": 1.0},
+    )
+    planned = pqn.pqn_planned_learning_blocks(8, _CONFIG)
+    for length in (4, 2, 4):
+        carry, rollout = _scan(collection, length)(state.carry)
+        np.testing.assert_array_equal(
+            np.asarray(rollout.transitions.opponent_snapshot)[
+                np.asarray(rollout.transitions.valid)
+            ],
+            -3,
+        )
+        state, result = _update(planned)(state, carry, rollout)
+        assert bool(result.accepted) and not bool(result.failed)
+    assert bool(result.performed)
+    counts = np.asarray(result.used.exposure_by_opponent)
+    assert counts.shape[-1] == 3
+    assert int(counts[..., :2].sum()) == 0
+    assert int(counts[..., 2].sum()) > 0
+    learner.validate_pqn_learner(collection, state, pqn=_CONFIG)
+
+
+def test_reward_reset_refills_recent_rows_without_restarting_exploration(
+    plain: _Run,
+) -> None:
+    from marl_battlegrounds.training._continuation_schedules import (
+        LearnerContinuation,
+        RewardReset,
+    )
+
+    parent = cast(learner.PQNLearnerState, plain.states[3])
+    rounds = int(parent.carry.progress.rounds)
+    learning = int(parent.learning_blocks)
+    context = LearnerContinuation(
+        "pqn_vdn",
+        rounds,
+        int(parent.completed_blocks),
+        learning,
+        plain.planned,
+        loss_settings=(("gamma", 0.0),),
+        reward_reset=RewardReset(
+            rounds,
+            int(parent.completed_blocks),
+            learning,
+            rounds,
+            rounds - _CONFIG.initial_rounds,
+        ),
+    )
+    state = parent._replace(
+        recent=learner._empty_recent(plain.collection, parent.carry, _CONFIG)
+    )
+    _equal(state.opt_state, parent.opt_state)
+    _equal(state.carry, parent.carry)
+    learner._check_recent(state, _CONFIG, context)
+    update = cast(
+        Update,
+        jax.jit(
+            partial(
+                learner.update_pqn_learner,
+                pqn=_CONFIG,
+                planned_learning_blocks=plain.planned,
+                continuation=context,
+            )
+        ),
+    )
+    for index, length in enumerate((2, 4)):
+        carry, rollout = _scan(plain.collection, length)(state.carry)
+        rows = rollout.transitions
+        rollout = rollout._replace(
+            transitions=rows._replace(
+                task_rewards=jnp.where(
+                    rows.valid[..., None], jnp.float32(40), jnp.float32(0)
+                )
+                * jnp.ones_like(rows.task_rewards),
+            )
+        )
+        previous = state
+        state, result = update(state, carry, rollout)
+        assert bool(result.accepted) and not bool(result.failed)
+        assert bool(result.performed) == (index == 1)
+        learner._check_recent(state, _CONFIG, context)
+        if index == 0:
+            assert int(state.completed_updates) == int(parent.completed_updates)
+            assert int(state.carry.history.last_refresh_rounds) == rounds
+            _equal(state.opt_state, previous.opt_state)
+            _equal(
+                state.carry.history.current_variables,
+                previous.carry.history.current_variables,
+            )
+        else:
+            assert int(state.learning_blocks) == learning + 1
+            np.testing.assert_allclose(result.metrics.mean_target, 40, rtol=1e-6)
+    np.testing.assert_array_equal(state.recent.rows.task_reward, 40)

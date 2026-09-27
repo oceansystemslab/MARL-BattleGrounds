@@ -631,7 +631,7 @@ def test_saved_selection_requires_all_candidates_and_exact_chosen_actor(
     ]
     host["validation_games"] = 140
     host["final_actor"] = host["actors"][final["checkpoint_id"]]
-    host["selection"] = select_checkpoint(host["confirmation_results"])
+    host["selection"] = select_checkpoint(host["confirmation_results"], rule="saved")
     host["selected_actor"] = host["actors"][host["selection"]["checkpoint_id"]]
     current = _description(tmp_path, host, parent=final, panel=True)
     io_helpers.validate_host_state(tmp_path, current, panel=panel)

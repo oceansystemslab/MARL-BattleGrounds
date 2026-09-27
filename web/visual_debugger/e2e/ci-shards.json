@@ -4,102 +4,18 @@
     {
       "files": [
         "authorized-presentation-install.spec.js",
-        "replay-static-summary.spec.js",
-        "scripted-live-advance.spec.js",
-        "server-lifecycle.spec.js"
-      ],
-      "test_titles": [
-        "all five real service leaves install with safe pending continuity",
-        "real moving crossfire and recovery replay expose durable IC and packed +4 regeneration",
-        "charge convergence preserves public causality and hidden-root privacy",
-        "real death cycle retains truthful outward lifecycle cues at both review viewports",
-        "real Agent replay paints only locally authorized Oracle corpses without changing replay state",
-        "paused replay installs a complete deterministic static summary at both supported viewports",
-        "scripted live Submit advances once, installs T0, and seals at completion",
-        "standalone launchers install their exact product identity"
-      ]
-    },
-    {
-      "files": ["authorized-presentation-install.spec.js", "control-parity.spec.js"],
-      "test_titles": [
-        "moving, Ultimate, and trap trajectories preserve public causality and hidden-root privacy",
-        "real Shared replay installs frame zero, middle, final, then rejects a forged raw root",
-        "real death and respawn keep one opaque Oracle body identity",
-        "real Live NoShared paints a locally visible corpse as inspection-only Oracle evidence",
-        "Agent queues next-turn WASD and Enter behind an in-flight Submit",
-        "Agent pointer roster selection queues movement before one Enter",
-        "authorized draft edit and rapid Submit install exactly one successor",
-        "Oracle queues next-turn WASD and Enter behind an in-flight Submit",
-        "native panels preserve user state only within exact authority",
-        "battlefield Space submits once and consumes busy repeats without scrolling",
-        "pointer draft keeps battlefield focus and queues one Enter exactly once",
-        "a lost applied response requires GET resync and never replays submit",
-        "class details change only through explicit agent activation",
-        "Agent keyboard roster selection retains researcher focus without submitting",
-        "Enter follows a coherent idempotent draft exactly once",
-        "right click stays native while Escape alone clears the target and releases focus"
-      ]
-    },
-    {
-      "files": ["authorized-presentation-install.spec.js"],
-      "test_titles": [
-        "recovery, death, and SharedObs trajectories preserve public causality and hidden-root privacy"
-      ],
-      "env": {
-        "MARL_CP5_SLICE_5_ONLY": "1"
-      }
-    },
-    {
-      "files": ["dev-client-authoring.spec.js", "red-zone-metrics.spec.js"]
-    },
-    {
-      "files": [
-        "recording-handoff.spec.js",
         "authorized-presentation-renderer.spec.js",
+        "control-parity.spec.js",
+        "dev-client-authoring.spec.js",
+        "recording-handoff.spec.js",
+        "red-zone-metrics.spec.js",
+        "replay-static-summary.spec.js",
+        "replay-viewer.spec.js",
         "resize.spec.js",
-        "tdm-gamma.spec.js"
-      ]
-    },
-    {
-      "files": ["replay-viewer.spec.js"],
-      "test_titles": [
-        "canonical complete and partial artifacts join their frame-zero and captured endpoints",
-        "replay transport has permanent visual proof at the minimum supported viewport",
-        "replay reconnect rejects a valid live frame without crossing the viewer boundary",
-        "one replay transport trajectory keeps static seeks, playback, rates, and races coherent",
-        "a stale cross-tab command atomically installs the latest audience without retry or animation",
-        "accessible playback pauses on hidden/error/endpoint and keeps one request in flight",
-        "Actor POV keeps battlefield fog while exposing artifact-wide facts",
-        "all replay authorities preserve battlefield fog and canonical metric access",
-        "Exit flushes its replay response before clean server shutdown",
-        "SharedObs TDM metrics and numeric identities remain visible across POV changes",
-        "TDM scores and offline metric exports follow the cursor across POV changes",
-        "nonzero replay view changes preserve the cursor and playing intent"
-      ]
-    },
-    {
-      "files": ["replay-viewer.spec.js", "visual-filters.spec.js"],
-      "test_titles": [
-        "all eight scenario identities and dense authoritative deaths render in both POVs",
-        "basic_support Agent POV playback visibly dwells for Hunter and Priest",
-        "visual filters remain page-local across live Oracle/NoShared and replay Oracle/Shared authority",
-        "real maximum-status replay renders +2 without losing owner semantics"
-      ]
-    },
-    {
-      "files": ["control-parity.spec.js", "visual-filters.spec.js"],
-      "test_titles": [
-        "post-Charge Agent history stays installable through a reciprocal Charge",
-        "target selection preserves pointer Submit and keyboard-native focus",
-        "Live Mage Burst retains every authorized Mage and Warrior aura modifier",
-        "queued Escape preserves its direct battlefield focus release",
-        "WASD followed immediately by Enter submits the installed draft once",
-        "Agent keyboard battlefield activation rebinds focus to the authorized successor",
-        "a stale tab adopts the latest ranges state without replaying its command",
-        "a command authorization failure clears the retained battlefield",
-        "an accepted Exit cannot retain a scene after sidecar authorization fails",
-        "amended regular and stress scenarios retain Oracle-Agent presentation continuity",
-        "declared System loads, accepts one turn and abandons a cancelled late reply"
+        "scripted-live-advance.spec.js",
+        "server-lifecycle.spec.js",
+        "tdm-gamma.spec.js",
+        "visual-filters.spec.js"
       ]
     }
   ]

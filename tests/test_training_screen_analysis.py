@@ -13,7 +13,7 @@ them from its scores, where the two were equal.
 # pyright: reportPrivateUsage=false
 import csv
 import json
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from pathlib import Path
 from typing import Any
 
@@ -203,8 +203,13 @@ def _saved_rows(
     monkeypatch: pytest.MonkeyPatch, sources: dict[str, list[Record]]
 ) -> None:
     def read(
-        result: Record, *, run_id: str | None, seed: int | None
+        result: Record,
+        *,
+        run_id: str | None,
+        seed: int | None,
+        deployment: Mapping[str, Any] | None = None,
     ) -> tuple[Record, list[Record]]:
+        assert deployment is None
         rows = sources[result["task_id"]]
         return analysis.summarize_validation(
             rows,
@@ -325,8 +330,13 @@ def test_complete_screen_keeps_shared_task_once_and_renders_actual_axes(
     calls: list[str] = []
 
     def read(
-        result: Record, *, run_id: str | None, seed: int | None
+        result: Record,
+        *,
+        run_id: str | None,
+        seed: int | None,
+        deployment: Mapping[str, Any] | None = None,
     ) -> tuple[Record, list[Record]]:
+        assert deployment is None
         calls.append(result["task_id"])
         rows = sources[result["task_id"]]
         return analysis.summarize_validation(

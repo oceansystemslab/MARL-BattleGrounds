@@ -1185,6 +1185,19 @@ test("all registered transient families validate without constructing disabled g
       label: "EVENT: Team A Respawn",
     },
   );
+  const reversed = structuredClone(raw);
+  reversed.match_summary.teams[0].display_side = "right";
+  reversed.match_summary.teams[1].display_side = "left";
+  const reversedPlan = buildChoreographyPlan(
+    await normalizeAuthorizedPresentationFrameV1(reversed),
+    surface,
+  );
+  const reversedWave = reversedPlan?.events.find(
+    (event) => event.cueSemantic === "respawn_wave_occurred",
+  );
+  assert.equal(reversedWave?.teamId, 1);
+  assert.equal(reversedWave?.teamSide, "right");
+  assert.ok(reversedWave?.anchor.x > surface.viewportBounds.width / 2);
   assert.equal(
     plan.events.some((event) => event.kind === "rejected_action"),
     false,
@@ -2319,4 +2332,32 @@ test("durable status countdown changes never synthesize browser lifecycle events
   assert.ok(plan);
   assert.deepEqual(plan.events, []);
   assert.equal(plan.phases.total, 0);
+});
+
+test("Death Announcer follows recorded spawn sides and keeps credited team identity", async () => {
+  const fixture = await authorizedFixture();
+  const raw = structuredClone(fixture.pairs.replay_oracle.presentation);
+  raw.match_summary.teams[0].display_side = "right";
+  raw.match_summary.teams[1].display_side = "left";
+  raw.match_summary.deaths = [
+    {
+      public_agent_id: "agent-slot-5",
+      team_id: 2,
+      class_id: 3,
+      killing_team_id: 1,
+      contributors: [{ public_agent_id: "agent-slot-2", team_id: 1, class_id: 5 }],
+    },
+  ];
+  const plan = buildChoreographyPlan(
+    await normalizeAuthorizedPresentationFrameV1(raw),
+    surface,
+  );
+  const death = plan?.events.find(
+    (event) => event.cueSemantic === "death_announcement",
+  );
+  assert.ok(death);
+  assert.equal(death.teamId, 1);
+  assert.equal(death.teamSide, "right");
+  assert.ok(death.anchor.x > surface.viewportBounds.width / 2);
+  assert.equal(death.label, "Team A Kills");
 });

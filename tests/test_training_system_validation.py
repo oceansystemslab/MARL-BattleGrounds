@@ -10,8 +10,9 @@ a panel holding a host-execution System; its summary names the method and its
 optimizer count. A panel chosen from a ranking saves the ranking's Red Zone
 depth (read from its recorded configurations, 5.0 or 6.0) with evidence schema
 2. load_panel keeps that ranking evidence while admitting actors for validation
-at a separately declared depth. Tests that stop at learner
-setup also skip content preparation, which the runner now does first.
+at a separately declared depth. Setup-order tests supply the source horizon
+without preparing full content, then stop at learner initialization. They check
+frozen identities before allocation and no output before roster preflight.
 Continuation binding tests complete real short CPU training and one-step M8
 validation, then resume with retained clients. They omit inherited candidate
 discovery; separate H300 tests verify inherited games and parent ranking. Their
@@ -26,6 +27,7 @@ import json
 from dataclasses import replace
 from importlib import import_module
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any, cast
 
 import jax
@@ -60,9 +62,10 @@ from marl_battlegrounds.training import (
 )
 
 
-def _no_content(**kwargs: object) -> None:
-    # These tests stop at learner setup; the prepared content is never used.
+def _no_content(**kwargs: object) -> SimpleNamespace:
+    # History spacing reads the horizon before the learner setup sentinel.
     del kwargs
+    return SimpleNamespace(source_configs=SimpleNamespace(max_steps=(300,)))
 
 
 def _jax_apply(
@@ -266,11 +269,16 @@ def test_native_score_then_kill_difference_and_legacy_ties() -> None:
         "score": 0.5,
         "mean_kill_difference": 3,
     }
-    assert analysis.select_checkpoint((early, later))["checkpoint_id"] == "early"
-    new = [{**row, "selection_schema_version": 2} for row in (early, later)]
-    assert analysis.select_checkpoint(new)["checkpoint_id"] == "later"
     assert (
-        analysis.select_checkpoint((new[0], {**new[1], "score": 0.49}))["checkpoint_id"]
+        analysis.select_checkpoint((early, later), rule="saved")["checkpoint_id"]
+        == "early"
+    )
+    new = [{**row, "selection_schema_version": 2} for row in (early, later)]
+    assert analysis.select_checkpoint(new, rule="saved")["checkpoint_id"] == "later"
+    assert (
+        analysis.select_checkpoint((new[0], {**new[1], "score": 0.49}), rule="saved")[
+            "checkpoint_id"
+        ]
         == "early"
     )
     rows = [
@@ -756,27 +764,40 @@ def test_live_system_panel_is_frozen_before_learner_setup(
     class SetupReachedError(Exception):
         pass
 
+    prepared: list[tuple[validation.FrozenPanel, dict[str, Any]]] = []
+    original_prepare = validation._prepare_system_panel
+    client = Client()
+    values = np.asarray([1.0], dtype=np.float32)
+    method = System("Live", client.apply, variables=values, execution="host")
+
+    def prepare(*args: Any, **kwargs: Any) -> Any:  # noqa: ANN401
+        result = original_prepare(*args, **kwargs)
+        prepared.append(result)
+        return result
+
     def begin(**kwargs: object) -> Any:  # noqa: ANN401
         del kwargs
+        assert len(prepared) == 1
+        panel, content = prepared[0]
+        assert panel.digest == content["panel_digest"]
+        np.testing.assert_array_equal(panel.methods[0].variables, [1.0])
+        values[0] = 7.0
+        np.testing.assert_array_equal(panel.methods[0].variables, [1.0])
+        assert not (tmp_path / "run").exists()
         raise SetupReachedError
 
+    monkeypatch.setattr(validation, "_prepare_system_panel", prepare)
     monkeypatch.setattr(learner, "init_learner", begin)
     monkeypatch.setattr(_content, "prepare_training_content", _no_content)
-    client = Client()
-    method = System("Live", client.apply, execution="host")
     config = runner.TrainConfig(purpose="demonstration")
     with pytest.raises(SetupReachedError):
         runner.train(
             config, output_dir=tmp_path / "run", validation_opponents=(method,)
         )
-    path = tmp_path / "run/validation_panel/panel.json"
-    saved = json.loads(path.read_text())
+    panel, saved = prepared[0]
     assert saved["schema_version"] == 2 and saved["members"][0]["reference"] is None
-    assert (
-        validation.load_panel(path, bindings=(method,)).methods[0].apply.__self__
-        is client
-    )
-    assert client.calls == []
+    assert panel.methods[0].apply.__self__ is client
+    assert client.calls == [] and not (tmp_path / "run").exists()
     with pytest.raises(ValueError, match="qualified frozen validation panel"):
         runner.train(config, output_dir=tmp_path / "missing")
     assert not (tmp_path / "missing").exists()
@@ -864,6 +885,7 @@ def test_resume_can_rebind_the_same_client_from_a_saved_config_reference(
             "kind": "learner",
             "schemas": checkpoints.checkpoint_schemas(),
             "metadata": {"config": runner.config_to_dict(config)},
+            "collection": {},
         }
 
     def saved_config(saved: object) -> dict[str, Any]:
@@ -991,6 +1013,7 @@ def test_live_panel_continuation_rebinds_clients_and_keeps_json_clean(
         method="ff_ippo",
         num_envs=4,
         total_env_steps=8,
+        keep_past=0,
         seed=817,
         ppo=PPOConfig(rollout_length=2, epochs=1),
         checkpoint_interval_updates=1,
@@ -1097,6 +1120,29 @@ def test_live_panel_continuation_rebinds_clients_and_keeps_json_clean(
         )
     assert not (tmp_path / "wrong-future-binding").exists()
     assert len(client.calls) == calls_before and not future_client.calls
+    preflight_names: list[list[str]] = []
+    checked_panels: list[str] = []
+    original_preflight = validation.prepare_validation_teams
+    original_purpose = runner._check_panel_purpose
+
+    def preflight(
+        candidate: System | Policy,
+        opponents: Any,  # noqa: ANN401
+        **kwargs: Any,  # noqa: ANN401
+    ) -> Any:  # noqa: ANN401
+        if not (tmp_path / "future-child").exists():
+            preflight_names.append([member.name for member in opponents])
+        return original_preflight(candidate, opponents, **kwargs)
+
+    def check_purpose(
+        config: runner.TrainConfig, panel: validation.FrozenPanel | None
+    ) -> None:
+        assert panel is not None
+        checked_panels.append(panel.digest)
+        original_purpose(config, panel)
+
+    monkeypatch.setattr(validation, "prepare_validation_teams", preflight)
+    monkeypatch.setattr(runner, "_check_panel_purpose", check_purpose)
     future = runner.extend_training(
         parent_checkpoint,
         additional_env_steps=4,
@@ -1104,6 +1150,8 @@ def test_live_panel_continuation_rebinds_clients_and_keeps_json_clean(
         validation_opponents=(method,),
         changes=request,
     )
+    assert preflight_names == [["Future Live"]]
+    assert checked_panels == [saved_panel["panel_digest"], future_panel.digest]
     assert future_client.calls and len(client.calls) == calls_before
     assert request["validation"] is future_changes
     assert (
@@ -1131,3 +1179,772 @@ def test_live_panel_continuation_rebinds_clients_and_keeps_json_clean(
         len(future_client.calls) == future_calls and len(client.calls) == calls_before
     )
     assert files(parent.run_dir) == before
+
+
+@pytest.mark.parametrize("kind", ("jax", "policy", "host", "mixed", "factory"))
+def test_live_candidates_validate_custom_rosters_and_reuse_exact_tasks(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, kind: str
+) -> None:
+    from marl_battlegrounds.evaluation.policy_execution import team
+    from marl_battlegrounds.evaluation.recording_context import (
+        capture_recording_provenance,
+    )
+    from marl_battlegrounds.evaluation.results import load_results
+
+    calls: list[np.ndarray[Any, Any]] = []
+
+    def act(
+        variables: object, memory: object, inputs: SystemInput, keys: Array
+    ) -> tuple[ActorAction, object]:
+        del variables, keys
+        calls.append(np.asarray(inputs.controlled_mask).copy())
+        zero = jnp.zeros(inputs.active_mask.shape, jnp.int32)
+        return ActorAction(zero, zero, zero), memory
+
+    candidate: System | Policy | str
+    host = System("Candidate", act, execution="host")
+    if kind == "policy":
+        candidate = Policy("Candidate", _mixture_policy, initial_carry=jnp.int32(0))
+    elif kind in ("host", "mixed", "factory"):
+        candidate = team("random", host, slots=[[0], [1]]) if kind == "mixed" else host
+    else:
+        candidate = System("Candidate", _jax_apply)
+    panel = validation.create_panel(opponents=["random"], output_dir=tmp_path / "panel")
+    made: list[str] = []
+    if kind == "factory":
+        loader = import_module("marl_battlegrounds._method_loading")
+        original_load = loader.load_method
+
+        def load(reference: str) -> System | Policy:
+            if reference == "researcher:build":
+                made.append(reference)
+                return host
+            return original_load(reference)
+
+        monkeypatch.setattr(loader, "load_method", load)
+        candidate = "researcher:build"
+    evaluator = import_module("marl_battlegrounds.evaluation.evaluate")
+    original, original_verify = evaluator.evaluate, evaluator._verify_evaluation
+    provenance = capture_recording_provenance(num_envs=2)
+
+    def fixed_provenance(**kwargs: object) -> dict[str, object]:
+        del kwargs
+        return provenance
+
+    def short(*args: Any, **kwargs: Any) -> Any:  # noqa: ANN401
+        return original(*args, max_steps=2, **kwargs)
+
+    def short_verify(*args: Any, **kwargs: Any) -> Any:  # noqa: ANN401
+        return original_verify(*args, max_steps=2, **kwargs)
+
+    monkeypatch.setattr(evaluator, "capture_recording_provenance", fixed_provenance)
+    monkeypatch.setattr(evaluator, "evaluate", short)
+    monkeypatch.setattr(evaluator, "_verify_evaluation", short_verify)
+    options: dict[str, Any] = dict(
+        output_dir=tmp_path / "task",
+        seed_pairs=1,
+        num_envs=2,
+        maps=[42],
+        system_roster=["mage", "mage"],
+        opponent_roster=["warrior"],
+    )
+    original_roster = options["system_roster"]
+
+    def change_caller_list(event: dict[str, Any]) -> None:
+        if event["event"] == "validation_task":
+            original_roster[:] = ["rogue"]
+            event["system_roster"][:] = ["priest"]
+            event["maps"][:] = [43]
+
+    result = validation.validate_checkpoint(
+        candidate, panel, event_callback=change_caller_list, **options
+    )
+    options["system_roster"] = ["mage", "mage"]
+    assert result["complete"] and result["games"] == 2
+    assert result["schema_version"] == 5
+    assert result["system_id"] and result["system"]
+    assert not {"checkpoint_id", "actor_digest", "env_steps"}.intersection(result)
+    assert result["maps"] == [42]
+    assert result["system_roster"] == ["mage", "mage"]
+    saved = load_results(result["pass_paths"][0], phase="validation")
+    rows = saved.table("episodes")
+    saved_pass = next(iter(saved.metadata["passes"].values()))
+    assert {row["spawn_locations"] for row in saved_pass["episodes"].values()} == {0, 1}
+    assert saved_pass["system_ids"]["team_a"] == result["system_id"]
+    assert all(value == result["system"]["name"] for value in rows["team_a_policy"])
+    if kind == "mixed":
+        assert calls
+        assert all(
+            np.array_equal(mask, [[False, True, False, False, False]] * 2)
+            for mask in calls
+        )
+    before = len(calls)
+    assert validation.validate_checkpoint(candidate, panel, **options) == result
+    assert len(calls) == before
+    if kind == "factory":
+        assert len(made) == 2
+    files = {
+        path: path.read_bytes()
+        for path in (tmp_path / "task").rglob("*")
+        if path.is_file()
+    }
+    for changed in (
+        {"maps": [43]},
+        {"system_roster": ["mage", "warrior"]},
+        {"opponent_roster": ["rogue"]},
+    ):
+        changed_options = options.copy()
+        changed_options.update(changed)
+        with pytest.raises(ValueError, match="different scientific conditions"):
+            validation.validate_checkpoint(candidate, panel, **changed_options)
+    with pytest.raises(ValueError, match="different scientific conditions"):
+        validation.validate_checkpoint(policy("tdm-beta"), panel, **options)
+    assert all(path.read_bytes() == data for path, data in files.items())
+    assert len(calls) == before
+
+
+@pytest.mark.parametrize(
+    "change", ({"maps": []}, {"maps": [42, 42]}, {"system_roster": []})
+)
+def test_invalid_custom_validation_conditions_create_no_output(
+    tmp_path: Path, change: dict[str, Any]
+) -> None:
+    panel = validation.create_panel(opponents=["random"], output_dir=tmp_path / "panel")
+    output = tmp_path / "task"
+    with pytest.raises(ValueError):
+        validation.validate_checkpoint("random", panel, output_dir=output, **change)
+    assert not output.exists()
+
+
+def test_duplicate_panel_labels_preserve_names_and_avoid_numbered_name_collisions(
+    tmp_path: Path,
+) -> None:
+    methods = [
+        System("Same", _jax_apply, variables=jnp.float32(value)) for value in (1, 2)
+    ]
+    methods.append(System("Same (2)", _jax_apply))
+    panel = validation.create_panel(opponents=methods, output_dir=tmp_path / "panel")
+    assert [member.name for member in panel.members] == ["Same", "Same (3)", "Same (2)"]
+    assert [method.name for method in panel.methods] == ["Same", "Same", "Same (2)"]
+    assert len({member.registration_id for member in panel.members}) == 3
+    loaded = validation.load_panel(panel.path, bindings=methods)
+    assert loaded.members == panel.members
+
+
+def test_late_incompatible_panel_roster_fails_before_any_output_or_provider(
+    tmp_path: Path,
+) -> None:
+    client = Client()
+    short = independent_policies((policy("random"),))
+    panel = validation.create_panel(
+        opponents=[System("Host", client.apply, execution="host"), short],
+        output_dir=tmp_path / "panel",
+    )
+    events: list[dict[str, Any]] = []
+    output = tmp_path / "task"
+    with pytest.raises(ValueError):
+        validation.validate_checkpoint(
+            "random",
+            panel,
+            output_dir=output,
+            maps=[42],
+            system_roster=["mage"],
+            opponent_roster=["warrior", "warrior"],
+            event_callback=events.append,
+        )
+    assert client.calls == [] and events == []
+    assert not output.exists()
+
+
+def test_builtin_candidate_precedes_a_same_named_directory(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / "random").mkdir()
+    panel = validation.create_panel(
+        opponents=["tdm-alpha"], output_dir=tmp_path / "panel"
+    )
+
+    def stop_at_task(
+        directory: Path, content: dict[str, Any], callback: object
+    ) -> dict[str, Any]:
+        del directory, callback
+        assert content["system"]["name"] == "random"
+        raise RuntimeError("candidate resolved")
+
+    monkeypatch.setattr(validation, "_task", stop_at_task)
+    with pytest.raises(RuntimeError, match="candidate resolved"):
+        validation.validate_checkpoint("random", panel, output_dir=tmp_path / "task")
+    assert not (tmp_path / "task").exists()
+
+
+def test_validation_folder_names_are_clear_and_never_replace_other_paths(
+    tmp_path: Path,
+) -> None:
+    first = validation._pass_directory(tmp_path, 0, "Same / Name")
+    second = validation._pass_directory(tmp_path, 1, "Same / Name")
+    assert first.name == "opponent_00_same_name"
+    assert second.name == "opponent_01_same_name" and first != second
+    legacy = tmp_path / "opponent-0"
+    legacy.mkdir()
+    (legacy / "keep.txt").write_text("saved")
+    assert validation._pass_directory(tmp_path, 0, "Same / Name") == legacy
+    first.mkdir()
+    with pytest.raises(ValueError, match="two folders"):
+        validation._pass_directory(tmp_path, 0, "Same / Name")
+    assert (legacy / "keep.txt").read_text() == "saved"
+    second.symlink_to(legacy, target_is_directory=True)
+    with pytest.raises(ValueError, match="plain directory"):
+        validation._pass_directory(tmp_path, 1, "Same / Name")
+
+
+@pytest.mark.parametrize("saved_actor", (False, True))
+def test_deployed_partner_panel_preserves_candidate_identity_and_saved_evidence(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, saved_actor: bool
+) -> None:
+    from marl_battlegrounds.evaluation.recording_context import (
+        capture_recording_provenance,
+    )
+    from marl_battlegrounds.evaluation.results import load_results
+    from marl_battlegrounds.training import _selection_evidence
+
+    evaluator = import_module("marl_battlegrounds.evaluation.evaluate")
+    provenance = capture_recording_provenance(num_envs=2)
+
+    def fixed_provenance(**kwargs: object) -> dict[str, object]:
+        del kwargs
+        return provenance
+
+    monkeypatch.setattr(evaluator, "capture_recording_provenance", fixed_provenance)
+    calls: list[np.ndarray[Any, Any]] = []
+
+    def act(
+        variables: object, memory: object, inputs: SystemInput, keys: Array
+    ) -> tuple[ActorAction, object]:
+        del variables, keys
+        calls.append(np.asarray(inputs.controlled_mask).copy())
+        zero = jnp.zeros(inputs.active_mask.shape, jnp.int32)
+        return ActorAction(zero, zero, zero), memory
+
+    candidate: System | Path = System("Researcher", act, execution="host")
+    if saved_actor:
+        candidate = checkpoints.export_system(
+            initialize_ppo(jax.random.key(42), method="ff_ippo").actor_params,
+            tmp_path / "actor",
+            metadata={
+                "run_id": "partner-validation",
+                "seed": 42,
+                "env_steps": 0,
+                "checkpoint_id": "c" * 64,
+            },
+            spawn_frame="left",
+            method="ff_ippo",
+        )
+    else:
+        evaluator = import_module("marl_battlegrounds.evaluation.evaluate")
+        original, original_verify = evaluator.evaluate, evaluator._verify_evaluation
+
+        def short(*args: Any, **kwargs: Any) -> Any:  # noqa: ANN401
+            return original(*args, max_steps=2, **kwargs)
+
+        def short_verify(*args: Any, **kwargs: Any) -> Any:  # noqa: ANN401
+            return original_verify(*args, max_steps=2, **kwargs)
+
+        monkeypatch.setattr(evaluator, "evaluate", short)
+        monkeypatch.setattr(evaluator, "_verify_evaluation", short_verify)
+    panel = validation.create_panel(opponents=["random"], output_dir=tmp_path / "panel")
+    partners = {
+        "Training Partner": policy("random"),
+        "New Partner": policy("tdm-alpha"),
+    }
+    bindings, declaration = validation.freeze_validation_partners(
+        partners,
+        learner_slots=[0],
+        partner_labels={"Training Partner": "familiar", "New Partner": "held_out"},
+    )
+    options: dict[str, Any] = dict(
+        output_dir=tmp_path / "task",
+        seed_pairs=1,
+        num_envs=2,
+        maps=[42],
+        system_roster=["mage", "priest"],
+        opponent_roster=["warrior"],
+        partners=bindings,
+        learner_slots=[0],
+        partner_labels={"Training Partner": "familiar", "New Partner": "held_out"},
+    )
+    result = validation.validate_checkpoint(candidate, panel, **options)
+    assert result["games"] == 4 and result["independent_blocks"] == 1
+    assert result["members"][0]["root"] == result["members"][1]["root"]
+    assert [
+        (row["name"], row["label"], row["games"]) for row in result["partner_results"]
+    ] == [("Training Partner", "familiar", 2), ("New Partner", "held_out", 2)]
+    if saved_actor:
+        assert isinstance(candidate, Path)
+        assert result["checkpoint_id"] == "c" * 64 and result["env_steps"] == 0
+        assert (
+            result["actor_digest"]
+            == checkpoints.artifact_identity(candidate)["actor_digest"]
+        )
+    else:
+        assert result["system"]["name"] == "Researcher"
+        assert not {"checkpoint_id", "actor_digest", "env_steps"}.intersection(result)
+        assert calls and all(
+            np.array_equal(mask, [[True, False, False, False, False]] * 2)
+            for mask in calls
+        )
+    for index, path in enumerate(result["pass_paths"]):
+        saved = load_results(path, phase="validation")
+        entry = next(iter(saved.metadata["passes"].values()))
+        evidence = json.loads((Path(path).parent / "sampling_facts.json").read_text())
+        assert evidence["deployment"]["partner"] == declaration["partners"][index]
+        assert evidence["system_ids"] == entry["system_ids"]
+        assert Path(path).parent.parent.name.startswith(f"partner_{index:02d}_")
+    before = len(calls)
+    assert validation.validate_checkpoint(candidate, panel, **options) == result
+    assert len(calls) == before
+    sidecar = Path(result["pass_paths"][-1]).parent / "sampling_facts.json"
+    original_sidecar = sidecar.read_bytes()
+    sidecar.unlink()
+    with pytest.raises(ValueError, match="missing constituent evidence"):
+        validation.validate_checkpoint(candidate, panel, **options)
+    sidecar.write_bytes(original_sidecar)
+    assert len(calls) == before
+    changed = dict(
+        options,
+        partner_labels={"Training Partner": "unknown", "New Partner": "held_out"},
+    )
+    with pytest.raises(ValueError, match="different scientific conditions"):
+        validation.validate_checkpoint(candidate, panel, **changed)
+    if saved_actor:
+        assert isinstance(candidate, Path)
+        task = json.loads((tmp_path / "task" / "task.json").read_text())
+        reduced, rows = _selection_evidence._panel_evidence(
+            tmp_path / "task" / "validation_summary.json",
+            result,
+            task,
+            validation._artifact(candidate),
+            panel,
+            _selection_evidence._Snapshot(),
+        )
+        assert reduced == result and len(rows) == 4
+        sidecar = Path(result["pass_paths"][1]).parent / "sampling_facts.json"
+        evidence = json.loads(sidecar.read_text())
+        evidence["deployment"]["learner_slots"] = [1]
+        sidecar.write_text(json.dumps(evidence))
+        with pytest.raises(ValueError, match="frozen constituents"):
+            _selection_evidence._panel_evidence(
+                tmp_path / "task" / "validation_summary.json",
+                result,
+                task,
+                validation._artifact(candidate),
+                panel,
+                _selection_evidence._Snapshot(),
+            )
+
+
+def test_deployed_partner_preflight_checks_every_member_before_files_or_calls(
+    tmp_path: Path,
+) -> None:
+    from marl_battlegrounds.evaluation.policy_execution import team
+
+    client = Client()
+    actor = System("Actor", client.apply, execution="host")
+    partners = {"First": policy("random"), "Last": team("random", slots=[[0]])}
+    panel = validation.create_panel(opponents=["random"], output_dir=tmp_path / "panel")
+    with pytest.raises(ValueError):
+        validation.validate_checkpoint(
+            actor,
+            panel,
+            output_dir=tmp_path / "task",
+            partners=partners,
+            learner_slots=[0],
+            system_roster=["mage", "priest"],
+            opponent_roster=["warrior"],
+            maps=[42],
+        )
+    assert not client.calls and not (tmp_path / "task").exists()
+    with pytest.raises(ValueError, match="no active learner"):
+        validation.prepare_validation_teams(
+            actor,
+            ["random"],
+            partners={"Partner": policy("random")},
+            learner_slots=[1],
+            system_roster=["mage"],
+            maps=[42],
+        )
+
+
+@pytest.mark.parametrize("with_partner", (False, True))
+def test_custom_random_deployment_verifies_actual_saved_rows_and_declared_conditions(
+    tmp_path: Path, with_partner: bool
+) -> None:
+    actor = checkpoints.export_system(
+        initialize_ppo(jax.random.key(11), method="ff_ippo").actor_params,
+        tmp_path / "actor",
+        metadata={
+            "run_id": "random-team",
+            "seed": 11,
+            "env_steps": 0,
+            "checkpoint_id": "d" * 64,
+        },
+        spawn_frame="left",
+        method="ff_ippo",
+    )
+    options: dict[str, Any] = dict(
+        maps=[42], system_roster=["mage", "priest"], opponent_roster=["warrior"]
+    )
+    declaration = options.copy()
+    if with_partner:
+        bindings, declared = validation.freeze_validation_partners(
+            {"Training Partner": policy("random")},
+            learner_slots=[0],
+            partner_labels={"Training Partner": "familiar"},
+        )
+        declaration.update(declared)
+        options.update(
+            partners=bindings,
+            learner_slots=[0],
+            partner_labels={"Training Partner": "familiar"},
+        )
+    result = validation.validate_random(
+        actor, output_dir=tmp_path / "task", num_envs=2, seed_pairs=1, **options
+    )
+    capture = {
+        **result,
+        "actor_path": str(actor),
+        "summary_path": str(tmp_path / "task" / "validation_summary.json"),
+        "reference_path": None,
+        "reused_initialization": False,
+        "elapsed_seconds": 0.0,
+        "training_seconds": 0.0,
+        "wall_seconds": 0.0,
+    }
+    verify: dict[str, Any] = dict(
+        actor_digest=result["actor_digest"], seed_pairs=1, deployment=declaration
+    )
+    assert validation.verify_random_result(capture, **verify) == result
+    reference = tmp_path / "original.json"
+    reference.write_text(json.dumps(capture))
+    assert validation.read_random_initialization(reference, **verify) == capture
+    changed = dict(declaration, system_roster=["priest", "mage"])
+    with pytest.raises(ValueError, match="task or summary differs"):
+        validation.verify_random_result(capture, **dict(verify, deployment=changed))
+    if with_partner:
+        from marl_battlegrounds.training import _selection_evidence
+
+        task = json.loads((tmp_path / "task" / "task.json").read_text())
+        _, rows = _selection_evidence._panel_evidence(
+            tmp_path / "task" / "validation_summary.json",
+            result,
+            task,
+            validation._artifact(actor),
+            validation._random_panel(),
+            _selection_evidence._Snapshot(),
+        )
+        statistics = analysis._screen_statistics(rows, result, summary=result)
+        assert statistics["score"] == result["score"]
+
+
+def test_fresh_partner_run_records_native_actor_validation_and_resumes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from tests.training_continuation_helpers import fixed_source
+
+    from marl_battlegrounds.baselines.ppo import PPOConfig
+    from marl_battlegrounds.evaluation.recording_context import (
+        capture_recording_provenance,
+    )
+    from marl_battlegrounds.training import _selection_evidence
+
+    fixed_source(monkeypatch, "ff_ippo")
+    evaluator = import_module("marl_battlegrounds.evaluation.evaluate")
+    provenance = capture_recording_provenance(num_envs=2)
+
+    def fixed_provenance(**kwargs: object) -> dict[str, object]:
+        del kwargs
+        return provenance
+
+    monkeypatch.setattr(evaluator, "capture_recording_provenance", fixed_provenance)
+    monkeypatch.setattr(validation, "VALIDATION_MAPS", (42,))
+    config = runner.TrainConfig(
+        method="ff_ippo",
+        num_envs=2,
+        total_env_steps=4,
+        keep_past=0,
+        ppo=PPOConfig(rollout_length=2, epochs=1),
+        curriculum=[
+            {
+                "share": 1.0,
+                "maps": [0],
+                "rosters": {"system": ["mage", "priest"], "opponent": ["warrior"]},
+            }
+        ],
+        learner_slots=(0,),
+        partners={"Training Partner": 1.0},
+        validation_partners={"New Partner": "tdm-alpha"},
+        validation_partner_labels={"New Partner": "held_out"},
+        validation_opponents=("random",),
+        validation_fractions=(1.0,),
+        routine_seed_pairs=1,
+        confirmation_seed_pairs=1,
+        checkpoint_interval_updates=1,
+        metrics="none",
+        verbose=False,
+    )
+    result = runner.train(
+        config, partners={"Training Partner": "random"}, output_dir=tmp_path / "run"
+    )
+    saved = checkpoints.read_checkpoint_details(result.final_checkpoint)
+    metadata = saved["metadata"]
+    assert metadata.get("continuation") is None
+    assert (
+        metadata["validation_declaration"]["deployment"]
+        == metadata["validation_deployment"]
+    )
+    records = (
+        metadata["host_state"]["routine_results"]
+        + metadata["host_state"]["confirmation_results"]
+    )
+    assert records and all(
+        row["system_roster"] == ["mage", "priest"] for row in records
+    )
+    assert all(
+        [part["label"] for part in row["partner_results"]] == ["familiar", "held_out"]
+        for row in records
+    )
+    evidence = _selection_evidence.read_run_evidence(result.run_dir)
+    assert evidence["status"] == "complete" and evidence["records"]
+    for row in evidence["records"]:
+        assert row["checkpoint_id"] in evidence["actors"]
+        assert (
+            row["actor_digest"]
+            == evidence["actors"][row["checkpoint_id"]]["actor_digest"]
+        )
+    resumed = runner.train(resume_from=result.final_checkpoint)
+    assert resumed.selected_actor == result.selected_actor
+    assert resumed.final_checkpoint == result.final_checkpoint
+
+
+def test_runner_rejects_custom_conditions_with_historical_panel_before_output(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from marl_battlegrounds.baselines.ppo import PPOConfig
+    from marl_battlegrounds.evaluation.run_writer import RunWriter
+
+    historical = validation.FrozenPanel(
+        path=tmp_path / "historical_panel.json",
+        digest="old-panel",
+        members=(),
+        qualified=True,
+        schema_version=1,
+    )
+
+    def load(*args: object, **kwargs: object) -> validation.FrozenPanel:
+        del args, kwargs
+        return historical
+
+    def no_writer(*args: object, **kwargs: object) -> None:
+        pytest.fail("Invalid historical deployment must fail before opening a writer")
+
+    monkeypatch.setattr(validation, "load_panel", load)
+    monkeypatch.setattr(RunWriter, "__init__", no_writer)
+    config = runner.TrainConfig(
+        method="ff_ippo",
+        num_envs=2,
+        total_env_steps=4,
+        keep_past=0,
+        curriculum=[{"share": 1.0, "maps": [0], "team_size": 2}],
+        ppo=PPOConfig(rollout_length=2, epochs=1),
+        validation_panel=str(historical.path),
+        metrics="none",
+        verbose=False,
+    )
+    with pytest.raises(ValueError, match="panel made with opponents="):
+        runner.train(config, output_dir=tmp_path / "run")
+    assert not (tmp_path / "run").exists()
+
+
+def test_public_validation_reuses_program_for_changed_same_shape_weights(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from time import perf_counter
+
+    evaluator = import_module("marl_battlegrounds.evaluation.evaluate")
+    program = evaluator._jax_system_chunk
+    chunk_seconds: list[float] = []
+    final_positions: list[np.ndarray[Any, Any]] = []
+    final_moves: list[list[int]] = []
+
+    def timed_chunk(*args: object, **kwargs: object) -> object:
+        started = perf_counter()
+        output = program(*args, **kwargs)
+        jax.block_until_ready(output)
+        chunk_seconds.append(perf_counter() - started)
+        state = output[0].state.core_state
+        final_positions.append(np.asarray(state.agent_positions))
+        final_moves.append(
+            np.asarray(state.previous_timestep_move_actions)[:, 0].tolist()
+        )
+        return output
+
+    def weighted_actor(
+        variables: object, memory: object, inputs: SystemInput, keys: Array
+    ) -> tuple[ActorAction, object]:
+        del keys
+        moves = inputs.action_mask.move_mask
+        last_legal = jnp.argmax(
+            jnp.where(moves, jnp.arange(moves.shape[-1]), -1), axis=-1
+        )
+        selected = jnp.where(cast(Array, variables) > 0, last_legal, 0)
+        zero = jnp.zeros_like(selected)
+        return ActorAction(selected, zero, zero), memory
+
+    monkeypatch.setattr(evaluator, "_jax_system_chunk", timed_chunk)
+    started = perf_counter()
+    panel = validation.create_panel(
+        opponents=[System("Idle Opponent", _jax_apply)],
+        output_dir=tmp_path / "panel",
+    )
+    panel_seconds = perf_counter() - started
+    candidate = System("Changing Actor", weighted_actor, variables=jnp.float32(0))
+    partner = System("Fixed Partner", _jax_apply)
+    measurements: list[dict[str, object]] = []
+    summaries: list[dict[str, Any]] = []
+    for index in range(2):
+        chunk_seconds.clear()
+        compiled_before = program._cache_size()
+        started = perf_counter()
+        summary = validation.validate_checkpoint(
+            replace(candidate, variables=jnp.float32(index)),
+            panel,
+            output_dir=tmp_path / f"candidate_{index}",
+            maps=[42],
+            system_roster=["mage", "mage"],
+            opponent_roster=["warrior"],
+            partners={"Partner": partner},
+            learner_slots=[0],
+            seed_pairs=1,
+            num_envs=2,
+            chunk_size=300,
+        )
+        wall_seconds = perf_counter() - started
+        added_programs = program._cache_size() - compiled_before
+        assert summary["complete"] and summary["games"] == 2
+        assert chunk_seconds
+        assert added_programs == (1 if index == 0 else 0)
+        summaries.append(summary)
+        measurements.append(
+            {
+                "weight": index,
+                "new_outer_programs": added_programs,
+                "chunk_calls": len(chunk_seconds),
+                "last_owned_moves": final_moves[-1],
+                "chunk_compile_and_execution_seconds": sum(chunk_seconds),
+                "outside_chunk_seconds": wall_seconds - sum(chunk_seconds),
+                "total_seconds": wall_seconds,
+                "saved_bytes": sum(
+                    path.stat().st_size
+                    for path in (tmp_path / f"candidate_{index}").rglob("*")
+                    if path.is_file()
+                ),
+            }
+        )
+    assert summaries[0]["task_id"] != summaries[1]["task_id"]
+    assert summaries[0]["system_id"] != summaries[1]["system_id"]
+    assert not np.array_equal(final_positions[0][:, 0], final_positions[-1][:, 0])
+    report = {"panel_seconds": panel_seconds, "calls": measurements}
+    (tmp_path / "validation_reuse.json").write_text(json.dumps(report, indent=2) + "\n")
+    print(json.dumps(report))
+
+
+def test_nested_composition_execution_key_hashes_each_leaf_once() -> None:
+    from marl_battlegrounds.evaluation.policy_execution import team
+    from marl_battlegrounds.evaluation.system_evaluation import (
+        prepare_evaluation_system,
+    )
+
+    calls: list[int] = []
+
+    class Hook:
+        def __hash__(self) -> int:
+            calls.append(1)
+            return 91
+
+        def __call__(self, *_args: object) -> object:
+            raise AssertionError("Building an execution key called the method")
+
+    actor = System("Actor", Hook(), variables=jnp.float32(0))
+    first = prepare_evaluation_system(team(team(team(actor))))[0]
+    second = prepare_evaluation_system(
+        team(team(team(replace(actor, variables=jnp.float32(1)))))
+    )[0]
+    calls.clear()
+    first_hash = hash(first)
+    assert len(calls) == 1
+    calls.clear()
+    assert first == second and first_hash == hash(second)
+    assert len(calls) == 1
+    changed = replace(second, reset=None)
+    assert changed != first
+
+
+@pytest.mark.parametrize("invalid_role", ("partner", "opponent"))
+def test_runner_panel_preflight_allows_a_corrected_retry(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, invalid_role: str
+) -> None:
+    from marl_battlegrounds.baselines.ppo import PPOConfig
+    from marl_battlegrounds.evaluation.policy_execution import team
+
+    class SetupCompleteError(Exception):
+        pass
+
+    published: list[validation.FrozenPanel] = []
+    original_publish = validation._publish_system_panel
+
+    def publish(panel: validation.FrozenPanel, content: dict[str, Any]) -> None:
+        original_publish(panel, content)
+        published.append(panel)
+        raise SetupCompleteError
+
+    monkeypatch.setattr(validation, "_publish_system_panel", publish)
+    client = Client()
+    compatible = System("Live", client.apply, execution="host")
+    incompatible = team("random", slots=[[0]])
+    partner_case = invalid_role == "partner"
+    config = runner.TrainConfig(
+        method="ff_ippo",
+        num_envs=2,
+        total_env_steps=4,
+        keep_past=0,
+        ppo=PPOConfig(rollout_length=2, epochs=1),
+        learner_slots=(0,) if partner_case else None,
+        partners={"Familiar": 1.0} if partner_case else None,
+        validation_partner_labels={"Held Out": "held_out"} if partner_case else None,
+        metrics="none",
+        verbose=False,
+    )
+    training_partners = {"Familiar": "random"} if partner_case else None
+    output = tmp_path / "run"
+    with pytest.raises(ValueError):
+        runner.train(
+            config,
+            output_dir=output,
+            partners=training_partners,
+            validation_partners={"Held Out": incompatible} if partner_case else None,
+            validation_opponents=(compatible if partner_case else incompatible,),
+        )
+    assert not output.exists() and not published and not client.calls
+    with pytest.raises(SetupCompleteError):
+        runner.train(
+            config,
+            output_dir=output,
+            partners=training_partners,
+            validation_partners={"Held Out": policy("random")}
+            if partner_case
+            else None,
+            validation_opponents=(compatible,),
+        )
+    assert len(published) == 1 and published[0].path.is_file()
+    assert published[0].methods[0].apply.__self__ is client
+    assert not client.calls

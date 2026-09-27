@@ -1,7 +1,7 @@
 """Check a named pinned System inside the compiled Team B opponent wrapper.
 
-With a JAX System pinned, the lanes assigned to history slot 0 act exactly as
-Team B of M8's own apply_systems with that System, for rosters of three and
+With a JAX System pinned, lanes on the separate permanent-pin route (-2) act
+exactly as Team B of M8's own apply_systems with that System, for rosters of three and
 five actors, and the other lanes act exactly as the unpinned wrapper; a step
 with no pinned lane never calls the pinned System and leaves its memory
 unchanged; Systems that return a 2-tuple, a 3-tuple or a SystemOutput route
@@ -81,19 +81,11 @@ def weights() -> Tree:
     return initialize_ppo(jax.random.key(30)).actor_params
 
 
-def _fill_slot_zero(bank: Array, leaf: Array) -> Array:
-    return bank.at[0].set(leaf)
-
-
 def _history(weights: Tree, snapshot: tuple[int, ...]) -> OpponentHistory:
-    history = init_opponent_history(weights, num_envs=len(snapshot))
-    return history._replace(
-        count=jnp.int32(1),
-        historical_variables=jax.tree.map(
-            _fill_slot_zero, history.historical_variables, weights
-        ),
-        lane_snapshot=jnp.asarray(snapshot, jnp.int32),
+    history = init_opponent_history(
+        weights, num_envs=len(snapshot), keep_past=0, external_pin=True
     )
+    return history._replace(lane_snapshot=jnp.asarray(snapshot, jnp.int32))
 
 
 def _team_b(actions: Action) -> dict[str, np.ndarray]:
@@ -166,7 +158,7 @@ def test_pinned_lanes_match_m8_and_other_lanes_match_the_plain_wrapper(
     weights: Tree, team_size: int
 ) -> None:
     alpha = shared_policy(cast(Policy, freeze_evaluation_method(policy("tdm-alpha"))))
-    actions, _, direct, _ = _run_pinned(weights, alpha, (-1, 0, -1, 0), team_size)
+    actions, _, direct, _ = _run_pinned(weights, alpha, (-1, -2, -1, -2), team_size)
     wrapped, reference = _team_b(actions), _team_b(direct)
     for name in HEADS:
         np.testing.assert_array_equal(wrapped[name][PINNED], reference[name][PINNED])
@@ -246,7 +238,7 @@ def test_every_return_form_routes_like_m8_and_idle_steps_skip_the_system(
 ) -> None:
     counter = System("Counter", apply, init=_counter_init)
     actions, memory, direct, direct_memory = _run_pinned(
-        weights, counter, (-1, 0, -1, 0)
+        weights, counter, (-1, -2, -1, -2)
     )
     pinned_memory = np.asarray(memory[1])
     np.testing.assert_array_equal(
@@ -285,15 +277,15 @@ def _steps_policy() -> System:
     ("snapshot", "rows"),
     [
         ((-1,) * 8, 0),
-        ((0, -1, -1, -1, -1, -1, -1, -1), 10),
-        ((-1, 0, -1, -1, -1, 0, -1, -1), 10),
-        ((0, 0, 0, -1, -1, -1, -1, -1), 20),
-        ((0, 0, 0, 0, -1, -1, -1, -1), 20),
-        ((0, 0, 0, 0, 0, -1, -1, -1), 40),
-        ((0,) * 8, 40),
-        ((0,), 5),
-        ((0, -1), 5),
-        ((0, 0), 10),
+        ((-2, -1, -1, -1, -1, -1, -1, -1), 10),
+        ((-1, -2, -1, -1, -1, -2, -1, -1), 10),
+        ((-2, -2, -2, -1, -1, -1, -1, -1), 20),
+        ((-2, -2, -2, -2, -1, -1, -1, -1), 20),
+        ((-2, -2, -2, -2, -2, -1, -1, -1), 40),
+        ((-2,) * 8, 40),
+        ((-2,), 5),
+        ((-2, -1), 5),
+        ((-2, -2), 10),
     ],
     ids=[
         "pins-0",
@@ -319,7 +311,7 @@ def test_a_policy_runs_on_its_games_only_when_they_fit_and_matches_m8(
     # B1 and B2 reuse the distinct capacities that exist at those sizes.
     assert len(SEEN) == rows
     direct, direct_memory = _direct_step(weights, steps, num_envs=len(snapshot))
-    lanes = np.asarray(snapshot) == 0
+    lanes = np.asarray(snapshot) == -2
     wrapped, reference = _team_b(actions), _team_b(direct)
     for name in HEADS:
         np.testing.assert_array_equal(wrapped[name][lanes], reference[name][lanes])
@@ -331,8 +323,8 @@ def test_a_policy_runs_on_its_games_only_when_they_fit_and_matches_m8(
 
 
 ENDS = (1, 1, 3, 3, 3, 3, 3, 3)
-BEFORE = (0, -1, 0, -1, -1, -1, -1, -1)
-AFTER = (-1, 0, 0, -1, -1, -1, -1, -1)
+BEFORE = (-2, -1, -2, -1, -1, -1, -1, -1)
+AFTER = (-1, -2, -2, -1, -1, -1, -1, -1)
 
 
 def _across_a_new_game(
@@ -388,10 +380,10 @@ def _across_a_new_game(
     ("before", "after"),
     [
         (BEFORE, AFTER),
-        (BEFORE, (-1, 0, 0, 0, -1, -1, -1, -1)),
-        ((0, 0, 0, -1, -1, -1, -1, -1), AFTER),
-        (BEFORE, (-1, 0, 0, 0, 0, 0, -1, -1)),
-        ((0, 0, 0, 0, 0, -1, -1, -1), AFTER),
+        (BEFORE, (-1, -2, -2, -2, -1, -1, -1, -1)),
+        ((-2, -2, -2, -1, -1, -1, -1, -1), AFTER),
+        (BEFORE, (-1, -2, -2, -2, -2, -2, -1, -1)),
+        ((-2, -2, -2, -2, -2, -1, -1, -1), AFTER),
     ],
     ids=[
         "quarter",
@@ -423,7 +415,8 @@ def test_a_new_game_resets_and_reassigns_the_pinned_lanes_like_m8(
     )
     direct, direct_memory = _across_a_new_game(weights, pinned, None, None, ends)
     # Newly pinned games restart; continuing pinned games retain memory.
-    lanes = np.flatnonzero(np.asarray(after) == 0)
+    lanes = np.flatnonzero(np.asarray(after) == -2)
+    assert lanes.size > 0
     wrapped, reference = _team_b(actions), _team_b(direct)
     for name in HEADS:
         np.testing.assert_array_equal(wrapped[name][lanes], reference[name][lanes])
@@ -433,7 +426,7 @@ def test_a_new_game_resets_and_reassigns_the_pinned_lanes_like_m8(
     if form == "system":
         np.testing.assert_array_equal(
             np.asarray(memory[1])[lanes],
-            np.where(np.asarray(before)[lanes] == 0, 2.0, 1.0),
+            np.where(np.asarray(before)[lanes] == -2, 2.0, 1.0),
         )
 
 
@@ -454,7 +447,7 @@ def test_a_policy_template_changed_after_setup_does_not_reach_pinned_games(
     frozen = cast(Policy, freeze_evaluation_method(source))
     pinned = shared_policy(frozen)
     template[0] = 7.0
-    _, memory, _, _ = _run_pinned(weights, pinned, (-1, 0, -1, 0))
+    _, memory, _, _ = _run_pinned(weights, pinned, (-1, -2, -1, -2))
     pinned_memory = np.asarray(memory[1])
     np.testing.assert_array_equal(pinned_memory[PINNED], np.full((2, 5, 1), 3.0))
 
@@ -494,7 +487,7 @@ def test_a_pinned_system_with_its_own_reset_hook_and_layout_matches_m8(
     )
     del observations, state
     actions, memory, direct, direct_memory = _run_pinned(
-        weights, layered, (-1, 0, -1, 0)
+        weights, layered, (-1, -2, -1, -2)
     )
     pinned_memory = np.asarray(memory[1])
     np.testing.assert_array_equal(

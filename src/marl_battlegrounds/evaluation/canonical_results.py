@@ -337,6 +337,10 @@ class CanonicalView(_View):
         self._game_by_origin = {
             origin_key(self.records.origin(game)): game for game in self.records.games
         }
+        self._entrant_names = {
+            row["entrant_id"]: row["name"]
+            for row in self.records.config["participants"]
+        }
         super().__init__(
             manifest, run_dir=run_dir, phase=phase, pass_id=pass_id, memory=memory
         )
@@ -530,6 +534,31 @@ class CanonicalView(_View):
         if entry is None:
             raise ValueError("canonical row has no exact original pass owner")
         return entry
+
+    def participant_names(self) -> dict[str, str]:
+        """Keep scoped canonical entrant IDs separate from original row labels."""
+        selected = set(self._selected_game_ids())
+        ids = {
+            game[team]
+            for game in self.records.games
+            if game["logical_game_id"] in selected
+            for team in ("team_a", "team_b")
+        }
+        return {key: name for key, name in self._entrant_names.items() if key in ids}
+
+    def _match_context(
+        self, row: Mapping[str, Any]
+    ) -> tuple[str, str, str, str, object]:
+        """Join the full original row key to its declared entrant and spawn facts."""
+        game = self._game_by_origin[origin_key(row)]
+        a, b = game["team_a"], game["team_b"]
+        return (
+            a,
+            b,
+            self._entrant_names[a],
+            self._entrant_names[b],
+            game.get("spawn_locations"),
+        )
 
     def _episodes(self, rows: int) -> Iterator[Row]:
         """Project exact outcomes with focal score only for challenger-owned games."""

@@ -1139,7 +1139,13 @@ def _run_evaluation(
             (variables_a, variables_b, base_carry_a, base_carry_b)
         )
     for cfg in {id(spec.env_config): spec.env_config for spec in specs}.values():
-        validate_evaluation_rosters(execution_a, execution_b, cfg)
+        validate_evaluation_rosters(
+            execution_a,
+            execution_b,
+            cfg,
+            variables_a=variables_a,
+            variables_b=variables_b,
+        )
     recording = bool(
         writer is not None
         or output_dir is not None

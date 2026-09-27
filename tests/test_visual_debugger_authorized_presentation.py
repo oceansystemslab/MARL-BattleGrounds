@@ -1112,6 +1112,8 @@ def test_every_nested_wire_object_forbids_additional_properties() -> None:
             if name == "MatchSummaryV1"
             else {"killing_team_id", "contributors"}
             if name == "MatchDeathV1"
+            else {"display_side"}
+            if name == "MatchTeamV1"
             else set()
         )
         assert properties - optional == set(cast(list[str], definition["required"])), (

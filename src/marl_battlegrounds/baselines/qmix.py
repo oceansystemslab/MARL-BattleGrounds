@@ -18,7 +18,7 @@
 
 This module adapts Mava's recurrent QMIX (``rec_qmix``) at revision
 ``9f67e612654ecb7b7d45ff8052ce9ccfc6c68d93``. It owns the QMIX settings, the
-shared local Q-network, the monotonic mixer, the epsilon-greedy actor System,
+local Q-networks, the monotonic mixer, the epsilon-greedy actor System,
 the exploration clock, network initialization and one Double-Q optimizer step
 on an already expanded replay sample. It owns no replay buffer, collection
 loop, checkpoint, curriculum or training run; ``training.qmix_learner`` joins
@@ -30,11 +30,13 @@ enters action selection. Q-networks trained before Red Zone, on historical
 actor input schema 1, play through a separate cached schema-1 hook that
 removes the Red Zone depth column and keeps the old spawn-side formula.
 Requires the optional training extra. Everything here is pure JAX that works
-inside jit, vmap and scan, except the host-only setting checks. The default
+inside jit and scan, except the host-only setting checks. Shared models also
+support vmap; grouped contractions do not support every extra mapped axis. The default
 settings are the donor's starting values, not settings qualified for learning
 in MARL-BGs.
 """
 
+import dataclasses
 import functools
 import math
 from collections.abc import Callable
@@ -75,10 +77,20 @@ from marl_battlegrounds.baselines.inputs import (
     team_obstacle_partners,
 )
 from marl_battlegrounds.baselines.ppo import (
+    _PARAMETER_SHARING,
     MLPTorso,
+    _actor_group_presence,
     _actor_input_schema,
+    _batch_actor_groups,
+    _group_dense,
+    _group_gru,
+    _group_order,
+    _grouped_actor_inputs,
     _input_scale,
+    _parameter_sharing,
+    _restore_group_rows,
     _spawn_frame,
+    _update_actor_groups,
 )
 from marl_battlegrounds.evaluation.policy_execution import (
     System,
@@ -195,6 +207,11 @@ class QMIXConfig:
         every game to look like a start from the left bank, "world" keeps raw
         coordinates. Replay rows and physical state stay in the world frame.
 
+    parameter_sharing : {"all", "class", "none"}, default="all"
+        Share actor weights across everyone, within each class, or not between
+        physical slots. Grouped modes have five parameter groups. Memory stays
+        separate per physical actor. Class changes at resets select new weights.
+
     Raises
     ------
     ValueError
@@ -226,6 +243,7 @@ class QMIXConfig:
     eps_decay: int = 100000
     input_scale: float = 1.0
     spawn_frame: str = "left"
+    parameter_sharing: str = "all"
 
     def __post_init__(self) -> None:
         """Reject invalid settings on the host before any array is created."""
@@ -251,6 +269,7 @@ class QMIXConfig:
         _positive(self.q_lr, "q_lr")
         _input_scale(self.input_scale)
         _spawn_frame(self.spawn_frame)
+        _parameter_sharing(self.parameter_sharing)
         for name in ("tau", "gamma", "eps_min"):
             _unit_interval(getattr(self, name), name)
         if type(self.hard_update) is not bool:
@@ -304,7 +323,8 @@ class QMIXActorVariables(NamedTuple):
     Attributes
     ----------
     params : PyTree
-        Flax variables of the shared local Q-network (``{"params": ...}``).
+        Flax variables of the local Q-network (``{"params": ...}``). Grouped
+        modes add a leading axis of five to every leaf.
         The mixer, target networks and optimizer never belong here.
     epsilon : Array
         Float32 0-d exploration probability in [0, 1]. Zero means greedy.
@@ -329,12 +349,15 @@ class QMIXTrainState(NamedTuple):
     Attributes
     ----------
     online_q, target_q : PyTree
-        Flax variables of the online and target local Q-networks.
+        Flax variables of the online and target local Q-networks. Class and
+        slot sharing add a leading axis of five to every Q-network leaf.
     online_mixer, target_mixer : PyTree
         Flax variables of the online and target mixers.
     opt_state : PyTree
-        One ``optax.chain(optax.adam(q_lr))`` state over the tuple
-        ``(online_q, online_mixer)``, in that order.
+        With shared parameters, one clip-then-Adam state over
+        ``(online_q, online_mixer)``. Class and slot sharing use a tuple of five
+        independent Q optimizer states and one mixer optimizer state. Each has
+        its own clipping and complete Adam history, including counts.
     optimizer_steps : Array
         Int32 0-d count of successful optimizer steps before this state.
 
@@ -387,9 +410,18 @@ class QMIXBatch(NamedTuple):
         Float32 (M,S,F_S) world-frame physical state for the mixer only. F_S is
         TRAINING_STATE_FEATURE_SIZE (920) for real inputs.
 
+    actor_group : Array or None, default=None
+        Optional int32 with active.shape, group IDs 0..4 from raw self classes
+        or physical slots. Class sharing requires it; all ignores it.
+    learner_active : Array or None, default=None
+        Optional bool with active.shape selecting owned actor slots. None uses
+        physical active. Partner utilities do not enter current or successor
+        team values; their actual actions already affect recorded transitions.
+
     Notes
     -----
     A TD pair uses rows t and t+1 and is eligible only when both are valid.
+    With learner_active, a pair also needs a learner slot on its left row.
     Every sample starts from zero recurrent memory; there is no burn-in.
     """
 
@@ -402,6 +434,8 @@ class QMIXBatch(NamedTuple):
     valid: Array
     active: Array
     training_state: Array
+    actor_group: Array | None = None
+    learner_active: Array | None = None
 
 
 class QMIXMetrics(NamedTuple):
@@ -502,7 +536,13 @@ class RecurrentQNetwork(nn.Module):
 
     @nn.compact
     def __call__(
-        self, carry: Array, features: Array, resets: Array, valid: Array
+        self,
+        carry: Array,
+        features: Array,
+        resets: Array,
+        valid: Array,
+        *,
+        actor_group: Array | None = None,
     ) -> tuple[Array, Array]:
         """Read feature sequences with independent actor memory.
 
@@ -518,6 +558,11 @@ class RecurrentQNetwork(nn.Module):
         valid : Array
             Bool (T,E,5) valid decisions. Invalid rows keep prior memory.
 
+        actor_group : Array or None, default=None
+            Optional int32 (T,E,5) group IDs 0..4. Variables then have a
+            leading axis of five independent actor groups. None keeps the
+            shared network. Initialize groups by mapping the shared init.
+
         Returns
         -------
         tuple[Array, Array]
@@ -532,6 +577,24 @@ class RecurrentQNetwork(nn.Module):
         scale = _input_scale(self.input_scale)
         if scale != 1.0:
             features = features * scale
+        if actor_group is not None:
+            params = self.variables["params"]
+            order, groups, sizes = _group_order(actor_group)
+            x = features.reshape(-1, features.shape[-1])[order]
+            x = nn.relu(_group_dense(x, params["pre_torso"]["Dense_0"], groups, sizes))
+            embedding = _restore_group_rows(x, order, features.shape[:-1])
+            carry, embedding = _group_gru(
+                params["ScannedRNN_0"]["GRUCell_1"],
+                carry,
+                embedding,
+                resets,
+                valid,
+                actor_group,
+            )
+            x = embedding.reshape(-1, embedding.shape[-1])[order]
+            x = nn.relu(_group_dense(x, params["post_torso"]["Dense_0"], groups, sizes))
+            x = _group_dense(x, params["Dense_0"], groups, sizes)
+            return carry, _restore_group_rows(x, order, features.shape[:-1])
         embedding = MLPTorso((QMIX_HIDDEN_SIZE,), name="pre_torso")(features)
         carry, embedding = QMIXScannedGRU(name="ScannedRNN_0")(
             carry, (embedding, resets, valid)
@@ -651,6 +714,11 @@ def _q_network_variables(key: Array, config: QMIXConfig) -> Tree:
     Zero inputs shaped (T=1, E=1, 5, ACTOR_FEATURE_SIZE) fix parameter shapes;
     values depend only on the key and the module paths.
     """
+    if config.parameter_sharing != "all":
+        shared = dataclasses.replace(config, parameter_sharing="all")
+        return jax.vmap(functools.partial(_q_network_variables, config=shared))(
+            jax.random.split(key, 5)
+        )
     return RecurrentQNetwork(input_scale=config.input_scale).init(
         key,
         jnp.zeros((1, TEAM_SLOTS, QMIX_HIDDEN_SIZE), jnp.float32),
@@ -663,7 +731,7 @@ def _q_network_variables(key: Array, config: QMIXConfig) -> Tree:
 def initialize_qmix(
     key: Array, config: QMIXConfig = DEFAULT_QMIX_CONFIG
 ) -> QMIXTrainState:
-    """Create untrained QMIX networks, equal targets and one Adam state.
+    """Create untrained QMIX networks, equal targets and complete Adam states.
 
     Parameters
     ----------
@@ -674,13 +742,14 @@ def initialize_qmix(
         online and target start equal. The learner derives it with
         ``fold_in(root, QMIX_MODEL_INITIALIZATION_TAG)``.
     config : QMIXConfig, default=DEFAULT_QMIX_CONFIG
-        Settings; only q_lr and input_scale matter here.
+        Settings for input_scale, parameter_sharing, q_lr, clipping and Adam.
 
     Returns
     -------
     QMIXTrainState
-        Float32 network variables, the chained Adam state over
-        ``(online_q, online_mixer)`` and ``optimizer_steps`` int32 0.
+        Float32 network variables, the optimizer layout documented by
+        QMIXTrainState and ``optimizer_steps`` int32 0. Grouped modes initialize
+        five independently keyed Q-networks and keep one mixer.
 
     Raises
     ------
@@ -690,7 +759,9 @@ def initialize_qmix(
     Notes
     -----
     Allocates about 8.1 MB of float32 parameters for each online/target copy
-    and twice that for Adam moments. Works under ``jax.eval_shape``.
+    and twice that for Adam moments in shared mode. Class and slot modes keep
+    five Q-network copies and their moments; the mixer is unchanged. Works
+    under ``jax.eval_shape``.
     """
     _check_key(key)
     q_variables = _q_network_variables(key, config)
@@ -704,7 +775,12 @@ def initialize_qmix(
         q_variables,
         mixer_variables,
         mixer_variables,
-        _optimizer(config).init((q_variables, mixer_variables)),
+        _optimizer(config).init((q_variables, mixer_variables))
+        if config.parameter_sharing == "all"
+        else (
+            jax.vmap(_optimizer(config).init)(q_variables),
+            _optimizer(config).init(mixer_variables),
+        ),
         jnp.int32(0),
     )
 
@@ -715,7 +791,8 @@ def qmix_actor_template(config: QMIXConfig = DEFAULT_QMIX_CONFIG) -> Tree:
     Parameters
     ----------
     config : QMIXConfig, default=DEFAULT_QMIX_CONFIG
-        Settings; the template does not depend on their values.
+        parameter_sharing selects the shared tree or a leading axis of five.
+        Other settings do not affect this template.
 
     Returns
     -------
@@ -1181,6 +1258,56 @@ def _schema_1_q_actor_apply(
     return apply
 
 
+@functools.lru_cache(maxsize=32)
+def _grouped_qmix_actor_apply(
+    scale: float, frame: str, sharing: str
+) -> Callable[[QMIXActorVariables, Array, SystemInput, Array], SystemOutput]:
+    """Bind the grouped actor's settings while preserving all shared hooks.
+
+    Checked scale/frame/sharing become numeric keyword defaults in the hook's
+    recorded identity. Parameters and per-actor memory remain dynamic inputs.
+    """
+
+    def apply(
+        variables: QMIXActorVariables,
+        memory: Array,
+        inputs: SystemInput,
+        keys: Array,
+        *,
+        input_scale: float = scale,
+        spawn_frame_index: int = SPAWN_FRAMES.index(frame),
+        parameter_sharing_index: int = _PARAMETER_SHARING.index(sharing),
+    ) -> SystemOutput:
+        """Choose grouped epsilon-greedy actions from one same-epoch actor call."""
+        features, mask, groups, flag = _grouped_actor_inputs(
+            inputs, _PARAMETER_SHARING[parameter_sharing_index], spawn_frame_index
+        )
+        valid = jnp.broadcast_to(inputs.valid[:, None], inputs.active_mask.shape)
+        starts = jnp.broadcast_to(
+            inputs.episode_start[:, None], inputs.active_mask.shape
+        )
+        next_memory, values = cast(
+            tuple[Array, Array],
+            RecurrentQNetwork(input_scale=input_scale).apply(
+                variables.params,
+                memory,
+                features[None],
+                starts[None],
+                valid[None],
+                actor_group=groups[None],
+            ),
+        )
+        actor_keys = jax.vmap(functools.partial(jax.random.split, num=TEAM_SLOTS))(keys)
+        indices = _explore(
+            greedy_actions(values[0], mask), mask, actor_keys, variables.epsilon
+        )
+        if flag is not None:
+            indices = mirror_action_indices(indices, flag)
+        return SystemOutput(decode_actions(indices), next_memory)
+
+    return apply
+
+
 def make_qmix_system(
     params: Tree,
     *,
@@ -1190,6 +1317,7 @@ def make_qmix_system(
     name: str = "QMIX",
     checkpoint: str | None = None,
     actor_input_schema: int = ACTOR_INPUT_SCHEMA_VERSION,
+    parameter_sharing: str = "all",
 ) -> System:
     """Wrap Q-network variables as an M8 JAX System with epsilon-greedy actions.
 
@@ -1206,6 +1334,10 @@ def make_qmix_system(
         Positive finite feature multiplier used to train these weights.
     spawn_frame : {"left", "world"}, default="left"
         Frame used to train these weights. It is part of System identity.
+    parameter_sharing : {"all", "class", "none"}, default="all"
+        Actor weight ownership used during training. Grouped variables carry
+        five groups; memory stays per physical actor. Historical schema 1
+        supports all only. The mode is part of the System identity.
     name : str, default="QMIX"
         Nonempty display name; it proves nothing about training.
     checkpoint : str or None, default=None
@@ -1244,7 +1376,14 @@ def make_qmix_system(
         if _actor_input_schema(actor_input_schema) == 1
         else _q_actor_apply
     )
-    apply = hook(scale, frame)
+    sharing = _parameter_sharing(parameter_sharing)
+    if sharing != "all" and actor_input_schema != ACTOR_INPUT_SCHEMA_VERSION:
+        raise ValueError("Grouped actors require the current actor input schema")
+    apply = (
+        hook(scale, frame)
+        if sharing == "all"
+        else _grouped_qmix_actor_apply(scale, frame, sharing)
+    )
     return System(
         name,
         apply,
@@ -1301,6 +1440,12 @@ def _check_batch(batch: QMIXBatch) -> tuple[int, int]:
         leading = (m, s, TEAM_SLOTS) if field == "actor_features" else (m, s)
         if value.shape[:-1] != leading or value.dtype != jnp.float32:
             raise ValueError(f"QMIXBatch.{field} has the wrong shape or dtype")
+    for field, dtype in (("actor_group", jnp.int32), ("learner_active", jnp.bool_)):
+        value = getattr(batch, field)
+        if value is not None and (
+            value.shape != batch.active.shape or value.dtype != dtype
+        ):
+            raise ValueError(f"QMIXBatch.{field} has the wrong shape or dtype")
     return m, s
 
 
@@ -1342,22 +1487,41 @@ def update_qmix(
     selects each next action, the target Q-network values it, and the target
     mixer gives the next team value. The target is
     ``reward + (1 - ended) * gamma * next_value`` and receives no gradient. The
-    loss averages the squared team error over eligible pairs only. Adam then
-    steps once over online Q and mixer. A hard copy uses the step count before
+    loss averages the squared team error over eligible pairs only. With
+    learner_active, only owned slots supply current and successor utilities.
+    Shared Adam steps once over online Q and mixer. Class and slot modes clip
+    and update each actor group and the mixer separately, using the same joint
+    loss. A group with no eligible left-row utility keeps its parameters,
+    complete optimizer state and target exactly. A hard copy uses the run-wide
+    step count before
     the step (copies at 0, 200, 400, ...); the soft rule blends with tau after
     every step. Pure JAX; wrap in jit with a fixed config.
     """
     m, _ = _check_batch(batch)
     valid = batch.valid
+    owned = (
+        batch.active
+        if batch.learner_active is None
+        else batch.active & batch.learner_active
+    )
     pair = valid[:, :-1] & valid[:, 1:]
+    if batch.learner_active is not None:
+        pair = pair & jnp.any(owned[:, :-1], axis=-1)
+    groups = _batch_actor_groups(
+        config.parameter_sharing, batch.actor_group, batch.active.shape
+    )
     neutral = jnp.arange(NUM_ACTIONS) == 0
-    features = jnp.where(valid[..., None, None], batch.actor_features, 0.0)
+    features = (
+        jnp.where((valid[..., None] & owned)[..., None], batch.actor_features, 0.0)
+        if batch.learner_active is not None
+        else jnp.where(valid[..., None, None], batch.actor_features, 0.0)
+    )
     mask = jnp.where(valid[..., None, None], batch.action_mask, neutral)
     actions = jnp.where(valid[..., None], batch.actions, 0)
     rewards = jnp.where(valid, batch.rewards, 0.0)
     ended = valid & batch.ended
     starts = valid & batch.episode_start
-    active = valid[..., None] & batch.active
+    active = valid[..., None] & owned
     state = jnp.where(valid[..., None], batch.training_state, 0.0)
     resets = jnp.broadcast_to(starts[..., None], active.shape)
     live = jnp.broadcast_to(valid[..., None], active.shape)
@@ -1375,6 +1539,7 @@ def update_qmix(
                 _time_major(features),
                 _time_major(resets),
                 _time_major(live),
+                actor_group=None if groups is None else _time_major(groups),
             ),
         )
         return _time_major(values)
@@ -1410,16 +1575,35 @@ def update_qmix(
         (train_state.online_q, train_state.online_mixer)
     )
     optimizer = _optimizer(config)
+    present = (
+        None
+        if groups is None
+        else _actor_group_presence(groups[:, :-1], active[:, :-1] & pair[..., None])
+    )
 
     def step(_: None) -> QMIXTrainState:
         """Apply Adam, then the target rule using the pre-step count."""
-        updates, opt_state = optimizer.update(grads, train_state.opt_state)
-        online_q, online_mixer = cast(
-            tuple[Tree, Tree],
-            optax.apply_updates(
-                (train_state.online_q, train_state.online_mixer), updates
-            ),
-        )
+        if present is None:
+            updates, opt_state = optimizer.update(grads, train_state.opt_state)
+            online_q, online_mixer = cast(
+                tuple[Tree, Tree],
+                optax.apply_updates(
+                    (train_state.online_q, train_state.online_mixer), updates
+                ),
+            )
+        else:
+            online_q, q_state = _update_actor_groups(
+                train_state.online_q,
+                train_state.opt_state[0],
+                grads[0],
+                present,
+                optimizer,
+            )
+            mixer_delta, mixer_state = optimizer.update(
+                grads[1], train_state.opt_state[1], train_state.online_mixer
+            )
+            online_mixer = optax.apply_updates(train_state.online_mixer, mixer_delta)
+            opt_state = (q_state, mixer_state)
         before = train_state.optimizer_steps
         if config.hard_update:
             target_q = optax.periodic_update(
@@ -1435,6 +1619,16 @@ def update_qmix(
             target_mixer = optax.incremental_update(
                 online_mixer, train_state.target_mixer, config.tau
             )
+        if present is not None:
+            target_present = present
+
+            def keep_absent(new: Array, old: Array) -> Array:
+                """Keep an absent actor group's target on the shared target clock."""
+                return jnp.where(
+                    target_present.reshape((5,) + (1,) * (new.ndim - 1)), new, old
+                )
+
+            target_q = jax.tree.map(keep_absent, target_q, train_state.target_q)
         return QMIXTrainState(
             online_q, target_q, online_mixer, target_mixer, opt_state, before + 1
         )

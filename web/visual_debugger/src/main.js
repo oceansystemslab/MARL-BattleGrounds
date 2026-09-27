@@ -1107,6 +1107,7 @@ function replayTimelineRenderState(playback) {
 }
 
 const replayPlayback = new ReplayPlaybackController({
+  playbackRate: isReplayMode() ? 0.5 : 1,
   request: sendReplayTransportCommand,
   /**
    * Return a promise that resolves without a value when choreography settles.

@@ -93,8 +93,9 @@ are 47–51. Training maps are 0–41, including curriculum maps 0–11; validat
 maps are 42–46. Numbered map names, authored IDs and saved-map folders use the
 same IDs. See the
 [map ID change guide](docs/evaluation/workflows.md#map-id-change--2026-09-12)
-when using saved IDs. Training distributions belong to the later curriculum
-milestone.
+when using saved IDs. The [training guide](docs/training/README.md#requested-stages-and-played-exposure)
+explains the built-in curriculum; the [complete curriculum example](examples/curriculum.py)
+shows researcher-defined stages.
 
 ## Train, Evaluate and Read Results
 
@@ -115,6 +116,16 @@ Choose the method in one `TrainConfig`; the workflow stays the same. The
 Python route; the [QMIX example](examples/qmix_training.py) and the
 [PQN-VDN example](examples/pqn_training.py) do the same for those methods.
 Working execution and useful learned behavior need separate evidence.
+
+Use `team()` to assign methods to physical agent slots and `pool()` to choose a
+method for each game. Both return ordinary Systems. Training accepts named
+opponent and partner populations, weighted draws or explicit game-start orders,
+and a Python callback for your own selection rule. Shared, per-class and
+per-slot actors use the same six built-in learners. The
+[competitive MARL guide](docs/training/competitive_marl.md) includes complete
+examples for self-play, league rules, PBT, PSRO, frozen partners and a researcher-owned
+CTDE update. See [cross-play and ZSC](examples/cross_play_and_zsc.py) for evaluating
+fixed learner, partner and opponent combinations with recoverable results.
 
 Use one callable for frozen-System validation and evaluation:
 

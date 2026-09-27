@@ -526,13 +526,19 @@ def _latest(run: Path) -> Path | None:
     if not pointer:
         return None
     identifier = pointer.get("checkpoint_id")
+    relative = pointer.get("relative_path")
     if (
         not isinstance(identifier, str)
         or Path(identifier).name != identifier
-        or pointer.get("relative_path") != f"checkpoints/{identifier}"
+        or not isinstance(relative, str)
+        or Path(relative).parent != Path("checkpoints")
+        or not (
+            Path(relative).name == identifier
+            or Path(relative).name.endswith(f"_{identifier}")
+        )
     ):
         raise ValueError("Study case has an invalid latest checkpoint pointer")
-    selected = run / "checkpoints" / identifier
+    selected = run / relative
     if selected.resolve() != selected:
         raise ValueError("Study checkpoint follows a link or escapes its run")
     return selected

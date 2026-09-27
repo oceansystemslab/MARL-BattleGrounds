@@ -3,8 +3,10 @@
 Run ``python examples/llm.py --model MODEL --server-url URL`` with an independently
 running vLLM server. Add ``--format words`` to use a two-word reply. This script
 owns its explicitly supplied Client and closes it on success or failure. It never
-starts/stops a server or downloads weights. Optional game output includes separate
-model-call evidence. Both teams' failure and cost totals are printed with outcomes.
+starts/stops a server or downloads weights. Add ``--llm-slots 4`` to give only
+the fifth actor to the LLM; Random controls the other actors. Optional game output
+includes separate model-call evidence. Both teams' failure and cost totals are
+printed with outcomes.
 """
 
 import argparse
@@ -159,6 +161,13 @@ def main() -> None:
     parser.add_argument("--map-id", type=int, default=0)
     parser.add_argument("--max-steps", type=int, default=300)
     parser.add_argument("--output-dir", type=Path)
+    parser.add_argument(
+        "--llm-slots",
+        nargs="+",
+        type=int,
+        choices=range(5),
+        help="give these physical slots to the LLM and the rest to Random",
+    )
     args = parser.parse_args()
     builder = (
         prompt_with_note
@@ -179,6 +188,10 @@ def main() -> None:
             custom_version="tutorial-v1" if builder else None,
             custom_settings={"format": args.format},
         )
+        if args.llm_slots is not None:
+            selected = sorted(set(args.llm_slots))
+            remaining = [slot for slot in range(5) if slot not in selected]
+            system = marl_bgs.team(system, "random", slots=[selected, remaining])
         result = marl_bgs.evaluate(
             system,
             "random",

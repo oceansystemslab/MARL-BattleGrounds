@@ -927,6 +927,75 @@ def _unattached_replay_context(_packet: ReplayPackets) -> Never:
     raise RuntimeError("Prepared recording prefixes need a child writer")
 
 
+def _check_fork_policy_extension(original: object, proposed: object) -> None:
+    """Allow unchanged policies or append-only training population components.
+
+    Each team's old component prefix and execution status remain exact. Only
+    stable opponent/partner identities may be added. The training continuation
+    owner checks learner, frozen values and source compatibility separately.
+    """
+    if original == proposed:
+        return
+    old = _object(original, "parent recording policies")
+    new = _object(proposed, "child recording policies")
+    if set(old) != set(new):
+        raise ValueError("Parent and child recording policies differ")
+    for team in old:
+        if old[team] == new[team]:
+            continue
+        if team not in ("team_a", "team_b"):
+            raise ValueError("Parent and child recording policies differ")
+        before = _object(old[team], "parent team registration")
+        after = _object(new[team], "child team registration")
+        left = cast(list[Any] | None, before.get("components"))
+        right = cast(list[Any] | None, after.get("components"))
+        if (
+            before.get("kind") != "system"
+            or any(
+                before.get(field) != after.get(field)
+                for field in (
+                    "kind",
+                    "execution",
+                    "parameter_status",
+                    "variables_frozen",
+                )
+            )
+            or before.get("parameter_status") != "evolving"
+            or not isinstance(left, list)
+            or not left
+            or not isinstance(right, list)
+            or len(right) < len(left)
+            or right[: len(left)] != left
+        ):
+            raise ValueError(
+                "Child team components must retain the parent's complete prefix"
+            )
+        versions = [
+            cast(dict[str, Any], item).get("version")
+            if isinstance(item, dict)
+            else None
+            for item in right
+        ]
+        pattern = (
+            r"partner_member_\d+"
+            if team == "team_a"
+            else r"(?:opponent_snapshot_-?\d+|partner_member_\d+)"
+        )
+        appended = versions[len(left) :]
+        stable = [
+            value
+            for value in versions
+            if isinstance(value, str) and re.fullmatch(pattern, value) is not None
+        ]
+        if any(
+            not isinstance(value, str) or re.fullmatch(pattern, value) is None
+            for value in appended
+        ) or len(set(stable)) != len(stable):
+            raise ValueError(
+                "Child team components need distinct stable member identities"
+            )
+
+
 def prepare_recording_fork(
     parent_dir: Path,
     token: object,
@@ -948,8 +1017,9 @@ def prepare_recording_fork(
         Each needs a verified first start. A replay prefix is kept when present.
     policies : dict or None
         Child writer's policy registrations, already saved with the learner.
-        None means no registrations. Their normalized identity must match the
-        saved training pass before any child writer exists.
+        None means no registrations. Identity must match the saved pass, except
+        training may append stable opponent components while keeping every old
+        component unchanged. Imported games retain their original registration.
 
     Returns
     -------
@@ -1008,14 +1078,15 @@ def prepare_recording_fork(
     original = _object(passes[pass_key], "parent training pass")
     if original["phase"] != "training":
         raise ValueError("Parent recording requires its dedicated training pass")
-    _prepare_pass_identity(
-        saved,
+    _, proposed, _ = _prepare_pass_identity(
+        {"passes": {}},
         "training",
         original["pass_id"],
         policies,
         original["checkpoint_id"],
         original["details"],
     )
+    _check_fork_policy_extension(original["policies"], proposed["policies"])
     _check_manifest_references(saved, pass_key)
     wanted = {_integer(value, "inherited episode ID", 1) for value in episode_ids}
     if len(wanted) != len(episode_ids):
@@ -1105,8 +1176,7 @@ def attach_recording_fork(
         raise ValueError("Recording continuation requires an empty child writer")
     supplied, saved, selected = prepared.token, prepared.saved, prepared.replays
     original = saved["passes"][supplied["pass_key"]]
-    if original["policies"] != entry["policies"]:
-        raise ValueError("Parent and child recording policies differ")
+    _check_fork_policy_extension(original["policies"], entry["policies"])
     wanted = set(prepared.episode_ids)
     details = deepcopy(writer._details)
     for field in ("configurations", "source_banks", "systems"):
@@ -1120,6 +1190,14 @@ def attach_recording_fork(
                 if int(key) in wanted
             }
         )
+    # An imported live game keeps the original registration even when future
+    # games use an expanded component table in the child pass.
+    for episode_id in wanted:
+        episode = child["episodes"].setdefault(
+            str(episode_id), {"episode_id": episode_id}
+        )
+        episode.setdefault("policies", deepcopy(original["policies"]))
+        episode.setdefault("system_ids", deepcopy(original["system_ids"]))
     details["recording_ancestry"] = {
         str(episode_id): {
             "run_id": saved["run_id"],

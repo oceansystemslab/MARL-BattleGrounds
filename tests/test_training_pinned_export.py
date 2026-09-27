@@ -41,6 +41,7 @@ def identity() -> Iterator[dict[str, Any]]:
 def source(identity: dict[str, Any], tmp_path_factory: pytest.TempPathFactory) -> Path:
     del identity
     config = TrainConfig(
+        keep_past=0,
         num_envs=4,
         total_env_steps=8,
         seed=741,
@@ -55,6 +56,7 @@ def source(identity: dict[str, Any], tmp_path_factory: pytest.TempPathFactory) -
 
 def _config(export: Path) -> TrainConfig:
     return TrainConfig(
+        keep_past=0,
         num_envs=4,
         total_env_steps=16,
         seed=742,

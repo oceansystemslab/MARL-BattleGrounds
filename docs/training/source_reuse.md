@@ -6,6 +6,23 @@ permitted actor inputs, action rules, evaluation, recording and checkpoint
 ownership. This page records each source and its independent numerical
 reference. A source match is not evidence of learning.
 
+BG also adds optional actor ownership above these donor updates. The default
+`parameter_sharing="all"` keeps one shared actor. `"class"` and `"none"` keep
+five actor groups, chosen by class or physical slot. Each group owns its weights,
+optimizer state and actor statistics; a group without eligible learner samples
+keeps them unchanged. Critics and mixers keep their existing ownership. Actor
+memory stays separate by physical slot in every mode. The donor comparisons
+below use the default shared actor and all active slots owned by the learner.
+
+Frozen partners supply actions through the ordinary System executor and receive
+no learner update. PPO keeps per-agent custom feedback; QMIX and PQN combine
+native task rewards and custom adjustments once over active learner-owned slots,
+then add team shaping once. Their stored rows retain an optional five-byte
+ownership mask; the reward sum uses the existing scalar field. A declared change
+to stored reward feedback clears and refills Q experience while preserving
+optimizer state. These are deliberate BG additions, checked separately from
+unchanged donor references. See [the training contracts](README.md#train-with-frozen-partners).
+
 ## PPO Model Choices
 
 One shared PPO implementation serves four method settings:
@@ -31,7 +48,7 @@ use scale 1.0, world frame and ValueNorm off. Search recipes do not silently
 change constructor defaults or historical saved settings.
 
 With the current 5,165 actor features, 920 physical-state features and 198
-actions, the parameter counts are:
+actions, the default `parameter_sharing="all"` parameter counts are:
 
 | Method | Actor Parameters | Critic Parameters |
 | --- | ---: | ---: |
@@ -489,10 +506,11 @@ return normalization, or tuning is added.
   `eps·uniform + (1−eps)·greedy` distribution exactly; the random stream
   differs, so sampled actions are not compared with the donor.
 - **Team reward.** The donor learns from the mean reward over all agents. BG
-  stores one team task reward per decision: the mean task reward over the
-  Team A slots that are in the game, and adds the shaping value, stored
-  separately, when the sample is built. The two rules agree for full 5v5
-  teams and differ only in smaller curriculum rosters.
+  stores one scalar per decision: native task rewards plus custom adjustments,
+  averaged over active learner-owned Team A slots. Separately stored team shaping
+  is added once when the sample is built. Without partners or custom feedback,
+  the native reduction agrees with the donor for full 5v5 teams; smaller rosters
+  use only their active slots.
 - **Inactive slots and padding.** Smaller rosters pad Team A to five slots.
   Inactive slots add nothing to the team value or its gradient. Invalid padding
   rows are replaced by neutral values before any calculation, keep recurrent
@@ -505,9 +523,11 @@ return normalization, or tuning is added.
 - **Compact Team A replay.** The donor stores whole observations twice (the
   observation and the next observation). BG's replay row keeps only Team A's
   five observer rows, their 5x5 source permissions, Team A masks and chosen
-  actions, the team task reward and the shaping reward separately, lifecycle
-  flags, the 920-value physical state once, and eight identity fields: 29,688
-  bytes per game row, or 950,016,000 bytes for 32 games and 1,000 rows each.
+  actions, the combined task/custom reward and separate shaping reward,
+  lifecycle flags, the 920-value physical state once, and eight identity fields:
+  29,688 bytes per game row without frozen partners, or 950,016,000 bytes for
+  32 games and 1,000 rows each. Partner training adds five ownership bytes per
+  game row; it does not duplicate the reward field.
   The next row of a sequence supplies the successor, so the newest stored row
   of a game is only ever used as a successor. A sample is rebuilt into network
   inputs with the same permitted-input builder the live actor uses; the
@@ -681,8 +701,10 @@ BG keeps its own default of 32.
 - **Stored rows and memory.** The donor keeps whole transitions for its
   window. BG stores a compact Team A row per game and decision (26,008 bytes:
   the five observer rows and their 5x5 permissions, masks, world-frame
-  actions, task and shaping rewards, lifecycle flags and identities) plus the
-  memory each actor held just before acting. Between blocks it keeps only the
+  actions, combined task/custom reward, separate shaping reward, lifecycle flags
+  and identities) plus the memory each actor held just before acting. The byte
+  count is for full learner ownership; frozen partners add five ownership bytes
+  per game row. Between blocks it keeps only the
   last H real rows per game (4,639,744 bytes at B32, H4); no Q values, Team B
   rows, physical state or expanded features are kept. A minibatch rebuilds
   its actor features with the same builder as live action selection, only
@@ -695,10 +717,10 @@ BG keeps its own default of 32.
   never becomes a successor, and the last real row serves only as the
   bootstrap for the pair before it.
 - **Team reward and endings.** The donor's SMAX team reward is the first
-  agent's reward. BG uses the mean native reward over the configured Team A
-  slots (the shared `team_task_reward`), plus the team shaping reward when
-  shaping is on. The value sum and the legal maximum cover configured slots
-  only. A real ending (win, loss or horizon draw) cuts the return to the
+  agent's reward. BG uses `team_task_reward` to average native rewards plus
+  custom adjustments over active learner-owned Team A slots, then adds enabled
+  team shaping once. The value sum and legal maximum use the same owned slots.
+  A real ending (win, loss or horizon draw) cuts the return to the
   immediate reward; the end of a block is not an ending and bootstraps from
   the next row, as in the donor.
 - **Loss and logged values.** The loss is the mean squared team TD error over

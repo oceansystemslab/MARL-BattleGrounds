@@ -4,8 +4,9 @@ These small CPU checks cover full-tree comparison, minimum timing samples,
 explicit hardware selection, compact update summaries and actual quiet/verbose
 writes. Failed comparisons retain every leaf path and unchanged tolerance, so
 the next diagnostic can identify the first numerical boundary that differs.
-These checks do not simulate games or establish GPU speed. The separate tool's
-CPU smoke checks its real collection, reference update and compilation wiring.
+A tiny CPU public-training case checks exact transitions, first and later block
+timings, normal checkpoint/export/report files and preservation of existing
+evidence. It proves tool wiring, not GPU speed or learned behavior.
 """
 
 # The developer tool deliberately exposes small private measurement owners.
@@ -72,9 +73,11 @@ def _result() -> UpdateResult:
         cast(Tree, np.zeros((17, 2), np.int32)),
         cast(Tree, np.zeros(17, np.int32)),
         cast(Tree, np.zeros(17, np.int32)),
+        cast(Tree, np.zeros((22, 3), np.int32)),
+        cast(Tree, np.zeros((22, 2), np.int32)),
     )
     snapshot = SnapshotEvent(
-        false, zero - 1, zero - 1, zero - 1, cast(Tree, np.zeros(20, bool))
+        false, zero - 1, zero - 1, zero - 1, cast(Tree, np.zeros(20, bool)), zero - 1
     )
     return UpdateResult(true, metrics, false, zero, snapshot, summary)
 
@@ -331,3 +334,176 @@ def test_unperformed_or_failed_update_never_becomes_reporting_evidence() -> None
     ):
         with pytest.raises(AssertionError):
             bench._status(changed, index=1, transitions=8, elapsed=1.0)
+
+
+def test_full_training_config_keeps_settings_and_checks_measurement_bounds(
+    tmp_path: Path,
+) -> None:
+    from dataclasses import replace
+
+    from marl_battlegrounds.baselines.ppo import PPOConfig
+
+    config = bench.TrainConfig(
+        num_envs=4,
+        total_env_steps=12,
+        keep_past=0,
+        ppo=PPOConfig(rollout_length=2, epochs=1),
+        verbose=False,
+    )
+    path = tmp_path / "config.json"
+    path.write_text(json.dumps(bench.config_to_dict(config)))
+    assert bench._full_training_config(path, cpu_smoke=True) == config
+    for changed in (
+        replace(config, num_envs=8, total_env_steps=16),
+        replace(config, method="ippo"),
+        replace(config, total_env_steps=3_932_164),
+    ):
+        path.write_text(json.dumps(bench.config_to_dict(changed)))
+        with pytest.raises(ValueError):
+            bench._full_training_config(path, cpu_smoke=True)
+    path.write_text(json.dumps(bench.config_to_dict(config)))
+    with pytest.raises(ValueError):
+        bench._full_training_config(path, cpu_smoke=False)
+
+
+def test_full_training_cost_uses_actual_last_block_and_nonoverlapping_events(
+    tmp_path: Path,
+) -> None:
+    config = bench.TrainConfig(num_envs=4, total_env_steps=12, keep_past=0)
+    updates = [
+        {"env_steps": 8, "collection_update_seconds": 2.0},
+        {"env_steps": 12, "collection_update_seconds": 0.5},
+    ]
+    updates_path = tmp_path / "training_updates.jsonl"
+    updates_path.write_text("\n".join(json.dumps(row) for row in updates))
+    events = [
+        {"event": name, "seconds": 0.1}
+        for name in (
+            "checkpoint_saved",
+            "actor_exported",
+            "past_copy_exported",
+            "validation_complete",
+            "random_validation_complete",
+            "reports_written",
+        )
+    ]
+    (tmp_path / "run_events.jsonl").write_text(
+        "\n".join(json.dumps(row) for row in events)
+    )
+    (tmp_path / "run_details.json").write_text(
+        json.dumps({"initial_setup_seconds": 0.25})
+    )
+    result = bench._full_training_cost(tmp_path, config, seconds=4.0, complete=True)
+    assert result["real_transitions"] == 12
+    assert result["first_block_compile_and_execute"]["real_transitions"] == 8
+    assert result["later_blocks"]["real_transitions"] == 4
+    assert result["later_blocks"]["transitions_per_second"] == 8.0
+    assert result["inclusive_output_seconds"]["validation"] == pytest.approx(0.2)
+    assert result["residual_seconds"] == pytest.approx(0.65)
+    assert result["disk_bytes"] > 0
+    for wall in (1.0, 0.0, float("nan")):
+        with pytest.raises(ValueError):
+            bench._full_training_cost(tmp_path, config, seconds=wall, complete=True)
+    for changed in (
+        {"env_steps": 8, "collection_update_seconds": 1.0},
+        {"env_steps": 10, "collection_update_seconds": 1.0},
+        {"env_steps": 16, "collection_update_seconds": 1.0},
+        {"env_steps": 12, "collection_update_seconds": float("nan")},
+    ):
+        updates_path.write_text(json.dumps(updates[0]) + "\n" + json.dumps(changed))
+        with pytest.raises(ValueError):
+            bench._full_training_cost(tmp_path, config, seconds=4.0, complete=True)
+    updates_path.write_text(json.dumps(updates[0]))
+    assert not bench._full_training_cost(tmp_path, config, seconds=4.0, complete=False)[
+        "complete"
+    ]
+    with pytest.raises(ValueError):
+        bench._full_training_cost(tmp_path, config, seconds=4.0, complete=True)
+
+
+def test_full_training_cli_runs_real_cpu_training_and_keeps_normal_outputs(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import sys
+
+    from marl_battlegrounds.baselines.ppo import PPOConfig
+    from marl_battlegrounds.training import checkpoints
+
+    identity = checkpoints.runtime_identity()
+    monkeypatch.setattr(checkpoints, "runtime_identity", lambda: identity)
+    config = bench.TrainConfig(
+        num_envs=4,
+        total_env_steps=12,
+        seed=917,
+        keep_past=0,
+        ppo=PPOConfig(rollout_length=2, epochs=1),
+        checkpoint_interval_updates=1,
+        metrics="none",
+        verbose=False,
+    )
+    path = tmp_path / "config.json"
+    path.write_text(json.dumps(bench.config_to_dict(config)))
+    output = tmp_path / "cost"
+    monkeypatch.setenv("JAX_PLATFORMS", "cpu")
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "benchmark_mappo_training",
+            "--full-training-config",
+            str(path),
+            "--output",
+            str(output),
+            "--cpu-smoke",
+        ],
+    )
+    bench.main()
+    cost = json.loads((output / "full_training_cost.json").read_text())
+    assert cost["complete"] and cost["error"] is None
+    assert cost["real_transitions"] == 12
+    assert cost["first_block_compile_and_execute"]["real_transitions"] == 8
+    assert cost["later_blocks"]["real_transitions"] == 4
+    assert cost["output_event_counts"]["checkpoint"] >= 2
+    assert cost["output_event_counts"]["actor_export"] >= 1
+    assert cost["output_event_counts"]["report"] >= 1
+    assert cost["disk_bytes"] > 0
+    assert cost["gpu_process_memory"]["samples"] == 0
+    assert (output / "source_identity.json").is_file()
+    assert (output / "training" / "latest_checkpoint.json").is_file()
+    assert json.loads((output / "workload.json").read_text())["config"] == (
+        bench.config_to_dict(config)
+    )
+    before = (output / "full_training_cost.json").read_bytes()
+    with pytest.raises(SystemExit):
+        bench.main()
+    assert (output / "full_training_cost.json").read_bytes() == before
+
+
+def test_full_training_failure_keeps_original_error_and_partial_evidence(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import time
+
+    failure = RuntimeError("Declared training failure")
+
+    def fail_train(config: bench.TrainConfig, *, output_dir: Path) -> Tree:
+        output_dir.mkdir()
+        (output_dir / "training_updates.jsonl").write_text("invalid partial row")
+        raise failure
+
+    monkeypatch.setattr(bench, "train", fail_train)
+    with pytest.raises(RuntimeError) as caught:
+        bench._full_training(
+            tmp_path,
+            bench.TrainConfig(num_envs=4, total_env_steps=12, keep_past=0),
+            gpu_uuid=None,
+            tool_started=time.perf_counter(),
+        )
+    assert caught.value is failure
+    result = json.loads((tmp_path / "full_training_cost.json").read_text())
+    assert not result["complete"]
+    assert result["error"] == "RuntimeError: Declared training failure"
+    assert result["measurement_error"]
+    assert (tmp_path / "training" / "training_updates.jsonl").read_text() == (
+        "invalid partial row"
+    )

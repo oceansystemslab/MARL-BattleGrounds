@@ -74,7 +74,11 @@ from marl_battlegrounds.training.learner import (
     init_learner,
     validate_learner,
 )
-from marl_battlegrounds.training.opponents import make_opponent_system
+from marl_battlegrounds.training.opponents import (
+    init_opponent_history,
+    make_opponent_system,
+    refresh_opponents,
+)
 
 type Tree = Any
 type Context = tuple[str, TrainingCollection, LearnerState, PPOConfig]
@@ -483,7 +487,15 @@ def test_feedforward_current_and_historical_opponents_keep_empty_memory() -> Non
     weights = initialize_ppo(jax.random.key(19047107), method="ff_ippo").actor_params
     actor = make_ppo_system(weights, method="ff_ippo", input_scale=0.01)
     wrapped = make_opponent_system(actor)
-    history = _history(weights, (0, -1, 0, -1))
+    history, event = refresh_opponents(
+        init_opponent_history(weights, num_envs=4, keep_past=1),
+        weights,
+        completed_rounds=jnp.int32(1),
+        update_index=jnp.int32(1),
+        schedule=make_training_schedule(total_env_steps=4, num_envs=4).arrays,
+    )
+    assert bool(event.created) and not bool(history.error)
+    history = history._replace(lane_snapshot=jnp.asarray((0, -1, 0, -1), jnp.int32))
     inputs = env.policy_inputs(observations, state, team=1)
     keys = jax.random.split(jax.random.key(19047108), 4)
     assert actor.init is None and wrapped.init is not None
@@ -519,7 +531,7 @@ def test_cross_architecture_pins_keep_separate_memory_and_matching_actions(
     pinned = make_ppo_system(pin_weights, method=pinned_method, input_scale=0.01)
     _, pin_variables, template = prepare_evaluation_system(pinned)
     wrapped = make_opponent_system(actor, pinned=pinned)
-    variables = (_history(weights, (0, -1, 0, -1)), pin_variables, template)
+    variables = (_history(weights, (-2, -1, -2, -1)), pin_variables, template)
     memory = init_systems(
         actor,
         wrapped,
@@ -616,6 +628,7 @@ def test_public_ippo_curriculum_and_shaping_keep_reset_and_reward_ownership(
 
     monkeypatch.setattr(collection_module, "collect_training_rollout", collect)
     config = training.TrainConfig(
+        keep_past=0,
         method="ippo",
         seed=19047102,
         num_envs=4,

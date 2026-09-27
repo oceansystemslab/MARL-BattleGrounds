@@ -1821,7 +1821,8 @@ def generated_replay_filename(
     -------
     str
         ASCII basename at most 255 bytes, ending in .marlbg-replay.json, with map,
-        episode, root/stream seeds, Team A/B policy labels, and full digest.
+        episode, root/stream seeds, Team A/B labels, and the full digest.
+        The generated stem is lowercase snake_case; the replay suffix stays fixed.
 
     Raises
     ------
@@ -1830,7 +1831,9 @@ def generated_replay_filename(
 
     Notes
     -----
-    Sanitizes and shortens display policy labels only. Unknown seeds remain
+    Uses recorded System display names when available, with old assignment labels
+    as a fallback. Sanitizes and shortens display labels only; full digest
+    identity is never shortened. Unknown seeds remain
     unknown. This helper neither reserves a path nor alters explicit caller paths.
     """
     from marl_battlegrounds.evaluation.map_identity import recorded_map
@@ -1841,13 +1844,13 @@ def generated_replay_filename(
         raise ValueError("replay filename requires a positive episode ID")
 
     def label(value: str, limit: int) -> str:
-        """Make a bounded ASCII display label using letters, digits, and hyphens.
+        """Make a bounded lowercase ASCII label with underscores.
 
-        Collapse nonalphanumeric runs, trim edge hyphens, fall back to unknown, then
+        Collapse nonalphanumeric runs, trim edge underscores, fall back to unknown, then
         truncate. This affects filenames only, never scientific identities.
         """
-        text = re.sub(r"[^A-Za-z0-9]+", "-", value).strip("-") or "unknown"
-        return text[:limit]
+        text = re.sub(r"[^a-z0-9]+", "_", value.lower()).strip("_") or "unknown"
+        return text[:limit].rstrip("_") or "unknown"
 
     map_info = recorded_map(context)
     map_name = (
@@ -1862,23 +1865,32 @@ def generated_replay_filename(
     root_seed = "unknown" if seeds.root_seed is None else str(seeds.root_seed)
     episode_seed = "unknown" if seeds.episode_seed is None else str(seeds.episode_seed)
     first = (
-        f"{map_name}__episode-{label(str(episode_id), 20)}"
-        f"__seed-{root_seed}__stream-{episode_seed}"
+        f"{label(map_name, 80)}__episode_{label(str(episode_id), 20)}"
+        f"__seed_{root_seed}__stream_{episode_seed}"
     )
     last = f"__{digest}{REPLAY_FILE_SUFFIX_V1}"
     # Reserve both team markers and shorten only display labels when needed.
     policy_limit = min(24, (255 - len(first) - len(last) - 8) // 2)
     if policy_limit < 1:
         raise ValueError("map identity is too long for a safe replay filename")
+    display_names = {row.name: row.value for row in context.aggregation_keys}
     teams = []
-    for start in (0, 5):
+    for team_name, start in (("team_a", 0), ("team_b", 5)):
         names = dict.fromkeys(
             row.policy_id
             for row in context.policy_assignments[start : start + 5]
             if isinstance(row, (AssignedPolicySlotV1, AssignedPolicySlotV2))
         )
-        teams.append(label("-".join(names), policy_limit))
-    filename = f"{first}__a-{teams[0]}__b-{teams[1]}{last}"
+        display = display_names.get(f"marl_bgs.system_name.{team_name}")
+        if display is not None:
+            try:
+                decoded = json.loads(display)
+            except ValueError:
+                decoded = None
+            if isinstance(decoded, str):
+                display = decoded
+        teams.append(label(display or "_".join(names), policy_limit))
+    filename = f"{first}__a_{teams[0]}__b_{teams[1]}{last}"
     if not filename.isascii() or len(filename.encode("ascii")) > 255:
         raise ValueError("generated replay filename exceeds the safe basename limit")
     return filename

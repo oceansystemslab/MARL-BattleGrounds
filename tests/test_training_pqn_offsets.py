@@ -59,6 +59,7 @@ def test_offset_schedule_saves_and_recovery_through_the_runner(
 
     _fixed_identity(monkeypatch)
     config = training.TrainConfig(
+        keep_past=0,
         method="pqn_vdn",
         seed=19049105,
         num_envs=4,

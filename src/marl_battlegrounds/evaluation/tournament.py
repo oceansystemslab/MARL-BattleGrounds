@@ -871,7 +871,11 @@ def _resume_legacy_tournament(
     for env_config in configs.values():
         for name_a, name_b in {(match.team_a, match.team_b) for match in schedule}:
             validate_evaluation_rosters(
-                executions[name_a], executions[name_b], env_config
+                executions[name_a],
+                executions[name_b],
+                env_config,
+                variables_a=frozen[name_a].variables,
+                variables_b=frozen[name_b].variables,
             )
     source_ids: dict[int, str] = {}
     resolved_ids: dict[tuple[int, int], str] = {}

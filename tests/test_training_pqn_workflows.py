@@ -69,6 +69,7 @@ def _config(**changes: Any) -> Any:  # noqa: ANN401
     from marl_battlegrounds import training
 
     settings: dict[str, Any] = {
+        "keep_past": 0,
         "method": "pqn_vdn",
         "seed": 19049101,
         "num_envs": 4,
@@ -222,7 +223,9 @@ def test_plain_complete_workflow(
     loaded = training.load_system(result.selected_actor)
     assert float(loaded.variables.epsilon) == 0.0
     ancestor = checkpoints.read_checkpoint_description(
-        root / "checkpoints" / selected["metadata"]["checkpoint_id"]
+        checkpoints.artifact_directory(
+            root, "checkpoints", selected["metadata"]["checkpoint_id"]
+        )
     )
     item = checkpoints._pqn_actor_item(loaded.variables.network)
     assert tree_digest(item) == ancestor["actor_digest"]

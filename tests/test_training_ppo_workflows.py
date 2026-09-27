@@ -46,6 +46,7 @@ def test_public_variant_train_validate_resume_select_load_and_evaluate(
 
     monkeypatch.setattr(evaluator, "capture_recording_provenance", fixed_provenance)
     config = training.TrainConfig(
+        keep_past=0,
         method=method,
         seed=19047101,
         num_envs=4,
@@ -125,7 +126,9 @@ def test_public_variant_train_validate_resume_select_load_and_evaluate(
     assert selection["checkpoint_id"] == selected["metadata"]["checkpoint_id"]
     assert selection["actor_digest"] == selected["actor_digest"]
     ancestor = checkpoints.read_checkpoint_description(
-        interrupted / "checkpoints" / selection["checkpoint_id"]
+        checkpoints.artifact_directory(
+            interrupted, "checkpoints", selection["checkpoint_id"]
+        )
     )
     assert ancestor["actor_digest"] == selected["weight_digest"]
     assert ancestor["schemas"] == selected["schemas"]

@@ -3657,3 +3657,189 @@ test("remote cooldown placement preserves the canonical badge in the shared rend
   expect(result.remoteDetails.tooltipDetails).toContain("29 ticks");
   expect(result.restored).toEqual(result.ordinary);
 });
+
+for (const caseName of [
+  "replay_no_shared_corpse_overlay",
+  "live_no_shared_editable_corpse_overlay",
+]) {
+  test(`living bodies win overlapping corpse paint and mouse targeting: ${caseName}`, async ({
+    page,
+  }) => {
+    await page.goto(origin);
+    const result = await page.evaluate(async (raw) => {
+      const moduleRoot = "/src";
+      const { normalizeAuthorizedPresentationFrameV1 } = await import(
+        `${moduleRoot}/authorized-presentation-normalizer.js`
+      );
+      const { BattlefieldRenderer } = await import(`${moduleRoot}/scene.js`);
+      const presentation = await normalizeAuthorizedPresentationFrameV1(raw);
+      const battlefield = document.querySelector("#battlefield");
+      const empty = document.querySelector("#empty");
+      if (!(battlefield instanceof SVGSVGElement) || !(empty instanceof HTMLElement))
+        throw new Error("Missing renderer surface");
+      const renderer = new BattlefieldRenderer({ battlefield, empty });
+      renderer.render(presentation, { showRanges: false });
+      const dead = battlefield.querySelector('.agent[data-alive="false"]');
+      const living = battlefield.querySelector('.agent[data-alive="true"]');
+      if (
+        !(dead instanceof SVGGraphicsElement) ||
+        !(living instanceof SVGGraphicsElement)
+      )
+        throw new Error("Fixture needs a corpse and a living body");
+      const corpseBody = dead.querySelector(".agent-body");
+      const livingBody = living.querySelector(".agent-body");
+      if (
+        !(corpseBody instanceof SVGCircleElement) ||
+        !(livingBody instanceof SVGCircleElement)
+      )
+        throw new Error("Missing body circles");
+      // Align only the rendered test geometry. The authorized records stay intact.
+      dead.setAttribute(
+        "transform",
+        `translate(${livingBody.cx.baseVal.value - corpseBody.cx.baseVal.value} ${livingBody.cy.baseVal.value - corpseBody.cy.baseVal.value})`,
+      );
+      const matrix = livingBody.getScreenCTM();
+      if (matrix === null) throw new Error("Missing screen transform");
+      const center = new DOMPoint(
+        livingBody.cx.baseVal.value,
+        livingBody.cy.baseVal.value,
+      ).matrixTransform(matrix);
+      const top = document.elementFromPoint(center.x, center.y)?.closest(".agent");
+      const deadGroup = dead.parentElement;
+      const livingGroup = living.parentElement;
+      const ordered = Boolean(
+        deadGroup &&
+          livingGroup &&
+          deadGroup.compareDocumentPosition(livingGroup) &
+            Node.DOCUMENT_POSITION_FOLLOWING,
+      );
+      dead.removeAttribute("transform");
+      renderer.render(presentation, { showRanges: false });
+      const retained = dead.isConnected && living.isConnected;
+      renderer.render(null);
+      renderer.render(presentation, { showRanges: false });
+      return {
+        ordered,
+        topAlive: top === living,
+        retained,
+        afterClear:
+          battlefield.querySelector(
+            '[data-body-state="living"] .agent[data-alive="true"]',
+          ) !== null,
+        corpseGroup: deadGroup?.getAttribute("data-body-state"),
+        livingGroup: livingGroup?.getAttribute("data-body-state"),
+      };
+    }, fixture.state_cases[caseName]);
+    expect(result).toEqual({
+      ordered: true,
+      topAlive: true,
+      retained: true,
+      afterClear: true,
+      corpseGroup: "dead",
+      livingGroup: "living",
+    });
+  });
+}
+
+test("all three team displays follow recorded spawn sides and keep team colours", async ({
+  page,
+}) => {
+  await page.goto(origin);
+  const result = await page.evaluate(async (raw) => {
+    const moduleRoot = "/src";
+    const { normalizeAuthorizedPresentationFrameV1 } = await import(
+      `${moduleRoot}/authorized-presentation-normalizer.js`
+    );
+    const { renderMatchSummary } = await import(`${moduleRoot}/match-summary.js`);
+    raw.match_summary.teams[0].display_side = "right";
+    raw.match_summary.teams[1].display_side = "left";
+    raw.match_summary.deaths = [
+      {
+        public_agent_id: "agent-slot-5",
+        team_id: 2,
+        class_id: 3,
+        killing_team_id: 1,
+        contributors: [{ public_agent_id: "agent-slot-2", team_id: 1, class_id: 5 }],
+      },
+    ];
+    const batch = raw.latest_events;
+    batch.events = [1, 2].map((teamId, ordinal) => ({
+      event_kind: "respawn_wave_occurred",
+      phase_rank: 120,
+      ordinal,
+      event_id: `${batch.incoming_transition_id}:event:${String(ordinal).padStart(4, "0")}`,
+      team_anchor: { phase: "successor", team_index: teamId - 1, team_id: teamId },
+    }));
+    batch.event_count = 2;
+    batch.ordered_event_ids = batch.events.map(
+      (/** @type {Record<string, any>} */ event) => event.event_id,
+    );
+    batch.ordered_event_kinds = ["respawn_wave_occurred", "respawn_wave_occurred"];
+    const presentation = await normalizeAuthorizedPresentationFrameV1(raw);
+    const { BattlefieldRenderer } = await import(`${moduleRoot}/scene.js`);
+    const { buildChoreographyPlan } = await import(
+      `${moduleRoot}/choreography-plan.js`
+    );
+    const { SvgChoreographyPainter } = await import(
+      `${moduleRoot}/choreography-painter.js`
+    );
+    const { DEFAULT_VISUAL_FILTER_STATE, enableAllVisualFilters } = await import(
+      `${moduleRoot}/visual-filters.js`
+    );
+    const battlefield = document.querySelector("#battlefield");
+    const empty = document.querySelector("#empty");
+    if (!(battlefield instanceof SVGSVGElement) || !(empty instanceof HTMLElement))
+      throw new Error("Missing renderer surface");
+    const renderer = new BattlefieldRenderer({ battlefield, empty });
+    renderer.render(presentation, { showRanges: false });
+    const surface = renderer.choreographySurface();
+    const plan = buildChoreographyPlan(
+      presentation,
+      surface,
+      enableAllVisualFilters(DEFAULT_VISUAL_FILTER_STATE),
+    );
+    if (surface === null || plan === null) throw new Error("Missing display plan");
+    new SvgChoreographyPainter().install(plan, surface, {
+      motionMode: "off",
+      settled: false,
+      persistentOnly: false,
+    });
+    const waves = [...battlefield.querySelectorAll(".combat-respawn-wave")];
+    const death = battlefield.querySelector(".combat-death-announcement");
+    const midpoint =
+      battlefield.getBoundingClientRect().x +
+      battlefield.getBoundingClientRect().width / 2;
+
+    const root = document.createElement("div");
+    const task = document.createElement("span");
+    const teams = [document.createElement("div"), document.createElement("div")];
+    const taskSelect = document.createElement("select");
+    root.append(task, ...teams, taskSelect);
+    document.body.append(root);
+    renderMatchSummary({ root, task, teams, taskSelect }, presentation);
+    return {
+      waves: waves.map((node) => ({
+        team: node.getAttribute("data-team-id"),
+        side: node.getAttribute("data-team-side"),
+      })),
+      deathSide: death?.getAttribute("data-team-side"),
+      deathOnRight: (death?.getBoundingClientRect().x ?? 0) > midpoint,
+      teams: teams.map((node) => ({
+        team: node.dataset.team,
+        label: node.querySelector("strong")?.textContent,
+        blue: node.classList.contains("match-scoreboard__team--a"),
+        red: node.classList.contains("match-scoreboard__team--b"),
+      })),
+    };
+  }, fixture.presentations.replay_oracle);
+  expect(result.waves).toEqual([
+    { team: "1", side: "right" },
+    { team: "2", side: "left" },
+  ]);
+  expect(result.deathSide).toBe("right");
+  expect(result.deathOnRight).toBe(true);
+  expect(result.teams).toEqual([
+    { team: "2", label: "Team B (Red)", blue: false, red: true },
+    { team: "1", label: "Team A (Blue)", blue: true, red: false },
+  ]);
+});

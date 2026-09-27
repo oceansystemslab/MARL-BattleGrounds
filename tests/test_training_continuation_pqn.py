@@ -36,6 +36,7 @@ def test_pqn_partial_child_matches_full_state_and_resumes(
     )
     parent = train(
         TrainConfig(
+            keep_past=0,
             method="pqn_vdn",
             num_envs=2,
             total_env_steps=12,

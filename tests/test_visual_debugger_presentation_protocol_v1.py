@@ -1712,7 +1712,22 @@ def test_recursive_schema_is_closed_required_and_key_catalog_is_exhaustive() -> 
             "episode_seed",
         },
         "root.$defs.MatchDeathV1": {"killing_team_id", "contributors"},
+        "root.$defs.MatchTeamV1": {"display_side"},
     }
+    team_properties = cast(
+        dict[str, dict[str, object]], definitions["MatchTeamV1"]["properties"]
+    )
+    assert set(team_properties) == {
+        "team_id",
+        "display_name",
+        "display_side",
+        "policy_ids",
+        "checkpoint_digests",
+    }
+    assert team_properties["display_side"]["anyOf"] == [
+        {"enum": ["left", "right"], "type": "string"},
+        {"type": "null"},
+    ]
     death_properties = cast(
         dict[str, object], definitions["MatchDeathV1"]["properties"]
     )

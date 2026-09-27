@@ -18,7 +18,7 @@
 
 This module adapts JaxMARL's recurrent PQN-VDN (``pqn_vdn_rnn.py``) at
 revision ``976aeb152cb184a5095021968bba94da96eb6394``. It owns the PQN
-settings and budget guards, the shared local Q-network with input and hidden
+settings and budget guards, the local Q-networks with input and hidden
 BatchNorm, the epsilon-greedy actor System, the exploration and learning-rate
 schedules, network initialization and one optimizer step on one expanded
 minibatch of recent game sequences. It owns no collection loop, recent-data
@@ -33,7 +33,9 @@ action never depends on another lane's input. Networks trained before Red
 Zone, on historical actor input schema 1, play through a separate cached
 schema-1 hook that removes the Red Zone depth column and keeps the old
 spawn-side formula. Requires the optional training extra. The network, action
-rule, schedules and update are pure JAX that works inside jit, vmap and scan.
+rule, schedules and update are pure JAX that works inside jit and scan. Shared
+models also support vmap; grouped contractions do not support every extra
+mapped axis.
 Host-only: the setting and batch checks, the float64 host twins of the
 schedules, the System factory and the running-variance check used by saving,
 exporting and loading. The default settings are the donor's SMAX values
@@ -80,9 +82,19 @@ from marl_battlegrounds.baselines.inputs import (
     team_obstacle_partners,
 )
 from marl_battlegrounds.baselines.ppo import (
+    _PARAMETER_SHARING,
+    _actor_group_presence,
     _actor_input_schema,
+    _batch_actor_groups,
+    _group_dense,
+    _group_gru,
+    _group_order,
+    _grouped_actor_inputs,
     _input_scale,
+    _parameter_sharing,
+    _restore_group_rows,
     _spawn_frame,
+    _update_actor_groups,
 )
 from marl_battlegrounds.baselines.qmix import (
     QMIX_TIE_RULE,
@@ -184,6 +196,11 @@ class PQNConfig:
         every game to look like a start from the left bank, "world" keeps raw
         coordinates. Stored recent rows stay in the world frame.
 
+    parameter_sharing : {"all", "class", "none"}, default="all"
+        Share actor weights across everyone, within each class, or not between
+        physical slots. Grouped modes have five parameter groups. Memory stays
+        separate per physical actor. Class changes at resets select new weights.
+
     Raises
     ------
     ValueError
@@ -216,6 +233,7 @@ class PQNConfig:
     eps_decay_fraction: float = 0.1
     input_scale: float = 1.0
     spawn_frame: str = "left"
+    parameter_sharing: str = "all"
 
     def __post_init__(self) -> None:
         """Reject invalid settings on the host before any array is created."""
@@ -236,6 +254,7 @@ class PQNConfig:
         _fraction(self.eps_decay_fraction, "eps_decay_fraction")
         _input_scale(self.input_scale)
         _spawn_frame(self.spawn_frame)
+        _parameter_sharing(self.parameter_sharing)
 
     @property
     def initial_rounds(self) -> int:
@@ -519,11 +538,14 @@ class PQNTrainState(NamedTuple):
     Attributes
     ----------
     network : PQNInferenceVariables
-        Online Q-network parameters and BatchNorm statistics.
+        Online Q-network parameters and BatchNorm statistics. Class and slot
+        sharing add a leading axis of five to both trees.
     opt_state : PyTree
         ``optax.chain(clip_by_global_norm, radam)`` state over ``network.params``
         only. With learning-rate decay it holds two integer counts (RAdam and
-        schedule); without decay, one.
+        schedule); without decay, one. Class and slot modes have five complete
+        independent states with local counts. Their learning rate still uses
+        the run-wide optimizer_steps clock.
     optimizer_steps : Array
         Int32 0-d count of optimizer steps applied before this state.
 
@@ -570,10 +592,20 @@ class PQNBatch(NamedTuple):
     initial_memory : Array
         Float32 (D,5,512) stored action-time memory of the first row.
 
+    actor_group : Array or None, default=None
+        Optional int32 with active.shape, group IDs 0..4 from raw self classes
+        or physical slots. Class sharing requires it; all ignores it.
+    learner_active : Array or None, default=None
+        Optional bool with active.shape selecting owned actor slots. None uses
+        physical active. Partner utilities do not enter current or successor
+        team values; their actual actions already affect recorded transitions.
+
     Notes
     -----
     Row t and t+1 form a TD pair only when both are valid, so the last real
     row supplies bootstrap values and statistics but is never a left row.
+    With learner_active, a pair also needs an owned slot on its left row.
+    A parameter group with no eligible left-row utility keeps its statistics.
     """
 
     actor_features: Array
@@ -585,6 +617,8 @@ class PQNBatch(NamedTuple):
     valid: Array
     active: Array
     initial_memory: Array
+    actor_group: Array | None = None
+    learner_active: Array | None = None
 
 
 class PQNMetrics(NamedTuple):
@@ -699,6 +733,8 @@ class PQNNetwork(nn.Module):
         active: Array,
         *,
         train: bool = False,
+        actor_group: Array | None = None,
+        normalization_mask: Array | None = None,
     ) -> tuple[Array, Array]:
         """Read time-major feature rows with independent actor memory.
 
@@ -723,6 +759,15 @@ class PQNNetwork(nn.Module):
             each feature over every valid active row of the call, time and
             flattened game/actor rows together, and must run with
             ``mutable=["batch_stats"]`` and at least one such row.
+
+        actor_group : Array or None, default=None
+            Optional int32 (rows,games,5) group IDs 0..4. Grouped parameters
+            and batch_stats each carry a leading axis of five. None preserves
+            the shared network and ignores normalization_mask.
+        normalization_mask : Array or None, default=None
+            Optional bool (rows,games,5) learner eligibility, combined with
+            physical valid/active for grouped training moments only. None uses
+            all valid active actors. An absent group keeps its saved statistics.
 
         Returns
         -------
@@ -753,6 +798,83 @@ class PQNNetwork(nn.Module):
         if scale != 1.0:
             features = features * scale
         row = valid[..., None] & active
+        if actor_group is not None:
+            params = self.variables["params"]
+            statistics = self.variables["batch_stats"]
+            order, groups, sizes = _group_order(actor_group)
+            x = jnp.where(row[..., None], features, 0.0).reshape(
+                -1, features.shape[-1]
+            )[order]
+            eligible = row if normalization_mask is None else row & normalization_mask
+            weights = eligible.reshape(-1)[order].astype(jnp.float32)
+            counts = jax.ops.segment_sum(weights, groups, num_segments=5)
+
+            def normalize_group(value: Array, index: int) -> Array:
+                """Use only eligible assigned rows for one group's BatchNorm moments."""
+                name = f"BatchNorm_{index}"
+                mean, variance = statistics[name]["mean"], statistics[name]["var"]
+                if train:
+                    total = jnp.maximum(counts[:, None], 1.0)
+                    selected = jnp.where(weights[:, None] > 0, value, 0.0)
+                    current_mean = (
+                        jax.ops.segment_sum(selected, groups, num_segments=5) / total
+                    )
+                    current_variance = jnp.maximum(
+                        jax.ops.segment_sum(selected * selected, groups, num_segments=5)
+                        / total
+                        - current_mean * current_mean,
+                        0.0,
+                    )
+                    present = counts[:, None] > 0
+                    next_mean = jnp.where(
+                        present,
+                        _BATCH_NORM_MOMENTUM * mean
+                        + (1 - _BATCH_NORM_MOMENTUM) * current_mean,
+                        mean,
+                    )
+                    next_variance = jnp.where(
+                        present,
+                        _BATCH_NORM_MOMENTUM * variance
+                        + (1 - _BATCH_NORM_MOMENTUM) * current_variance,
+                        variance,
+                    )
+                    self.put_variable(
+                        "batch_stats", name, {"mean": next_mean, "var": next_variance}
+                    )
+                    mean = jnp.where(present, current_mean, mean)
+                    variance = jnp.where(present, current_variance, variance)
+                normalized = (value - mean[groups]) * jax.lax.rsqrt(
+                    variance[groups] + _BATCH_NORM_EPSILON
+                )
+                return (
+                    normalized * params[name]["scale"][groups]
+                    + params[name]["bias"][groups]
+                )
+
+            x = normalize_group(x, 0)
+            for index in range(2):
+                x = nn.relu(
+                    normalize_group(
+                        _group_dense(x, params[f"Dense_{index}"], groups, sizes),
+                        index + 1,
+                    )
+                )
+            embedding = _restore_group_rows(x, order, features.shape[:-1])
+            starts = jnp.broadcast_to(episode_start[..., None], actor_group.shape)
+            real = jnp.broadcast_to(valid[..., None], actor_group.shape)
+            carry, embedding = _group_gru(
+                params["ScannedRNN_0"]["GRUCell_0"],
+                memory,
+                embedding,
+                starts,
+                real,
+                actor_group,
+                active,
+            )
+            x = embedding.reshape(-1, embedding.shape[-1])[order]
+            x = _group_dense(x, params["Dense_2"], groups, sizes)
+            values = _restore_group_rows(x, order, features.shape[:-1])
+            return carry, jnp.where(active[..., None], values, 0.0)
         x = jnp.where(row[..., None], features, 0.0).reshape(rows, actors, -1)
         mask = row.reshape(rows, actors, 1) if train else None
 
@@ -844,10 +966,16 @@ def _check_typed_key(key: Array) -> None:
 
 
 def _network_variables(
-    key: Array, input_scale: float, *, features: int = ACTOR_FEATURE_SIZE
+    key: Array,
+    input_scale: float,
+    *,
+    features: int = ACTOR_FEATURE_SIZE,
+    parameter_sharing: str = "all",
 ) -> PQNInferenceVariables:
     """Initialize the Q-network from one key with train=False.
 
+    parameter_sharing selects one shared network or five independently keyed
+    groups, adding one leading axis to parameters and statistics.
     key is a typed Threefry key and input_scale the network's finite positive
     feature multiplier (it changes no parameter shape or value). features is
     the input width, ACTOR_FEATURE_SIZE (5,165) by default; the donor
@@ -857,6 +985,12 @@ def _network_variables(
     paths. Returns the parameters and the initial statistics (mean 0,
     variance 1).
     """
+    if _parameter_sharing(parameter_sharing) != "all":
+        return jax.vmap(
+            functools.partial(
+                _network_variables, input_scale=input_scale, features=features
+            )
+        )(jax.random.split(key, 5))
     variables = PQNNetwork(input_scale=input_scale).init(
         key,
         jnp.zeros((1, TEAM_SLOTS, PQN_HIDDEN_SIZE), jnp.float32),
@@ -943,7 +1077,7 @@ def initialize_pqn(
     pqn: PQNConfig = DEFAULT_PQN_CONFIG,
     planned_learning_blocks: int,
 ) -> PQNTrainState:
-    """Create an untrained PQN network, its statistics and one RAdam state.
+    """Create untrained PQN parameters, statistics and complete RAdam states.
 
     Parameters
     ----------
@@ -951,8 +1085,8 @@ def initialize_pqn(
         One typed Threefry key (``jax.random.key(seed)``). The learner derives
         it with ``fold_in(root, PQN_MODEL_INITIALIZATION_TAG)``.
     pqn : PQNConfig, default=DEFAULT_PQN_CONFIG
-        Settings; input_scale, q_lr, lr_linear_decay, max_grad_norm, epochs
-        and num_minibatches matter here.
+        Settings; input_scale, parameter_sharing, q_lr, lr_linear_decay,
+        max_grad_norm, epochs and num_minibatches matter here.
     planned_learning_blocks : int
         Plain positive N for the learning-rate schedule.
 
@@ -960,7 +1094,9 @@ def initialize_pqn(
     -------
     PQNTrainState
         Float32 parameters, running mean 0 and variance 1, the optimizer state
-        over the parameters only and ``optimizer_steps`` int32 0.
+        over the parameters only and ``optimizer_steps`` int32 0. Class and
+        slot modes give every parameter, statistic and optimizer leaf a leading
+        axis of five, with independent initialization keys and optimizer counts.
 
     Raises
     ------
@@ -971,16 +1107,28 @@ def initialize_pqn(
     -----
     Allocates 4,596,512 float32 parameters (18,386,048 bytes), 12,378 float32
     statistics (49,512 bytes) and two moment trees (36,772,096 bytes) plus
-    counters. Works under ``jax.eval_shape``.
+    counters in shared mode. Class and slot modes use five copies of these
+    arrays. Works under ``jax.eval_shape``.
     """
     _check_typed_key(key)
-    network = _network_variables(key, pqn.input_scale)
+    network = _network_variables(
+        key, pqn.input_scale, parameter_sharing=pqn.parameter_sharing
+    )
     optimizer = pqn_optimizer(pqn, planned_learning_blocks)
-    return PQNTrainState(network, optimizer.init(network.params), jnp.int32(0))
+    return PQNTrainState(
+        network,
+        optimizer.init(network.params)
+        if pqn.parameter_sharing == "all"
+        else jax.vmap(optimizer.init)(network.params),
+        jnp.int32(0),
+    )
 
 
-def pqn_actor_template() -> PQNInferenceVariables:
+def pqn_actor_template(*, parameter_sharing: str = "all") -> PQNInferenceVariables:
     """Return the Q-network's parameter and statistic shapes without allocating.
+
+    parameter_sharing is all (the unchanged default), class or none. The latter
+    two add a leading group axis of five to every parameter/statistic leaf.
 
     Returns
     -------
@@ -992,7 +1140,10 @@ def pqn_actor_template() -> PQNInferenceVariables:
     return cast(
         PQNInferenceVariables,
         jax.eval_shape(
-            functools.partial(_network_variables, input_scale=1.0), jax.random.key(0)
+            functools.partial(
+                _network_variables, input_scale=1.0, parameter_sharing=parameter_sharing
+            ),
+            jax.random.key(0),
         ),
     )
 
@@ -1189,6 +1340,58 @@ def _schema_1_pqn_actor_apply(
     return apply
 
 
+@functools.lru_cache(maxsize=32)
+def _grouped_pqn_actor_apply(
+    scale: float, frame: str, sharing: str
+) -> Callable[[PQNActorVariables, Array, SystemInput, Array], SystemOutput]:
+    """Bind the grouped actor's settings while preserving all shared hooks.
+
+    Checked scale/frame/sharing become numeric keyword defaults in the hook's
+    recorded identity. Parameters and per-actor memory remain dynamic inputs.
+    """
+
+    def apply(
+        variables: PQNActorVariables,
+        memory: Array,
+        inputs: SystemInput,
+        keys: Array,
+        *,
+        input_scale: float = scale,
+        spawn_frame_index: int = SPAWN_FRAMES.index(frame),
+        parameter_sharing_index: int = _PARAMETER_SHARING.index(sharing),
+    ) -> SystemOutput:
+        """Choose grouped epsilon-greedy actions from one same-epoch actor call."""
+        features, mask, groups, flag = _grouped_actor_inputs(
+            inputs, _PARAMETER_SHARING[parameter_sharing_index], spawn_frame_index
+        )
+        next_memory, values = cast(
+            tuple[Array, Array],
+            PQNNetwork(input_scale=input_scale).apply(
+                _flax_variables(variables.network),
+                memory,
+                features[None],
+                inputs.episode_start[None],
+                inputs.valid[None],
+                inputs.active_mask[None],
+                actor_group=groups[None],
+                train=False,
+            ),
+        )
+        actor_keys = jax.vmap(functools.partial(jax.random.split, num=TEAM_SLOTS))(keys)
+        indices = _explore(
+            greedy_actions(values[0], mask), mask, actor_keys, variables.epsilon
+        )
+        if flag is not None:
+            indices = mirror_action_indices(indices, flag)
+        return SystemOutput(
+            decode_actions(indices),
+            next_memory,
+            learning_outputs=PQNLearningOutputs(memory),
+        )
+
+    return apply
+
+
 def make_pqn_system(
     network: PQNInferenceVariables,
     *,
@@ -1198,6 +1401,7 @@ def make_pqn_system(
     name: str = "PQN-VDN",
     checkpoint: str | None = None,
     actor_input_schema: int = ACTOR_INPUT_SCHEMA_VERSION,
+    parameter_sharing: str = "all",
 ) -> System:
     """Wrap PQN network variables as an M8 JAX System with epsilon-greedy actions.
 
@@ -1215,6 +1419,10 @@ def make_pqn_system(
         Positive finite feature multiplier used to train these weights.
     spawn_frame : {"left", "world"}, default="left"
         Frame used to train these weights. It is part of System identity.
+    parameter_sharing : {"all", "class", "none"}, default="all"
+        Actor weight ownership used during training. Grouped variables carry
+        five groups; memory stays per physical actor. Historical schema 1
+        supports all only. The mode is part of the System identity.
     name : str, default="PQN-VDN"
         Nonempty display name; it proves nothing about training.
     checkpoint : str or None, default=None
@@ -1255,7 +1463,14 @@ def make_pqn_system(
         if _actor_input_schema(actor_input_schema) == 1
         else _pqn_actor_apply
     )
-    apply = hook(scale, frame)
+    sharing = _parameter_sharing(parameter_sharing)
+    if sharing != "all" and actor_input_schema != ACTOR_INPUT_SCHEMA_VERSION:
+        raise ValueError("Grouped actors require the current actor input schema")
+    apply = (
+        hook(scale, frame)
+        if sharing == "all"
+        else _grouped_pqn_actor_apply(scale, frame, sharing)
+    )
     return System(
         name,
         apply,
@@ -1294,6 +1509,12 @@ def _check_batch(batch: PQNBatch) -> tuple[int, int]:
         or features.dtype != jnp.float32
     ):
         raise ValueError("PQNBatch.actor_features has the wrong shape or dtype")
+    for field, dtype in (("actor_group", jnp.int32), ("learner_active", jnp.bool_)):
+        value = getattr(batch, field)
+        if value is not None and (
+            value.shape != batch.active.shape or value.dtype != dtype
+        ):
+            raise ValueError(f"PQNBatch.{field} has the wrong shape or dtype")
     return rows, games
 
 
@@ -1380,11 +1601,29 @@ def _minibatch_loss(
     Differentiable in params only; targets carry no gradient. Pure JAX.
     """
     valid = batch.valid
+    owned = (
+        batch.active
+        if batch.learner_active is None
+        else batch.active & batch.learner_active
+    )
     pair = valid[:-1] & valid[1:]
+    if batch.learner_active is not None:
+        pair = pair & jnp.any(owned[:-1], axis=-1)
+    groups = _batch_actor_groups(
+        pqn.parameter_sharing, batch.actor_group, batch.active.shape
+    )
+    normalization_mask = owned
+    if groups is not None:
+        present = _actor_group_presence(groups[:-1], owned[:-1] & pair[..., None])
+        normalization_mask = owned & present[groups]
     denominator = jnp.maximum(jnp.sum(pair, dtype=jnp.int32), 1).astype(jnp.float32)
     neutral = jnp.arange(NUM_ACTIONS) == 0
-    live = valid[..., None] & batch.active
-    features = jnp.where(valid[..., None, None], batch.actor_features, 0.0)
+    live = valid[..., None] & owned
+    features = (
+        jnp.where(live[..., None], batch.actor_features, 0.0)
+        if batch.learner_active is not None
+        else jnp.where(valid[..., None, None], batch.actor_features, 0.0)
+    )
     mask = jnp.where(live[..., None], batch.action_mask, neutral)
     actions = jnp.where(live, batch.actions, 0)
     rewards = jnp.where(valid, batch.rewards, 0.0)
@@ -1392,12 +1631,16 @@ def _minibatch_loss(
         tuple[tuple[Array, Array], dict[str, Tree]],
         PQNNetwork(input_scale=pqn.input_scale).apply(
             {"params": params, "batch_stats": batch_stats},
-            batch.initial_memory,
+            batch.initial_memory
+            if batch.learner_active is None
+            else jnp.where(owned[0, ..., None], batch.initial_memory, 0.0),
             features,
             valid & batch.episode_start,
             valid,
-            batch.active,
+            batch.active if groups is not None else owned,
             train=True,
+            actor_group=groups,
+            normalization_mask=normalization_mask,
             mutable=["batch_stats"],
         ),
     )
@@ -1470,17 +1713,51 @@ def update_pqn(
     forward's stopped values: the sum over active slots of each slot's legal
     maximum (-inf masking), then :func:`lambda_returns`. There is no target
     network. The loss averages the squared team error over eligible pairs.
-    Gradients are clipped by global norm, then RAdam steps. Pure JAX; wrap in
-    jit with fixed settings.
+    With learner_active, only owned slots supply utilities and statistics.
+    Class and slot modes normalize each group from its assigned learner rows,
+    clip each group's gradient and use independent RAdam histories. A group
+    with no eligible left-row utility keeps all parameters, statistics and
+    optimizer leaves. Learning rates use the run-wide optimizer_steps clock;
+    local RAdam counts advance only for groups with eligible samples. Shared
+    mode retains its original global clipping and optimizer tree. Pure JAX;
+    wrap in jit with fixed settings.
     """
     _check_batch(batch)
+    groups = _batch_actor_groups(
+        pqn.parameter_sharing, batch.actor_group, batch.active.shape
+    )
+    rate = learning_rate
+    if groups is not None:
+        if learning_rate is not None:
+            global_rate = learning_rate(state.optimizer_steps)
+        elif pqn.lr_linear_decay:
+            global_rate = optax.linear_schedule(
+                pqn.q_lr,
+                _LEARNING_RATE_END,
+                planned_learning_blocks * pqn.epochs * pqn.num_minibatches,
+            )(state.optimizer_steps)
+        else:
+            global_rate = jnp.asarray(pqn.q_lr, jnp.float32)
+
+        def global_schedule(_: Array) -> Array:
+            """Use run-wide time, independent of each actor group's RAdam count."""
+            return jnp.asarray(global_rate, jnp.float32)
+
+        rate = global_schedule
     optimizer = pqn_optimizer(
         pqn,
         planned_learning_blocks,
-        learning_rate=learning_rate,
+        learning_rate=rate,
         optimizer_count=state.optimizer_steps,
     )
+    owned = (
+        batch.active
+        if batch.learner_active is None
+        else batch.active & batch.learner_active
+    )
     pair = batch.valid[:-1] & batch.valid[1:]
+    if batch.learner_active is not None:
+        pair = pair & jnp.any(owned[:-1], axis=-1)
     count = jnp.sum(pair, dtype=jnp.int32)
 
     def step(_: None) -> tuple[PQNTrainState, PQNMetrics]:
@@ -1488,10 +1765,16 @@ def update_pqn(
         (loss, (stats, mean_q, mean_target)), grads = jax.value_and_grad(
             _minibatch_loss, has_aux=True
         )(state.network.params, state.network.batch_stats, batch, pqn)
-        updates, opt_state = optimizer.update(
-            grads, state.opt_state, state.network.params
-        )
-        params = optax.apply_updates(state.network.params, updates)
+        if groups is None:
+            updates, opt_state = optimizer.update(
+                grads, state.opt_state, state.network.params
+            )
+            params = optax.apply_updates(state.network.params, updates)
+        else:
+            present = _actor_group_presence(groups[:-1], owned[:-1] & pair[..., None])
+            params, opt_state = _update_actor_groups(
+                state.network.params, state.opt_state, grads, present, optimizer
+            )
         candidate = PQNTrainState(
             PQNInferenceVariables(params, stats),
             opt_state,
@@ -1503,7 +1786,7 @@ def update_pqn(
             mean_target,
             optax.tree.norm(grads),
             count,
-            jnp.sum(batch.active[:-1] & pair[..., None], dtype=jnp.int32),
+            jnp.sum(owned[:-1] & pair[..., None], dtype=jnp.int32),
             _finite((loss, mean_q, mean_target, grads, candidate)),
             jnp.bool_(True),
         )

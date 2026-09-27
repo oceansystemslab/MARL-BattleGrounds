@@ -355,6 +355,9 @@ def _schema_1_scene(scene: str, depth: float) -> EnvConfig:
 def _input_digest(inputs: SystemInput) -> str:
     digest = hashlib.sha256()
     for name, leaf in _named_leaves(inputs):
+        # Schema 1 predates action ownership; preserve its historical evidence.
+        if name == ".controlled_mask":
+            continue
         array = np.asarray(leaf)
         digest.update(name.encode())
         digest.update(str(array.dtype).encode())

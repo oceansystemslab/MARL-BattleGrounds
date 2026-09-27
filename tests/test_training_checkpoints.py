@@ -39,7 +39,11 @@ right after the kind check, before any array is read and without changing a
 file. A mixed schema dictionary (actor input 2 with training state 1, or the
 reverse) is rejected. Actor templates are cached per method and schema; the
 schema-1 template differs only in its 5,164-row input kernel, and an unknown
-schema is refused.
+schema is refused. Changed source identities still require compatible input,
+frame, content and schema before arrays or recovery files are touched.
+All/class/none actor exports preserve all six methods, exact inference and
+actor-only warm-start checks. Grouped learner state restores exactly at update
+zero for PPO, QMIX and PQN; these cases do not claim trained-state equivalence.
 """
 
 from __future__ import annotations
@@ -257,6 +261,11 @@ def _schema_1_round_trip(
     _equal(saved, weights)
     before = _files(tmp_path)
     listing = sorted(tmp_path.iterdir())
+    with pytest.raises(ValueError, match="Initial actor schema"):
+        checkpoints.load_initial_actor(
+            path, method=method, input_scale=0.01, spawn_frame="left"
+        )
+    assert _files(tmp_path) == before
     with pytest.raises(ValueError, match="historical actor input schema 1"):
         export_system(
             actor,
@@ -977,7 +986,7 @@ def test_learner_scale_load_and_config_mismatch_before_restore(
             "run_id": "run",
             "seed": 42,
             "env_steps": 0,
-            "checkpoint_id": path.name,
+            "checkpoint_id": read_checkpoint_details(path)["checkpoint_id"],
         },
         input_scale=0.01,
         spawn_frame="world",
@@ -1147,6 +1156,7 @@ def test_directory_publication_failure_keeps_pointer_and_allows_new_attempt(
         original = save_checkpoint(
             tmp_path, collection, state, metadata=metadata, writer=writer, ppo=PPO
         )
+        original_id = read_checkpoint_details(original)["checkpoint_id"]
         original_pointer = (tmp_path / "latest_checkpoint.json").read_bytes()
         publish = checkpoints._atomic_json  # pyright: ignore[reportPrivateUsage]
 
@@ -1165,7 +1175,7 @@ def test_directory_publication_failure_keeps_pointer_and_allows_new_attempt(
                     metadata={
                         **metadata,
                         "attempt_id": "orphan",
-                        "parent_checkpoint": original.name,
+                        "parent_checkpoint": original_id,
                     },
                     writer=writer,
                     ppo=PPO,
@@ -1181,7 +1191,7 @@ def test_directory_publication_failure_keeps_pointer_and_allows_new_attempt(
             metadata={
                 **metadata,
                 "attempt_id": "retry",
-                "parent_checkpoint": original.name,
+                "parent_checkpoint": original_id,
             },
             writer=writer,
             ppo=PPO,
@@ -1189,13 +1199,13 @@ def test_directory_publication_failure_keeps_pointer_and_allows_new_attempt(
         assert resumed != original
         assert (
             read_checkpoint_details(resumed)["metadata"]["parent_checkpoint"]
-            == original.name
+            == original_id
         )
         assert (
             json.loads((tmp_path / "latest_checkpoint.json").read_bytes())[
                 "checkpoint_id"
             ]
-            == resumed.name
+            == read_checkpoint_details(resumed)["checkpoint_id"]
         )
         assert (
             len(
@@ -1564,7 +1574,7 @@ def test_variants_resume_partial_updates_and_load_only_actor_arrays(
         "run_id": metadata["run_id"],
         "seed": 42,
         "env_steps": 8,
-        "checkpoint_id": path.name,
+        "checkpoint_id": read_checkpoint_details(path)["checkpoint_id"],
     }
     export = export_system(
         state.carry.history.current_variables,
@@ -1825,42 +1835,444 @@ def test_a_learner_saved_before_red_zone_is_readable_but_cannot_resume(
     assert not (tmp_path / "checkpoint_recovery.json").exists()
 
 
-@pytest.mark.parametrize("fault", [None, "parent", "target", "extra"])
-def test_source_transition_checks_exact_qualified_package(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, fault: str | None
+@pytest.mark.parametrize("fault", [None, "input", "frame", "content", "schema"])
+def test_changed_source_keeps_real_restore_contracts_before_output(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    variant_content: PreparedTrainingContent,
+    fault: str | None,
 ) -> None:
-    from hashlib import sha256
+    collection, state = init_learner(
+        schedule=make_training_schedule(total_env_steps=20, num_envs=4),
+        ppo=PPO,
+        prepared=variant_content,
+        metrics="none",
+    )
+    metadata = _metadata()
+    path = save_checkpoint(tmp_path, collection, state, metadata=metadata, ppo=PPO)
+    expected = _expected(metadata)
+    expected["source"] = {"scope": "New compatible package version"}
+    settings = PPO
+    if fault == "schema":
+        path = _as_schema_1_learner(path, "mappo")
+    elif fault == "input":
+        settings = replace(PPO, input_scale=0.5)
+    elif fault == "frame":
+        settings = replace(PPO, spawn_frame="left")
+    elif fault == "content":
+        collection = replace(collection, reward_settings=(0.5, 0.01))
+    before = _files(tmp_path)
+    transition = checkpoints.continuation_source_compatibility(
+        metadata["source"], expected["source"]
+    )
+    assert transition["qualification"] == "Checkpoint contract checks"
+    if fault is not None:
 
-    from marl_battlegrounds.training import checkpoints
+        def forbidden(*args: object, **kwargs: object) -> None:
+            pytest.fail("Incompatible metadata reached array restore")
 
-    package = tmp_path / "package"
-    training = package / "training"
-    training.mkdir(parents=True)
-    module = training / "checkpoints.py"
-    module.write_text("# Checked source fixture\n")
-    parent = {"commit": "declared-parent"}
-    current = {"commit": "actual-current"}
-    record = {
-        "schema_version": 1,
-        "parent_sources": [parent],
-        "target_files": {
-            "training/checkpoints.py": sha256(module.read_bytes()).hexdigest()
+        monkeypatch.setattr(checkpoints, "_restore_arrays", forbidden)
+    with ExitStack() as stack:
+        if fault is not None:
+            stack.enter_context(pytest.raises(ValueError))
+        restored = restore_checkpoint(
+            path,
+            collection,
+            state,
+            expected_metadata=expected,
+            ppo=settings,
+            _source_compatibility=transition,
+        )
+        _equal(restored.state, state)
+        assert restored.details["metadata"]["source"] == metadata["source"]
+    assert _files(tmp_path) == before
+    assert not (tmp_path / "checkpoint_recovery.json").exists()
+
+
+def test_readable_names_keep_exact_ids_and_immutable_artifacts(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    collection, state = init_learner(
+        schedule=make_training_schedule(total_env_steps=20, num_envs=4),
+        seed=42,
+        ppo=PPO,
+        prepared=prepare_training_content(),
+        metrics="none",
+    )
+    metadata = _metadata()
+    first = save_checkpoint(tmp_path, collection, state, metadata=metadata, ppo=PPO)
+    first_details = read_checkpoint_details(first)
+    first_id = first_details["checkpoint_id"]
+    assert first.name.startswith("mappo_checkpoint_step_000000000000_")
+    assert first.name.endswith(first_id)
+    before = _files(first)
+    # Payload serialization can add new file metadata, so a repeat save may
+    # have a new full identity. It must leave the earlier boundary intact.
+    save_checkpoint(tmp_path, collection, state, metadata=metadata, ppo=PPO)
+    assert _files(first) == before
+    second = save_checkpoint(
+        tmp_path,
+        collection,
+        state,
+        metadata={**metadata, "attempt_id": "another_attempt"},
+        ppo=PPO,
+    )
+    assert second != first
+    assert _files(first) == before
+    assert read_checkpoint_details(second)["counters"] == first_details["counters"]
+    pointer = json.loads((tmp_path / "latest_checkpoint.json").read_text())
+    assert tmp_path / pointer["relative_path"] == second
+    assert pointer["checkpoint_id"] == read_checkpoint_details(second)["checkpoint_id"]
+    for checkpoint in (first, second):
+        identifier = read_checkpoint_details(checkpoint)["checkpoint_id"]
+        assert (
+            checkpoints.artifact_directory(tmp_path, "checkpoints", identifier)
+            == checkpoint
+        )
+        actor = (
+            tmp_path
+            / "actors"
+            / checkpoints.artifact_name("mappo", "actor", 0, identifier)
+        )
+        actor.parent.mkdir(exist_ok=True)
+        export_system(
+            state.carry.history.current_variables,
+            actor,
+            spawn_frame="world",
+            metadata={
+                "run_id": "same_name",
+                "seed": 42,
+                "env_steps": 0,
+                "checkpoint_id": identifier,
+            },
+        )
+        assert checkpoints.artifact_directory(tmp_path, "actors", identifier) == actor
+        _equal(load_system(actor).variables, state.carry.history.current_variables)
+    legacy = first.with_name(first_id)
+    first.rename(legacy)
+    assert checkpoints.artifact_directory(tmp_path, "checkpoints", first_id) == legacy
+    assert read_checkpoint_details(legacy) == first_details
+    old_actor = checkpoints.artifact_directory(tmp_path, "actors", first_id)
+    legacy_actor = old_actor.with_name(first_id)
+    old_actor.rename(legacy_actor)
+    from marl_battlegrounds.training import runner
+
+    execution = object.__new__(runner._Run)  # pyright: ignore[reportPrivateUsage]
+    execution.root = tmp_path
+    execution.config = runner.TrainConfig(num_envs=4, total_env_steps=20, ppo=PPO)
+    execution.checkpoint = legacy
+    execution.checkpoint_id = first_id
+    execution.collection = collection
+    execution.state = state
+    execution.qmix = execution.pqn = None
+    execution.metadata = {**metadata, "run_id": "same_name"}
+    execution.host = {"env_steps": 0, "actors": {}}
+    old_bytes = _files(legacy_actor)
+    assert execution.actor() == legacy_actor
+    assert _files(legacy_actor) == old_bytes
+    event = json.loads((tmp_path / "run_events.jsonl").read_text().splitlines()[-1])
+    assert event["event"] == "actor_exported"
+    assert event["attempt_id"] == metadata["attempt_id"]
+    assert event["checkpoint_id"] == first_id
+    assert event["path"] == str(legacy_actor)
+    assert event["reused"] is True
+    inherited = checkpoints.validation_directory(
+        tmp_path / "child", "confirmation", first_id, actor=legacy_actor
+    )
+    assert inherited.name.startswith("confirmation_mappo_actor_step_000000000000_")
+    linked = tmp_path / "linked" / "checkpoints" / first_id
+    linked.parent.mkdir(parents=True)
+    linked.symlink_to(legacy, target_is_directory=True)
+    with pytest.raises(ValueError, match="link"):
+        checkpoints.artifact_directory(linked.parent.parent, "checkpoints", first_id)
+    damaged = second / "checkpoint_details.json"
+    content = json.loads(damaged.read_text())
+    content["metadata"]["attempt_id"] = "different_saved_work"
+    damaged.write_text(json.dumps(content))
+    unchanged = damaged.read_bytes()
+
+    def same_destination(*args: object) -> str:
+        return second.name
+
+    monkeypatch.setattr(checkpoints, "artifact_name", same_destination)
+    with pytest.raises(ValueError, match="digest"):
+        save_checkpoint(
+            tmp_path,
+            collection,
+            state,
+            metadata={**metadata, "attempt_id": "another_attempt"},
+            ppo=PPO,
+        )
+    assert damaged.read_bytes() == unchanged
+
+
+def test_capture_export_is_loadable_without_a_recovery_checkpoint(
+    tmp_path: Path, context: Context
+) -> None:
+    from marl_battlegrounds.training._content import pinned_opponent_evidence
+
+    collection, state = context
+    weights = state.carry.history.current_variables
+    metadata: dict[str, object] = {
+        "run_id": "rolling_history",
+        "seed": 13,
+        "env_steps": 320,
+        "capture_origin": {
+            "capture_id": 23,
+            "update_index": 10,
+            "content_binding": collection.binding.model_dump(mode="json"),
+            "epsilon": None,
         },
-        "qualification": {"proof": "Test fixture only"},
+        "display_name": "MAPPO past copy at step 320",
     }
-    (training / "continuation_compatibility.json").write_text(json.dumps(record))
-    monkeypatch.setattr(checkpoints, "__file__", str(module))
-    if fault == "parent":
-        parent = {"commit": "different-parent"}
-    elif fault == "target":
-        module.write_text("# Edited source\n")
-    elif fault == "extra":
-        (package / "extra.py").write_text("# Extra source\n")
-    if fault is None:
-        result = checkpoints.continuation_source_compatibility(parent, current)
-        assert result["parent_source"] == parent
-        assert result["child_source"] == current
-        assert result["qualification_sha256"]
+    destination = tmp_path / "mappo_past_step_320_capture_000023"
+    export_system(weights, destination, metadata=metadata, spawn_frame="world")
+    saved = read_checkpoint_details(destination)
+    assert "checkpoint_id" not in saved["metadata"]
+    assert saved["metadata"]["capture_origin"]["capture_id"] == 23
+    loaded = load_system(destination)
+    _equal(loaded.variables, weights)
+    evidence = pinned_opponent_evidence(collection.binding, loaded, export=destination)
+    assert evidence["source"] == "verified capture"
+    assert evidence["exposure"] == "none"
+    original = _files(destination)
+    assert (
+        export_system(weights, destination, metadata=metadata, spawn_frame="world")
+        == destination
+    )
+    assert _files(destination) == original
+    with pytest.raises(ValueError, match="different artifact"):
+        export_system(
+            weights,
+            destination,
+            metadata={**metadata, "env_steps": 640},
+            spawn_frame="world",
+        )
+    assert _files(destination) == original
+    with pytest.raises(ValueError, match="exactly one"):
+        export_system(
+            weights,
+            tmp_path / "bad_origin",
+            metadata={**metadata, "checkpoint_id": "a" * 64},
+            spawn_frame="world",
+        )
+    assert not (tmp_path / "bad_origin").exists()
+
+
+# Sharing modes use the real actor layout, file format and public System path.
+@pytest.mark.parametrize(
+    "method", ("mappo", "ippo", "ff_mappo", "ff_ippo", "qmix", "pqn_vdn")
+)
+@pytest.mark.parametrize("sharing", ("all", "class", "none"))
+def test_sharing_actor_export_load_and_warm_start_modes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, method: str, sharing: str
+) -> None:
+    from tests.test_baseline_inputs import (
+        _two_lane_reset,  # pyright: ignore[reportPrivateUsage]
+    )
+
+    from marl_battlegrounds.baselines import pqn, qmix
+
+    template = checkpoints._actor_template(  # pyright: ignore[reportPrivateUsage]
+        method, parameter_sharing=sharing
+    )
+
+    def fill(leaf: jax.ShapeDtypeStruct) -> jax.Array:
+        if sharing == "all":
+            return _small(leaf)
+        groups = jnp.arange(1, 6, dtype=leaf.dtype).reshape(
+            (5,) + (1,) * (len(leaf.shape) - 1)
+        )
+        return jnp.broadcast_to(groups * 0.002, leaf.shape)
+
+    saved_values = jax.tree.map(fill, template)
+    values = (
+        pqn.PQNInferenceVariables(saved_values["params"], saved_values["batch_stats"])
+        if method == "pqn_vdn"
+        else saved_values
+    )
+    options: dict[str, Any] = dict(
+        parameter_sharing=sharing, input_scale=1.0, spawn_frame="world"
+    )
+    original = (
+        qmix.make_qmix_system(values, **options)
+        if method == "qmix"
+        else pqn.make_pqn_system(values, **options)
+        if method == "pqn_vdn"
+        else make_ppo_system(values, method=method, **options)
+    )
+    path = export_system(
+        values,
+        tmp_path / "actor",
+        method=method,
+        **options,
+        metadata={
+            "run_id": "sharing_modes",
+            "seed": 42,
+            "env_steps": 0,
+            "checkpoint_id": "a" * 64,
+            **({"optimizer_steps": 0} if method in ("qmix", "pqn_vdn") else {}),
+        },
+    )
+    details = read_checkpoint_details(path)
+    assert details.get("parameter_sharing", "all") == sharing
+    assert ("parameter_sharing" not in details) == (sharing == "all")
+    arrays_read: list[str] = []
+    restore_arrays = checkpoints._restore_arrays  # pyright: ignore[reportPrivateUsage]
+
+    def actor_only(source: Path, spec: Tree, device: object) -> Tree:
+        arrays_read.append(source.name)
+        return restore_arrays(source, spec, device)
+
+    monkeypatch.setattr(checkpoints, "_restore_arrays", actor_only)
+    loaded = load_system(path)
+    warm, warm_details = checkpoints.load_initial_actor(path, method=method, **options)
+    assert arrays_read == ["actor", "actor"]
+    assert warm_details == details
+    _equal(loaded.variables, original.variables)
+    _equal(warm.variables, original.variables)
+    assert (
+        loaded.checkpoint == warm.checkpoint == artifact_identity(path)["actor_digest"]
+    )
+    _, observations, env_state = _two_lane_reset(team_sizes=(3, 2))
+    memory = init_systems(
+        original, original, observations, env_state, jax.random.key(711)
+    )
+    expected = apply_systems(
+        original, original, memory, observations, env_state, jax.random.key(712)
+    )
+    actual = apply_systems(
+        loaded, original, memory, observations, env_state, jax.random.key(712)
+    )
+    _equal(actual, expected)
+    if sharing == "all":
+        # This is the pre-sharing identity envelope, not the new helper's answer.
+        identity: dict[str, object] = {
+            "kind": f"{method}_inference"
+            if method in ("qmix", "pqn_vdn")
+            else "ppo_inference",
+            "version": 1,
+            "model": details["schemas"]["model"],
+            "actor_digest": details["actor_digest"],
+            "input_scale": 1.0,
+            "spawn_frame": "world",
+            **(
+                {"epsilon": 0.0, "tie_rule": "first_legal_maximum"}
+                if method in ("qmix", "pqn_vdn")
+                else {}
+            ),
+        }
+        expected_id = (
+            details["actor_digest"]
+            if method == "mappo"
+            else hashlib.sha256(
+                (
+                    json.dumps(identity, sort_keys=True, separators=(",", ":")) + "\n"
+                ).encode()
+            ).hexdigest()
+        )
+        assert loaded.checkpoint == expected_id
     else:
-        with pytest.raises(ValueError, match=r"[Qq]ualified continuation"):
-            checkpoints.continuation_source_compatibility(parent, current)
+        alternate = "none" if sharing == "class" else "class"
+        changed = {**details, "parameter_sharing": alternate}
+        assert loaded.checkpoint != checkpoints._inference_digest(changed)  # pyright: ignore[reportPrivateUsage]
+    before = _files(path)
+    for other in {"all", "class", "none"} - {sharing}:
+        with pytest.raises(ValueError, match="parameter_sharing"):
+            checkpoints.load_initial_actor(
+                path,
+                method=method,
+                parameter_sharing=other,
+                input_scale=1.0,
+                spawn_frame="world",
+            )
+    assert arrays_read == ["actor", "actor"]
+    assert _files(path) == before
+    assert not (path / "state").exists()
+
+
+@pytest.mark.parametrize(
+    ("method", "sharing"), (("mappo", "class"), ("qmix", "none"), ("pqn_vdn", "class"))
+)
+def test_sharing_full_checkpoint_restores_grouped_state_exactly(
+    tmp_path: Path,
+    variant_content: PreparedTrainingContent,
+    method: str,
+    sharing: str,
+) -> None:
+    from marl_battlegrounds.baselines import pqn, qmix
+    from marl_battlegrounds.training import pqn_learner, qmix_learner
+
+    schedule = make_training_schedule(total_env_steps=20, num_envs=2)
+    setup: dict[str, Any] = dict(
+        schedule=schedule,
+        seed=42,
+        prepared=variant_content,
+        metrics="none",
+        keep_past=0,
+        history_capture_capacity=0,
+    )
+    if method == "qmix":
+        settings = qmix.QMIXConfig(
+            rollout_length=2,
+            buffer_size=4,
+            min_buffer_size=2,
+            sample_sequence_length=2,
+            sample_batch_size=2,
+            epochs=1,
+            parameter_sharing=sharing,
+            spawn_frame="world",
+        )
+        collection, state = qmix_learner.init_qmix_learner(**setup, qmix=settings)
+        method_options: dict[str, Any] = {"qmix": settings}
+    elif method == "pqn_vdn":
+        settings = pqn.PQNConfig(
+            rollout_length=2,
+            memory_window=1,
+            epochs=1,
+            num_minibatches=1,
+            parameter_sharing=sharing,
+            spawn_frame="world",
+        )
+        collection, state = pqn_learner.init_pqn_learner(**setup, pqn=settings)
+        method_options = {"pqn": settings}
+    else:
+        settings = replace(PPO, minibatches=1, parameter_sharing=sharing)
+        collection, state = init_learner(**setup, ppo=settings)
+        method_options = {"ppo": settings}
+    metadata = _metadata()
+    metadata["config"] = {
+        "method": method,
+        "seed": 42,
+        "num_envs": 2,
+        "total_env_steps": 20,
+        **{name: asdict(value) for name, value in method_options.items()},
+    }
+    path = save_checkpoint(
+        tmp_path, collection, state, metadata=metadata, method=method, **method_options
+    )
+    before = _files(tmp_path)
+
+    def retain(item: Tree) -> Tree:
+        return item
+
+    restored = restore_checkpoint(
+        path,
+        collection,
+        jax.eval_shape(retain, state),
+        expected_metadata=_expected(metadata),
+        method=method,
+        **method_options,
+    )
+    _equal(restored.state, state)
+    saved_actor = load_system(path)
+    warm, _ = checkpoints.load_initial_actor(
+        path,
+        method=method,
+        parameter_sharing=sharing,
+        input_scale=settings.input_scale,
+        spawn_frame=settings.spawn_frame,
+    )
+    _equal(warm.variables, saved_actor.variables)
+    assert _files(tmp_path) == before
+    assert not (tmp_path / "checkpoint_recovery.json").exists()

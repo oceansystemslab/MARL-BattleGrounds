@@ -716,3 +716,33 @@ def test_custom_history_reuses_the_same_immutable_hook_inputs(
             for value in jax.tree.leaves((entry.actor, entry.masks)):
                 with pytest.raises(ValueError):
                     np.asarray(value).flags.writeable = True
+
+
+def test_owned_nonprefix_actor_requests_preserve_full_views_and_slot_history(
+    game: tuple[Environment, Observations, EnvironmentState],
+) -> None:
+    env, observations, state = game
+    model = Model()
+    with server(model.serve) as url, Client(url) as client:
+        member = make_system("fake", client=client, history_turns=2)
+        method = marl_bgs.team(member, "random", slots=[[4], [0, 1, 2, 3]])
+        opponent = shared_policy(policy("random"))
+        memory = init_systems(method, opponent, observations, state, jax.random.key(7))
+        actions, memory, _ = apply_systems(
+            method, opponent, memory, observations, state, jax.random.key(8)
+        )
+        env.step(jax.random.key(9), state, actions)
+        assert len(model.generations()) == 2
+        for lane in memory.team_a.members[0]:
+            assert [len(history) for history in lane] == [0, 0, 0, 0, 1]
+            assert int(lane[4][0].actor.observation.self_ally_index) == 4
+        model.calls.clear()
+        inputs_now = inputs(game)._replace(controlled_mask=np.zeros((2, 5), np.bool_))
+        result = member.apply(
+            member.variables,
+            memory.team_a.members[0],
+            inputs_now,
+            jax.random.split(jax.random.key(10), 2),
+        )
+        assert not model.calls
+        assert result.next_memory == memory.team_a.members[0]

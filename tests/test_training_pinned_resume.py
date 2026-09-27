@@ -201,6 +201,10 @@ def test_a_pinned_game_in_progress_resumes_exactly_and_changed_weights_refuse(
         variables=jnp.ones(3, jnp.float32, device=device),
     )
     collection, initial = _learner(prepared, weighted)
+    # Choose both pinned games before either makes its first decision.
+    assignment = (-1, -2, -1, -2)
+    initial = _assigned(initial, assignment)
+    np.testing.assert_array_equal(initial.carry.memory.team_b[1], 0)
     assert not any(
         leaf.committed for leaf in jax.tree.leaves(initial.carry.pinned_opponent)
     )
@@ -208,12 +212,20 @@ def test_a_pinned_game_in_progress_resumes_exactly_and_changed_weights_refuse(
     after, rollout = collect_training_rollout(collection, initial.carry, length=2)
     state, result = update(initial, after, rollout)
     assert bool(result.performed)
-    # One block against the pinned System leaves both of its games unfinished.
-    state = _assigned(state, (-1, 0, -1, 0))
+    np.testing.assert_array_equal(
+        rollout.transitions.opponent_snapshot, (assignment, assignment)
+    )
+    np.testing.assert_array_equal(rollout.transitions.ended, False)
+    np.testing.assert_array_equal(state.carry.memory.team_b[1], (0, 2, 0, 2))
+    # Continuing games keep the same member and its accumulated memory.
     after, rollout = collect_training_rollout(collection, state.carry, length=2)
     state, result = update(state, after, rollout)
     assert bool(result.performed)
-    np.testing.assert_array_equal(np.asarray(state.carry.memory.team_b[1])[[1, 3]], 2.0)
+    np.testing.assert_array_equal(
+        rollout.transitions.opponent_snapshot, (assignment, assignment)
+    )
+    np.testing.assert_array_equal(rollout.transitions.ended, False)
+    np.testing.assert_array_equal(state.carry.memory.team_b[1], (0, 4, 0, 4))
     metadata = _metadata(None)
     for name in ("saved", "changed"):
         (tmp_path / name).mkdir()
@@ -222,12 +234,18 @@ def test_a_pinned_game_in_progress_resumes_exactly_and_changed_weights_refuse(
     )
     saved = checkpoints.read_checkpoint_details(path)["collection"]
     assert saved["pinned_opponent"] == collection.pinned_opponent
-    _, uninterrupted = collect_training_rollout(collection, state.carry, length=2)
+    uninterrupted_carry, uninterrupted = collect_training_rollout(
+        collection, state.carry, length=2
+    )
     # The template is the untrained start, so every value must come from files.
     restored = restore_checkpoint(
         path, collection, initial, expected_metadata=_expected(metadata), ppo=PPO
     )
-    _, resumed = collect_training_rollout(collection, restored.state.carry, length=2)
+    equal(state, restored.state)
+    resumed_carry, resumed = collect_training_rollout(
+        collection, restored.state.carry, length=2
+    )
+    equal(uninterrupted_carry, resumed_carry)
     for left, right in zip(
         jax.tree.leaves(uninterrupted), jax.tree.leaves(resumed), strict=True
     ):
@@ -266,7 +284,7 @@ def test_a_host_method_with_unsaved_memory_refuses_to_resume_mid_game(
     host = System("Host", _host_apply, init=_host_init, execution="host")
     collection, state = _learner(prepared, host)
     assert collection.host_opponent is not None and collection.host_opponent.stateful
-    # One real update captures slot 0, so a lane may legitimately be assigned to it.
+    # One real update creates a rolling copy; the external pin uses its own route.
     after, rollout = collect_training_rollout(collection, state.carry, length=2)
     state, result = updater(PPO)(state, after, rollout)
     assert bool(result.performed) and int(state.carry.history.count) == 1
@@ -276,7 +294,7 @@ def test_a_host_method_with_unsaved_memory_refuses_to_resume_mid_game(
     mid_game = save_checkpoint(
         tmp_path / "mid-game",
         collection,
-        _assigned(state, (-1, 0, -1, 0)),
+        _assigned(state, (-1, -2, -1, -2)),
         metadata=metadata,
         ppo=PPO,
     )
@@ -306,7 +324,7 @@ def test_a_memory_free_host_method_resumes_with_games_in_progress(
     assert collection.host_opponent is not None
     assert not collection.host_opponent.stateful
     checkpoints._check_restored_pinned_opponent(
-        collection, _assigned(state, (-1, 0, -1, 0))
+        collection, _assigned(state, (-1, -2, -1, -2))
     )
 
 
@@ -329,7 +347,7 @@ def test_mixed_actor_memories_resume_a_pinned_game_and_partial_update(
     carry, rollout = collect_training_rollout(collection, initial.carry, length=2)
     state, result = update(initial, carry, rollout)
     assert bool(result.performed) and not bool(result.failed)
-    state = _assigned(state, (-1, 0, -1, 0))
+    state = _assigned(state, (-1, -2, -1, -2))
     carry, rollout = collect_training_rollout(collection, state.carry, length=2)
     state, result = update(state, carry, rollout)
     assert bool(result.performed) and not bool(result.failed)
@@ -369,3 +387,31 @@ def test_mixed_actor_memories_resume_a_pinned_game_and_partial_update(
         (state, uninterrupted_rollout, uninterrupted),
         (restored.state, resumed_rollout, resumed),
     )
+
+
+def test_host_frozen_array_restore_keeps_opaque_bindings_and_pool_choices() -> None:
+    from marl_battlegrounds.evaluation.policy_execution import pool
+    from marl_battlegrounds.training.opponents import HostOpponent
+
+    opaque = object()
+    system = System(
+        "Host With Weights",
+        _host_apply,
+        variables={"weights": np.asarray([1.0, 2.0], np.float32), "client": opaque},
+        execution="host",
+    )
+    holder = HostOpponent(system, 4)
+    frozen = holder.checkpoint_values()
+    assert len(frozen) == 1
+    holder.variables["weights"][:] = 9.0
+    holder.restore_values(frozen)
+    np.testing.assert_array_equal(holder.variables["weights"], [1.0, 2.0])
+    assert holder.variables["client"] is opaque
+    assert isinstance(holder.variables["weights"], np.ndarray)
+    selected = HostOpponent(pool({system: 1.0}), 4, external_selection=True)
+    before = selected.checkpoint_values()
+    choices = jnp.zeros(4, jnp.int32)
+    selected.variables = selected.variables._replace(choices=choices)
+    equal(before, selected.checkpoint_values())
+    selected.restore_values(before)
+    equal(selected.variables.choices, choices)

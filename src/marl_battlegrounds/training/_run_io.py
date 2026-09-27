@@ -534,6 +534,12 @@ def checkpoint_ancestry(
                 raise ValueError("Saved ancestor belongs to a different experiment")
         if context.get("execution") != metadata.get("execution"):
             raise ValueError("Saved ancestor uses a different execution identity")
+        if context.get("selection_rule", "saved") != metadata.get(
+            "selection_rule", "saved"
+        ):
+            raise ValueError(
+                "Saved ancestor uses a different checkpoint selection rule"
+            )
         for name, maximum in previous_counts.items():
             if integer(current["counters"][name], name) > maximum:
                 raise ValueError("Saved ancestor follows its descendant")
@@ -543,7 +549,7 @@ def checkpoint_ancestry(
         if parent is None:
             break
         parent = identifier(parent)
-        directory = root / "checkpoints" / parent
+        directory = checkpoints.artifact_directory(root, "checkpoints", parent)
         if directory.resolve() != directory:
             raise ValueError("Saved ancestry cannot follow a linked directory")
         current = checkpoints.read_checkpoint_description(directory)
@@ -631,6 +637,7 @@ def validate_host_state(
     checkpoint_details: dict[str, Any],
     *,
     panel: FrozenPanel | None,
+    validation_options: Mapping[str, Any] | None = None,
 ) -> None:
     """Reject malformed saved runner work before any writer or log rewind.
 
@@ -643,6 +650,11 @@ def validate_host_state(
         Its config and numerical counters must already match the resumed state.
     panel : FrozenPanel or None
         Already verified current panel, or None for a run without validation.
+    validation_options : mapping or None, default=None
+        Already frozen partner bindings from the runner's validation setup.
+        Required when saved panel games contain deployed teams. Their recorded
+        slots and rosters rebuild the actual teams for M8 identity verification;
+        no client is serialized and no policy is called. Bare tasks need no value.
 
     Returns
     -------
@@ -789,8 +801,17 @@ def validate_host_state(
         "stage_length_sum": (17,),
         "stage_k20_count": (17,),
     }
-    if not required <= set(host) or set(host) - required - stage_shapes.keys() - {
-        "random_results"
+    member_shapes = {
+        "member_completed": 3,
+        "member_score_sums": 2,
+        "last_member_completed": 3,
+        "last_member_score_sums": 2,
+    }
+    if not required <= set(host) or set(
+        host
+    ) - required - stage_shapes.keys() - member_shapes.keys() - {
+        "random_results",
+        "past_copies",
     }:
         raise ValueError("Saved host state fields differ from the runner schema")
 
@@ -853,11 +874,19 @@ def validate_host_state(
     epochs, length = settings["epochs"], settings["rollout_length"]
     if qmix_run:
         _check_qmix_host_counts(
-            host, checkpoint_details["counters"], config, continuation=learner_context
+            host,
+            checkpoint_details["counters"],
+            config,
+            continuation=learner_context,
+            opponent_rows=checkpoint_details["collection"].get("opponent_rows", 21),
         )
     elif pqn_run:
         _check_pqn_host_counts(
-            host, checkpoint_details["counters"], config, continuation=learner_context
+            host,
+            checkpoint_details["counters"],
+            config,
+            continuation=learner_context,
+            opponent_rows=checkpoint_details["collection"].get("opponent_rows", 21),
         )
     elif (
         {"env_steps": steps, "updates": updates} != checkpoint_details["counters"]
@@ -914,6 +943,66 @@ def validate_host_state(
         if sum(sum(row) for row in host["stage_completed"]) > steps:
             raise ValueError("Completed games exceed real transitions")
 
+    member_fields = set(host) & member_shapes.keys()
+    if member_fields and member_fields != member_shapes.keys():
+        raise ValueError("Saved member-result summaries are incomplete")
+    member_rows = checkpoint_details["collection"].get("opponent_rows", 21)
+    for name in member_fields:
+        rows = host[name]
+        if not isinstance(rows, list) or len(cast(list[Any], rows)) != member_rows:
+            raise ValueError("Saved member-result row count differs")
+        for row in cast(list[Any], rows):
+            if (
+                not isinstance(row, list)
+                or len(cast(list[Any], row)) != member_shapes[name]
+            ):
+                raise ValueError("Saved member-result shape differs")
+            for cell in cast(list[Any], row):
+                integer(cell, name)
+    if member_fields:
+        for name in ("member_completed", "member_score_sums"):
+            if any(
+                recent > cumulative
+                for totals, last in zip(host[name], host["last_" + name], strict=True)
+                for cumulative, recent in zip(totals, last, strict=True)
+            ):
+                raise ValueError("Last-update member counts exceed cumulative counts")
+        if sum(map(sum, host["member_completed"])) > steps:
+            raise ValueError("Completed member games exceed real transitions")
+    past_copies = host.get("past_copies", {})
+    if not isinstance(past_copies, dict):
+        raise ValueError("Saved past copies must be a mapping")
+    capacity = checkpoint_details["collection"].get(
+        "history_capture_capacity", member_rows - 2
+    )
+    for capture, raw in cast(dict[str, Any], past_copies).items():
+        if (
+            not capture.isdecimal()
+            or str(int(capture)) != capture
+            or int(capture) >= capacity
+        ):
+            raise ValueError("Saved capture identity is outside the history counters")
+        if not isinstance(raw, dict):
+            raise ValueError("Saved capture metadata must be an object")
+        entry = cast(dict[str, Any], raw)
+        if set(entry) != {"env_steps", "path", "sampled_epsilon"}:
+            raise ValueError("Saved capture metadata fields differ")
+        captured_at = integer(entry["env_steps"], "capture env_steps")
+        if not 0 < captured_at <= steps or captured_at % batch:
+            raise ValueError("Saved capture step differs from the training timeline")
+        if not isinstance(entry["path"], str) or not Path(entry["path"]).is_absolute():
+            raise ValueError("Saved capture path must be absolute")
+        epsilon = entry["sampled_epsilon"]
+        if (qmix_run or pqn_run) and (
+            isinstance(epsilon, bool)
+            or not isinstance(epsilon, (int, float))
+            or not math.isfinite(epsilon)
+            or not 0 <= epsilon <= 1
+        ):
+            raise ValueError("Saved capture exploration must be in [0, 1]")
+        if not qmix_run and not pqn_run and epsilon is not None:
+            raise ValueError("A PPO capture has no epsilon exploration")
+
     ancestry = checkpoint_ancestry(root, checkpoint_details)
     if any(ancestor["schemas"] != schemas for ancestor in ancestry.values()):
         raise ValueError("Saved ancestor model differs from the training method")
@@ -929,10 +1018,11 @@ def validate_host_state(
     actors = host["actors"]
     if not isinstance(actors, dict):
         raise ValueError("Saved actor paths must be a mapping")
+    actors = cast(dict[str, str], actors)
     actor_records: dict[str, dict[str, Any]] = {}
     for key, path in cast(dict[str, Any], actors).items():
         key = identifier(key)
-        expected_path = root / "actors" / key
+        expected_path = checkpoints.artifact_directory(root, "actors", key)
         if (
             key not in ancestry
             or path != str(expected_path)
@@ -977,7 +1067,7 @@ def validate_host_state(
         }
     selection_actors: dict[str, str] = {
         **{key: item["actor_path"] for key, item in inherited["actors"].items()},
-        **cast(dict[str, str], actors),
+        **actors,
     }
     random_points: set[int] = (
         {0, total, *config["checkpoint_env_steps"]}
@@ -1003,6 +1093,7 @@ def validate_host_state(
             actor_digest=checkpoints._inference_digest(initial),  # pyright: ignore[reportPrivateUsage]
             seed_pairs=random_pairs,
             red_zone_depth=depth,
+            deployment=metadata.get("validation_deployment"),
         )
     if initial_reference is not None and continuation is not None:
         parent_context = continuation
@@ -1013,7 +1104,14 @@ def validate_host_state(
                 raise ValueError("Random initialization ancestry is cyclic or linked")
             visited.add(str(parent_path))
             parent_details = checkpoints.read_checkpoint_description(parent_path)
-            if parent_details["checkpoint_id"] != parent_path.name:
+            if (
+                checkpoints.artifact_directory(
+                    parent_path.parent.parent,
+                    "checkpoints",
+                    parent_details["checkpoint_id"],
+                )
+                != parent_path
+            ):
                 raise ValueError("Random initialization ancestor identity differs")
             parent_chain = checkpoint_ancestry(
                 parent_path.parent.parent, parent_details
@@ -1036,6 +1134,7 @@ def validate_host_state(
                     actor_digest=checkpoints._inference_digest(initial),  # pyright: ignore[reportPrivateUsage]
                     seed_pairs=random_pairs,
                     red_zone_depth=depth,
+                    deployment=parent_details["metadata"].get("validation_deployment"),
                 )
                 break
             parent_context = parent_details["metadata"].get("continuation")
@@ -1073,7 +1172,9 @@ def validate_host_state(
     if host["final_actor"] is not None:
         if steps != total or host["final_actor"] not in actors.values():
             raise ValueError("Saved final actor is outside its completed run")
-        final_id = Path(host["final_actor"]).name
+        final_id = next(
+            key for key, path in actors.items() if path == host["final_actor"]
+        )
         if actor_records[final_id]["env_steps"] != total:
             raise ValueError("Saved final actor has not reached the full budget")
     elif steps == total and pending is None:
@@ -1126,7 +1227,7 @@ def validate_host_state(
                     purpose=purpose,
                 )
                 pairs = expected_task["seed_pairs"]
-            directory = root / "validation" / f"{purpose}-{key}"
+            directory = checkpoints.validation_directory(root, purpose, key)
             task_file = read(directory / "task.json")
             if json.dumps(task_file, sort_keys=True, allow_nan=False) != json.dumps(
                 expected_task, sort_keys=True, allow_nan=False
@@ -1149,12 +1250,14 @@ def validate_host_state(
             ):
                 raise ValueError("Saved validation follows its checkpoint time")
             _check_validation_interval(result)
-            games = 2 * len(validation.VALIDATION_MAPS) * len(panel.members) * pairs
+            members = expected_task["members"]
+            games_per_pass = 2 * len(expected_task["maps"]) * pairs
+            games = games_per_pass * len(members)
             if integer(result.get("games"), "validation games") != games:
                 raise ValueError("Saved validation game count differs")
             paths = result.get("pass_paths")
             if not isinstance(paths, list) or len(cast(list[Any], paths)) != len(
-                panel.members
+                members
             ):
                 raise ValueError("Saved validation pass paths are incomplete")
             loaded_actor = (
@@ -1162,25 +1265,46 @@ def validate_host_state(
                 if panel.schema_version == 2
                 else None
             )
+            deployed_actors: tuple[Any, ...] = (loaded_actor,)
+            if "partners" in expected_task:
+                if validation_options is None or not validation_options.get("partners"):
+                    raise ValueError(
+                        "Saved deployed-team games need their frozen partners"
+                    )
+                assert loaded_actor is not None
+                deployed_actors = validation.prepare_validation_teams(
+                    loaded_actor,
+                    panel.methods,
+                    partners=validation_options["partners"],
+                    learner_slots=expected_task["learner_slots"],
+                    maps=expected_task["maps"],
+                    system_roster=expected_task["system_roster"],
+                    opponent_roster=expected_task["opponent_roster"],
+                    red_zone_depth=0.0 if depth is None else depth,
+                )
             for index, (path, member) in enumerate(
-                zip(cast(list[Any], paths), panel.members, strict=True)
+                zip(cast(list[Any], paths), members, strict=True)
             ):
                 if not isinstance(path, str):
                     raise ValueError("Saved validation pass path must be text")
                 actual_path = Path(path)
-                parent = directory / f"opponent-{index}"
+                parent = validation._cell_directory(  # pyright: ignore[reportPrivateUsage]
+                    directory, expected_task, index
+                )
                 if (
                     not actual_path.is_relative_to(parent)
                     or actual_path.resolve() != actual_path
                 ):
                     raise ValueError("Saved validation pass is outside its task")
-                pass_id = validation.validation_pass_id(result["task_id"], member.name)
+                pass_id = validation.validation_pass_id(
+                    result["task_id"], member["name"]
+                )
                 if (
                     validation._saved_run(parent, pass_id) != actual_path  # pyright: ignore[reportPrivateUsage]
                     or validation._pending(  # pyright: ignore[reportPrivateUsage]
                         actual_path,
                         pass_id=pass_id,
-                        total=2 * len(validation.VALIDATION_MAPS) * pairs,
+                        total=games_per_pass,
                     )
                     != 0
                 ):
@@ -1188,11 +1312,22 @@ def validate_host_state(
                 if panel.schema_version == 2:
                     validation._verify_panel_pass(  # pyright: ignore[reportPrivateUsage]
                         actual_path,
-                        loaded_actor,
-                        panel.methods[index],
+                        deployed_actors[cast(int, member.get("partner_index", 0))],
+                        panel.methods[cast(int, member.get("opponent_index", index))],
                         task=expected_task,
                         member_index=index,
                         num_envs=min(32, batch),
+                    )
+                if "partners" in expected_task:
+                    sampling = read(parent / "sampling_facts.json")
+                    if sampling.get("deployment") != validation._deployment_cell(  # pyright: ignore[reportPrivateUsage]
+                        expected_task, index
+                    ):
+                        raise ValueError("Saved validation team constituents differ")
+                    validation._read_pass_sampling(  # pyright: ignore[reportPrivateUsage]
+                        actual_path,
+                        task_id=expected_task["task_id"],
+                        pass_id=pass_id,
                     )
             validation_games += games
             if purpose == "routine":
@@ -1234,7 +1369,10 @@ def validate_host_state(
         if not reused and (
             result.get("actor_path") != actors[key]
             or result.get("summary_path")
-            != str(root / "validation" / f"random-{key}" / "validation_summary.json")
+            != str(
+                checkpoints.validation_directory(root, "random", key)
+                / "validation_summary.json"
+            )
         ):
             raise ValueError("Saved Random evidence is outside its current-run capture")
         validation.verify_random_result(
@@ -1244,6 +1382,7 @@ def validate_host_state(
             checkpoint_id=None if reused else key,
             env_steps=point,
             red_zone_depth=depth,
+            deployment=metadata.get("validation_deployment"),
         )
         if result["task_id"] in seen:
             raise ValueError("Saved Random task is duplicated")
@@ -1271,6 +1410,7 @@ def validate_host_state(
     ):
         raise ValueError("Saved completed validation coverage is incomplete")
     confirmations = host["confirmation_results"]
+    rule = metadata.get("selection_rule", "saved")
     routine_results = host["routine_results"]
     if (
         declaration is not None
@@ -1283,13 +1423,20 @@ def validate_host_state(
             inherited,
             declaration=declaration,
             panel=panel,
-            final_checkpoint_id=Path(host["final_actor"]).name,
+            final_checkpoint_id=next(
+                key for key, path in actors.items() if path == host["final_actor"]
+            ),
+            rule=rule,
         )
     if confirmations:
         if host["final_actor"] is None:
             raise ValueError("Saved confirmation has no final checkpoint")
         candidates = analysis.confirmation_candidates(
-            routine_results, final_checkpoint_id=Path(host["final_actor"]).name
+            routine_results,
+            final_checkpoint_id=next(
+                key for key, path in actors.items() if path == host["final_actor"]
+            ),
+            rule=rule,
         )
         if not {row["checkpoint_id"] for row in confirmations} <= set(candidates):
             raise ValueError("Saved confirmation includes an unselected candidate")
@@ -1300,11 +1447,15 @@ def validate_host_state(
         if not confirmations or host["final_actor"] is None:
             raise ValueError("Saved selection has no completed confirmation")
         candidates = analysis.confirmation_candidates(
-            routine_results, final_checkpoint_id=Path(host["final_actor"]).name
+            routine_results,
+            final_checkpoint_id=next(
+                key for key, path in actors.items() if path == host["final_actor"]
+            ),
+            rule=rule,
         )
         if {row["checkpoint_id"] for row in confirmations} != set(candidates):
             raise ValueError("Saved selection is missing confirmation candidates")
-        chosen = analysis.select_checkpoint(confirmations)
+        chosen = analysis.select_checkpoint(confirmations, rule=rule)
         if declaration is not None:
             chosen.update(
                 routine_comparison=validation.validation_root_comparison(
@@ -1361,6 +1512,7 @@ def _check_qmix_host_counts(
     config: dict[str, Any],
     *,
     continuation: LearnerContinuation | None = None,
+    opponent_rows: int = 21,
 ) -> None:
     """Check a QMIX run's saved host counts with fixed-block arithmetic.
 
@@ -1408,7 +1560,7 @@ def _check_qmix_host_counts(
             for name in marginals
         )
         and len(cast(list[Any], exposure["by_stage"])) == 17
-        and len(cast(list[Any], exposure["by_opponent"])) == 21
+        and len(cast(list[Any], exposure["by_opponent"])) == opponent_rows
     )
     if (
         {
@@ -1438,6 +1590,7 @@ def _check_pqn_host_counts(
     config: dict[str, Any],
     *,
     continuation: LearnerContinuation | None = None,
+    opponent_rows: int = 21,
 ) -> None:
     """Check a PQN-VDN run's saved host counts with offset-block arithmetic.
 
@@ -1453,6 +1606,7 @@ def _check_pqn_host_counts(
     continuation : LearnerContinuation or None, default=None
         Checked child block origin and cumulative counts. None uses the original
         warmup-offset schedule. A child never repeats completed warmup blocks.
+        A stored reward reset excludes its clean-row refill from sample totals.
 
     Raises
     ------
@@ -1464,7 +1618,7 @@ def _check_pqn_host_counts(
         is k * E * B, used_td_pairs is E * B * ((r - W) + k * (H - 1)) (0 before
         learning), used_prefix_td_pairs is k * E * B * H, utilities lie
         between 1 and 5 per pair, and each used_exposure marginal (17 stages,
-        the source bank, 21 opponent rows) sums to used_td_pairs.
+        the source bank, the declared stable opponent rows) sums to used_td_pairs.
 
     Notes
     -----
@@ -1506,11 +1660,17 @@ def _check_pqn_host_counts(
             initial_rounds=initial,
         )
     pairs = host["used_td_pairs"]
-    expected_pairs = (
-        epochs * batch * ((rounds - initial) + learning * (window - 1))
-        if learning
-        else 0
+    from marl_battlegrounds.training._continuation_schedules import (
+        pqn_learning_rounds,
     )
+
+    learned_rows = pqn_learning_rounds(
+        rounds,
+        continuation=continuation,
+        initial_rounds=initial,
+        memory_window=window,
+    )
+    expected_pairs = epochs * batch * (learned_rows + learning * (window - 1))
     exposure = host["used_exposure"]
     marginals = ("by_stage", "by_source", "by_opponent")
     exposure_ok = (
@@ -1527,7 +1687,7 @@ def _check_pqn_host_counts(
             for name in marginals
         )
         and len(cast(list[Any], exposure["by_stage"])) == 17
-        and len(cast(list[Any], exposure["by_opponent"])) == 21
+        and len(cast(list[Any], exposure["by_opponent"])) == opponent_rows
     )
     if (
         {

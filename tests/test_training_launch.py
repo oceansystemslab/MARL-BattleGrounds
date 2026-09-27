@@ -410,28 +410,42 @@ def test_resume_requires_marker_checkpoint_and_never_falls_back(
 
     run = tmp_path / "run"
     run.mkdir()
+    latest_id, recovering_id = "a" * 64, "b" * 64
+    latest = run / "checkpoints" / latest_id
+    recovering = (
+        run
+        / "checkpoints"
+        / checkpoints.artifact_name("mappo", "checkpoint", 8, recovering_id)
+    )
+    identities = {latest: latest_id, recovering: recovering_id}
+    for path in identities:
+        path.mkdir(parents=True)
     atomic_json(
         run / "latest_checkpoint.json",
         {
             "schema_version": 1,
-            "checkpoint_id": "latest",
-            "relative_path": "checkpoints/latest",
+            "checkpoint_id": latest_id,
+            "relative_path": latest.relative_to(run).as_posix(),
         },
     )
-    atomic_json(run / "checkpoint_recovery.json", {"checkpoint_id": "recovering"})
+    atomic_json(run / "checkpoint_recovery.json", {"checkpoint_id": recovering_id})
     seen: list[Path] = []
+
+    def describe(path: Path) -> dict[str, str]:
+        return {"checkpoint_id": identities[path], "kind": "learner"}
 
     def read(path: Path) -> dict[str, str]:
         seen.append(path)
-        return {"checkpoint_id": path.name, "kind": "learner"}
+        return describe(path)
 
+    monkeypatch.setattr(checkpoints, "read_checkpoint_description", describe)
     monkeypatch.setattr(checkpoints, "read_checkpoint_details", read)
-    assert launch._checkpoint(tmp_path, None) == run / "checkpoints/recovering"
-    assert seen == [run / "checkpoints/recovering"]
+    assert launch._checkpoint(tmp_path, None) == recovering
+    assert seen == [recovering]
     with pytest.raises(ValueError, match="original checkpoint"):
-        launch._checkpoint(tmp_path, str(run / "checkpoints/latest"))
+        launch._checkpoint(tmp_path, str(latest))
     (run / "checkpoint_recovery.json").unlink()
-    assert launch._checkpoint(tmp_path, None) == run / "checkpoints/latest"
+    assert launch._checkpoint(tmp_path, None) == latest
     monkeypatch.setattr(checkpoints, "read_checkpoint_details", _corrupt)
     with pytest.raises(ValueError, match="Corrupt chosen checkpoint"):
         launch._checkpoint(tmp_path, None)
